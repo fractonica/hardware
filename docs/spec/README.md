@@ -72,5 +72,6 @@
 
 ## Still open
 
-- Which exact 2.4 GHz channel the router uses. The hardware probe reads it, so you don't need to answer.
+- Router channel: **1** (measured by hwprobe; BSSID `74:9d:79:03:69:6e`).
+- First latency result: with the Mac on Wi-Fi the round-trip tail is ~100 ms (p99), so the router-mode go/no-go needs the follow-up runs in the spike note.
 - The S3 variant (no rush; it joins after M1).

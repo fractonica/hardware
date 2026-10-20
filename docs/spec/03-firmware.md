@@ -127,7 +127,7 @@ caps:
 - **M1 profiles:**
   - `c6-pad` (button + WS2812);
   - `c6-pad-mono` (the same board with `led_gpio` on GPIO15, which shows that swapping drivers needs no code change);
-  - `c3-pad` (button + active-low blue LED).
+  - `c3o-pad` (the C3 0.42" OLED board: button GPIO9 + active-low LED GPIO8; OLED bound once `fr.display` exists).
   - `s3-pad` is added once your S3 is identified ([11 §11.3](11-roadmap.md)).
 
 ## 3.7 sdkconfig layering

@@ -1,0 +1,41 @@
+menu "Fractonica hwprobe"
+
+    config HWPROBE_WIFI_SSID
+        string "Wi-Fi SSID (empty = skip Wi-Fi tests)"
+        default ""
+        help
+            Pass via a git-ignored defaults file, never commit credentials.
+
+    config HWPROBE_WIFI_PASS
+        string "Wi-Fi password"
+        default ""
+
+    config HWPROBE_HUB_HOST
+        string "Hub mDNS host name (without .local)"
+        default "dimas-3"
+
+    config HWPROBE_HUB_IP
+        string "Hub IPv4 fallback if mDNS fails"
+        default ""
+
+    config HWPROBE_HUB_PORT
+        int "Hub echo port (TCP and UDP)"
+        default 7421
+
+    config HWPROBE_OLED_SDA
+        int "OLED SDA GPIO"
+        default 5
+
+    config HWPROBE_OLED_SCL
+        int "OLED SCL GPIO"
+        default 6
+
+    config HWPROBE_LED_GPIO
+        int "Status LED GPIO"
+        default 8
+
+    config HWPROBE_BUTTON_GPIO
+        int "BOOT button GPIO"
+        default 9
+
+endmenu

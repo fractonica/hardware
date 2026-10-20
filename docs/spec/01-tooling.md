@@ -34,9 +34,9 @@ Status: inventory taken 2026-10-20 on the hub machine. The approved installs fro
 
 | Port | USB identity | Inference |
 |---|---|---|
-| `/dev/cu.usbmodem1101` | VID 0x303A, PID 0x1001 (native USB-Serial/JTAG), serial `1C:DB:D4:16:BA:34`, bcdDevice 0x0101 | **ESP32-C3 or ESP32-S3**, not the C6 (the C6 reports 0x0102). The USB serial number is the chip's base MAC. |
+| `/dev/cu.usbmodem1101` | VID 0x303A, PID 0x1001 (native USB-Serial/JTAG), serial `1C:DB:D4:16:BA:34`, bcdDevice 0x0101 | **ESP32-C3 0.42" OLED board** (`esp32c3-oled042`), C3 revision v0.4, 4 MB XMC flash. Identified with esptool and hwprobe on 2026-10-20 |
 
-The port is currently **held open by Google Chrome** (Web Serial; `lsof` shows PID 715). Nothing else can open it until that tab disconnects. The hub must be the only owner of serial ports ([08-hub §8.2](08-hub.md)).
+On the day of the inventory, the port was **held open by Google Chrome** (Web Serial, PID 715). It was released later the same day, and the board was flashed with hwprobe. The hub must be the only owner of serial ports ([08-hub §8.2](08-hub.md)).
 
 ## 1.4 Install plan (proposed, needs your OK)
 
