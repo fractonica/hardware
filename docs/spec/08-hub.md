@@ -88,7 +88,7 @@ The **Router** does the following:
   UV_PROJECT_ENVIRONMENT=~/.fractonica/pytools uv sync --project <repo>/tools/pytools --frozen --no-dev --managed-python --python 3.12
   ```
 
-  The project path is absolute. The hub spawns `~/.fractonica/pytools/bin/python -I -m pytools` directly, never `uv run`. `fr doctor` checks `esptool.__version__ == '5.6.0'` inside that venv. The system Python 3.9 is too old.
+  The project path is absolute. The hub spawns `~/.fractonica/pytools/bin/python -I -m fractonica_pytools` directly, never `uv run`. `fr doctor` checks `esptool.__version__ == '5.6.0'` inside that venv. The system Python 3.9 is too old.
 - **Protocol.** One JSON request on stdin; JSON-line events (`progress`, `log`, `result`, `error`) on stdout. Cancellation is SIGTERM.
 - **Commands.**
   - `probe {port}`: chip, revision, features, flash size, MAC, security info. Uses ESPLoader methods; the log-only `cmds` functions are not used.

@@ -1,0 +1,16 @@
+# Capability id allocations (spec 07 §7.2). Ids are never reused.
+standard:
+  0x0001: fr.button
+  0x0002: fr.led
+  0x0003: fr.display
+  0x0004: fr.audio_out
+  0x0005: fr.analog_in
+system:
+  0x00F0: fr.node
+  0x00F1: fr.ota
+  0x00F2: fr.diag
+planned: [fr.haptic, fr.encoder]
+ranges:
+  standard: [0x0001, 0x00EF]
+  system: [0x00F0, 0x00FF]
+  project: [0x8000, 0xFFFE]

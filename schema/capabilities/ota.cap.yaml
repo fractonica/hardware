@@ -1,0 +1,4 @@
+capability: fr.ota
+id: 0x00F1
+version: "1.0"
+summary: OTA endpoint on port 240 (instance "ota"). Control uses cls=OTA frames (protocol.yaml), not commands.

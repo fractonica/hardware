@@ -1,0 +1,7 @@
+profile: c6-pad
+board: esp32c6-supermini
+app: node
+net: { link_profile: default }
+caps:
+  boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 64 } }

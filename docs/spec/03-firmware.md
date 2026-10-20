@@ -147,13 +147,14 @@ CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
-CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 CONFIG_APP_REPRODUCIBLE_BUILD=y
 CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM=0
 CONFIG_LWIP_TCP_TMR_INTERVAL=50
 CONFIG_LWIP_TCP_RTO_TIME=300
 ```
 
+- ELF is the only core-dump format in IDF v6.1: `ESP_COREDUMP_ENABLE` selects the hidden `ESP_COREDUMP_DATA_FORMAT_ELF`, so there is no switch to set.
+- Apps build with `MINIMAL_BUILD`, so a symbol from a component nothing requires yet (`esp_wifi`, `lwip`) is reported by kconfgen as `unknown kconfig symbol` and ignored until a component pulls that component in. `fr_core` requires `espcoredump`, so the core-dump setting always applies.
 - `ESPNOW_MAX_ENCRYPT_NUM=0` is valid (range 0–17) and is set because native ESP-NOW encryption is not used ([05 §5.13](05-network.md)).
 - The lwIP values give router-mode TCP a sane retransmit time ([05 §5.12.1](05-network.md)).
 

@@ -1,0 +1,9 @@
+{
+  "schema": "fractonica.idf-lock/1",
+  "idf": {
+    "tag": "v6.1",
+    "commit": "fff9895c82d744c7237be8847347bdd1b07c6643",
+    "install_hint": "~/esp/v6.1/esp-idf"
+  },
+  "targets": ["esp32c3", "esp32c6", "esp32s3"]
+}

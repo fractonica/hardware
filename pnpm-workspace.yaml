@@ -1,0 +1,7 @@
+packages:
+  - packages/*
+
+# Native addons that ship prebuilds but run an install script to select them.
+allowBuilds:
+  '@serialport/bindings-cpp': true
+  better-sqlite3: true

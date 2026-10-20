@@ -1,0 +1,8 @@
+profile: c3o-pad
+board: esp32c3-oled042
+app: node
+net: { link_profile: default }
+caps:
+  boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,    driver: led_gpio,    bind: leds.status }
+  # oled: { cap: fr.display, driver: ssd1306_i2c, bind: displays.oled }   # M2

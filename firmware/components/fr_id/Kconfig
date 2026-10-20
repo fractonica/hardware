@@ -1,0 +1,21 @@
+menu "Fractonica identity"
+
+    config FR_BOARD
+        string "Board id"
+        default "unknown"
+        help
+            Set by the generated board fragment (sdkconfig.board), never by hand.
+
+    config FR_PROFILE
+        string "Profile"
+        default "unknown"
+        help
+            Set by the generated board fragment (sdkconfig.board), never by hand.
+
+    config FR_PART_PROFILE
+        string "Partition profile"
+        default "unknown"
+        help
+            Set by the generated board fragment (sdkconfig.board), never by hand.
+
+endmenu

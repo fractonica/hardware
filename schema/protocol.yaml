@@ -1,0 +1,177 @@
+# Fractonica wire protocol v1 — single source of truth for the envelope and system messages
+# (spec 05 §5.5–5.8). `fr gen` (M1 step 2) generates C++ and TS codecs plus golden vectors from it.
+# Only the 18-byte header and the class prefixes are fixed layout; message bodies are protobuf-wire.
+protocol: fractonica
+version: 1
+
+header:   # little-endian, 18 bytes, naturally aligned
+  - { name: magic_ver, type: u8,  value: 0xA1 }
+  - { name: flags,     type: u8 }
+  - { name: cls,       type: u8 }
+  - { name: kind,      type: u8 }
+  - { name: seq,       type: u32 }
+  - { name: net,       type: u16 }
+  - { name: src,       type: u16 }
+  - { name: dst,       type: u16 }
+  - { name: epoch,     type: u16 }
+  - { name: ttl,       type: u8, doc: "[7:4] initial, [3:0] remaining (relay-mutable)" }
+  - { name: port,      type: u8 }
+
+flags:
+  SEC: 0
+  ACK_REQ: 1
+  FRAG: 2
+  RELAYED: 3
+  LATEST: 4
+  URGENT: 5
+  BULK: 6
+  EXT: 7
+
+frag: [ { name: frag_id, type: u16 }, { name: idx, type: u8 }, { name: cnt, type: u8 } ]
+
+ext_tlv:   # type u8 | len u8 | value; types >= 0x80 are critical
+  0x02: { name: trace_id, type: u32 }
+  0x03: { name: valid_ms, type: u16 }
+  0x04: { name: expire_at_us, type: u32 }
+  0x81: { name: exec_at_us, type: u32, critical: true }
+
+addresses:
+  hub: 0x0000
+  nodes: [0x0001, 0xEFFF]
+  groups: [0xF000, 0xFEFF]
+  well_known: { all_gateways: 0xFF01 }
+  unassigned: 0xFFFE
+  broadcast: 0xFFFF
+
+ports:
+  node: 0       # fr.node, instance "node"
+  ota: 240      # fr.ota, instance "ota"
+  diag: 241     # fr.diag, instance "diag"
+  capabilities: [1, 239]
+
+mtu: { realtime: 250, bulk: 1470, realtime_payload_budget: 200 }
+
+status:
+  OK: 0
+  UNSUPPORTED: 1
+  INVALID_ARGS: 2
+  BUSY: 3
+  FAILED: 4
+  NOT_PROVISIONED: 5
+  LATE: 6
+  EXPIRED: 7
+  NOT_FOUND: 8
+
+enums:
+  ChipId: { esp32c3: 5, esp32s3: 9, esp32c6: 13 }
+  Role: { node: 0, gateway: 1 }
+  OtaState: { new: 0, pending_verify: 1, valid: 2, invalid: 3, aborted: 4, undefined: 255 }
+
+classes:
+  0x00:
+    name: NET
+    kinds:
+      DISCOVER: 1
+      BEACON: 2
+      JOIN_REQ: 3
+      JOIN_ACCEPT: 4
+      CHANNEL_SWITCH: 5
+      NEIGHBORS: 6
+      WELCOME: 7
+      DIRECTORY: 8
+      RESOLVE: 9
+  0x01:
+    name: PRESENCE
+    kinds: { HELLO: 1, HEARTBEAT: 2, BYE: 3, PING: 4, PONG: 5 }
+  0x02:
+    name: ACK
+    prefix: [ { name: req_epoch, type: u16 }, { name: req_seq, type: u32 }, { name: status, type: u8 } ]
+    kinds: { ACK: 1, NACK: 2, SACK: 3 }
+  0x03: { name: EVENT, prefix: [ { name: t_us, type: u32 } ], kinds: capability }
+  0x04: { name: CMD, kinds: capability }
+  0x05:
+    name: RESULT
+    prefix: [ { name: req_epoch, type: u16 }, { name: req_seq, type: u32 }, { name: status, type: u8 } ]
+    kinds: capability
+  0x06: { name: STATE, prefix: [ { name: t_us, type: u32 } ], kinds: capability, always_latest: true }
+  0x07: { name: MSG, kinds: { MSG: 0 } }
+  0x08: { name: LOG, kinds: { E: 1, W: 2, I: 3, D: 4, V: 5 } }
+  0x09:
+    name: OTA
+    port: 240
+    kinds: { OFFER: 1, ACCEPT: 2, REJECT: 3, CHUNK: 4, STATUS: 5, COMMIT: 6, RESULT: 7, ABORT: 8 }
+  0x0A: { name: TIME, kinds: { SYNC_REQ: 1, SYNC_RES: 2 } }
+
+# Message bodies (protobuf-wire; `id` is the field number, never reused).
+messages:
+  PRESENCE.HELLO:
+    mac: { id: 1, type: bytes, max: 6 }
+    chip: { id: 2, type: u8 }
+    chip_rev: { id: 3, type: u16 }
+    fw_id_prefix: { id: 4, type: bytes, max: 8 }
+    descriptor_hash: { id: 5, type: u32 }
+    board_hash: { id: 6, type: u32 }
+    role: { id: 7, type: Role }
+    caps: { id: 8, type: u32, doc: "b0 espnow_v2, b1 wifi, b2 sleepy, b3 sec, b4 inject_enabled, b5 provisioned" }
+    hb_interval_ms: { id: 9, type: u32 }
+    reset_reason: { id: 10, type: u8 }
+    ota_state: { id: 11, type: OtaState }
+    alias: { id: 12, type: string, max: 31 }
+    alias_rev: { id: 13, type: u32 }
+    channel: { id: 14, type: u8 }
+    bssid: { id: 15, type: bytes, max: 6 }
+  PRESENCE.HEARTBEAT:
+    uptime_s: { id: 1, type: u32 }
+    state: { id: 2, type: u32, doc: "b0 wifi_up, b1 hub_link, b2 ota_busy, b3 time_synced, b4 low_batt, b5 swept" }
+    rssi_ap: { id: 3, type: i8 }
+    tx_fail: { id: 4, type: u32 }
+    rx_drop: { id: 5, type: u32 }
+    queue_hwm: { id: 6, type: u8 }
+    free_heap_kb: { id: 7, type: u32 }
+    vbat_mv: { id: 8, type: u32 }
+    bcast_watermark: { id: 9, type: u32 }
+    state_seq: { id: 10, type: u32 }
+  PRESENCE.BYE:
+    reason: { id: 1, type: u8, doc: "0 shutdown, 1 reboot, 2 ota, 3 sleep, 4 maintenance" }
+  PRESENCE.PING: { t0: { id: 1, type: u32 } }
+  PRESENCE.PONG: { t0: { id: 1, type: u32 }, t1: { id: 2, type: u32 } }
+  NET.WELCOME:
+    hub_epoch: { id: 1, type: u16 }
+    ucast_floor: { id: 2, type: u32 }
+    bcast_base: { id: 3, type: u32 }
+    hub_time_us: { id: 4, type: u64 }
+    net_mode: { id: 5, type: u8 }
+    channel: { id: 6, type: u8 }
+  NET.DIRECTORY:
+    page: { id: 1, type: u8 }
+    pages: { id: 2, type: u8 }
+    entries: { id: 3, type: "array<DirectoryEntry>", max: 14 }
+  NET.RESOLVE: { addr: { id: 1, type: u16 } }
+  OTA.OFFER:
+    job_id: { id: 1, type: string, max: 23 }
+    fw_id: { id: 2, type: bytes, max: 32 }
+    size: { id: 3, type: u32 }
+    version: { id: 4, type: string, max: 31 }
+    flags: { id: 5, type: u32, doc: "b0 FORCE, b1 DEFER_COMMIT, b2 ALLOW_DOWNGRADE" }
+  OTA.ACCEPT: { job_id: { id: 1, type: string, max: 23 }, code: { id: 2, type: u8 } }
+  OTA.REJECT: { job_id: { id: 1, type: string, max: 23 }, code: { id: 2, type: u8 } }
+  OTA.STATUS: { job_id: { id: 1, type: string, max: 23 }, state: { id: 2, type: u8 }, bytes: { id: 3, type: u32 } }
+  OTA.RESULT:
+    job_id: { id: 1, type: string, max: 23 }
+    outcome: { id: 2, type: u8, doc: "0 success, 1 failed, 2 rolled_back" }
+    fw_id_prefix: { id: 3, type: bytes, max: 8 }
+    reason: { id: 4, type: u8 }
+  TIME.SYNC_REQ: { t1: { id: 1, type: u64 } }
+  TIME.SYNC_RES: { t1: { id: 1, type: u64 }, t2: { id: 2, type: u64 }, t3: { id: 3, type: u64 } }
+  MSG.MSG: { topic: { id: 1, type: string, max: 32 }, data: { id: 2, type: bytes, max: 168 } }
+  LOG.LINE: { tag: { id: 1, type: string, max: 16 }, text: { id: 2, type: string, max: 200 } }
+
+types:
+  DirectoryEntry: { addr: { id: 1, type: u16 }, mac: { id: 2, type: bytes, max: 6 } }
+
+serial_framing:
+  prefix: "@fr1:"
+  encoding: base64url-nopad
+  crc: { algo: crc16-ccitt-false, poly: 0x1021, init: 0xFFFF, order: little-endian, covers: "type|body" }
+  max_line: 2048
+  types: { ENV: 0x01, GW_RX: 0x10, GW_TX: 0x11, GW_TX_DONE: 0x12, GW_STATUS: 0x13, GW_CMD: 0x14, GW_RSP: 0x15, LINK_PING: 0x16, LINK_PONG: 0x17 }

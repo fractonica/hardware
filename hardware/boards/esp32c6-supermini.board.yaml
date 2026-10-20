@@ -1,0 +1,31 @@
+schema: fractonica/board@1
+id: esp32c6-supermini
+name: ESP32-C6 Super Mini
+idf_target: esp32c6
+flash: { size: 4MB, mode: dio, part_profile: fr-4mb-v1 }
+psram: null
+usb: { kind: usb_serial_jtag, vid: 0x303A, pid: 0x1001, bcd_device: 0x0102, serial_is_mac: true, pins: [12, 13] }
+console: usb_serial_jtag
+buttons:
+  boot: { gpio: 9, active_level: low, pull: external, strapping: true, deep_sleep_wake: false, confidence: H }
+leds:
+  rgb:    { gpio: 8,  kind: ws2812, color_order: GRB, count: 1, strapping: true, confidence: H }
+  status: { gpio: 15, kind: gpio, active_level: high, strapping: true, confidence: M }
+pins:
+  reserved: { usb: [12, 13], flash: [24, 25, 26, 27, 28, 29, 30], not_bonded: [10, 11] }
+  strapping: [4, 5, 8, 9, 15]
+  free: [0, 1, 2, 3, 14, 18, 19, 20, 21, 22, 23]
+  adc1: [0, 1, 2, 3, 4, 5, 6]
+rf: { max_tx_power_qdbm: null, antenna: ceramic }
+test_pin: 20
+resources: { rmt_tx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
+defaults:
+  boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb }
+detection:
+  usb: { vid: 0x303A, pid: 0x1001, bcd_device: 0x0102 }
+  esptool: { chip_type: '^ESP32-C6FH4 \(QFN32\)', flash_size: 4MB }
+  probe: { leds: [rgb, status] }
+sources:
+  - https://documentation.espressif.com/esp32-c6_datasheet_en.pdf
+  - https://mischianti.org/esp32-c6-supermini-high-resolution-pinout-datasheet-schema-and-specs/

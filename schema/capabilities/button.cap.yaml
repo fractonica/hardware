@@ -1,0 +1,36 @@
+capability: fr.button
+id: 0x0001
+version: "1.0"
+summary: Momentary push button with debounced edges and gesture recognition.
+doc: |
+  `down` fires on the debounced leading edge and is the lowest-latency signal — bind game
+  input to it. `click` is semantic; with multi_press_max > 1 it waits multi_press_gap_ms
+  to tell single from double clicks.
+maps_to: { matter: "Switch 0x003B", ha: "event, device_class: button" }
+types:
+  Gesture: { enum: { click: 0, double_click: 1, long_press: 2, press: 3, release: 4 } }
+traits:
+  long_press:      { id: 1, type: bool, default: true }
+  multi_press_max: { id: 2, type: u8, default: 2, range: [1, 5] }
+config:
+  debounce_ms:        { type: u16, default: 20,  range: [0, 200],  unit: ms }
+  long_press_ms:      { type: u16, default: 600, range: [0, 10000], unit: ms, doc: "0 disables long_press" }
+  multi_press_gap_ms: { type: u16, default: 250, range: [50, 1000], unit: ms }
+  multi_press_max:    { type: u8,  default: 2,   range: [1, 5], doc: "1 = click on release, no wait" }
+properties:
+  pressed: { id: 1, type: bool }
+events:
+  down:       { id: 1, priority: realtime }
+  up:         { id: 2, priority: realtime, fields: { held_ms: { id: 1, type: duration_ms } } }
+  click:      { id: 3, priority: normal,   fields: { count: { id: 1, type: u8, range: [1, 5] } } }
+  long_press: { id: 4, priority: normal,   requires: { trait: long_press }, fields: { held_ms: { id: 1, type: duration_ms } } }
+commands:
+  inject:
+    id: 1
+    visibility: test            # compiled only with CONFIG_FR_TEST_HOOKS=y (debug builds)
+    delivery: reliable
+    doc: |
+      Replays a gesture through ButtonService exactly as a real one, including `pressed`.
+      press/release emit only down/up and set/clear `pressed` (hold a button for a test).
+    fields: { gesture: { id: 1, type: Gesture, default: click } }
+    examples: [ { gesture: double_click }, { gesture: press } ]

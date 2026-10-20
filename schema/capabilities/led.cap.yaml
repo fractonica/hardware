@@ -1,0 +1,40 @@
+capability: fr.led
+id: 0x0002
+version: "1.0"
+summary: A single indicator light (mono or RGB, optionally dimmable) with on-device effects.
+types:
+  ColorMode: { enum: { mono: 0, rgb: 1 } }
+  Effect:    { enum: { none: 0, blink: 1 } }
+traits:
+  color:    { id: 1, type: ColorMode, default: mono }
+  dimmable: { id: 2, type: bool, default: false }
+config:
+  max_brightness: { type: u8, default: 255, doc: "hard cap (WS2812 boards default to 64)" }
+properties:
+  on:         { id: 1, type: bool }
+  brightness: { id: 2, type: u8,  requires: { trait: dimmable } }
+  color:      { id: 3, type: rgb, requires: { trait: color, eq: rgb } }
+commands:
+  set:
+    id: 1
+    delivery: fast
+    idempotent: true
+    fields:
+      on:         { id: 1, type: bool }
+      brightness: { id: 2, type: u8,  optional: true }
+      color:      { id: 3, type: rgb, optional: true }
+    examples: [ { on: true, color: 0x00FF00 } ]
+  toggle: { id: 2, delivery: reliable, idempotent: false }
+  blink:
+    id: 3
+    delivery: reliable
+    doc: Flash `count` times (0 = until stop/set), then restore the steady state and emit effect_done.
+    fields:
+      on_ms:  { id: 1, type: u16, default: 200, range: [10, 10000], unit: ms }
+      off_ms: { id: 2, type: u16, default: 200, range: [10, 10000], unit: ms }
+      count:  { id: 3, type: u16, default: 3,   range: [0, 1000] }
+      color:  { id: 4, type: rgb, optional: true }
+    examples: [ { on_ms: 100, off_ms: 100, count: 3, color: 0xFF0000 } ]
+  stop: { id: 4, delivery: reliable, idempotent: true }
+events:
+  effect_done: { id: 1, priority: normal, fields: { effect: { id: 1, type: Effect } } }

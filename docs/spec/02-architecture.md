@@ -77,6 +77,7 @@ fractonica/                       # this folder; unrelated experiments move to e
 │  └─ config/                      # sdkconfig.framework[.<target>], sdkconfig.build.{debug,release}, sdkconfig.local (git-ignored)
 ├─ packages/                       # TypeScript (pnpm workspace)
 │  ├─ protocol/                    # Zod control-plane schemas + generated device codecs
+│  ├─ host/                        # host toolchain shared by hub and CLI: paths, IDF env, pytools, `fr doctor`
 │  ├─ codegen/                     # `fr gen`
 │  ├─ hub/                         # hub server
 │  ├─ dashboard/                   # React SPA, served by the hub

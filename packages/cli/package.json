@@ -1,0 +1,16 @@
+{
+  "name": "@fractonica/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "fr": "./src/main.ts" },
+  "exports": {
+    ".": { "@fractonica/source": "./src/main.ts", "default": "./dist/main.js" }
+  },
+  "dependencies": {
+    "@fractonica/host": "workspace:*",
+    "@fractonica/protocol": "workspace:*",
+    "commander": "15.0.0",
+    "zod": "4.6.7"
+  }
+}

@@ -1,0 +1,33 @@
+schema: fractonica/board@1
+id: esp32c3-oled042
+name: ESP32-C3 0.42" OLED (Abrobot-style)
+idf_target: esp32c3
+flash: { size: 4MB, mode: dio, part_profile: fr-4mb-v1 }
+psram: null
+usb: { kind: usb_serial_jtag, vid: 0x303A, pid: 0x1001, bcd_device: 0x0101, serial_is_mac: true, pins: [18, 19] }
+console: usb_serial_jtag
+buttons:
+  boot: { gpio: 9, active_level: low, pull: up, strapping: true, deep_sleep_wake: false, confidence: H }
+leds:
+  status: { gpio: 8, kind: gpio, active_level: low, strapping: true, confidence: H }
+displays:
+  oled: { kind: ssd1306b, bus: i2c, sda: 5, scl: 6, address: 0x3C, width: 72, height: 40, column_offset: 28, confidence: H }
+pins:
+  reserved: { usb: [18, 19], flash: [11, 12, 13, 14, 15, 16, 17], display: [5, 6] }
+  strapping: [2, 8, 9]
+  free: [0, 1, 2, 3, 4, 7, 10, 20, 21]
+  adc1: [0, 1, 2, 3, 4]
+rf: { max_tx_power_qdbm: null, antenna: ceramic }
+test_pin: 10
+resources: { rmt_tx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
+defaults:
+  boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,    driver: led_gpio,    bind: leds.status }
+detection:
+  usb: { vid: 0x303A, pid: 0x1001, bcd_device: 0x0101 }
+  esptool: { chip_type: '^ESP32-C3 \(QFN32\)', flash_size: 4MB }
+  probe: { i2c: { sda: 5, scl: 6, address: 0x3C } }
+sources:
+  - docs/spikes/2026-10-20-hwprobe-c3-oled.md
+  - https://docs.zephyrproject.org/latest/boards/01space/esp32c3_042_oled/doc/index.html
+  - https://www.otronic.nl/en/esp32-c3-ontwikkelbord-met-mini-042-inch-midi-oled.html

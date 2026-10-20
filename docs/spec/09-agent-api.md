@@ -7,7 +7,7 @@ Goal: any agent (Claude Code, other MCP clients, plain scripts) can build, flash
 | Surface | Phase | Notes |
 |---|---|---|
 | `fr` CLI with `--json` / `--ndjson` | **M1** | The most portable surface: works for every coding agent and in CI. Prints exactly one JSON envelope per command |
-| REST `http://127.0.0.1:7420/api/v1` + OpenAPI 3.1 | **M1** | Generated from the operation registry |
+| REST `http://127.0.0.1:7420/api/v1` + OpenAPI 3.1 | **M1** | Generated from the operation registry. Checkpoint C1 ships the generic form only: `POST /api/v1/op/<name>` with the op input as the JSON body, plus `GET /api/v1/health` (`version`, `registry_hash`, `pid`). Resource-style routes and the OpenAPI document come with the dashboard |
 | WebSocket `/ws` | **M1** | Event subscriptions only; commands go over REST. Used by the dashboard and agents. Apps use `/app` ([07 §7.9](07-capabilities-sdk.md)) |
 | MCP over stdio: `fr mcp` | **M1** | Thin adapter to the running hub. Auto-starts it as a detached daemon ([08 §8.2](08-hub.md)). This is what the Claude Code plugin spawns |
 | MCP over HTTP `/mcp`, MCP resources, SSE, AsyncAPI | M3 | Defer until there is a need |

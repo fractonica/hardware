@@ -1,0 +1,12 @@
+{
+  "name": "@fractonica/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "@fractonica/source": "./src/index.ts", "default": "./dist/index.js" }
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  }
+}

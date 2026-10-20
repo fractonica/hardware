@@ -149,8 +149,9 @@ hub_ip,data,string,192.168.0.17
 6. **Render** `fr_ident.bin` (§6.3).
 7. **Flash.** One `write_flash`: `0x0` bootloader, `0x8000` partition table, `0xE000` ota_data_initial, `0x10000` app, `fr_ident` at its offset. A full erase is done only when explicitly asked.
 8. **Boot.**
-   - The pytools child resets the chip with `--after hard-reset` and exits.
-   - The hub reopens the port at once (DTR and RTS deasserted), re-resolving it by serial number, and waits for the `@fr1` HELLO on serial (≤ 10 s).
+   - The pytools child finishes with `--after no-reset` (the chip waits in the ROM loader) and exits.
+   - The hub reopens the port at once (DTR and RTS deasserted), re-resolving it by serial number, then resets the chip itself by pulsing RTS on its own handle. A USJ chip reset does not re-enumerate ([04 §4.4](04-boards.md)), so the hub captures the ROM and bootloader lines and the boot banner. If esptool reset the chip instead, the banner would be printed while no host had the port open, and the USJ console drops output nobody reads (seen at checkpoint C1).
+   - The hub waits for the `@fr1` HELLO on serial (≤ 10 s).
    - The node repeats HELLO on the serial link every 1 s until it receives a WELCOME there.
 9. **Join.** The node joins Wi-Fi, connects to the hub over TCP and sends HELLO. The hub replies WELCOME and marks it `online + provisioned` (`device.provisioned`). The hub ends the provisioning lease; its monitor stays attached.
 
@@ -305,14 +306,15 @@ Every transition is persisted and emitted as `ota.job.state`.
 ## 6.10 esptool integration (hub `pytools`)
 
 - **Environment.** `tools/pytools` is a uv project: Python 3.12, `esptool==5.6.0` (stub v1.4.1; fallback pin 5.5.0, qualified in S1), `esp-idf-nvs-partition-gen` and `esp-idf-panic-decoder`.
-- **Process model.** The hub spawns `~/.fractonica/pytools/bin/python -I -m pytools`, one process per job, speaking JSON lines over stdio. esptool's logger is global, and a process per job also gives clean cancellation.
+- **Process model.** The hub spawns `~/.fractonica/pytools/bin/python -I -m fractonica_pytools`, one process per job, speaking JSON lines over stdio. esptool's logger is global, and a process per job also gives clean cancellation.
 - **API.**
   - `esptool.cmds`: `detect_chip` / `connect_esp`, `detect_flash_size` (returns a string), `write_flash` (multiple offset/file pairs, compressed, verify), `erase_region`, `reset_chip`.
   - `ESPLoader` methods: `esp.get_chip_description()`, `esp.get_chip_features()`, `esp.read_mac('BASE_MAC')`, `esp.get_security_info()` (a dict).
   - The `cmds` functions `read_mac`, `get_security_info` and `flash_id` **only log**, so they are not used.
   - All calls live in one adapter module with per-chip contract tests. A custom logger turns progress into JSON events.
 - **Reset modes:**
-  - `--before default-reset` (auto USJ reset), `--after hard-reset`.
+  - `--before default-reset` (auto USJ reset), `--after no-reset`; the hub then hard-resets through its own open port (§6.4 step 8).
+  - `device_reset {mode: hard}` is done by the hub on its open port (RTS pulse, DTR deasserted), so the boot log is kept. esptool's hard reset is only the fallback when the hub cannot open the port.
   - `device_reset {mode: bootloader}` = connect with `default-reset`, then `reset_chip(esp, 'no-reset')`.
   - A stuck download-mode node is recovered with `watchdog-reset` on C3/S3, or RST on C6.
 - **Fallback:** the pinned esptool CLI with `NO_COLOR=1`, parsing only exit codes and coarse progress.

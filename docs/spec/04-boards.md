@@ -80,7 +80,7 @@ The PSRAM mode and voltage are checked against the device later, at provisioning
 
 | Event | Reset kind | USB device | Straps re-sampled |
 |---|---|---|---|
-| esptool USJ reset into the loader, or `--after hard-reset` | core reset; the USJ itself is not reset | normally stays enumerated | no |
+| esptool USJ reset into the loader, `--after hard-reset`, or an RTS pulse from the hub | core reset; the USJ itself is not reset | stays enumerated (measured on the C3 at checkpoint C1: `rst:0x15 (USB_UART_CHIP_RESET)`, port never closed) | no |
 | `esp_restart()` (including the reboot after OTA) | CPU reset | expected to stay (from the IDF source; measure in spike S1) | no |
 | RST button, power-on, brownout, RTC watchdog | chip reset | re-enumerates | **yes** |
 | Deep sleep | USJ powered down | disconnects; reconnects on wake | — |

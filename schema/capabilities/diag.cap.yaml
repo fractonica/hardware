@@ -1,0 +1,13 @@
+capability: fr.diag
+id: 0x00F2
+version: "1.0"
+summary: Diagnostics on port 241 (instance "diag"); the same command set as the serial command channel.
+commands:
+  exec:
+    id: 1
+    delivery: reliable
+    fields: { line: { id: 1, type: string, max: 200 } }
+    result: { json: { id: 1, type: string, max: 1400 } }
+    doc: "Runs one diag command line (info, caps, call, inject, stats, selftest, mark, log, ota, net, pin_pulse, reboot) and returns single-line JSON (BULK)."
+events:
+  mark: { id: 1, priority: normal, fields: { token: { id: 1, type: string, max: 32 } } }
