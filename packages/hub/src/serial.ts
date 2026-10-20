@@ -16,6 +16,11 @@ const POLL_MS = 500;
 const GONE_DEBOUNCE_MS = 1500;
 const BUSY_RETRY_MS = 5000;
 const MAX_LINE = 4096;
+/** A port gone for less than this is still waited for (USB re-enumerating after a chip reset). */
+const RECENTLY_GONE_MS = 60_000;
+const REAPPEAR_WAIT_MS = 5000;
+/** Consecutive identical lines are stored once, then as one "repeated N times" line per this period. */
+const REPEAT_FLUSH_MS = 1000;
 
 type State = PortInfo['state'];
 
@@ -35,6 +40,8 @@ interface Entry {
   lines: number;
   lastSeen: number;
   nextOpenAt: number;
+  /** The last stored line and how many identical copies have been held back since `since`. */
+  repeat?: { text: string; count: number; since: number };
 }
 
 /** "1C:DB:D4:16:BA:34" -> "1cdbd416ba34"; anything else is returned unchanged. */
@@ -56,6 +63,8 @@ async function portHolder(path: string): Promise<string | undefined> {
 
 export class SerialPortManager {
   #entries = new Map<string, Entry>();
+  /** Ports that disappeared recently: key -> { path, at }. */
+  #gone = new Map<string, { path: string; at: number }>();
   #logs: LogStore;
   #db: Db;
   #timer: NodeJS.Timeout | null = null;
@@ -90,6 +99,7 @@ export class SerialPortManager {
         const key = p.serialNumber ? normalizeMac(p.serialNumber) : cuPath(p.path);
         let e = this.#entries.get(key);
         if (!e) {
+          this.#gone.delete(key);
           e = { key, path: cuPath(p.path), usbSerial: p.serialNumber, vid: p.vendorId, pid: p.productId, state: 'closed', decoder: new StringDecoder('utf8'), buf: '', lines: 0, lastSeen: now, nextOpenAt: 0 };
           this.#entries.set(key, e);
           this.#db
@@ -103,9 +113,18 @@ export class SerialPortManager {
         }
       }
       for (const e of this.#entries.values()) {
+        if (e.repeat?.count && now - e.repeat.since >= REPEAT_FLUSH_MS) {
+          this.#flushRepeats(e);
+        }
         if (now - e.lastSeen > GONE_DEBOUNCE_MS && e.state !== 'leased') {
           await this.#close(e);
           this.#entries.delete(e.key);
+          this.#gone.set(e.key, { path: e.path, at: now });
+        }
+      }
+      for (const [key, g] of this.#gone) {
+        if (now - g.at > RECENTLY_GONE_MS) {
+          this.#gone.delete(key);
         }
       }
     } finally {
@@ -178,8 +197,39 @@ export class SerialPortManager {
     if (!text.trim()) {
       return;
     }
+    // A reset cuts the line being printed, so the ROM banner lands on the end of it
+    // (`invalid header: 0xESP-ROM:esp32c6-20220919`); give the banner its own line.
+    const rom = text.indexOf('ESP-ROM:');
+    if (rom > 0) {
+      this.#emit(e, text.slice(0, rom));
+      this.#emit(e, text.slice(rom));
+      return;
+    }
+    // A blank board's ROM prints `invalid header: 0xffffffff` ~400 times a second; store the first
+    // copy and then one count per second, like syslog. ESP_LOG lines carry a timestamp, so they
+    // never repeat exactly.
+    if (e.repeat?.text === text) {
+      e.repeat.count++;
+      if (Date.now() - e.repeat.since >= REPEAT_FLUSH_MS) {
+        this.#flushRepeats(e);
+      }
+      return;
+    }
+    this.#flushRepeats(e);
+    e.repeat = { text, count: 0, since: Date.now() };
     e.lines++;
     this.#logs.append(e.key, e.path, text);
+  }
+
+  #flushRepeats(e: Entry): void {
+    if (!e.repeat?.count) {
+      return;
+    }
+    const n = e.repeat.count;
+    e.repeat.count = 0;
+    e.repeat.since = Date.now();
+    e.lines++;
+    this.#logs.append(e.key, e.path, `(previous line repeated ${n} more time${n === 1 ? '' : 's'})`);
   }
 
   /**
@@ -191,6 +241,8 @@ export class SerialPortManager {
     e.buf = '';
     e.decoder = new StringDecoder('utf8');
     this.#emit(e, rest);
+    this.#flushRepeats(e);
+    e.repeat = undefined;
   }
 
   async #close(e: Entry): Promise<void> {
@@ -225,9 +277,29 @@ export class SerialPortManager {
     });
   }
 
+  /**
+   * resolve(), but a port that vanished in the last minute is waited for: a chip reset on the C6
+   * (and a blank board's ROM boot loop) re-enumerates USB, so the port is briefly absent.
+   */
+  async resolveWait(selector: string, waitMs = REAPPEAR_WAIT_MS): Promise<Entry> {
+    const want = normalizeMac(selector.replace(/^(mac|port|id):/, ''));
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      try {
+        return this.resolve(selector);
+      } catch (err) {
+        const recent = [...this.#gone].some(([key, g]) => (key === want || g.path === cuPath(want)) && Date.now() - g.at < RECENTLY_GONE_MS);
+        if (!(err instanceof FrError && err.code === 'NOT_FOUND' && recent && Date.now() < deadline)) {
+          throw err;
+        }
+      }
+      await sleep(100);
+    }
+  }
+
   /** Hands the port to another process (pytools, idf.py monitor). The hub stops reading until release. */
   async lease(selector: string, holder: string): Promise<{ path: string; key: string; release: () => void }> {
-    const e = this.resolve(selector);
+    const e = await this.resolveWait(selector);
     if (e.state === 'busy_external') {
       // Ask lsof again: the program seen at the last failed open may have let go (a closed Web Serial tab).
       const h = await portHolder(e.path);
@@ -270,7 +342,7 @@ export class SerialPortManager {
    * boot-banner lines land in the log store instead of being dropped while nobody has the port open.
    */
   async hardReset(selector: string, waitOpenMs = 3000): Promise<{ path: string; key: string }> {
-    const e = this.resolve(selector);
+    const e = await this.resolveWait(selector);
     const deadline = Date.now() + waitOpenMs;
     while (!(e.state === 'open' && e.port?.isOpen)) {
       if (Date.now() > deadline) {

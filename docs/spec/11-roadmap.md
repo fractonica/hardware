@@ -91,7 +91,7 @@ Steps 3a and 4a, the flash-plan half of 4b, and the `build`/`flash`/`logs`/`wait
 
 | Checkpoint | Contents | Gates |
 |---|---|---|
-| **C1 flash + monitor** | `fr build`, `fr flash --port <usb-serial> --plan full\|app`, `fr logs` and `fr wait log --json` work on the C3 and C6. A board with no registry row gets no `fr_ident` and boots UNASSIGNED. The node is minimal: it logs its id and `fw_id` | — |
+| **C1 flash + monitor** ✅ 2026-10-21 | `fr build`, `fr flash --port <usb-serial> --plan full\|app`, `fr logs` and `fr wait log --json` work on the C3 and C6. A board with no registry row gets no `fr_ident` and boots UNASSIGNED. The node is minimal: it logs its id and `fw_id`. Passed on both boards ([spike note](../spikes/2026-10-21-c1-c3-c6.md)) | — |
 | **C2 local capabilities** | Button and LED services on real boards, driven through the serial command channel (`call`, `inject`, `selftest`), plus host tests | T-CODEC |
 | **C3 hub link** | Registry + provisioning; TCP/UDP HELLO/WELCOME/HEARTBEAT/BYE, presence, `command_send`, `wait_for_event` | T-PRES, T-LED |
 | **C4 OTA** | HTTP pull + rollback | T-OTA, T-PROV |

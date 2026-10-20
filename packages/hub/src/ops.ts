@@ -207,7 +207,7 @@ export const HANDLERS: Record<OpName, Handler> = {
     }
     const manifest = loadManifest(hub.db, buildId);
     const plan = flashPlan(manifest, input.plan);
-    const entry = hub.serial.resolve(input.port);
+    const entry = await hub.serial.resolveWait(input.port);
     if (input.dry_run) {
       return { dry_run: true, port: entry.path, device_id: entry.key, build_id: buildId, target: manifest.target, ...plan };
     }
@@ -243,7 +243,7 @@ export const HANDLERS: Record<OpName, Handler> = {
   },
 
   device_reset: async (input: { port: string; mode: 'hard' | 'bootloader'; wait_s?: number }, hub) => {
-    const entry = hub.serial.resolve(input.port);
+    const entry = await hub.serial.resolveWait(input.port);
     const job = hub.jobs.start('reset', [entry.key], [`port:${entry.key}`, `device:${entry.key}`], async (ctx) => {
       if (input.mode === 'hard') {
         return { mode: 'hard', via: await hardResetCapturing(hub, entry.key, ctx) };

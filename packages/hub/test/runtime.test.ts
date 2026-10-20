@@ -185,6 +185,45 @@ describe('serial port manager', () => {
     second.emit('data', Buffer.from('ESP-ROM:esp32c3-api1-20210207\r\n'));
     expect(lines).toEqual(['I (5123) app: part', 'ESP-ROM:esp32c3-api1-20210207']);
   });
+
+  it('stores a ROM boot-loop line once, then a repeat count', async () => {
+    const { mgr, lines } = rig();
+    await mgr.poll();
+    const port = last();
+    port.finishOpen();
+    port.emit('data', Buffer.from('invalid header: 0xffffffff\r\n'.repeat(400)));
+    expect(lines).toEqual(['invalid header: 0xffffffff']);
+    await sleep(1050);
+    await mgr.poll(); // flushes a count held for more than a second
+    port.emit('data', Buffer.from('ESP-ROM:esp32c6-20220919\r\n'));
+    expect(lines).toEqual(['invalid header: 0xffffffff', '(previous line repeated 399 more times)', 'ESP-ROM:esp32c6-20220919']);
+  });
+
+  it('splits a ROM banner off the line a reset cut short', async () => {
+    const { mgr, lines } = rig();
+    await mgr.poll();
+    const port = last();
+    port.finishOpen();
+    port.emit('data', Buffer.from('invalid header: 0xESP-ROM:esp32c6-20220919\r\nBuild:Sep 19 2022\r\n'));
+    expect(lines).toEqual(['invalid header: 0x', 'ESP-ROM:esp32c6-20220919', 'Build:Sep 19 2022']);
+  });
+
+  it('waits for a port that vanished moments ago, but not for one never seen', async () => {
+    const { mgr } = rig();
+    await mgr.poll();
+    last().finishOpen();
+    h.FakePort.listed = [];
+    await sleep(1600); // past the gone debounce
+    await mgr.poll();
+    expect(mgr.list()).toEqual([]);
+    await expect(mgr.resolveWait('aabbccddeeff')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+    const waiting = mgr.resolveWait('1C:DB:D4:16:BA:34');
+    await sleep(300);
+    h.FakePort.listed = [DEV]; // re-enumerated after the chip reset
+    await mgr.poll();
+    expect((await waiting).key).toBe('1cdbd416ba34');
+  });
 });
 
 describe('hub REST envelope', () => {

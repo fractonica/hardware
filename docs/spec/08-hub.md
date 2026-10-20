@@ -54,12 +54,15 @@ Rules:
 
 ## 8.3 Serial subsystem
 
-- **Discovery.** Poll `SerialPort.list()` every 500 ms and diff by serial number. The key is the **USB serial number (= MAC)** for USJ boards; the path is just an attribute. Appear and disappear events are debounced, with timing tuned in spike S1.
+- **Discovery.** Poll `SerialPort.list()` every 500 ms and diff by serial number. The key is the **USB serial number (= MAC)** for USJ boards; the path is just an attribute. A port missing from the list for 1.5 s is gone.
+- **Brief absences.** An op that acts on a port (`flash`, `devices reset`, a lease) waits up to 5 s for a port that disappeared in the last 60 s before answering `NOT_FOUND`, because a chip reset can re-enumerate USB. An unknown selector fails at once.
 - **Identification.** Passive first ([04 §4.5](04-boards.md)). An active esptool probe runs only on first contact, on explicit request, or during provisioning.
 - **Line control.** Open with `hupcl` off, then set DTR and RTS false at once. Resets happen only through explicit actions. S1 checks whether node-serialport toggles them during `open()` on macOS; if it does, use the plan-B transport.
 - **Busy ports.** On `EBUSY`, `lsof` finds the holder, and the error is `PORT_BUSY_EXTERNAL` with app name and PID (today: Chrome, PID 715).
 - **Logs.**
   - Each line is stored with a global **cursor**, timestamp, level and tag (parsed from the `ESP_LOGx` prefix).
+  - **Repeats collapse.** Consecutive identical lines from one port are stored once, then as `(previous line repeated N more times)` at most once a second or when the text changes. A blank board's ROM loop prints ~400 identical lines a second; `ESP_LOG` lines carry a timestamp and never collapse.
+  - **ROM banner split.** A reset cuts the line being printed, so `ESP-ROM:` can arrive glued to its tail. The hub stores the banner as its own line, so it still classifies as `boot`.
   - Panic blocks are decoded against the ELF of the running `fw_id` (`crash.detected`).
   - Logs live in a SQLite ring (7 days by default).
 - **Download-mode detection.** "USB present and no HELLO or log for 5 s after a reset" sets `maybe_download_mode`, with a recovery hint.

@@ -80,7 +80,8 @@ The PSRAM mode and voltage are checked against the device later, at provisioning
 
 | Event | Reset kind | USB device | Straps re-sampled |
 |---|---|---|---|
-| esptool USJ reset into the loader, `--after hard-reset`, or an RTS pulse from the hub | core reset; the USJ itself is not reset | stays enumerated (measured on the C3 at checkpoint C1: `rst:0x15 (USB_UART_CHIP_RESET)`, port never closed) | no |
+| esptool USJ reset into the loader, `--after hard-reset`, or an RTS pulse from the hub | core reset; the USJ itself is not reset | stays enumerated (measured at checkpoint C1: C3 `rst:0x15 (USB_UART_CHIP_RESET)`, C6 `rst:0x15 (USB_UART_HPSYS)`; the port never closed) | no |
+| Blank or erased flash: the ROM prints `invalid header: 0xffffffff` until its watchdog fires | C6: `rst:0x7 (TG0_WDT_HPSYS)` about every 0.7 s, ~270 lines per cycle | stays enumerated (C6, measured at C1) | no |
 | `esp_restart()` (including the reboot after OTA) | CPU reset | expected to stay (from the IDF source; measure in spike S1) | no |
 | RST button, power-on, brownout, RTC watchdog | chip reset | re-enumerates | **yes** |
 | Deep sleep | USJ powered down | disconnects; reconnects on wake | — |
