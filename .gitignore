@@ -1,0 +1,30 @@
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# ESP-IDF
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+sdkconfig.local
+firmware/config/sdkconfig.local
+
+# Secrets (Wi-Fi credentials, tokens) never go into git
+secrets.json
+*.secret
+secrets.h
+
+# Node / TS
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Generated per app project
+**/fractonica/token.ts
