@@ -167,7 +167,7 @@ Exit code 2 is avoided on purpose: Claude Code hooks treat 2 as "block".
 
 ```
 fr doctor [--fix]                          # local; works without a hub (env, IDF pin, pytools, Node shim, LNP/firewall/VPN report)
-fr hub start [--detach] | stop | restart | status
+fr hub start [--foreground] | stop [--force] | restart [--force] | status
 fr net set --ssid S --password-stdin [--bssid B] [--country CC] | get
 fr devices ls [sel] | get <dev> | set <dev> --alias A --tag +t | provision --port <usb-serial> [--profile P] [--build B] [--alias A] | reset <dev> [--mode bootloader]
 fr ports ls          fr boards ls          fr profiles ls          fr caps ls [--device D]
@@ -185,7 +185,8 @@ fr msg <sel|broadcast> <topic> [json]
 fr input <dev> <inst> press|release|click|double_click|long_press
 fr bind <alias>.<inst>.<event>|<alias>.msg:<topic> <alias>.<inst>.<command>|<alias>.msg:<topic> [json] | ls [sel] | rm <dev> <slot>
 fr events [--since c:R.N] [--types boot.*,device.*] [--follow]
-fr wait event|log|device …  --since c:R.N [--count N] [--per-device] [--timeout 30]
+fr wait event|device …  --since c:R.N [--count N] [--per-device] [--timeout 30]
+fr wait log [sel] <pattern> --since c:R.N [--regex] [--count N] [--timeout 30]   # one word = pattern
 fr latency <sel> [--window 60]
 fr jobs ls | get | wait | logs | cancel
 fr serial lease <dev> [--ttl 120] [-- <cmd…>] | renew <lease> | release <lease> | monitor <dev>

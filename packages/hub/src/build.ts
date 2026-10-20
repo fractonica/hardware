@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { checkSourceDir, idfEnv, idfStatus, readIdfLock, run } from '@fractonica/host';
 import { FrError } from '@fractonica/protocol';
@@ -88,10 +89,51 @@ async function gitInfo(dir: string): Promise<{ sha: string; dirty: boolean }> {
   return { sha: sha.code === 0 ? sha.stdout.trim() : 'unknown', dirty: status.stdout.trim().length > 0 };
 }
 
-function spawnLogged(cmd: string, args: string[], env: Record<string, string>, cwd: string, ctx: JobCtx, onLine: (l: string) => void): Promise<number> {
+// Process groups of running builds. A detached group no longer gets the terminal's SIGINT, so the
+// hub signals them itself when it exits mid-build.
+const liveGroups = new Set<number>();
+let exitHooked = false;
+
+function killGroup(pgid: number, sig: NodeJS.Signals | 0): boolean {
+  try {
+    process.kill(-pgid, sig);
+    return true;
+  } catch {
+    return false; // ESRCH: nothing left in the group
+  }
+}
+
+/** Waits until no process is left in the group (SIGKILL after 5 s, give up after 10 s). */
+async function waitGroupGone(pgid: number): Promise<void> {
+  for (let i = 0; i < 100 && killGroup(pgid, 0); i++) {
+    if (i === 50) {
+      killGroup(pgid, 'SIGKILL');
+    }
+    await sleep(100);
+  }
+}
+
+/** Resolves with the exit code; 130 without spawning if the job was cancelled already. */
+export function spawnLogged(cmd: string, args: string[], env: Record<string, string>, cwd: string, ctx: JobCtx, onLine: (l: string) => void): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'] });
-    const abort = () => child.kill('SIGTERM');
+    // An 'abort' listener added after the abort never fires: a cancel during idf_env lands here.
+    if (ctx.signal.aborted) {
+      resolve(130);
+      return;
+    }
+    // idf.py starts cmake and ninja in its own process group and has no signal handler, so SIGTERM to
+    // idf.py alone orphans them. The build gets a group of its own and a cancel signals all of it;
+    // ninja then stops its compiler jobs and removes their partial outputs.
+    const child = spawn(cmd, args, { env, cwd, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const pgid = child.pid;
+    if (pgid) {
+      liveGroups.add(pgid);
+      if (!exitHooked) {
+        exitHooked = true;
+        process.on('exit', () => liveGroups.forEach((g) => killGroup(g, 'SIGTERM')));
+      }
+    }
+    const abort = () => pgid && killGroup(pgid, 'SIGTERM');
     ctx.signal.addEventListener('abort', abort, { once: true });
     const pump = (stream: NodeJS.ReadableStream, name: 'out' | 'err') => {
       let buf = '';
@@ -111,10 +153,54 @@ function spawnLogged(cmd: string, args: string[], env: Record<string, string>, c
     pump(child.stderr!, 'err');
     child.on('close', (code) => {
       ctx.signal.removeEventListener('abort', abort);
-      resolve(code ?? 1);
+      // On cancel idf.py exits at once while ninja is still stopping its compilers; the build-dir
+      // lock must not pass to the next build before they are gone.
+      void (ctx.signal.aborted && pgid ? waitGroupGone(pgid) : Promise.resolve()).then(() => {
+        if (pgid) {
+          liveGroups.delete(pgid);
+        }
+        resolve(code ?? 1);
+      });
     });
     child.on('error', () => resolve(127));
   });
+}
+
+/**
+ * sdkconfig layers in contract order (spec 03 §3.7). Only sdkconfig.local is optional; a missing
+ * required layer is an error rather than a build that silently lacks it.
+ */
+export function sdkconfigLayers(src: string, appDir: string, genDir: string, buildType: string): string[] {
+  const required = [
+    join(src, 'firmware', 'config', 'sdkconfig.framework'),
+    join(appDir, 'sdkconfig.defaults'),
+    join(genDir, 'sdkconfig.board'),
+    join(src, 'firmware', 'config', `sdkconfig.build.${buildType}`),
+  ];
+  for (const f of required) {
+    if (!existsSync(f)) {
+      throw new FrError('NOT_FOUND', `sdkconfig layer missing: ${f}`);
+    }
+  }
+  const local = join(src, 'firmware', 'config', 'sdkconfig.local');
+  return existsSync(local) ? [...required, local] : required;
+}
+
+/** Staleness hash: the ordered layers plus the `<layer>.<target>` files IDF applies after each. */
+export function layerHash(layers: string[], target: string): string {
+  const files = layers.flatMap((f) => (existsSync(`${f}.${target}`) ? [f, `${f}.${target}`] : [f]));
+  return createHash('sha256')
+    .update(files.map((f) => f + '\n' + readFileSync(f, 'utf8')).join('\n---\n'))
+    .digest('hex');
+}
+
+/** IDF_TARGET the build dir was configured for, or null before its first configure. */
+export function cachedIdfTarget(buildDir: string): string | null {
+  const cache = join(buildDir, 'CMakeCache.txt');
+  if (!existsSync(cache)) {
+    return null;
+  }
+  return /^IDF_TARGET:[A-Z]+=(.*)$/m.exec(readFileSync(cache, 'utf8'))?.[1].trim() || null;
 }
 
 export interface BuildInput {
@@ -136,31 +222,32 @@ export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
   const lock = readIdfLock(src);
   const idf = await idfStatus(lock);
   ctx.stage('idf_env');
-  const env = await idfEnv(idf);
+  const env = await idfEnv(idf, { targets: lock.targets });
 
   const appDir = join(src, 'firmware', 'apps', inp.app);
   const buildDir = join(appDir, 'build', `${inp.profile}-${inp.buildType}`);
-  if (inp.clean) {
+  // idf.py refuses a build dir configured for another target ("Run idf.py set-target"); the
+  // equivalent here is a full clean.
+  const cachedTarget = cachedIdfTarget(buildDir);
+  const retargeted = cachedTarget !== null && cachedTarget !== prof.target;
+  if (retargeted) {
+    ctx.log(`build dir was configured for ${cachedTarget}, profile now targets ${prof.target}: cleaning it`, 'event');
+  }
+  if (inp.clean || retargeted) {
     rmSync(buildDir, { recursive: true, force: true });
   }
   const genDir = join(buildDir, 'fr_gen');
   mkdirSync(genDir, { recursive: true });
   writeFileSync(join(genDir, 'sdkconfig.board'), prof.fragment);
 
-  // Layer order is part of the contract (spec 03 §3.7); sdkconfig.local only if it exists.
-  const layers = [
-    join(src, 'firmware', 'config', 'sdkconfig.framework'),
-    join(appDir, 'sdkconfig.defaults'),
-    join(genDir, 'sdkconfig.board'),
-    join(src, 'firmware', 'config', `sdkconfig.build.${inp.buildType}`),
-    join(src, 'firmware', 'config', 'sdkconfig.local'),
-  ].filter((f) => existsSync(f));
-  const layerHash = createHash('sha256')
-    .update(layers.map((f) => f + '\n' + readFileSync(f, 'utf8')).join('\n---\n'))
-    .digest('hex');
+  const layers = sdkconfigLayers(src, appDir, genDir, inp.buildType);
+  const hash = layerHash(layers, prof.target);
   const hashFile = join(buildDir, 'fr_layers.sha256');
-  if (!existsSync(hashFile) || readFileSync(hashFile, 'utf8') !== layerHash) {
+  if (!existsSync(hashFile) || readFileSync(hashFile, 'utf8') !== hash) {
     rmSync(join(buildDir, 'sdkconfig'), { force: true });
+    // Recorded now, not after a good build: the next configure regenerates sdkconfig from these
+    // layers even if the compile fails, so reverting a layer afterwards must count as a change.
+    writeFileSync(hashFile, hash);
     ctx.log('sdkconfig layers changed: regenerating sdkconfig', 'event');
   }
 
@@ -195,6 +282,9 @@ export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
       ctx.progress(Math.round((100 * Number(pct[1])) / Number(pct[2])));
     }
   });
+  if (ctx.signal.aborted) {
+    throw new FrError('INTERNAL', 'cancelled');
+  }
   if (code !== 0) {
     throw new FrError('BUILD_FAILED', `idf.py build failed (exit ${code})`, {
       ...(hints.length ? { hint: hints[0] } : {}),
@@ -202,7 +292,6 @@ export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
       remediation: [{ tool: 'job_logs', args: { job_id: ctx.jobId, errors_only: true } }],
     });
   }
-  writeFileSync(hashFile, layerHash);
 
   ctx.stage('ingest');
   const previous = lastFwId(db, src, inp.profile, inp.buildType);

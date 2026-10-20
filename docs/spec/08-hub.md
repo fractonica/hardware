@@ -44,11 +44,13 @@ Rules:
 
 **Lifecycle**
 
-- **Single instance.** `fr hub start [--detach]` takes an exclusive `flock` on `~/.fractonica/hub.lock` *before* opening `hub.db` or any port. A second instance exits 0 with `already_running`.
-- **Detached.** `--detach` uses `setsid`, logs to `~/.fractonica/hub.log`, and runs on the absolute Node path recorded by `fr doctor --fix`. It refuses Node < 24.12.
-- **`fr mcp` auto-start.** If nothing answers on `127.0.0.1:7420`, `fr mcp` runs `fr hub start --detach` and waits up to 10 s. The hub is **never** a child of an MCP or agent process, so ending a Claude session never kills in-flight flash or OTA jobs.
+- **Single instance.** The hub binds its loopback API address (`127.0.0.1:7420`) *before* opening `hub.db` or any port; the bound address is the mutex, and the kernel frees it when the process dies. Serial ports open only after the API listens. A second instance exits 0 with `already_running`; if anything that is not a hub holds the address, the start fails with exit 1.
+- **Pidfile.** `~/.fractonica/hub.lock` holds the hub's pid for discovery only. It is written by tmp + rename and removed on exit. A pid read from it counts only while `ps` shows it running the hub's `packages/hub/src/main.ts`, so a pid reused after a crash never blocks a start and is never signalled.
+- **Detached.** `fr hub start` detaches by default (`--foreground` keeps it in the terminal); the daemon uses `setsid`, logs to `~/.fractonica/hub.log`, and runs on the absolute Node path recorded by `fr doctor --fix`. It refuses Node < 24.12.
+- **`fr mcp` auto-start.** If nothing answers on `127.0.0.1:7420`, `fr mcp` runs `fr hub start` and waits up to 10 s. The hub is **never** a child of an MCP or agent process, so ending a Claude session never kills in-flight flash or OTA jobs.
 - **Version check.** `hub_status` reports the version, `registry_hash`, Node path and version, `launched_by` (the app responsible for the process), and `lnp: allowed|denied|unknown`. `fr mcp` refuses with `HUB_VERSION_MISMATCH` (remediation: `fr hub restart`) when the hashes differ.
-- **Stop guard.** `fr hub stop|restart` refuses while a flash or OTA job is `working`, unless `--force`.
+- **Stop guard.** `fr hub stop|restart` refuses with `LOCKED` (retryable; `details.holder_job`, remediation `fr jobs wait <id>`) while any job is `queued` or `working`, unless `--force`. A hub whose pid is alive but does not answer `/health` is stopped only with `--force` (`HUB_UNREACHABLE` otherwise).
+- **Stop.** `fr hub stop` sends SIGTERM and waits up to 10 s for the process to exit, not only for `/health` to go away, so `restart` never races the old hub for the ports. On SIGTERM the hub cancels its remaining jobs (killing build process groups and sidecars), drops open connections including long-polls, and exits within 5 s.
 
 ## 8.3 Serial subsystem
 
@@ -85,10 +87,10 @@ The **Router** does the following:
 - **Setup.** `fr doctor --fix` runs:
 
   ```
-  UV_PROJECT_ENVIRONMENT=~/.fractonica/pytools uv sync --project <repo>/tools/pytools --frozen --no-dev --managed-python --python 3.12
+  UV_PROJECT_ENVIRONMENT=~/.fractonica/pytools uv sync --project <repo>/tools/pytools --frozen --no-dev --no-editable --reinstall-package fractonica-pytools --managed-python --python 3.12
   ```
 
-  The project path is absolute. The hub spawns `~/.fractonica/pytools/bin/python -I -m fractonica_pytools` directly, never `uv run`. `fr doctor` checks `esptool.__version__ == '5.6.0'` inside that venv. The system Python 3.9 is too old.
+  The project path is absolute. The install is non-editable, so the hub never runs live sources from a checkout that may move; `--reinstall-package` rebuilds it, because uv by itself only notices `pyproject.toml` changes. After a successful sync, `fr doctor --fix` writes `~/.fractonica/pytools/fractonica-source.json` (`{source_dir, hash}`, the hash covering `pyproject.toml`, `uv.lock` and `src/`). `fr doctor` and `hub_status.warnings` report a sidecar whose stamp does not match the checkout as stale; `--fix` re-syncs it. The hub spawns `~/.fractonica/pytools/bin/python -I -m fractonica_pytools` directly, never `uv run`. `fr doctor` checks `esptool.__version__ == '5.6.0'` inside that venv. The system Python 3.9 is too old.
 - **Protocol.** One JSON request on stdin; JSON-line events (`progress`, `log`, `result`, `error`) on stdout. Cancellation is SIGTERM.
 - **Commands.**
   - `probe {port}`: chip, revision, features, flash size, MAC, security info. Uses ESPLoader methods; the log-only `cmds` functions are not used.

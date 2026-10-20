@@ -4,11 +4,13 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { networkInterfaces } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import { idfEnv, idfStatus, uvPython312 } from './idf.ts';
+import { FrError } from '@fractonica/protocol';
+
+import { idfEnv, idfStatus, sanitizedPath, uvPython312, type IdfStatus } from './idf.ts';
 import { paths } from './paths.ts';
 import { run } from './proc.ts';
-import { bootstrapPytools, PINNED_ESPTOOL, pytoolsStatus } from './pytools.ts';
-import { readIdfLock } from './repo.ts';
+import { bootstrapPytools, PINNED_ESPTOOL, pytoolsSource, pytoolsStatus } from './pytools.ts';
+import { readIdfLock, type IdfLock } from './repo.ts';
 
 export type CheckLevel = 'ok' | 'warn' | 'error';
 
@@ -36,6 +38,43 @@ function shimText(sourceDir: string, node: string): string {
   ].join('\n');
 }
 
+/** Fix for an IDF that is missing or at the wrong commit: clone only when there is nothing to update. */
+export function idfFix(lock: IdfLock, idf: IdfStatus): string {
+  const p = idf.path;
+  const install = `${p}/install.sh ${lock.targets.join(',')}`;
+  const clone = `git clone -b ${lock.idf.tag} --recursive https://github.com/espressif/esp-idf.git ${p}`;
+  if (idf.actual_commit) {
+    return [
+      `git -C ${p} fetch origin tag ${lock.idf.tag} --no-tags`,
+      `git -C ${p} checkout ${lock.idf.commit}`,
+      `git -C ${p} submodule update --init --recursive`,
+      install,
+    ].join(' && ');
+  }
+  return existsSync(p) ? `mv ${p} ${p}.old && ${clone} && ${install}` : `${clone} && ${install}`;
+}
+
+function ipv4(addr: string): number {
+  return addr.split('.').reduce((n, o) => n * 256 + Number(o), 0);
+}
+
+function ipv4String(n: number): string {
+  return [24, 16, 8, 0].map((s) => Math.floor(n / 2 ** s) % 256).join('.');
+}
+
+export function sameSubnet(a: string, b: string, netmask: string): boolean {
+  const m = ipv4(netmask);
+  return ipv4(a) - (ipv4(a) % (2 ** 32 - m)) === ipv4(b) - (ipv4(b) % (2 ** 32 - m));
+}
+
+/** An address inside the interface's own subnet (the usual gateway slot) to ask the routing table about. */
+export function subnetProbe(address: string, netmask: string): string {
+  const size = 2 ** 32 - ipv4(netmask);
+  const net = ipv4(address) - (ipv4(address) % size);
+  const probe = net + 1 === ipv4(address) ? net + 2 : net + 1;
+  return ipv4String(probe);
+}
+
 async function lanRouteCheck(): Promise<Check> {
   const ifaces = networkInterfaces();
   const lan = Object.entries(ifaces)
@@ -45,12 +84,46 @@ async function lanRouteCheck(): Promise<Check> {
     return { id: 'lan', level: 'warn', detail: 'no IPv4 address on a Wi-Fi/Ethernet interface' };
   }
   const { name, a } = lan[0];
-  const probe = a.address.split('.').slice(0, 3).join('.') + '.1';
+  const probe = subnetProbe(a.address, a.netmask);
   const r = await run('route', ['-n', 'get', probe]);
   const iface = /interface:\s*(\S+)/.exec(r.stdout)?.[1] ?? '?';
-  return iface.startsWith('utun')
-    ? { id: 'lan', level: 'error', detail: `LAN ${probe} routes via ${iface} (VPN); nodes cannot reach the hub`, fix: 'exclude local networks in the VPN' }
-    : { id: 'lan', level: 'ok', detail: `${a.address} on ${name}; LAN routed via ${iface}` };
+  // OK when the route leaves through any interface on this subnet (Wi-Fi and Ethernet may both be on it);
+  // utun/ipsec/ppp or a default route elsewhere means the LAN is captured.
+  const onLan = (ifaces[iface] ?? []).some((x) => x.family === 'IPv4' && sameSubnet(x.address, a.address, a.netmask));
+  return onLan
+    ? { id: 'lan', level: 'ok', detail: `${a.address} on ${name}; LAN routed via ${iface}` }
+    : { id: 'lan', level: 'error', detail: `LAN ${probe} routes via ${iface}, not the LAN interface (VPN?); nodes cannot reach the hub`, fix: 'exclude local networks in the VPN' };
+}
+
+const FW = '/usr/libexec/ApplicationFirewall/socketfilterfw';
+
+/** The firewall filters per binary, so ask about the node that runs the hub (spec 08 §8.11). */
+async function firewallCheck(): Promise<Check> {
+  const on = (out: string) => /enabled/i.test(out) && !/disabled/i.test(out);
+  const state = await run(FW, ['--getglobalstate']);
+  if (!on(state.stdout)) {
+    return { id: 'firewall', level: 'ok', detail: 'macOS firewall off' };
+  }
+  const blockAll = await run(FW, ['--getblockall']);
+  if (on(blockAll.stdout) || /State = 2/.test(state.stdout)) {
+    return { id: 'firewall', level: 'error', detail: 'macOS firewall blocks all incoming connections; nodes cannot reach the hub', fix: 'System Settings → Network → Firewall → Options → turn off "Block all incoming connections"' };
+  }
+  const node = process.execPath;
+  const allow = `sudo ${FW} --add ${node} && sudo ${FW} --unblockapp ${node}`;
+  const app = await run(FW, ['--getappblocked', node]);
+  if (/permitted/i.test(app.stdout)) {
+    return { id: 'firewall', level: 'ok', detail: `macOS firewall on; incoming allowed for ${node}` };
+  }
+  if (/blocked/i.test(app.stdout)) {
+    return { id: 'firewall', level: 'warn', detail: `macOS firewall blocks incoming connections to ${node}`, fix: allow };
+  }
+  // Not listed: allowed only if signed downloads are auto-allowed and this binary has a Developer ID.
+  const signed = await run(FW, ['--getallowsigned']);
+  const sig = await run('codesign', ['-dv', '--verbose=2', node]);
+  if (/downloaded signed software ENABLED/i.test(signed.stdout) && /Authority=Developer ID Application/.test(sig.stderr)) {
+    return { id: 'firewall', level: 'ok', detail: `macOS firewall on; ${node} is signed and allowed automatically` };
+  }
+  return { id: 'firewall', level: 'warn', detail: `macOS firewall on and ${node} is not allowed for incoming connections`, fix: allow };
 }
 
 async function serialPortsCheck(): Promise<Check> {
@@ -95,54 +168,85 @@ export async function runDoctor(opts: { sourceDir: string | null; fix: boolean }
           id: 'idf',
           level: 'error',
           detail: `expected ${lock.idf.tag} ${lock.idf.commit.slice(0, 12)} at ${idf.path}, found ${idf.actual_commit ?? 'nothing'}`,
-          fix: `git clone -b ${lock.idf.tag} --recursive https://github.com/espressif/esp-idf.git ${idf.path} && ${idf.path}/install.sh ${lock.targets.join(',')}`,
+          fix: idfFix(lock, idf),
         },
   );
 
   const python = await uvPython312();
   add(python ? { id: 'uv_python', level: 'ok', detail: python } : { id: 'uv_python', level: 'error', detail: 'no uv-managed Python 3.12', fix: 'uv python install 3.12' });
 
+  let buildPath: string | null = null;
   if (idf.ok && python) {
     try {
-      const env = await idfEnv(idf);
+      // The cache is validated on read; --fix recomputes it regardless.
+      const env = await idfEnv(idf, { refresh: opts.fix, targets: lock.targets });
+      buildPath = env.PATH ?? null;
       add({ id: 'idf_env', level: 'ok', detail: `export.sh OK (python ${env.IDF_PYTHON_ENV_PATH ?? '?'})` });
     } catch (e) {
-      add({ id: 'idf_env', level: 'error', detail: e instanceof Error ? e.message : String(e) });
+      const fix = e instanceof FrError ? e.remediation?.[0]?.cli : undefined;
+      add({ id: 'idf_env', level: 'error', detail: e instanceof Error ? e.message : String(e), ...(fix ? { fix } : {}) });
     }
   }
 
   let py = await pytoolsStatus();
-  if (!py.ok && opts.fix) {
+  let src = pytoolsSource(opts.sourceDir);
+  let repaired = false;
+  if ((!py.ok || src.stale) && opts.fix) {
     const b = await bootstrapPytools(opts.sourceDir);
     py = await pytoolsStatus();
+    src = pytoolsSource(opts.sourceDir);
+    repaired = b.ok && py.ok && !src.stale;
     if (!b.ok) {
       add({ id: 'pytools', level: 'error', detail: `uv sync failed: ${b.output}` });
     }
   }
   if (!checks.some((c) => c.id === 'pytools')) {
     add(
-      py.ok
-        ? { id: 'pytools', level: 'ok', detail: `esptool ${py.esptool} in ${paths.pytoolsVenv()}`, fixed: opts.fix }
-        : { id: 'pytools', level: 'error', detail: py.installed ? `esptool ${py.esptool}, expected ${PINNED_ESPTOOL}` : 'sidecar venv missing', fix: 'fr doctor --fix' },
+      !py.ok
+        ? { id: 'pytools', level: 'error', detail: py.installed ? `esptool ${py.esptool}, expected ${PINNED_ESPTOOL}` : 'sidecar venv missing', fix: 'fr doctor --fix' }
+        : src.stale
+          ? { id: 'pytools', level: 'warn', detail: `sidecar in ${paths.pytoolsVenv()} was installed from ${src.installed_from ?? 'an editable or unknown source'}, not this checkout's tools/pytools`, fix: 'fr doctor --fix' }
+          : { id: 'pytools', level: 'ok', detail: `esptool ${py.esptool} in ${paths.pytoolsVenv()}`, ...(repaired ? { fixed: true } : {}) },
     );
   }
 
-  const ccache = await run('/bin/sh', ['-c', 'command -v ccache']);
-  add(ccache.code === 0 ? { id: 'ccache', level: 'ok', detail: ccache.stdout.trim() } : { id: 'ccache', level: 'warn', detail: 'ccache missing (slower rebuilds)', fix: 'brew install ccache' });
+  // Resolve ccache the way IDF's find_program will: on the build PATH, not the caller's.
+  const wherePath = buildPath ?? sanitizedPath(python ?? '/usr/bin/python3');
+  const ccache = await run('/bin/sh', ['-c', 'command -v ccache'], { env: { PATH: wherePath } });
+  if (ccache.code === 0) {
+    add({ id: 'ccache', level: 'ok', detail: ccache.stdout.trim() });
+  } else {
+    const elsewhere = await run('/bin/sh', ['-c', 'command -v ccache']);
+    add(
+      elsewhere.code === 0
+        ? { id: 'ccache', level: 'warn', detail: `${elsewhere.stdout.trim()} is not on the build PATH; builds run without ccache`, fix: 'brew install ccache' }
+        : { id: 'ccache', level: 'warn', detail: 'ccache missing (slower rebuilds)', fix: 'brew install ccache' },
+    );
+  }
 
   const shim = paths.shim();
   const wanted = shimText(opts.sourceDir, process.execPath);
-  const current = existsSync(shim) ? readFileSync(shim, 'utf8') : null;
+  let current: string | null = null;
+  let unreadable = false; // a directory or no permission: report it instead of crashing
+  try {
+    current = readFileSync(shim, 'utf8');
+  } catch (e) {
+    unreadable = (e as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
   if (current !== wanted && opts.fix && nodeOk(process.version)) {
-    mkdirSync(dirname(shim), { recursive: true });
-    writeFileSync(shim, wanted);
-    chmodSync(shim, 0o755);
-    add({ id: 'shim', level: 'ok', detail: `wrote ${shim}`, fixed: true });
+    try {
+      mkdirSync(dirname(shim), { recursive: true });
+      writeFileSync(shim, wanted);
+      chmodSync(shim, 0o755);
+      add({ id: 'shim', level: 'ok', detail: `wrote ${shim}`, fixed: true });
+    } catch (e) {
+      add({ id: 'shim', level: 'error', detail: `cannot write ${shim}: ${(e as Error).message}`, fix: `check the owner and type of ${shim} and ${dirname(shim)} (e.g. sudo chown -R "$USER" ~/.local)` });
+    }
   } else {
     add(
       current === wanted
         ? { id: 'shim', level: 'ok', detail: shim }
-        : { id: 'shim', level: 'warn', detail: current ? `${shim} points elsewhere` : `${shim} missing`, fix: 'fr doctor --fix' },
+        : { id: 'shim', level: 'warn', detail: unreadable ? `${shim} is not a readable file` : current !== null ? `${shim} points elsewhere` : `${shim} missing`, fix: 'fr doctor --fix' },
     );
   }
   const onPath = (process.env.PATH ?? '').split(':').includes(dirname(shim));
@@ -151,9 +255,7 @@ export async function runDoctor(opts: { sourceDir: string | null; fix: boolean }
   }
 
   if (process.platform === 'darwin') {
-    const fw = await run('/usr/libexec/ApplicationFirewall/socketfilterfw', ['--getglobalstate']);
-    const enabled = /enabled/i.test(fw.stdout) && !/disabled/i.test(fw.stdout);
-    add(enabled ? { id: 'firewall', level: 'warn', detail: 'macOS firewall is on; allow incoming connections for node', fix: 'System Settings → Network → Firewall → Options' } : { id: 'firewall', level: 'ok', detail: 'macOS firewall off' });
+    add(await firewallCheck());
     const host = await run('scutil', ['--get', 'LocalHostName']);
     add({ id: 'hostname', level: 'ok', detail: `nodes reach the hub as ${host.stdout.trim()}.local` });
     add(await lanRouteCheck());

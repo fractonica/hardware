@@ -12,7 +12,9 @@ Requests:
   {"cmd": "version"}
   {"cmd": "probe", "port": "/dev/cu.usbmodem1101"}
   {"cmd": "flash", "port": ..., "files": [{"offset": "0x0", "path": ...}], "erase": [{"offset": ..., "size": ...}],
-   "after": "hard-reset"}
+   "after": "hard-reset", "expect_chip_id": 5}
+     expect_chip_id (optional) is the image header chip id; a different chip fails with TARGET_MISMATCH
+     before anything is written.
   {"cmd": "reset", "port": ..., "mode": "hard" | "bootloader"}
 """
 
@@ -35,6 +37,7 @@ from esptool.cmds import (
 )
 from esptool.logger import TemplateLogger, log
 from esptool.reset import HardReset
+from esptool.targets import ROM_LIST
 
 
 def emit(**kv: Any) -> None:
@@ -92,16 +95,46 @@ def set_stage(name: str) -> None:
     emit(ev="stage", stage=name)
 
 
+# pyserial open errors. esptool adds "the port is busy or doesn't exist" to every one, so that text is not
+# matched; a port another pyserial user holds fails the flock: "Could not exclusively lock port ...".
+PORT_GONE = ("No such file or directory", "Device not configured", "FileNotFoundError")
+PORT_BUSY = ("Resource busy", "Could not exclusively lock port", "Access is denied")
+
+
+def port_open_error(msg: str) -> SidecarError | None:
+    if any(s in msg for s in PORT_GONE):
+        return SidecarError("NOT_FOUND", msg, "the port disappeared: re-run port_list (fr ports ls)")
+    if any(s in msg for s in PORT_BUSY):
+        return SidecarError("PORT_BUSY_EXTERNAL", msg, "close any other program using the port")
+    return None
+
+
 def connect(port: str, before: str = "default-reset"):
     set_stage("connect")
     try:
         return detect_chip(port, connect_mode=before)
     except Exception as e:  # esptool raises FatalError / serial errors
         msg = str(e)
-        if "Resource busy" in msg or "could not open port" in msg:
-            raise SidecarError("PORT_BUSY_EXTERNAL", msg, "close any other program using the port")
-        raise SidecarError("FLASH_FAILED", msg,
-                           "if the board does not respond: hold BOOT, tap RST, release BOOT, then retry")
+        raise port_open_error(msg) or SidecarError(
+            "FLASH_FAILED", msg, "if the board does not respond: hold BOOT, tap RST, release BOOT, then retry")
+
+
+def chip_name(image_chip_id: int) -> str:
+    return next((c.CHIP_NAME for c in ROM_LIST if c.IMAGE_CHIP_ID == image_chip_id), f"chip id {image_chip_id}")
+
+
+def check_target(esp: Any, expect: int | None) -> None:
+    """Refuses an image built for another chip. esptool itself only checks images written at 0x0."""
+    if expect is None or esp.IMAGE_CHIP_ID == expect:
+        return
+    try:
+        reset_chip(esp, "hard-reset")  # nothing was written: let the old firmware run again
+    except Exception:  # noqa: BLE001 - the mismatch is the error to report
+        pass
+    raise SidecarError("TARGET_MISMATCH",
+                       f"the image is for {chip_name(expect)} (chip id {expect}), but the chip on this port is "
+                       f"{esp.CHIP_NAME} (chip id {esp.IMAGE_CHIP_ID}); nothing was written",
+                       "flash a build for this board's profile, or check that --port is the board you meant")
 
 
 def mac_str(mac: Any) -> str:
@@ -137,8 +170,12 @@ def cmd_probe(req: dict) -> dict:
 def cmd_flash(req: dict) -> dict:
     files = [(int(f["offset"], 0), f["path"]) for f in req["files"]]
     erases = [(int(e["offset"], 0), int(e["size"], 0)) for e in req.get("erase", [])]
+    expect = req.get("expect_chip_id")
+    if expect is not None and (isinstance(expect, bool) or not isinstance(expect, int)):
+        raise SidecarError("INVALID_ARGS", f"expect_chip_id must be an integer, got {expect!r}")
     with connect(req["port"], req.get("before", "default-reset")) as esp:
         chip = esp.CHIP_NAME
+        check_target(esp, expect)
         set_stage("stub")
         esp = run_stub(esp)
         attach_flash(esp)
@@ -168,7 +205,8 @@ def cmd_reset(req: dict) -> dict:
     try:
         port.open()
     except serial.SerialException as e:
-        raise SidecarError("PORT_BUSY_EXTERNAL", str(e), "close any other program using the port")
+        raise port_open_error(str(e)) or SidecarError(
+            "PORT_BUSY_EXTERNAL", str(e), "close any other program using the port")
     try:
         HardReset(port, uses_usb=True)()
     finally:

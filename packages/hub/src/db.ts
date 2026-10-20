@@ -41,9 +41,20 @@ export function kvSet(db: Db, k: string, v: string): void {
   db.prepare('INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, v);
 }
 
-/** Increments and returns the hub run counter (part of every cursor). */
+/**
+ * Increments and returns the hub run counter (part of every cursor). The bump is fsynced (spec 08
+ * §8.7): with WAL + synchronous=NORMAL a power loss could roll it back and let a reused run number
+ * silently re-base old cursors. FULL syncs the WAL on commit; fullfsync makes that F_FULLFSYNC on macOS.
+ */
 export function nextHubRun(db: Db): number {
   const run = Number(kvGet(db, 'hub_run') ?? '0') + 1;
-  kvSet(db, 'hub_run', String(run));
+  db.pragma('synchronous = FULL');
+  db.pragma('fullfsync = ON');
+  try {
+    kvSet(db, 'hub_run', String(run));
+  } finally {
+    db.pragma('fullfsync = OFF');
+    db.pragma('synchronous = NORMAL');
+  }
   return run;
 }

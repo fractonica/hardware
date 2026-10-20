@@ -88,5 +88,12 @@ export const ArtifactManifestSchema = z.object({
     files: z.array(ArtifactFileSchema),
   }),
   partitions: z.array(PartitionSchema),
+  /** ELF and linker map, kept to decode panics and core dumps of this fw_id; never flashed. */
+  debug: z
+    .object({
+      elf: z.object({ blob: z.string(), size: z.number() }).optional(),
+      map: z.object({ blob: z.string(), size: z.number() }).optional(),
+    })
+    .optional(),
 });
 export type ArtifactManifest = z.infer<typeof ArtifactManifestSchema>;

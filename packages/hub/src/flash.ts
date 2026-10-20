@@ -53,9 +53,27 @@ interface SidecarEvent {
   hint?: string;
 }
 
+/** Sidecar requests (tools/pytools `__main__.py`). */
+export type PytoolsRequest =
+  | { cmd: 'version' }
+  | { cmd: 'probe'; port: string; before?: string }
+  | {
+      cmd: 'flash';
+      port: string;
+      files: Array<{ offset: string; path: string }>;
+      erase?: Array<{ offset: string; size: string }>;
+      after?: 'hard-reset' | 'no-reset';
+      before?: string;
+      /** Image header chip id (manifest `chip_id`); the sidecar fails with TARGET_MISMATCH before writing if the chip differs. */
+      expect_chip_id?: number;
+    }
+  | { cmd: 'reset'; port: string; mode: 'hard' | 'bootloader' };
+
 /** Runs one pytools request; progress and log events go to the job; resolves with the result data. */
-export function runPytools(req: Record<string, unknown>, ctx: JobCtx): Promise<unknown> {
+export function runPytools(req: PytoolsRequest, ctx: JobCtx): Promise<unknown> {
   return new Promise((resolve, reject) => {
+    // A cancel during an earlier await (lease, port close) already fired; a listener added now never would.
+    ctx.signal.throwIfAborted();
     const child = spawn(pytoolsPython(), ['-I', '-m', 'fractonica_pytools'], { stdio: ['pipe', 'pipe', 'pipe'] });
     const abort = () => child.kill('SIGTERM');
     ctx.signal.addEventListener('abort', abort, { once: true });
@@ -107,6 +125,8 @@ export function runPytools(req: Record<string, unknown>, ctx: JobCtx): Promise<u
         reject(error);
       } else if (code === 0) {
         resolve(result);
+      } else if (ctx.signal.aborted) {
+        reject(ctx.signal.reason);
       } else {
         reject(new FrError('FLASH_FAILED', `pytools exited with ${code}`));
       }

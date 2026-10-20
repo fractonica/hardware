@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { FrError } from '@fractonica/protocol';
@@ -26,14 +26,17 @@ export function findSourceDir(start: string): string | null {
   }
 }
 
-/** Validates an explicit source_dir (spec 09 §9.2: absolute and containing the IDF lock). */
+/**
+ * Validates an explicit source_dir (spec 09 §9.2: absolute and containing the IDF lock) and returns
+ * its canonical path, so /tmp/x, /private/tmp/x and x/ share one build lock and one artifact history.
+ */
 export function checkSourceDir(sourceDir: string): string {
   if (!isAbsolute(sourceDir) || !existsSync(join(sourceDir, LOCK_REL))) {
     throw new FrError('INVALID_SOURCE', `${sourceDir} is not a Fractonica checkout (no ${LOCK_REL})`, {
       hint: 'pass the absolute path of your checkout; the fr CLI fills it from its working directory',
     });
   }
-  return sourceDir;
+  return realpathSync.native(sourceDir);
 }
 
 export function readIdfLock(sourceDir: string): IdfLock {

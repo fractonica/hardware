@@ -30,6 +30,8 @@ export class JobRunner {
   #waiters = new Map<string, Set<() => void>>();
   #lockTails = new Map<string, Promise<void>>();
   #lockHolders = new Map<string, string>();
+  /** job id -> the lock key it is queued on. */
+  #queuedOn = new Map<string, string>();
 
   constructor(db: Db) {
     this.#db = db;
@@ -55,8 +57,9 @@ export class JobRunner {
   }
 
   async #run(job: Job, abort: AbortController, locks: string[], fn: JobFn): Promise<void> {
-    const release = await this.#acquire(job, [...new Set(locks)].sort());
+    let release = () => {};
     try {
+      release = await this.#acquire(job, [...new Set(locks)].sort(), abort.signal);
       if (abort.signal.aborted) {
         throw new FrError('INTERNAL', 'cancelled before start');
       }
@@ -79,11 +82,13 @@ export class JobRunner {
       };
       job.result = await fn(ctx);
       job.status = 'completed';
+      job.progress = { pct: 100 }; // a no-op ninja run never prints its last [n/n] step
     } catch (err) {
       job.status = abort.signal.aborted ? 'cancelled' : 'failed';
       job.error = err instanceof FrError ? err.toToolError() : { code: 'INTERNAL', message: String(err), retryable: false };
     } finally {
       release();
+      delete job.blocked_by;
       job.ended_at = now();
       this.#persist(job);
       for (const w of this.#waiters.get(job.job_id) ?? []) {
@@ -93,9 +98,14 @@ export class JobRunner {
     }
   }
 
-  /** FIFO per lock key: each job chains behind the previous holder of every key it needs. */
-  async #acquire(job: Job, keys: string[]): Promise<() => void> {
+  /**
+   * FIFO per lock key: each job chains behind the previous holder of every key it needs.
+   * A cancel while queued gives up the job's places at once: jobs behind it chain through `prev`,
+   * so they still wait for the earlier holder.
+   */
+  async #acquire(job: Job, keys: string[], signal: AbortSignal): Promise<() => void> {
     const releases: Array<() => void> = [];
+    const releaseAll = () => releases.forEach((r) => r());
     for (const key of keys) {
       const prev = this.#lockTails.get(key) ?? Promise.resolve();
       let releaseFn!: () => void;
@@ -106,8 +116,18 @@ export class JobRunner {
         job.blocked_by = { lock: key, holder_job: holder };
         this.#persist(job);
       }
-      await prev;
+      this.#queuedOn.set(job.job_id, key);
+      try {
+        await unlessCancelled(prev, signal);
+      } catch (err) {
+        releaseFn();
+        releaseAll();
+        throw err;
+      } finally {
+        this.#queuedOn.delete(job.job_id);
+      }
       this.#lockHolders.set(key, job.job_id);
+      this.#retarget(key, job.job_id);
       releases.push(() => {
         if (this.#lockHolders.get(key) === job.job_id) {
           this.#lockHolders.delete(key);
@@ -115,7 +135,18 @@ export class JobRunner {
         releaseFn();
       });
     }
-    return () => releases.forEach((r) => r());
+    return releaseAll;
+  }
+
+  /** Points the jobs queued on `key` at its new holder, so `job_wait(blocked_by.holder_job)` waits for the right job. */
+  #retarget(key: string, holder: string): void {
+    for (const [jobId, queuedOn] of this.#queuedOn) {
+      const j = this.#jobs.get(jobId);
+      if (queuedOn === key && j) {
+        j.blocked_by = { lock: key, holder_job: holder };
+        this.#persist(j);
+      }
+    }
   }
 
   #log(jobId: string, text: string, stream: string): void {
@@ -177,12 +208,29 @@ export class JobRunner {
     return rows.map((r) => this.#jobs.get((JSON.parse(r.json) as Job).job_id) ?? (JSON.parse(r.json) as Job));
   }
 
-  cancel(jobId: string): Job {
+  /**
+   * Aborts the job's signal; the reason is an FrError, so `ctx.signal.throwIfAborted()` fails the job
+   * as cancelled. A queued job leaves its queue at once and is returned already "cancelled".
+   */
+  async cancel(jobId: string): Promise<Job> {
     const job = this.get(jobId);
     if (!TERMINAL.has(job.status)) {
-      this.#aborts.get(jobId)?.abort();
+      this.#aborts.get(jobId)?.abort(new FrError('INTERNAL', 'cancelled'));
+      if (job.status === 'queued') {
+        return this.wait(jobId, 1);
+      }
     }
     return this.get(jobId);
+  }
+
+  /** Hub shutdown: aborts every job that has not ended, so its children are signalled and it ends "cancelled". */
+  cancelAll(): void {
+    for (const [jobId, abort] of this.#aborts) {
+      const job = this.#jobs.get(jobId);
+      if (job && !TERMINAL.has(job.status)) {
+        abort.abort(new FrError('INTERNAL', 'cancelled: the hub is stopping'));
+      }
+    }
   }
 
   counts(): Record<string, number> {
@@ -194,6 +242,21 @@ export class JobRunner {
     }
     return counts;
   }
+}
+
+/** Resolves with `p`, or rejects as soon as the job is cancelled. */
+function unlessCancelled(p: Promise<void>, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new FrError('INTERNAL', 'cancelled before start'));
+    if (signal.aborted) {
+      return onAbort();
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    void p.then(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    });
+  });
 }
 
 // Compiler/ninja/idf.py failure lines. Not "stream === err": idf.py prints Kconfig notes to stderr,

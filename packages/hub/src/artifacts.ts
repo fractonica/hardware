@@ -1,13 +1,13 @@
 // Content-addressed artifact store and build manifests (spec 06 §6.8).
 
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { paths } from '@fractonica/host';
 import { type ArtifactManifest, ArtifactManifestSchema, FrError } from '@fractonica/protocol';
 
-import type { Db } from './db.ts';
+import { type Db, kvGet, kvSet } from './db.ts';
 
 const IMAGE_MAGIC = 0xe9;
 const APP_DESC_OFFSET = 32;          // esp_app_desc_t follows the 24 B image header and 8 B segment header
@@ -32,6 +32,22 @@ export interface AppImageInfo {
   elf_sha256: string;
 }
 
+/** Image length through its checksum: 24 B header, the segments, then padding so the checksum byte ends a 16 B block. */
+function imageLen(bin: Buffer): number {
+  let off = 24;
+  for (let i = 0; i < bin[1]; i++) {
+    if (off + 8 > bin.length) {
+      throw new FrError('BUILD_FAILED', 'app binary is truncated');
+    }
+    off += 8 + bin.readUInt32LE(off + 4);
+  }
+  const len = (off + 16) & ~15;
+  if (len > bin.length) {
+    throw new FrError('BUILD_FAILED', 'app binary is truncated');
+  }
+  return len;
+}
+
 /** Parses an ESP app image: header, esp_app_desc_t and the appended SHA-256 (fw_id). */
 export function parseAppImage(bin: Buffer): AppImageInfo {
   if (bin[0] !== IMAGE_MAGIC) {
@@ -40,9 +56,23 @@ export function parseAppImage(bin: Buffer): AppImageInfo {
   if (bin.readUInt32LE(APP_DESC_OFFSET) !== APP_DESC_MAGIC) {
     throw new FrError('BUILD_FAILED', 'app binary has no esp_app_desc_t');
   }
-  const hashAppended = bin[23] === 1;
-  const tail = bin.subarray(bin.length - 32);
-  const fw_id = hashAppended && sha256(bin.subarray(0, bin.length - 32)) === tail.toString('hex') ? tail.toString('hex') : sha256(bin);
+  // fw_id is what esp_partition_get_sha256() reports: the digest right after the walked image. In a
+  // signed image (L1, spec 06 §6.9) a signature block follows it, so it is not the file's last 32 B.
+  const len = imageLen(bin);
+  let fw_id: string;
+  if (bin[23] !== 1) {
+    fw_id = sha256(bin.subarray(0, len));
+  } else {
+    const digest = bin.subarray(len, len + 32).toString('hex');
+    const tail = bin.subarray(bin.length - 32).toString('hex');
+    if (sha256(bin.subarray(0, len)) === digest) {
+      fw_id = digest;
+    } else if (sha256(bin.subarray(0, bin.length - 32)) === tail) {
+      fw_id = tail; // unsigned layout, digest last
+    } else {
+      throw new FrError('BUILD_FAILED', 'app image digest does not match its contents');
+    }
+  }
   return {
     chip_id: bin.readUInt16LE(12),
     fw_id,
@@ -87,13 +117,22 @@ export function blobPath(ref: string): string {
   return join(paths.artifacts(), 'blobs', 'sha256', hash.slice(0, 2), hash);
 }
 
-function storeBlob(file: string): { ref: string; size: number; sha: string } {
+export function storeBlob(file: string): { ref: string; size: number; sha: string } {
   const buf = readFileSync(file);
   const sha = sha256(buf);
   const dest = blobPath(sha);
-  if (!existsSync(dest)) {
+  // Only presence is checked on later ingests, so a blob is written under a temp name and renamed:
+  // a kill or a full disk never leaves a truncated file under the hash. A short one is rewritten.
+  if (!existsSync(dest) || statSync(dest).size !== buf.length) {
     mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(file, dest);
+    const tmp = `${dest}.tmp-${process.pid}`;
+    try {
+      writeFileSync(tmp, buf, { flush: true });
+      renameSync(tmp, dest);
+    } catch (err) {
+      rmSync(tmp, { force: true });
+      throw err;
+    }
   }
   return { ref: `sha256:${sha}`, size: buf.length, sha };
 }
@@ -104,6 +143,10 @@ interface FlasherArgs {
   app?: { offset: string; file: string };
   'partition-table'?: { offset: string; file: string };
   otadata?: { offset: string; file: string };
+}
+
+interface ProjectDescription {
+  app_elf: string;
 }
 
 export interface IngestInput {
@@ -147,6 +190,17 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
     throw new FrError('BUILD_FAILED', 'build produced no app or partition table');
   }
   const image = parseAppImage(appBin);
+  // The ELF and map are stored too: the build dir is reused per profile, and crash decoding needs
+  // the ELF of whatever fw_id a device still runs (spec 06 §6.6, §6.8).
+  const desc = JSON.parse(readFileSync(join(inp.buildDir, 'project_description.json'), 'utf8')) as ProjectDescription;
+  const elfFile = join(inp.buildDir, desc.app_elf);
+  const elf = storeBlob(elfFile);
+  if (elf.sha !== image.elf_sha256) {
+    throw new FrError('BUILD_FAILED', `${desc.app_elf} is not the ELF the app image was made from (elf_sha256 differs)`);
+  }
+  const mapFile = elfFile.replace(/\.elf$/, '.map');
+  const map = existsSync(mapFile) ? storeBlob(mapFile) : null;
+  const debug = { elf: { blob: elf.ref, size: elf.size }, ...(map ? { map: { blob: map.ref, size: map.size } } : {}) };
   const fwShort = image.fw_id.slice(0, 12);
   const build_id = `${inp.app}/${inp.profile}/${inp.buildType}/${fwShort}`;
   const manifest: ArtifactManifest = ArtifactManifestSchema.parse({
@@ -169,14 +223,22 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
     built_at: new Date().toISOString(),
     flash: { mode: flasher.flash_settings.flash_mode, freq: flasher.flash_settings.flash_freq, size: flasher.flash_settings.flash_size, files },
     partitions: parsePartitionTable(ptable),
+    debug,
   });
   const manifestPath = join(paths.artifacts(), 'builds', build_id, 'manifest.json');
   mkdirSync(dirname(manifestPath), { recursive: true });
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  // Two clean checkouts of one commit build the same image (reproducible builds), hence the same
+  // build_id: the row follows the latest manifest, and cache_hit is tracked per source_dir in kv.
   db.prepare(
-    'INSERT INTO artifacts (build_id, source_dir, profile, build_type, fw_id, built_at, manifest_path) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(build_id) DO UPDATE SET built_at = excluded.built_at, manifest_path = excluded.manifest_path',
+    'INSERT INTO artifacts (build_id, source_dir, profile, build_type, fw_id, built_at, manifest_path) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(build_id) DO UPDATE SET source_dir = excluded.source_dir, built_at = excluded.built_at, manifest_path = excluded.manifest_path',
   ).run(build_id, inp.sourceDir, inp.profile, inp.buildType, image.fw_id, manifest.built_at, manifestPath);
+  kvSet(db, lastFwKey(inp.sourceDir, inp.profile, inp.buildType), image.fw_id);
   return { manifest, manifestPath };
+}
+
+function lastFwKey(sourceDir: string, profile: string, buildType: string): string {
+  return `last_fw_id:${JSON.stringify([sourceDir, profile, buildType])}`;
 }
 
 export function loadManifest(db: Db, buildId: string): ArtifactManifest {
@@ -194,7 +256,13 @@ export function newestBuildId(db: Db, profile: string, buildType?: string): stri
   return row?.build_id ?? null;
 }
 
+/** fw_id of the last build of (source_dir, profile, build_type), for cache_hit (spec 03 §3.8). */
 export function lastFwId(db: Db, sourceDir: string, profile: string, buildType: string): string | null {
+  const known = kvGet(db, lastFwKey(sourceDir, profile, buildType));
+  if (known) {
+    return known;
+  }
+  // Builds ingested before the kv entry existed.
   const row = db
     .prepare('SELECT fw_id FROM artifacts WHERE source_dir = ? AND profile = ? AND build_type = ? ORDER BY built_at DESC LIMIT 1')
     .get(sourceDir, profile, buildType) as { fw_id: string } | undefined;

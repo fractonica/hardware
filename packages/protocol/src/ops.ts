@@ -1,6 +1,6 @@
 // Operation registry: every hub operation is defined once here; REST, the `fr` CLI and (later)
 // MCP tools are generated from it (spec 09 §9.1). Field names are snake_case; the CLI maps them
-// to --kebab-case options.
+// to --kebab-case options (see cliFlag).
 
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -18,6 +18,11 @@ export interface OpDef<I extends z.ZodObject = z.ZodObject> {
 
 function op<I extends z.ZodObject>(def: OpDef<I>): OpDef<I> {
   return def;
+}
+
+/** CLI option name for an input field (spec 09 §9.5): wait_s is --wait, timeout_s is --timeout, else kebab-case. */
+export function cliFlag(key: string): string {
+  return key === 'wait_s' ? 'wait' : key === 'timeout_s' ? 'timeout' : key.replace(/_/g, '-');
 }
 
 /** Max server-side wait. Claude Code backgrounds tool calls after 2 minutes. */
@@ -48,7 +53,7 @@ export const OPS = [
   op({
     name: 'network_set',
     kind: 'command',
-    summary: 'Store the Wi-Fi network nodes join. The password is write-only (pass "-" on the CLI to read it from stdin).',
+    summary: 'Store the Wi-Fi network nodes join. The password is write-only (the CLI reads it from stdin with --password-stdin).',
     input: z.object({
       ssid: z.string().min(1).max(32),
       password: z.string().max(64).optional(),
@@ -141,6 +146,8 @@ export const OPS = [
       count: z.number().int().min(1).max(100).default(1),
       timeout_s: z.number().int().min(1).max(MAX_WAIT_S).default(30),
     }),
+    // Selector first like every other command; with one word it is the pattern (the CLI leaves
+    // optional positionals empty first).
     cli: { path: ['wait', 'log'], positional: ['selector', 'pattern'] },
   }),
   op({

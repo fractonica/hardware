@@ -11,9 +11,11 @@ import { HUB_API_PORT, HUB_VERSION, REGISTRY_HASH } from '@fractonica/protocol';
 import { nextHubRun, openDb } from './db.ts';
 import { buildServer } from './http.ts';
 import { JobRunner } from './jobs.ts';
-import { acquireLock } from './lock.ts';
+import { holdPort, runningHubPid, writePidfile } from './lock.ts';
 import { LogStore } from './logstore.ts';
 import { SerialPortManager } from './serial.ts';
+
+const HOST = '127.0.0.1';
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(name);
@@ -23,11 +25,18 @@ function arg(name: string, fallback: string): string {
 async function main(): Promise<void> {
   const port = Number(arg('--port', String(HUB_API_PORT)));
   mkdirSync(paths.home(), { recursive: true });
-  const lock = acquireLock(paths.lock());
-  if ('runningPid' in lock) {
-    console.log(JSON.stringify({ event: 'already_running', pid: lock.runningPid }));
-    process.exit(0);
+  // Single instance: hold the API address before opening hub.db or any serial port.
+  const guard = await holdPort(HOST, port);
+  if (!guard) {
+    const pid = runningHubPid(paths.lock());
+    if (pid) {
+      console.log(JSON.stringify({ event: 'already_running', pid }));
+      process.exit(0);
+    }
+    throw new Error(`${HOST}:${port} is in use by a program that is not a Fractonica hub`);
   }
+  const lock = writePidfile(paths.lock());
+  process.on('exit', () => lock.release()); // also on a failed start and the stop backstop
 
   const hubSourceDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
   const db = openDb(paths.db());
@@ -39,18 +48,24 @@ async function main(): Promise<void> {
   let idf: IdfStatus | null = null;
   let pytools: PytoolsStatus | null = null;
   const refreshEnv = async () => {
-    idf = await idfStatus(readIdfLock(hubSourceDir)).catch(() => null);
+    try {
+      // readIdfLock throws synchronously while the checkout's lock file is missing or half-written.
+      idf = await idfStatus(readIdfLock(hubSourceDir));
+    } catch {
+      idf = null;
+    }
     pytools = await pytoolsStatus().catch(() => null);
   };
   await refreshEnv();
-  const envTimer = setInterval(() => void refreshEnv(), 60_000);
+  const envTimer = setInterval(() => void refreshEnv().catch(() => undefined), 60_000);
 
   const app = buildServer(
     { db, logs, serial, jobs, startedAt: Date.now(), hubSourceDir, idf: () => idf, pytools: () => pytools },
     port,
   );
-  serial.start();
-  await app.listen({ host: '127.0.0.1', port });
+  await new Promise<void>((r) => guard.close(() => r()));
+  await app.listen({ host: HOST, port });
+  serial.start(); // only once this process owns the address
   console.log(JSON.stringify({ event: 'listening', version: HUB_VERSION, registry_hash: REGISTRY_HASH, port, run, pid: process.pid }));
 
   let stopping = false;
@@ -60,12 +75,16 @@ async function main(): Promise<void> {
     }
     stopping = true;
     console.log(JSON.stringify({ event: 'stopping', signal }));
+    // Backstop: a close that hangs must not keep the address and the ports from the next hub.
+    setTimeout(() => process.exit(0), 5000).unref();
     clearInterval(envTimer);
+    // Jobs still running here (`fr hub stop --force`, or a signal from elsewhere) are aborted: that
+    // kills their build groups and sidecars, and lets them record "cancelled" while the db is open.
+    jobs.cancelAll();
     await app.close().catch(() => undefined);
     await serial.stop().catch(() => undefined);
-    logs.flush();
+    logs.close();
     db.close();
-    lock.release();
     process.exit(0);
   };
   process.on('SIGTERM', () => void stop('SIGTERM'));

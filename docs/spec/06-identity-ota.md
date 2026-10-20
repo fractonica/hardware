@@ -285,12 +285,14 @@ Every transition is persisted and emitted as `ota.job.state`.
                         { "offset": "0x8000", "blob": "sha256:…", "role": "partition_table" },
                         { "offset": "0xe000", "blob": "sha256:…", "role": "ota_data_initial" },
                         { "offset": "0x10000", "blob": "sha256:…", "role": "app" } ] },
+  "debug": { "elf": { "blob": "sha256:…", "size": 6815744 }, "map": { "blob": "sha256:…", "size": 1048576 } },
   "caps": [ { "port": 1, "name": "boot", "cap": "fr.button", "v": "1.0" },
             { "port": 2, "name": "status", "cap": "fr.led", "v": "1.0" } ]
 }
 ```
 
 - **Version label.** `version` is a display label. A dirty tree gets `.dirty.<fw_id[0:8]>`.
+- **Debug files.** `debug.elf` and `debug.map` keep the app ELF and linker map of every `fw_id` (never flashed), for panic and core-dump decoding after the build dir has been reused. Ingest checks `sha256(ELF) == elf_sha256`. The blob store has no GC yet: each distinct build adds about 7 MB.
 - **Flash offsets** come from `flasher_args.json`. Any esptool v4 spellings (`default_reset`) are normalised to v5 (`default-reset`).
 - **Header parsing.** The hub parses image headers itself: `0xE9` magic; `chip_id` at offset 12; min/max chip revision at 15 and 17; `esp_app_desc_t` at 32; the custom `fr_app_desc_t` at **288** (24 + 8 + 256); the appended hash in the last 32 bytes for unsigned images.
 - **`fr_app_desc` definition rules.** It is defined once, in C (or `extern "C"`), as `const __attribute__((used, section(".rodata_custom_desc"))) fr_app_desc_t fr_app_desc = {…};`, with a leading magic word, `_Static_assert` on its size, and `target_link_libraries(${COMPONENT_LIB} INTERFACE "-u fr_app_desc")`. A namespace-scope C++ `const` has internal linkage and would be dropped. CI checks the magic at offset 288 and exactly one symbol in `.rodata_custom_desc`.

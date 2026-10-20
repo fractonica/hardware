@@ -1,7 +1,7 @@
 // Human-mode output. `--json` bypasses all of this and prints the Result envelope verbatim.
 
 import type { Check } from '@fractonica/host';
-import { findOp, type Job, type LogLine, type PortInfo, type Remediation, type Result } from '@fractonica/protocol';
+import { cliFlag, findOp, type Job, type LogLine, type PortInfo, type Remediation, type Result, type ToolError } from '@fractonica/protocol';
 
 function yamlish(v: unknown, indent = ''): string {
   if (v === null || v === undefined) {
@@ -64,7 +64,7 @@ function remediationCli(rem: Remediation): string {
     }
   }
   for (const [k, v] of Object.entries(args)) {
-    const flag = `--${k === 'wait_s' ? 'wait' : k.replace(/_/g, '-')}`;
+    const flag = `--${cliFlag(k)}`;
     words.push(...(v === true ? [flag] : v === false ? [] : [flag, String(v)]));
   }
   return words.join(' ');
@@ -72,7 +72,7 @@ function remediationCli(rem: Remediation): string {
 
 export function renderResult(op: string, r: Result): { out: string; err: string } {
   if (!r.ok) {
-    const e = r.error!;
+    const e: ToolError = r.error ?? { code: 'INTERNAL', message: 'the hub returned an error without details', retryable: false };
     const lines = [`error ${e.code}: ${e.message}`];
     if (e.hint) {
       lines.push(`hint: ${e.hint}`);

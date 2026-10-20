@@ -28,6 +28,8 @@ interface Entry {
   state: State;
   holder?: string;
   port?: SerialPort;
+  /** Settles when the current port.open() call has called back. */
+  opening?: Promise<void>;
   decoder: StringDecoder;
   buf: string;
   lines: number;
@@ -115,28 +117,45 @@ export class SerialPortManager {
     e.state = 'open';
     const port = new SerialPort({ path: e.path, baudRate: 115200, autoOpen: false, hupcl: false });
     e.port = port;
-    port.open((err) => {
-      if (err) {
-        e.port = undefined;
-        const busy = /busy|lock/i.test(err.message);
-        e.state = busy ? 'busy_external' : 'error';
-        e.nextOpenAt = Date.now() + BUSY_RETRY_MS;
-        if (busy) {
-          void portHolder(e.path).then((h) => (e.holder = h));
+    e.opening = new Promise<void>((done) =>
+      port.open((err) => {
+        try {
+          if (e.port !== port) {
+            return; // leased or closed while opening: #close owns this handle now and closes it
+          }
+          if (err) {
+            e.port = undefined;
+            const busy = /busy|lock/i.test(err.message);
+            e.state = busy ? 'busy_external' : 'error';
+            e.nextOpenAt = Date.now() + BUSY_RETRY_MS;
+            if (busy) {
+              void portHolder(e.path).then((h) => {
+                if (e.state === 'busy_external') {
+                  e.holder = h;
+                }
+              });
+            }
+            return;
+          }
+          e.holder = undefined;
+          // Never assert DTR (BOOT) or RTS (EN): a reset would roll back an image pending verification.
+          port.set({ dtr: false, rts: false }, () => undefined);
+        } finally {
+          done();
         }
-        return;
-      }
-      e.holder = undefined;
-      // Never assert DTR (BOOT) or RTS (EN): a reset would roll back an image pending verification.
-      port.set({ dtr: false, rts: false }, () => undefined);
-    });
+      }),
+    );
     port.on('data', (chunk: Buffer) => this.#onData(e, chunk));
     port.on('close', () => {
+      if (e.port !== port) {
+        return; // closed by #close, which settles the entry itself
+      }
       if (e.state === 'open') {
         e.state = 'closed';
         e.nextOpenAt = Date.now() + 250;
       }
       e.port = undefined;
+      this.#flushPartial(e);
     });
     port.on('error', () => undefined);
   }
@@ -163,13 +182,28 @@ export class SerialPortManager {
     this.#logs.append(e.key, e.path, text);
   }
 
-  #close(e: Entry): Promise<void> {
+  /**
+   * A partial line left when the port closes is stored on its own; kept, it would be glued to the
+   * first line after a reopen (often the ROM boot banner, which then no longer parses as `boot`).
+   */
+  #flushPartial(e: Entry): void {
+    const rest = e.buf;
+    e.buf = '';
+    e.decoder = new StringDecoder('utf8');
+    this.#emit(e, rest);
+  }
+
+  async #close(e: Entry): Promise<void> {
     const port = e.port;
+    const opening = e.opening;
     e.port = undefined;
-    if (!port || !port.isOpen) {
-      return Promise.resolve();
+    // An open still in flight would finish later with an fd (and its flock) that nothing references,
+    // so esptool could not open the port until replug. Wait for it, then close what it opened.
+    await opening;
+    if (port?.isOpen) {
+      await new Promise<void>((resolve) => port.close(() => resolve()));
     }
-    return new Promise((resolve) => port.close(() => resolve()));
+    this.#flushPartial(e);
   }
 
   resolve(selector: string): Entry {
@@ -181,7 +215,10 @@ export class SerialPortManager {
       return hits[0];
     }
     if (hits.length > 1) {
-      throw new FrError('AMBIGUOUS_SELECTOR', `${selector} matches ${hits.length} ports`);
+      throw new FrError('AMBIGUOUS_SELECTOR', `${selector} matches ${hits.length} ports`, {
+        remediation: [{ tool: 'port_list', cli: 'fr ports ls', human: 'select one port by its path (port:<path>)' }],
+        details: { candidates: hits.map((e) => ({ path: e.path, ...(e.usbSerial ? { usb_serial: e.usbSerial } : {}) })) },
+      });
     }
     throw new FrError('NOT_FOUND', `no attached Espressif port matches ${selector}`, {
       remediation: [{ tool: 'port_list', cli: 'fr ports ls' }],
@@ -191,17 +228,21 @@ export class SerialPortManager {
   /** Hands the port to another process (pytools, idf.py monitor). The hub stops reading until release. */
   async lease(selector: string, holder: string): Promise<{ path: string; key: string; release: () => void }> {
     const e = this.resolve(selector);
-    if (e.state === 'leased') {
-      throw new FrError('PORT_LEASED', `${e.path} is leased to ${e.holder}`, { details: { holder: e.holder } });
-    }
     if (e.state === 'busy_external') {
-      e.holder = (await portHolder(e.path)) ?? e.holder;
-      if (e.holder) {
-        throw new FrError('PORT_BUSY_EXTERNAL', `${e.path} is held by ${e.holder}`, {
-          remediation: [{ human: `close the program holding the port (${e.holder}), e.g. a Chrome Web Serial tab` }],
-          details: { holder: e.holder },
+      // Ask lsof again: the program seen at the last failed open may have let go (a closed Web Serial tab).
+      const h = await portHolder(e.path);
+      if (e.state === 'busy_external') {
+        e.holder = h;
+      }
+      if (h) {
+        throw new FrError('PORT_BUSY_EXTERNAL', `${e.path} is held by ${h}`, {
+          remediation: [{ human: `close the program holding the port (${h}), e.g. a Chrome Web Serial tab` }],
+          details: { holder: h },
         });
       }
+    }
+    if (e.state === 'leased') {
+      throw new FrError('PORT_LEASED', `${e.path} is leased to ${e.holder}`, { details: { holder: e.holder } });
     }
     e.state = 'leased';
     e.holder = holder;
@@ -218,7 +259,6 @@ export class SerialPortManager {
         e.state = 'closed';
         e.holder = undefined;
         e.nextOpenAt = 0;
-        e.buf = '';
         void this.poll();
       },
     };
@@ -257,18 +297,6 @@ export class SerialPortManager {
       ...(e.holder ? { holder: e.holder } : {}),
       lines: e.lines,
     }));
-  }
-
-  /** Device ids a selector covers (for log queries); null means all devices. */
-  devicesFor(selector: string | undefined): string[] | null {
-    if (!selector || selector === 'all') {
-      return null;
-    }
-    try {
-      return [this.resolve(selector).key];
-    } catch {
-      return [normalizeMac(selector.replace(/^(mac|id):/, ''))];
-    }
   }
 }
 

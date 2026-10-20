@@ -1,14 +1,28 @@
-// Single-instance guard: a pidfile created with O_EXCL; a stale file (dead pid) is taken over.
+// Single-instance guard (spec 08 §8.2). The mutex is the loopback API address: only one process can
+// listen on 127.0.0.1:7420, and the kernel frees it however the hub dies, so a crash never leaves a
+// lock behind. hub.lock is only a pidfile for discovery. A pid read from it counts only while `ps`
+// shows it running the hub's main.ts, so a pid reused after a crash or reboot is never mistaken for
+// the hub (and never signalled).
 
-import { closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:net';
 import { dirname } from 'node:path';
 
-export function pidAlive(pid: number): boolean {
+const HUB_COMMAND_RE = /packages[\\/]hub[\\/]src[\\/]main\.ts\b/;
+
+/** True when a `ps -o command=` line is a hub process. */
+export function isHubCommand(command: string): boolean {
+  return HUB_COMMAND_RE.test(command);
+}
+
+/** True when `pid` is alive and runs the hub's main.ts. */
+export function isHubPid(pid: number): boolean {
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'EPERM';
+    const command = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return isHubCommand(command);
+  } catch {
+    return false; // ps exits 1 when there is no such process
   }
 }
 
@@ -21,31 +35,40 @@ export function readLockPid(file: string): number | null {
   }
 }
 
-/** Returns a release function, or the pid of the running hub. */
-export function acquireLock(file: string): { release: () => void } | { runningPid: number } {
+/** The pid in the pidfile when it is another live hub, else null. */
+export function runningHubPid(file: string): number | null {
+  const pid = readLockPid(file);
+  return pid && pid !== process.pid && isHubPid(pid) ? pid : null;
+}
+
+/**
+ * Binds `host:port` with a placeholder that resets every connection, so no second hub gets past
+ * this point while this one opens hub.db and builds its server. Resolves null when the address is
+ * taken. Close it right before the real server listens on the same address.
+ */
+export function holdPort(host: string, port: number): Promise<Server | null> {
+  return new Promise((resolve, reject) => {
+    const server = createServer((socket) => socket.destroy());
+    server.once('error', (err: NodeJS.ErrnoException) => (err.code === 'EADDRINUSE' ? resolve(null) : reject(err)));
+    server.listen({ host, port }, () => resolve(server));
+  });
+}
+
+/** Records this process in the pidfile (atomic replace). `release` removes it only while it is still ours. */
+export function writePidfile(file: string): { release: () => void } {
   mkdirSync(dirname(file), { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const fd = openSync(file, 'wx', 0o644);
-      writeSync(fd, String(process.pid));
-      closeSync(fd);
-      return {
-        release: () => {
-          if (readLockPid(file) === process.pid) {
-            unlinkSync(file);
-          }
-        },
-      };
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw e;
+  const tmp = `${file}.${process.pid}`;
+  writeFileSync(tmp, String(process.pid), { mode: 0o644 });
+  renameSync(tmp, file);
+  return {
+    release: () => {
+      if (readLockPid(file) === process.pid) {
+        try {
+          unlinkSync(file);
+        } catch {
+          // already gone
+        }
       }
-      const pid = readLockPid(file);
-      if (pid && pid !== process.pid && pidAlive(pid)) {
-        return { runningPid: pid };
-      }
-      unlinkSync(file); // stale lock from a crashed hub
-    }
-  }
-  throw new Error(`could not acquire ${file}`);
+    },
+  };
 }

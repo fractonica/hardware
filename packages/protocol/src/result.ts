@@ -129,3 +129,16 @@ export function exitCodeFor(code: ErrorCode | undefined): number {
       return 1;
   }
 }
+
+/** Exit code for a whole envelope: a failed call, or a job that ended failed or cancelled. "working" is 0. */
+export function exitCodeForResult(r: Result): number {
+  if (!r.ok) {
+    // A failed body without a code (not a real envelope) must still exit non-zero.
+    return exitCodeFor(r.error?.code ?? 'INTERNAL');
+  }
+  const data = r.data as { status?: string; error?: { code?: ErrorCode } } | null | undefined;
+  if (data?.status === 'failed') {
+    return exitCodeFor(data.error?.code ?? 'INTERNAL');
+  }
+  return data?.status === 'cancelled' ? 1 : 0;
+}
