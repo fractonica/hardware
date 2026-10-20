@@ -14,9 +14,9 @@
 | Flash | 4 MB embedded, XMC (manufacturer 0x46, device 0x4016) | esptool `flash-id`; `esp_flash_get_physical_size` = 4194304 |
 | Security | Secure boot off, flash encryption off | esptool `get-security-info` |
 | USB | Native USB-Serial/JTAG, 303A:1001, bcdDevice 0x0101, serial = MAC | ioreg |
-| OLED | I2C **SDA GPIO5, SCL GPIO6**, address **0x3C**. The SSD1306B init (72×40 window at column 28, multiplex 0x27, internal IREF 0xAD 0x30) returned OK | full 0x08–0x77 scan on 5/6 found only 0x3C |
+| OLED | I2C **SDA GPIO5, SCL GPIO6**, address **0x3C**. The SSD1306B init (72×40 window at column 28, multiplex 0x27, internal IREF 0xAD 0x30) works: the test frame and text render correctly framed | full 0x08–0x77 scan on 5/6 found only 0x3C; confirmed by eye |
 | BOOT button | GPIO9, idle level 1 (pull-up) | `gpio_get_level` |
-| LED | GPIO8. Polarity **to confirm by eye**: the probe toggled it, and the OLED showed "LED PIN LOW/HIGH" in step. Research and the C3 Super Mini convention say active-low | — |
+| LED | GPIO8, **active-low**: the blue LED is on while the pin is LOW | toggled by the probe with the level shown on the OLED; confirmed by eye |
 | Wi-Fi radio | b/g/n with `TENRETNI` | `esp_wifi_sta_get_ap_info` |
 
 ## Link facts (measured)
