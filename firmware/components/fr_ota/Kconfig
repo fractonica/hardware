@@ -1,0 +1,13 @@
+menu "Fractonica OTA"
+
+    config FR_TEST_FAULT_HEALTH
+        bool "Fault build: never pass the OTA health check"
+        default n
+        depends on FR_TEST_HOOKS
+        help
+            A fault build (spec 03 §3.8): the image never sets the CAPS health bit, so after an OTA
+            its 60 s health deadline rolls it back (T-OTA). Set only by `fr build --fault health`,
+            through the generated layer fr_gen/sdkconfig.fault; fr_app_desc reports it (fault = 1)
+            and the hub never picks such a build implicitly. Debug builds only.
+
+endmenu

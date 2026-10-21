@@ -710,6 +710,14 @@ function messageCases(b: Builder): void {
   if (has(b.model, 'OTA.OFFER')) {
     b.value(c, 'message', 'OTA.OFFER', 'typical', { job_id: 'ota-0042', fw_id: bytesPattern(32, 9), size: 1048576, version: '0.3.1', flags: 0x2 });
   }
+  if (has(b.model, 'OTA.REJECT')) {
+    // REJECT code 3 identity (design c4 §3).
+    b.value(c, 'message', 'OTA.REJECT', 'identity', { job_id: 'ota-0042', code: 3 });
+  }
+  if (has(b.model, 'OTA.RESULT')) {
+    // outcome 2 rolled_back, reason 1 health_timeout, with the prefix of the image that was rolled back.
+    b.value(c, 'message', 'OTA.RESULT', 'rolled_back', { job_id: 'ota-0042', outcome: 2, fw_id_prefix: bytesPattern(8, 9), reason: 1 });
+  }
   if (has(b.model, 'LOG.LINE')) {
     b.value(c, 'message', 'LOG.LINE', 'typical', { tag: 'fr_core', text: 'button boot: down' });
   }
@@ -956,6 +964,33 @@ function envelopeSpecs(model: Model): EnvSpec[] {
       header: hdr({ flags: FLAG.ACK_REQ, cls: CLS.OTA, kind: kind('OTA', 'OFFER'), seq: 3, src: 0x0000, epoch: 9, port: model.protocol.ports.ota, dst: 0x0012 }),
       prefix: none,
       body: { type: 'OTA.OFFER', value: { job_id: 'ota-0042', fw_id: bytesPattern(32, 9), size: 1048576, version: '0.3.1' } },
+    });
+  }
+  if (has(model, 'OTA.ACCEPT')) {
+    // The answer to the OFFER above: an OTA frame from port 240, no ACK_REQ (it is the response, 05 §5.8).
+    out.push({
+      name: 'ota.accept',
+      header: hdr({ cls: CLS.OTA, kind: kind('OTA', 'ACCEPT'), seq: 21, port: model.protocol.ports.ota }),
+      prefix: none,
+      body: { type: 'OTA.ACCEPT', value: { job_id: 'ota-0042', code: 0 } },
+    });
+  }
+  if (has(model, 'OTA.RESULT')) {
+    // A Q1 RESULT the hub ACKs (design c4 §3: send_ota with ack_req).
+    out.push({
+      name: 'ota.result_rolled_back',
+      header: hdr({ flags: FLAG.ACK_REQ, cls: CLS.OTA, kind: kind('OTA', 'RESULT'), seq: 22, port: model.protocol.ports.ota }),
+      prefix: none,
+      body: { type: 'OTA.RESULT', value: { job_id: 'ota-0042', outcome: 2, fw_id_prefix: bytesPattern(8, 9), reason: 1 } },
+    });
+  }
+  if (has(model, 'OTA.COMMIT')) {
+    // No ACK_REQ: the node answers a COMMIT by installing the image (BYE ota, then the restart).
+    out.push({
+      name: 'ota.commit',
+      header: hdr({ cls: CLS.OTA, kind: kind('OTA', 'COMMIT'), seq: 5, src: 0x0000, epoch: 9, port: model.protocol.ports.ota, dst: 0x0012 }),
+      prefix: none,
+      body: { type: 'OTA.COMMIT', value: { job_id: 'ota-0042' } },
     });
   }
   if (has(model, 'TIME.SYNC_REQ')) {

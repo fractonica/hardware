@@ -1,6 +1,7 @@
-// fr_net hub frames and commands (spec 05 §5.6-5.8): the RESULT envelope, WELCOME floors on the unicast
-// window, DUP requests answered from the response cache (byte-identical, never run twice), bulk RESULTs,
-// fast and broadcast CMDs, frames that are not for this node, LATEST hub frames, expire_at and exec_at.
+// fr_net hub frames and commands (spec 05 §5.6-5.8, §5.10): the RESULT envelope and its link (a serial
+// request is answered on serial), WELCOME floors on the unicast window, DUP requests answered from the
+// response cache (byte-identical, never run twice), bulk RESULTs, fast and broadcast CMDs, frames that are
+// not for this node, LATEST hub frames, expire_at and exec_at.
 #include "tests/net_fakes.hpp"
 
 namespace {
@@ -65,18 +66,27 @@ TEST(net_result_reports_dispatch_errors_without_fields)
     CHECK(res[0].body.empty());
 }
 
-TEST(net_result_takes_the_hub_path_not_the_requests_link)
+TEST(net_result_of_a_serial_request_stays_on_serial)
 {
-    // Design c3 §9, decision 4: TCP/UDP first. A CMD that came over serial is answered over TCP while TCP has a
-    // session (the hub matches RESULTs by req_epoch/req_seq, whatever the link).
+    // 05 §5.10: a CMD that came over TCP is answered on the hub path (UDP once udp_ok), one that came over
+    // serial on serial, even with a TCP session. The hub sends over USB to such a node only for the serial
+    // session's own handshake, or once Wi-Fi went silent at its end, which the node may not see: only its
+    // uplink may be gone, while the hub's keepalives still reach it over TCP.
     NetRig r;
+    r.up(LinkKind::udp);
     r.session(LinkKind::serial);
     r.session(LinkKind::tcp);
+    r.echo_last_udp_heartbeat();
     r.clear_sent();
     r.deliver(LinkKind::serial, r.hub.cmd(2, 3));
-    CHECK_EQ(results(r.tcp).size(), 1u);
-    CHECK(results(r.serial).empty());
+    CHECK_EQ(results(r.serial).size(), 1u);
+    CHECK(results(r.tcp).empty());
+    CHECK(results(r.udp).empty());
     CHECK_EQ(r.host.calls.back().capacity, fr::cap::Reply::kBulkCapacity);
+    r.deliver(LinkKind::tcp, r.hub.cmd(2, 3));
+    CHECK_EQ(results(r.udp).size(), 1u);
+    CHECK(results(r.tcp).empty());
+    CHECK_EQ(results(r.serial).size(), 1u);
 }
 
 TEST(net_welcome_floor_sets_the_unicast_window)
@@ -125,12 +135,13 @@ TEST(net_dup_request_gets_the_cached_response_byte_identical)
     REQUIRE_EQ(res.size(), 2u);
     CHECK_BYTES(res[1].bytes, res[0].bytes);
     CHECK_EQ(res[0].result.req_seq, seq);
-    // The copy may come over another link: the same bytes still go out on the hub path.
+    // The copy may come over another link: the same bytes go back on that one (serial answers serial).
     r.session(LinkKind::serial);
     r.deliver(LinkKind::serial, toggle);
-    res = results(r.tcp);
-    REQUIRE_EQ(res.size(), 3u);
-    CHECK_BYTES(res[2].bytes, res[0].bytes);
+    CHECK_EQ(results(r.tcp).size(), 2u);
+    auto again = results(r.serial);
+    REQUIRE_EQ(again.size(), 1u);
+    CHECK_BYTES(again[0].bytes, res[0].bytes);
     CHECK_EQ(toggles, 1);
     const fr::net::State s = r.net.state();
     CHECK_EQ(s.cmds, 1u);

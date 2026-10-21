@@ -960,6 +960,40 @@ bool operator==(const OtaStatus &a, const OtaStatus &b)
     return a.job_id == b.job_id && a.state == b.state && a.bytes == b.bytes;
 }
 
+size_t encode(const OtaCommit &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (!v.job_id.empty()) {
+        w.field_string(1, v.job_id);
+    }
+    return w.size() - start;
+}
+
+std::expected<OtaCommit, fr::wire::DecodeErr> decode_ota_commit(std::span<const uint8_t> in)
+{
+    OtaCommit v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.job_id = r.read_string(23);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const OtaCommit &a, const OtaCommit &b)
+{
+    return a.job_id == b.job_id;
+}
+
 size_t encode(const OtaResult &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -1013,6 +1047,40 @@ bool operator==(const OtaResult &a, const OtaResult &b)
            a.outcome == b.outcome &&
            fr::proto::equal_bytes(a.fw_id_prefix, b.fw_id_prefix) &&
            a.reason == b.reason;
+}
+
+size_t encode(const OtaAbort &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (!v.job_id.empty()) {
+        w.field_string(1, v.job_id);
+    }
+    return w.size() - start;
+}
+
+std::expected<OtaAbort, fr::wire::DecodeErr> decode_ota_abort(std::span<const uint8_t> in)
+{
+    OtaAbort v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.job_id = r.read_string(23);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const OtaAbort &a, const OtaAbort &b)
+{
+    return a.job_id == b.job_id;
 }
 
 size_t encode(const TimeSyncReq &v, fr::wire::Writer &w)

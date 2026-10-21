@@ -19,3 +19,6 @@ CONFIG_LWIP_TCP_RTO_TIME=300
 # CONFIG_MDNS_PREDEF_NETIF_AP is not set
 # Dev Wi-Fi for UNASSIGNED nodes (CONFIG_FR_DEV_WIFI_SSID/PASS, CONFIG_FR_DEV_HUB_HOST) goes only in the
 # git-ignored firmware/config/sdkconfig.local.
+# OTA pulls the image over plain HTTP from the hub's node port (L0, spec 06 §6.5, 06 §6.9) with fr_ota's
+# own GET over lwIP sockets: esp_http_client, tcp_transport, esp-tls and the mbedTLS SSL layer are not in
+# the build (design c4 §4), so there is no HTTP client option to set here.

@@ -25,12 +25,14 @@ inline constexpr size_t kMaxInstances = 16;
 using SelftestFn = hal::Selftest (*)(const char *name);
 
 /**
- * Boot steps 1 and 4 of 03 §3.5 that need no board: initialises NVS, loads the identity, commits this
- * boot's epoch before any frame can go out, builds the hub link's protocol core (fr_net's Net) with its
- * serial, TCP and UDP links attached (the TCP and UDP ones stay down until run() starts Wi-Fi), and starts
+ * Boot steps 1, 2 and 4 of 03 §3.5 that need no board: initialises NVS, loads the identity, commits this
+ * boot's epoch before any frame can go out, starts fr_worker, builds the hub link's protocol core (fr_net's
+ * Net) with its serial, TCP and UDP links attached (the TCP and UDP ones stay down until run() starts
+ * Wi-Fi), runs fr_ota's boot checks (a PENDING_VERIFY image's health deadline starts here) and starts
  * fr_serial with the serial command channel. It also takes the runtime's own timers (the delayed reboot,
- * the serial link poll) and Net's from the pool, so the board's services get their 23. Lines and frames
- * that arrive before run() wait in the core queues; HELLO waits for the core task. Call once, from app_main.
+ * the serial link poll), Net's and Ota's from the pool, so the board's services get their 23. Lines and
+ * frames that arrive before run() wait in the core queues; HELLO waits for the core task. Call once, from
+ * app_main.
  */
 Core &start();
 

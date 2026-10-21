@@ -2,7 +2,8 @@
 // (src/links), duplicate windows per (device, epoch) and LATEST last_seq, the hub's sequence spaces, the
 // HELLO handshake (WELCOME -> DIRECTORY -> TIME burst -> get_state -> device.online), heartbeat echoes and
 // hub keepalives, presence (suspect + PING, offline, BYE), clock offsets, command delivery correlated by
-// (device, req_seq), and EVENT/STATE publication as <instance>.<member> on the event bus.
+// (device, req_seq), EVENT/STATE publication as <instance>.<member> on the event bus, and OTA-class frames
+// both ways for the OTA orchestrator (design c4 §3-4: sendOta, onOta).
 //
 // Everything on the receive path runs synchronously in the tick the envelope arrived in (spec 08 §8.2
 // rule 2); only the handshake and commands await answers.
@@ -17,6 +18,7 @@ import {
   decodeMsgMsg,
   decodeNetResolve,
   decodeNodeDescribeResult,
+  decodeOtaResult,
   decodePresenceBye,
   decodePresenceHeartbeat,
   decodePresenceHello,
@@ -40,7 +42,7 @@ import {
   statusName,
 } from '@fractonica/protocol/gen';
 
-import type { Device, Events, HelloSeen, Lifecycle, LinkName, Presence, Registry, Router, Seq } from '../context.ts';
+import type { Device, Events, HelloSeen, Lifecycle, LinkName, OtaFrame, Presence, Registry, Router, Seq } from '../context.ts';
 import type { Db } from '../db.ts';
 import type { Endpoint, LinkSink, NodeLinksStatus, Source } from '../links/index.ts';
 import { NodeLinks } from '../links/index.ts';
@@ -56,6 +58,11 @@ import { cmp16, cmp32, ReplayWindow } from './window.ts';
 export interface RouterConfig {
   /** FR_SUSPECT_X10: suspect after 2.5 heartbeat intervals of silence (PING then). */
   suspectX10: number;
+  /**
+   * A node with a TCP and a serial session: after more than this many tenths of a heartbeat interval with
+   * nothing over Wi-Fi (TCP, or UDP riding it), what the hub sends takes the USB line (2 intervals).
+   */
+  wifiSilentX10: number;
   /** FR_OFFLINE_X10 / FR_OFFLINE_MIN_MS: offline after 3.5 intervals of silence, and never before 750 ms. */
   offlineX10: number;
   offlineMinMs: number;
@@ -87,6 +94,7 @@ export interface RouterConfig {
 
 export const ROUTER_DEFAULTS: RouterConfig = {
   suspectX10: 25,
+  wifiSilentX10: 20,
   offlineX10: 35,
   offlineMinMs: 750,
   defaultHeartbeatMs: 1000,
@@ -151,6 +159,8 @@ export interface DeviceLinkInfo {
   epoch: number | null;
   addr: number;
   fw_id_prefix: string | null;
+  /** HELLO `ota_state` (pending_verify until a new OTA image passes its health check), null before a HELLO. */
+  ota_state: HelloSeen['ota_state'] | null;
   /** HELLO `caps` bits (b1 wifi, b4 inject_enabled, b5 provisioned, 05 §5.7), null before a HELLO. */
   hello_caps: number | null;
   hb_interval_ms: number;
@@ -180,6 +190,8 @@ interface Session {
   startedAt: number;
   /** Clock ms of the last envelope sent on it (any hub frame is a keepalive to the node). */
   lastTx: number;
+  /** Clock ms of the last envelope received on it; a TCP session counts the node's UDP datagrams too. */
+  lastRx: number;
   welcomed: boolean;
   ready: boolean;
   closed: boolean;
@@ -277,7 +289,21 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
   #listening = false;
   #stopped = false;
   #listenError: string | null = null;
-  #counters = { rx_bad: 0, not_for_hub: 0, no_session: 0, udp_unknown: 0, foreign_net: 0, dup: 0, old: 0, old_epoch: 0, stale: 0, registry_errors: 0 };
+  #otaListeners = new Set<(f: OtaFrame) => void>();
+  #counters = {
+    rx_bad: 0,
+    not_for_hub: 0,
+    no_session: 0,
+    udp_unknown: 0,
+    foreign_net: 0,
+    dup: 0,
+    old: 0,
+    old_epoch: 0,
+    stale: 0,
+    registry_errors: 0,
+    /** OTA-class frames off port 240 or over UDP (design c4 §3: OTA frames never ride UDP). */
+    ota_dropped: 0,
+  };
 
   constructor(deps: RouterDeps) {
     this.#deps = deps;
@@ -387,6 +413,33 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     return this.#request(peer, session, port, cmdId, args, opts);
   }
 
+  sendOta(deviceId: string, kind: number, body: Uint8Array, opts: { ackReq?: boolean } = {}): { link: SessionKind; seq: number } {
+    const peer = this.#peers.get(deviceId);
+    const session = peer && this.#best(peer);
+    if (!peer || !session || !isUp(peer.presence)) {
+      throw new FrError('DEVICE_OFFLINE', `${peer?.alias ?? deviceId} has no hub link (${peer?.presence ?? 'unknown'})`, {
+        remediation: [{ tool: 'wait_for_device', args: { selector: peer?.alias ?? `id:${deviceId}`, state: 'online' } }],
+      });
+    }
+    // #best is TCP when the node has it (unless Wi-Fi went silent), else its USB line: the hub never sends
+    // UDP (05 §5.12.2).
+    const seq = this.#nextSeq(peer);
+    if (!this.#send(session, this.#encode(peer, seq, CLS.OTA, kind, PORT.OTA, body, { ackReq: opts.ackReq }))) {
+      throw new FrError('DEVICE_OFFLINE', `${peer.alias}: the ${session.ep.kind} link refused the OTA frame (closed or backed up)`);
+    }
+    return { link: session.ep.kind, seq };
+  }
+
+  onOta(fn: (frame: OtaFrame) => void): () => void {
+    this.#otaListeners.add(fn);
+    return () => this.#otaListeners.delete(fn);
+  }
+
+  tcpAddress(deviceId: string): string | null {
+    const s = this.#peers.get(deviceId)?.sessions.tcp;
+    return s && !s.closed && !s.ep.closed ? s.ep.remote : null;
+  }
+
   pushAlias(deviceId: string): void {
     const peer = this.#peers.get(deviceId);
     if (!peer) {
@@ -419,12 +472,13 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     }
     return {
       presence: peer.presence,
-      links: this.#sessionsOf(peer).map((s) => s.ep.kind),
+      links: this.#ranked(peer).map((s) => s.ep.kind),
       udp_ms_ago: peer.lastUdpAt === null ? null : Math.round(now - peer.lastUdpAt),
       udp_blocked: peer.udpBlocked,
       epoch: peer.epoch,
       addr: peer.addr,
       fw_id_prefix: peer.hello?.fw_id_prefix ?? null,
+      ota_state: peer.hello?.ota_state ?? null,
       hello_caps: peer.hello?.caps ?? null,
       hb_interval_ms: peer.hbMs,
       last_rx_ms_ago: peer.lastRx === null ? null : Math.round(now - peer.lastRx),
@@ -527,6 +581,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     }
     const session = this.#sessions.get(from);
     if (session) {
+      session.lastRx = this.#clock.now(); // the link carries, whatever the window makes of the frame
       this.#frame(session.peer, from.kind, env);
       return;
     }
@@ -563,6 +618,8 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
       return;
     }
     this.#udpSeen(peer);
+    // Once udp_ok, the node's heartbeats come over UDP alone: Wi-Fi is up, and so is its TCP session.
+    tcp.lastRx = this.#clock.now();
     // The udp_ok probe (05 §5.10): every UDP-received HEARTBEAT is echoed over TCP, DUP copies included,
     // so this comes before duplicate filtering.
     if (h.cls === CLS.PRESENCE && h.kind === KIND.PRESENCE.HEARTBEAT) {
@@ -660,6 +717,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
       caps: hello.caps,
       alias: hello.alias,
       alias_rev: hello.alias_rev,
+      ota_state: hello.ota_state,
       link: ep.kind,
     };
     peer.hello = seen;
@@ -673,7 +731,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     peer.alias = peer.device?.alias || hello.alias || id;
     peer.window.check(h.seq);
     // One session per link kind: a new HELLO supersedes the older connection of its kind (05 §5.11).
-    const session: Session = { ep, peer, startedAt: now, lastTx: now, welcomed: false, ready: false, closed: false };
+    const session: Session = { ep, peer, startedAt: now, lastTx: now, lastRx: now, welcomed: false, ready: false, closed: false };
     const old = peer.sessions[ep.kind];
     peer.sessions[ep.kind] = session;
     this.#sessions.set(ep, session);
@@ -774,8 +832,43 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
           this.#reply(peer, h, CLS.RESULT, STATUS.NOT_FOUND);
         }
         break;
+      case CLS.OTA:
+        this.#ota(peer, link, env);
+        break;
       default:
-      // ACK (the hub sends no Q1 frame that wants one), LOG (serial logs suffice in C3), OTA (C4).
+      // ACK (the hub sends no Q1 frame that wants one), LOG (serial logs suffice in C3).
+    }
+  }
+
+  /**
+   * An OTA-class frame from a node (design c4 §3) goes to the OTA listeners. A Q1 one (a RESULT the node
+   * sent with ACK_REQ) is ACKed first; ACCEPT and REJECT carry none, since they answer an OFFER.
+   */
+  #ota(peer: Peer, link: LinkName, env: Envelope): void {
+    const h = env.header;
+    if (link === 'udp' || h.port !== PORT.OTA) {
+      this.#counters.ota_dropped++;
+      return;
+    }
+    if (h.flags & FLAG.ACK_REQ) {
+      this.#ack(peer, h, STATUS.OK);
+    }
+    if (h.kind === KIND.OTA.RESULT && peer.hello) {
+      // RESULT success names the running image once its health gate passed (the node HELLOs only on a new
+      // session): its ota_state is valid from now on, for device_get and wait_for_device {ota_state}.
+      const r = decodeOtaResult(env.body);
+      if (r.ok && r.value.outcome === 0 && hex(r.value.fw_id_prefix) === peer.hello.fw_id_prefix) {
+        peer.hello = { ...peer.hello, ota_state: 'valid' };
+      }
+    }
+    const frame: OtaFrame = { device: peer.id, alias: peer.alias, kind: h.kind, body: env.body.slice(), link, epoch: h.epoch, seq: h.seq };
+    for (const fn of this.#otaListeners) {
+      try {
+        fn(frame);
+      } catch (err) {
+        // A failing listener must not cost the receive path (or the other listeners) the frame.
+        console.error(JSON.stringify({ event: 'ota_listener_failed', device: peer.id, message: (err as Error).message }));
+      }
     }
   }
 
@@ -823,7 +916,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
   /** A duplicate of a request: answer it again (the node retried because the answer was lost). */
   #answerDup(peer: Peer, env: Envelope): void {
     const h = env.header;
-    if (h.cls === CLS.EVENT || h.cls === CLS.MSG) {
+    if (h.cls === CLS.EVENT || h.cls === CLS.MSG || (h.cls === CLS.OTA && h.port === PORT.OTA)) {
       this.#ack(peer, h, STATUS.OK);
     } else if (h.cls === CLS.PRESENCE && h.kind === KIND.PRESENCE.PING) {
       const ping = decodePresencePing(env.body);
@@ -1022,6 +1115,8 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
         link: session.ep.kind,
         addr: peer.addr,
         fw_id_prefix: hello.fw_id_prefix,
+        // The OTA orchestrator's VERIFYING: back on the new image, pending_verify until its health gate passes.
+        ota_state: hello.ota_state,
         provisioned: peer.device?.provisioned ?? Boolean(hello.caps & (1 << 5)),
       });
     }
@@ -1155,11 +1250,14 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
         }
       }
       // An UNASSIGNED node (dev Wi-Fi, not provisioned) sends no UDP at all (05 §5.5): nothing to miss.
+      // Nor while TCP is silent too (Wi-Fi stalled; a USB node goes on over its USB line): that is no
+      // firewall. Behind one, the node's heartbeats keep TCP busy, since they take both until udp_ok.
       const tcp = peer.sessions.tcp;
       if (
         tcp?.ready &&
         peer.addr !== ADDR.UNASSIGNED &&
         !peer.udpBlocked &&
+        !this.#wifiSilent(peer, tcp, now) &&
         now - Math.max(tcp.startedAt, peer.lastUdpAt ?? -Infinity) >= this.#cfg.udpBlockedMs
       ) {
         peer.udpBlocked = true;
@@ -1357,9 +1455,29 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     return [peer.sessions.tcp, peer.sessions.serial].filter((s): s is Session => s !== undefined);
   }
 
-  /** TCP when the node has it (05 §5.10 router mode), else its USB line. */
+  /**
+   * TCP when the node has it (05 §5.10 router mode), else its USB line; and the USB line while nothing came
+   * over Wi-Fi for more than 2 heartbeat intervals (wifiSilentX10). Wi-Fi can go quiet without a FIN (an AP
+   * gone, IP traffic stalled); presence counts frames from either link, so the device stays online through
+   * USB, and commands, OTA frames, PINGs and ACKs follow it there until Wi-Fi carries again.
+   */
   #best(peer: Peer): Session | undefined {
-    return peer.sessions.tcp ?? peer.sessions.serial;
+    const { tcp, serial } = peer.sessions;
+    if (tcp && serial && this.#wifiSilent(peer, tcp, this.#clock.now())) {
+      return serial;
+    }
+    return tcp ?? serial;
+  }
+
+  /** Nothing over the TCP session (or UDP) for more than wifiSilentX10 / 10 heartbeat intervals. */
+  #wifiSilent(peer: Peer, tcp: Session, now: number): boolean {
+    return now - tcp.lastRx > (peer.hbMs * this.#cfg.wifiSilentX10) / 10;
+  }
+
+  /** The device's sessions, the one #best picks first. */
+  #ranked(peer: Peer): Session[] {
+    const best = this.#best(peer);
+    return best ? [best, ...this.#sessionsOf(peer).filter((s) => s !== best)] : [];
   }
 
   /** The next UNICAST seq toward this device: one dense counter per destination, from 1 each run (05 §5.8). */

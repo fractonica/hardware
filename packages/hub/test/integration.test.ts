@@ -173,6 +173,21 @@ describe('hub_status', () => {
     stamp(src, 'old');
     expect(await warnings(hubAt(src, false))).toEqual([expect.stringMatching(/missing or wrong esptool/)]);
   });
+
+  it('reports the node HTTP listener (OTA) and warns while it is not bound', async () => {
+    const src = sidecarSources();
+    stamp(src, pytoolsSourceHash(src));
+    const ota = { httpPort: () => 17522, listenError: () => null as string | null, active: () => true };
+    const hub = { ...hubAt(src, true), ota } as unknown as HubContext;
+    const st = (await HANDLERS.hub_status({}, hub)) as { ota: unknown; warnings: string[] };
+    expect(st.ota).toEqual({ http_port: 17522, listen_error: null, active: true });
+    expect(st.warnings).toEqual([]);
+    ota.httpPort = () => null as unknown as number;
+    ota.listenError = () => 'node HTTP listener 0.0.0.0:7422: listen EADDRINUSE';
+    const down = (await HANDLERS.hub_status({}, hub)) as { ota: unknown; warnings: string[] };
+    expect(down.ota).toMatchObject({ http_port: null, listen_error: expect.stringContaining('EADDRINUSE') });
+    expect(down.warnings).toEqual([expect.stringMatching(/^OTA over Wi-Fi is unavailable: .*EADDRINUSE/)]);
+  });
 });
 
 describe('network remediations', () => {

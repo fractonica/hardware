@@ -1,10 +1,10 @@
 // `fr gen firmware` (design c2 §6; spec 03 §3.6-3.8, 04 §4.3, 07 §7.8): validates a profile against its
 // board manifest and the bound drivers' driver.yaml, freezes instance ports in the profile's
 // slots.lock, and writes the per-profile glue into the build directory: the fr_board composition
-// root, components.cmake, sdkconfig.board and fr_manifest.json. The slots.lock is the only file it
-// writes into the source tree.
+// root, components.cmake, sdkconfig.board and fr_manifest.json, plus sdkconfig.fault for a fault build
+// (spec 03 §3.8). The slots.lock is the only file it writes into the source tree.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { parseDocument } from 'yaml';
@@ -138,6 +138,27 @@ export interface FirmwareOptions {
   write?: boolean;
   /** Reuse an already loaded schema model (catalog_hash). */
   model?: Model;
+  /**
+   * A fault build (spec 03 §3.8, design c4 §4): also writes the layer sdkconfig.fault, which `fr build`
+   * lists after the build-type layer. Without it a stale sdkconfig.fault is removed from outDir.
+   */
+  fault?: FaultKind;
+}
+
+/** Fault builds `fr build --fault` knows (spec 03 §3.8): `health` never passes the OTA health check. */
+export const FAULT_KINDS = ['health'] as const;
+export type FaultKind = (typeof FAULT_KINDS)[number];
+
+/** The generated sdkconfig.fault layer of a fault build. */
+export const FAULT_LAYER = 'sdkconfig.fault';
+
+/** sdkconfig.fault: the Kconfig a fault build sets (fr_ota's FR_TEST_FAULT_HEALTH, debug builds only). */
+export function renderFaultLayer(fault: FaultKind): string {
+  const lines: Record<FaultKind, string[]> = {
+    // The image never sets the CAPS health bit, so after an OTA its health deadline rolls it back.
+    health: ['CONFIG_FR_TEST_FAULT_HEALTH=y'],
+  };
+  return [`# ${GENERATED} --fault ${fault} (spec 03 §3.8). Do not edit.`, ...lines[fault], ''].join('\n');
 }
 
 export interface ManifestCap {
@@ -987,6 +1008,7 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
     { path: 'fr_board/fr_board.cpp', content: emitBoardCpp(inp!, insts, driverIds) },
     { path: 'components.cmake', content: emitComponentsCmake(opts.profile, sourceDir, driverIds) },
     { path: 'sdkconfig.board', content: renderFragment(inp!) },
+    ...(opts.fault ? [{ path: FAULT_LAYER, content: renderFaultLayer(opts.fault) }] : []),
     { path: 'fr_manifest.json', content: `${JSON.stringify(manifest, null, 2)}\n` },
   ];
   const slotsLock: GeneratedFile = { path: slotsLockFile(opts.profile), content: renderSlots(opts.profile, slots) };
@@ -994,6 +1016,10 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
   if (write) {
     for (const f of files) {
       writeIfChanged(join(outDir, f.path), f.content);
+    }
+    if (!opts.fault) {
+      // The out dir holds exactly what this run generated: `fr build` hashes every file in it.
+      rmSync(join(outDir, FAULT_LAYER), { force: true });
     }
     if (changed) {
       writeFileSync(join(sourceDir, slotsLock.path), slotsLock.content);

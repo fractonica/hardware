@@ -1,17 +1,20 @@
 // Operation registry: every hub operation is defined once here; REST, the `fr` CLI and (later)
 // MCP tools are generated from it (spec 09 §9.1). Field names are snake_case; the CLI maps them
 // to --kebab-case options (see cliFlag). Checkpoint C3 adds its groups from ops/registry.ts (registry
-// and provisioning) and ops/links.ts (node links, router, events), spread in at the end of OPS.
+// and provisioning) and ops/links.ts (node links, router, events), C4 its OTA group from ops/ota.ts, all
+// spread in at the end of OPS.
 
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
 import { LINKS_OPS } from './ops/links.ts';
+import { OTA_OPS } from './ops/ota.ts';
 import { REGISTRY_OPS } from './ops/registry.ts';
 
 export { cliFlag, MAX_WAIT_S, type OpDef, type OpKind } from './ops/common.ts';
 export type { LinksOpName } from './ops/links.ts';
+export type { OtaOpName } from './ops/ota.ts';
 export type { RegistryOpName } from './ops/registry.ts';
 
 export const OPS = [
@@ -58,6 +61,10 @@ export const OPS = [
       build_type: z.enum(['debug', 'release']).default('debug'),
       app: z.string().default('node'),
       clean: z.boolean().default(false),
+      fault: z
+        .enum(['health'])
+        .optional()
+        .describe('debug only: a fault build into <profile>-debug-fault (health: never passes the OTA health check, so it rolls back); never picked implicitly'),
       wait_s: waitS,
     }),
     cli: { path: ['build'] },
@@ -190,6 +197,7 @@ export const OPS = [
   }),
   ...REGISTRY_OPS,
   ...LINKS_OPS,
+  ...OTA_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

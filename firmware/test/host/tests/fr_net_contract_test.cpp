@@ -41,6 +41,7 @@ public:
     fr::net::Identity identity() override { return {}; }
     fr::net::LinkInfo link_info() override { return {}; }
     fr::net::Vitals vitals() override { return {}; }
+    void ota_frame(LinkKind, const fr::wire::Header &, std::span<const uint8_t>, fr::net::OtaReply &) override {}
 };
 
 }  // namespace

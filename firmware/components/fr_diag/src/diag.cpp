@@ -161,10 +161,11 @@ void add_link_states(cJSON *res, const NetStatus &n)
             cJSON_AddBoolToObject(wifi, "trial", true);
         }
     }
-    if (n.hub_link_dropped || n.udp_blocked) {
+    if (n.hub_link_dropped || n.udp_blocked || n.ip_blocked) {
         cJSON *hooks = cJSON_AddObjectToObject(res, "hooks");
         cJSON_AddBoolToObject(hooks, "drop_hub_link", n.hub_link_dropped);
         cJSON_AddBoolToObject(hooks, "udp_block", n.udp_blocked);
+        cJSON_AddBoolToObject(hooks, "ip_block", n.ip_blocked);
     }
 }
 
@@ -539,19 +540,21 @@ Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
         hook = NetHook::drop_hub_link;
     } else if (name == "udp_block") {
         hook = NetHook::udp_block;
+    } else if (name == "ip_block") {
+        hook = NetHook::ip_block;
     } else {
-        return fail("invalid_args", "usage: net drop_hub_link|udp_block <seconds>");
+        return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block <seconds>");
     }
     uint32_t s = 0;
     auto [end, ec] = std::from_chars(secs.data(), secs.data() + secs.size(), s);
     if (secs.empty() || ec != std::errc{} || end != secs.data() + secs.size() || s > kMaxSeconds || !args.empty()) {
-        return fail("invalid_args", "usage: net drop_hub_link|udp_block <seconds> (0-86400; 0 ends it)");
+        return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block <seconds> (0-86400; 0 ends it)");
     }
     Status st = host.net_hook(hook, s);
     if (!st) {
         return fail(err_name(st.error()));
     }
-    cJSON_AddStringToObject(res, "hook", hook == NetHook::drop_hub_link ? "drop_hub_link" : "udp_block");
+    cJSON_AddStringToObject(res, "hook", hook_name(hook));
     cJSON_AddNumberToObject(res, "s", s);
     return ok;
 #else

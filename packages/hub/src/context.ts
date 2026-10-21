@@ -1,9 +1,10 @@
-// What the hub's parts share (design c3 §4): the op handlers' HubContext and the interfaces the registry
-// (packages/hub/src/registry), the node links and router (src/links, src/router) and the event store and
-// bus (src/events) implement and use; main.ts builds them with createRegistry, createRouter and
-// createEvents.
+// What the hub's parts share (design c3 §4, c4 §4): the op handlers' HubContext and the interfaces the
+// registry (packages/hub/src/registry), the node links and router (src/links, src/router), the event store
+// and bus (src/events) and the OTA service (src/ota) implement and use; main.ts builds them with
+// createRegistry, createRouter, createEvents and createOta.
 
 import type { IdfStatus, PytoolsStatus } from '@fractonica/host';
+import type { OtaState } from '@fractonica/protocol/gen';
 
 import type { Db } from './db.ts';
 import type { JobRunner } from './jobs.ts';
@@ -68,6 +69,11 @@ export interface HelloSeen {
   caps: number;
   alias: string;
   alias_rev: number;
+  /**
+   * The running image's esp_ota_img_states_t: pending_verify while a new OTA image has not passed its health
+   * check, valid after; a number the protocol does not name passes through.
+   */
+  ota_state: OtaState | number;
   link: LinkName;
 }
 
@@ -114,6 +120,20 @@ export interface Events {
   query(q: { afterSeq?: number; types?: string[]; devices?: string[] | null; limit: number }): HubEvent[];
 }
 
+/** An OTA-class frame from a node (05 §5.7, design c4 §3): ACCEPT, REJECT, STATUS or RESULT, on port 240. */
+export interface OtaFrame {
+  device: string;
+  alias: string;
+  /** KIND.OTA value. */
+  kind: number;
+  /** The protobuf-wire body (decodeOtaAccept, decodeOtaResult, ...); a copy the listener may keep. */
+  body: Uint8Array;
+  /** The link it came on: OTA frames never ride UDP (the router drops one that does). */
+  link: Exclude<LinkName, 'udp'>;
+  epoch: number;
+  seq: number;
+}
+
 export interface Router {
   presence(deviceId: string): Presence;
   /** device_ids with a session up. */
@@ -128,6 +148,29 @@ export interface Router {
   ): Promise<{ status: number; fields: Uint8Array; rtt_ms: number; link: string }>;
   /** After a rename: fr.node.set_alias if the device is online. */
   pushAlias(deviceId: string): void;
+  /**
+   * One OTA-class frame (port 240) to an online device: OFFER (with ackReq: its ACCEPT or REJECT is the
+   * answer), COMMIT, ABORT. Over its TCP session, else its serial one (05 §5.10), never UDP. Throws
+   * DEVICE_OFFLINE without a session or when the link refuses it.
+   */
+  sendOta(deviceId: string, kind: number, body: Uint8Array, opts?: { ackReq?: boolean }): { link: Exclude<LinkName, 'udp'>; seq: number };
+  /** Every OTA-class frame from a node, fresh frames only (DUPs are dropped); returns the unsubscribe. */
+  onOta(fn: (frame: OtaFrame) => void): () => void;
+  /** The IPv4 address a device's live TCP session comes from (the 7422 gate, spec 08 §8.10), or null. */
+  tcpAddress(deviceId: string): string | null;
+}
+
+/**
+ * The hub's OTA side (design c4 §4; stream H1): the per-device job orchestrator and the node HTTP listener
+ * (0.0.0.0:7422, `GET /ota/<fw_id>.bin`). main.ts starts it after the router and stops it before.
+ */
+export interface OtaService extends Lifecycle {
+  /** True while any OTA job is not terminal: SleepGuard holds the Mac awake then (design c4 §4). */
+  active(): boolean;
+  /** The bound node HTTP port (tests bind 0); null while not listening. */
+  httpPort(): number | null;
+  /** Why the node HTTP listener could not bind (OTA over Wi-Fi fails meanwhile), or null. */
+  listenError(): string | null;
 }
 
 /** A part main.ts starts once the API listens and stops before the db closes. */
@@ -152,6 +195,8 @@ export interface HubContext {
   events: Events;
   /** This run's hub epoch (kv `hub_epoch`, +1 at every start; 05 §5.8): the `epoch` of hub frames. */
   hubEpoch: number;
+  /** OTA jobs and the node HTTP listener (design c4 §4). */
+  ota: OtaService;
 }
 
 /** An op handler (packages/protocol/src/ops.ts): the parsed input (typed per handler) and the hub. */

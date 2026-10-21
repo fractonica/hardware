@@ -50,12 +50,13 @@ export async function genAll(opts: { check: boolean; cwd: string }): Promise<Res
 }
 
 /**
- * `fr gen firmware --profile <p> [--out <dir>]`. The default out dir is the one `fr build` uses for
- * a debug build (spec 03 §3.8): firmware/apps/<app>/build/<profile>-debug/fr_gen. The hub's `fr build`
- * runs this command from the checkout it builds and reads `manifest` (app, board, target) and
- * `part_profile` from the --json envelope, so it never loads a generator of its own.
+ * `fr gen firmware --profile <p> [--out <dir>] [--fault health]`. The default out dir is the one
+ * `fr build` uses for a debug build (spec 03 §3.8): firmware/apps/<app>/build/<profile>-debug/fr_gen,
+ * or <profile>-debug-fault/fr_gen for a fault build, which also gets the sdkconfig.fault layer. The
+ * hub's `fr build` runs this command from the checkout it builds and reads `manifest` (app, board,
+ * target), `part_profile` and `fault` from the --json envelope, so it never loads a generator of its own.
  */
-export async function genFirmware(opts: { profile: string; out?: string; cwd: string }): Promise<Result> {
+export async function genFirmware(opts: { profile: string; out?: string; fault?: 'health'; cwd: string }): Promise<Result> {
   const codegen = await import('@fractonica/codegen');
   try {
     const src = sourceDir(opts.cwd);
@@ -65,8 +66,9 @@ export async function genFirmware(opts: { profile: string; out?: string; cwd: st
       throw new FrError('NOT_FOUND', `no profile ${opts.profile} in ${profiles}`, { details: { profiles: known } });
     }
     const prof = codegen.resolveProfile(src, opts.profile);
-    const outDir = opts.out ? resolve(opts.cwd, opts.out) : join(src, 'firmware', 'apps', prof.app, 'build', `${opts.profile}-debug`, 'fr_gen');
-    const r = codegen.generateFirmware({ sourceDir: src, profile: opts.profile, outDir });
+    const buildDir = `${opts.profile}-debug${opts.fault ? '-fault' : ''}`;
+    const outDir = opts.out ? resolve(opts.cwd, opts.out) : join(src, 'firmware', 'apps', prof.app, 'build', buildDir, 'fr_gen');
+    const r = codegen.generateFirmware({ sourceDir: src, profile: opts.profile, outDir, ...(opts.fault ? { fault: opts.fault } : {}) });
     return ok({
       source_dir: src,
       profile: opts.profile,
@@ -77,6 +79,7 @@ export async function genFirmware(opts: { profile: string; out?: string; cwd: st
       warnings: r.warnings,
       manifest: r.manifest,
       part_profile: prof.partProfile,
+      fault: opts.fault ?? null,
     });
   } catch (e) {
     return failed(e, codegen);

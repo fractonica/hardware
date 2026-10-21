@@ -20,6 +20,7 @@ describe('flags', () => {
   it('maps fields to the spec CLI names', () => {
     expect(cliFlag('wait_s')).toBe('wait');
     expect(cliFlag('timeout_s')).toBe('timeout');
+    expect(cliFlag('expect_timeout_s')).toBe('expect-timeout');
     expect(cliFlag('max_lines')).toBe('max-lines');
     expect(cliFlag('source_dir')).toBe('source-dir');
   });
@@ -83,7 +84,9 @@ describe('renderResult', () => {
 });
 
 // The CLI against a fake hub on a random port (FR_HUB), never the real one.
-describe('fr (subprocess)', () => {
+// Each test starts the CLI (node, type stripping, zod) once or more: seconds apiece while the whole suite
+// runs in parallel, so these get more than vitest's 5 s.
+describe('fr (subprocess)', { timeout: 20_000 }, () => {
   let server: Server;
   let hubUrl = '';
   const requests: { op: string; body: Record<string, unknown> }[] = [];
@@ -198,6 +201,29 @@ describe('fr (subprocess)', () => {
     expect(r.code).toBe(5);
     expect(JSON.parse(r.stdout)).toMatchObject({ ok: false, error: { code: 'LOCKED' } });
     expect(decoy.exitCode).toBeNull();
+  });
+
+  it('generates the C4 commands: build --fault, ota <sel>, ota status <sel>, deploy <sel> (spec 09 §9.5)', async () => {
+    let r = await fr(['build', '--profile', 'c6-pad', '--fault', 'health', '--json']);
+    expect(r.code).toBe(0);
+    expect(requests.at(-1)).toMatchObject({ op: 'build_start', body: { profile: 'c6-pad', fault: 'health' } });
+    r = await fr(['build', '--profile', 'c6-pad', '--fault', 'bogus', '--json']);
+    expect(r.code).toBe(64);
+    r = await fr(['ota', 'pad-c3', '--via', 'wifi', '--json']);
+    expect(r.code).toBe(0);
+    expect(requests.at(-1)).toEqual({ op: 'ota_deploy', body: { selector: 'pad-c3', via: 'wifi', wait_s: 110 } });
+    r = await fr(['ota', 'status', 'pad-c3', '--json']);
+    expect(r.code).toBe(0);
+    expect(requests.at(-1)).toEqual({ op: 'ota_status', body: { selector: 'pad-c3' } });
+    r = await fr(['deploy', 'all', '--fault', 'health', '--expect-event', 'node.boot', '--json']);
+    expect(r.code).toBe(0);
+    expect(requests.at(-1)).toMatchObject({ op: 'deploy', body: { selector: 'all', fault: 'health', expect_event: 'node.boot', source_dir: expect.any(String) } });
+  });
+
+  it('exits 8 for OTA_FAILED and OTA_ROLLED_BACK (spec 09 §9.3)', () => {
+    for (const code of ['OTA_FAILED', 'OTA_ROLLED_BACK'] as const) {
+      expect(exitCodeForResult({ ok: false, cursor: '', error: { code, message: 'x', retryable: false } })).toBe(8);
+    }
   });
 
   it('reports a dead hub as HUB_UNREACHABLE, exit 10', async () => {

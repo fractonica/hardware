@@ -154,6 +154,13 @@ public:
     };
     using Dispatch = std::function<fr::Status(uint8_t port, uint8_t cmd, std::span<const uint8_t> args,
                                               fr::cap::Reply &reply)>;
+    /** One Host::ota_frame call. */
+    struct OtaCall {
+        LinkKind from;
+        fr::wire::Header header;
+        std::vector<uint8_t> body;
+    };
+    using OnOta = std::function<void(const OtaCall &call, fr::net::OtaReply &reply)>;
 
     FakeHost()
     {
@@ -194,6 +201,14 @@ public:
     fr::net::Identity identity() override { return id; }
     fr::net::LinkInfo link_info() override { return wifi; }
     fr::net::Vitals vitals() override { return vit; }
+    void ota_frame(LinkKind from, const fr::wire::Header &h, std::span<const uint8_t> body,
+                   fr::net::OtaReply &reply) override
+    {
+        ota_calls.push_back({from, h, {body.begin(), body.end()}});
+        if (on_ota) {
+            on_ota(ota_calls.back(), reply);
+        }
+    }
 
     fr::net::Identity id;
     fr::net::HelloInfo hello;
@@ -201,6 +216,8 @@ public:
     fr::net::Vitals vit;
     Dispatch on_dispatch;
     std::vector<Call> calls;
+    OnOta on_ota;
+    std::vector<OtaCall> ota_calls;
     int report_alls = 0;
 };
 
@@ -302,6 +319,17 @@ public:
     {
         return frame(0, fr::wire::kClsPresence, fr::proto::kKindPresenceBye, ++ucast, node, 0, {},
                      body_of(fr::proto::PresenceBye{.reason = reason}));
+    }
+
+    /** An OTA-class frame on port 240 (OFFER with ACK_REQ, COMMIT, ABORT; design c4 §3). */
+    std::vector<uint8_t> ota(uint8_t kind, std::span<const uint8_t> body, uint8_t flags = 0,
+                             uint8_t port = fr::proto::kPortOta, uint32_t *seq_out = nullptr)
+    {
+        const uint32_t seq = ++ucast;
+        if (seq_out != nullptr) {
+            *seq_out = seq;
+        }
+        return frame(flags, fr::wire::kClsOta, kind, seq, node, port, {}, body);
     }
 
     std::vector<uint8_t> sync_req(uint64_t t1)

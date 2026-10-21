@@ -5,7 +5,7 @@
 | Concern | Choice | Why |
 |---|---|---|
 | Runtime | **Node.js** ≥ 24.12 now; Node 26 once Active LTS (2026-10-28). In the repo, TS runs directly via type stripping (`erasableSyntaxOnly`, no enums or namespaces). Published packages ship JS (§8.12) | Shares types with the dashboard, SDK and MCP; no build step in development |
-| HTTP + WS | Fastify 5 + `@fastify/websocket` (ws 8) + `@fastify/static` | Mature; OpenAPI from Zod; Range support for OTA |
+| HTTP + WS | Fastify 5 + `@fastify/websocket` (ws 8) + `@fastify/static`; the node HTTP listener (7422) is plain `node:http` (§8.10) | Mature; OpenAPI from Zod. 7422 only streams images with Range and binds the node-facing interface, so it shares nothing with the API server |
 | Schemas | Zod 4 operation registry ([09 §9.1](09-agent-api.md)) + generated device codecs ([07 §7.6](07-capabilities-sdk.md)) | One source per concern |
 | Serial | `serialport` 13 behind a `SerialTransport` interface | N-API prebuilds for darwin-arm64 and linux-arm64. Plan B: a napi-rs addon over `serialport-rs` |
 | Flashing | `pytools` sidecar: uv-managed Python 3.12, **esptool 5.6.0 API**, one process per job, JSON lines ([06 §6.10](06-identity-ota.md)) | Espressif recommends the API over log scraping |
@@ -26,9 +26,10 @@
  ├─ Codec                  generated TS envelope + capability codecs
  ├─ Bus + Events           publish synchronously in the receive tick; events stored in the `events` ring (§8.7)
  ├─ Registry + Db          SQLite (WAL); writes queued to a worker_thread; main thread never blocks on disk
- ├─ JobRunner              build / flash / provision / ota / test jobs; locks; spawns children
- ├─ Listeners              :7420 API (loopback) · :7421 node links · :7422 node HTTP (OTA, coredumps)
- └─ SleepGuard             child `caffeinate -i -w <hub pid>` while any node session is up (05 §5.11)
+ ├─ JobRunner              build / flash / provision / ota / deploy / test jobs; locks; spawns children
+ ├─ OtaOrchestrator        per-device OTA jobs (06 §6.7) and the node HTTP listener :7422 (§8.10)
+ ├─ Listeners              :7420 API (loopback) · :7421 node links · :7422 node HTTP (OTA; core dumps later)
+ └─ SleepGuard             child `caffeinate -i -w <hub pid>` while any node session is up or any OTA child is unfinished (05 §5.11)
  children: pytools (flash/probe/nvs/panic) · idf.py builds (sanitized env) · caffeinate
  separate process: `fr mcp` (stdio MCP adapter → hub REST/WS)
 ```
@@ -87,9 +88,11 @@ The **Router** does the following ([05 §5.8–5.12](05-network.md)):
 - **Duplicate filtering** per [05 §5.8](05-network.md): replay windows on `(device, epoch, seq)` for ordinary frames (256 bits, keyed by device so unprovisioned nodes work), `last_seq` per `(device, port, kind)` for LATEST frames, and sessions reset on HELLO.
 - **Hub-originated frames.** These get `src=0x0000`, the hub epoch (kv `hub_epoch`, incremented and fsynced at every start, skipping 0), `dst` = the node's HELLO `src`, `net` = its HELLO `net`, ttl 0x11, and a seq from the right space: one dense UNICAST counter per device, the BCAST counter, or LATEST, all from 1 each run.
 - **Handshake.** On HELLO it upserts the registry (a first HELLO creates a `provisioned: false` row, [06 §6.3](06-identity-ota.md)) and answers WELCOME (`ucast_floor` = the WELCOME's own seq), then DIRECTORY (all provisioned devices, pages from 0), then a TIME burst (8 SYNC_REQ, min-RTT offset; again every 60 s), then `fr.node.describe` (BULK) when no artifact manifest names the HELLO's `fw_id_prefix` (cached per `descriptor_hash`), then `get_state`. Only then does it publish `device.online` (the node's first session) and `device.link {link, up: true}` (every session). It pushes `set_alias` when the HELLO's alias or rev differs from the registry's. HELLOs from another net are dropped (`foreign_net`) once a network record exists; the router reads `net_id` again on each HELLO until one does, so `fr net set` on a fresh `hub.db` needs no restart.
-- **Liveness.** It echoes every UDP-received HEARTBEAT, DUP copies included, with an ACK over TCP; this is the `udp_ok` probe. On every session (TCP and serial) on which nothing went out for one heartbeat interval, it sends a hub PRESENCE/HEARTBEAT, so the node always has a keepalive. It raises `udp_blocked` when a TCP session sees no UDP for 10 s (`hub.warning` and `hub_status`; never for an UNASSIGNED node) and clears it when UDP returns.
+- **Liveness.** It echoes every UDP-received HEARTBEAT, DUP copies included, with an ACK over TCP; this is the `udp_ok` probe. On every session (TCP and serial) on which nothing went out for one heartbeat interval, it sends a hub PRESENCE/HEARTBEAT, so the node always has a keepalive. It raises `udp_blocked` when a TCP session sees no UDP for 10 s (`hub.warning` and `hub_status`; never for an UNASSIGNED node, nor while TCP is silent too) and clears it when UDP returns. Each session keeps its `lastRx` (the node's UDP counts for its TCP session).
 - **Presence** ([05 §5.11](05-network.md)). Suspect at 2.5 × the interval, with PINGs at 2.5 × and 3.0 ×; offline at 3.5 × (≥ 750 ms), which sends a hub BYE on a serial session and closes the TCP connection; offline `link_lost` when the last session closes. A node's BYE is offline at once with its reason; commands waiting on the device keep waiting, and a RESULT from it is still taken, for 250 ms (`byeGraceMs`; over UDP, its TCP connection kept open that long, or its USB line), since a RESULT sent before the BYE on one link can arrive after it on another. A HELLO with another epoch is offline `restarted` (or `epoch_regressed`, logged), then a new handshake.
-- **Commands.** One unicast CMD per device ([05 §5.8](05-network.md)), over its TCP session, else its serial session. ACK_REQ whenever the RESULT is awaited; `expire_at_us` (hub now + 1000 ms, in node time) once the node is synced; RESULTs match on `(device, req_seq)` with `req_epoch` = the hub epoch, from any link. Q1 frames from nodes get an ACK (EVENT, MSG; again on a DUP) or are answered (PING → PONG).
+- **Which session.** The hub sends to a device (commands, OTA frames, PINGs, ACKs, `get_state` and TIME resyncs) over its TCP session, else its serial session, and over the serial session while nothing came over TCP or UDP from a device that has both for more than 2 heartbeat intervals (`wifiSilentX10` 20); back to TCP as soon as Wi-Fi carries ([05 §5.10](05-network.md)). Presence counts frames from any link, and the node sends its heartbeats on every session, so a USB node whose Wi-Fi stalls stays online. `device_get`'s `router.links` lists the links best first.
+- **Commands.** One unicast CMD per device ([05 §5.8](05-network.md)). ACK_REQ whenever the RESULT is awaited; `expire_at_us` (hub now + 1000 ms, in node time) once the node is synced; RESULTs match on `(device, req_seq)` with `req_epoch` = the hub epoch, from any link. Q1 frames from nodes get an ACK (EVENT, MSG; again on a DUP) or are answered (PING → PONG).
+- **OTA frames** ([05 §5.7](05-network.md)). Those over UDP or off port 240 are dropped (`ota_dropped`); those with ACK_REQ are ACKed, duplicates too, and handed to the OTA orchestrator (`sendOta` sends the hub's). HELLO `ota_state` is kept per device (`device_get` `router.ota_state`, `device.online`, `wait_for_device {ota_state}`); a RESULT success for the running image's prefix sets it `valid`, since the node HELLOs only on a new session.
 - **Publication.** Capability EVENTs and STATEs become events (§8.7); STATE also updates a per-device property mirror, which `device_get` shows.
 - **Routing (C5).** It keeps `addr → {links[], best}`. It fans broadcasts out over every link, forwards node → node frames when a node has no direct path, and repairs broadcasts for nodes whose watermark lags.
 - **Clocks.** It tracks the per-node clock offset and uncertainty ([05 §5.12.4](05-network.md)).
@@ -111,7 +114,7 @@ The **Router** does the following ([05 §5.8–5.12](05-network.md)):
   - `nvs_gen {csv_path, size, out_path}` → `{out_path, size, rows}`: renders `fr_ident` ([06 §6.3](06-identity-ota.md)); no event or error carries the CSV's content.
   - `panic_decode {elf, text}`.
 - **Plans** come from the artifact manifest ([06 §6.4](06-identity-ota.md)): `full`, `app` (always including otadata), `identity`, `recover`. `full` (for a provisioned device), `identity` and `recover` add `fr_ident` rendered from the registry. Never `idf.py flash`, and never merged images padded to full flash size (they would wipe `fr_ident`).
-- **Artifact choice.** `fr flash --profile <p>` takes the newest `debug` artifact of (`node`, `p`); a release build only through `--build`. With none, the result is `NOT_FOUND` with `build_start` as remediation.
+- **Artifact choice.** `fr flash --profile <p>` takes the newest `debug` artifact of (`node`, `p`), never a fault build; a release or fault build only through `--build`. With none, the result is `NOT_FOUND` with `build_start` as remediation.
 - **Speed.** `write_flash --diff-with` (esptool ≥ 5.2) rewrites only changed sectors in the dev loop.
 
 ## 8.6 Builds
@@ -125,9 +128,12 @@ The **Router** does the following ([05 §5.8–5.12](05-network.md)):
   - A changed `.slots.lock` adds a "commit it" warning.
   - Generation comes first, so `--clean` deletes the build dir before it, a target change found afterwards empties the build dir except `fr_gen`, and `INCOMPATIBLE_PROFILE` removes a build dir this run created.
 - **Environment.** Native IDF, with the environment from `export.sh` cached per IDF commit. Docker is optional, for reproducibility checks.
-- **No tree-hash cache.** `idf.py`, ninja and ccache always run, and an unchanged tree is a near no-op. `cache_hit` means the resulting `fw_id` matches the last one for `(source_dir, profile, build_type)`. `deploy` then reports `already_current` per device.
+- **No tree-hash cache.** `idf.py`, ninja and ccache always run, and an unchanged tree is a near no-op. `cache_hit` means the resulting `fw_id` matches the last one for `(source_dir, profile, build_type)` (fault builds compare with the last fault build). `deploy` then reports `already_current` per device.
+- **Fault builds** ([03 §3.8](03-firmware.md)). `build_start {fault: 'health'}`: debug only (`release` is `INVALID_ARGS`), into `<profile>-debug-fault`, build_id `node/<profile>/debug-fault/<fw12>`. A checkout whose CLI writes no `sdkconfig.fault` fails `generate` with `BUILD_FAILED`.
+- **Ingest** checks `fr_app_desc` against the build and sets the version label ([06 §6.8](06-identity-ota.md)).
+- **Artifact list.** `artifact_list` is newest first; `fr artifacts ls` prints a table (BUILD, BUILT, SOURCE) with fault builds after all normal ones, marked in a FAULT column with a footnote (they never pass their health check, roll back after an OTA, and are used only when named with `--build`). An empty store prints a `fr build` hint.
 - **Diagnostics.** GCC output and CMake's `CMake Error at <file>:<line> (<cmd>):` blocks (with their indented message; stdout and stderr each have a parser) go into `diagnostics[]`.
-- **Locks.** `build:<sha1(source_dir)>:<app>` during dependency resolution, then `build:<sha1(source_dir)>:<app>:<profile>:<build_type>`. A global limit of ⌈cores/4⌉ builds.
+- **Locks.** `build:<sha1(source_dir)>:<app>` during dependency resolution, then `build:<sha1(source_dir)>:<app>:<profile>:<variant>` (the build type, or `debug-fault`). A global limit of ⌈cores/4⌉ builds.
 
 ## 8.7 Event bus and cursors
 
@@ -144,7 +150,8 @@ The **Router** does the following ([05 §5.8–5.12](05-network.md)):
   - Every event carries `t_hub_us` and `replayed: bool`, which marks frames that were buffered during an outage (the node is synced and its device time is more than 2 s before arrival). `t_hub_us` is device time converted through the TIME offset, or the hub's receive time when it has no offset yet for the sender's current epoch.
 - **Event types** ([09 §9.2](09-agent-api.md)):
   - capability EVENTs and STATEs as `<inst>.<member>` with decoded fields, or `port<p>.event<k>` / `port<p>.state<k>` with `{raw}` when nothing names the port; `node.boot` and `diag.mark` likewise. `late` flags an event older than the last of its instance. A STATE older than the mirror's is neither applied nor published;
-  - `device.online {link, addr, fw_id_prefix, provisioned}` (or `{link, recovered}` when a suspect device comes back), `device.suspect {silent_ms}`, `device.offline {reason}`, `device.link {link, up, remote | reason}`, `device.provisioned`;
+  - `device.online {link, addr, fw_id_prefix, provisioned, ota_state}` (or `{link, recovered}` when a suspect device comes back), `device.suspect {silent_ms}`, `device.offline {reason}`, `device.link {link, up, remote | reason}`, `device.provisioned`;
+  - `ota.job.state {job, parent, state, via, attempt, bytes, size, code?, message?, reason?, needs_serial_recovery?}` on every OTA child transition, DOWNLOADING also every 10 % ([06 §6.7](06-identity-ota.md)); `message` comes with `code` on FAILED and QUEUED, and `deploy` shows it as the device's error;
   - `hub.warning {code: udp_blocked, hint}`, `msg {topic, data, dst}`, `registry.drift`.
 - **Storage.** `publish` runs in the receive tick: it takes the cursor, notifies subscribers synchronously and queues the row; rows are written to the `events` table in one transaction every 50 ms.
 - **Delivery classes.**
@@ -161,7 +168,8 @@ The **Router** does the following ([05 §5.8–5.12](05-network.md)):
 | `hub.db` → `devices` | device_id (PK = MAC), addr (NULL until provisioned; never reused for another device, kv `registry.addr_hwm`), alias (stored lower case, unique ignoring case) + alias_rev, net, board, profile, chip, tags, role, fw_id, provisioned, last_seen, last_epoch, created_at, provision record (what the last `fr_ident` write held; never the password) |
 | `hub.db` → `networks` | `net_id` (random u16 in 1..65535, created with the record and kept), mode, ssid, bssid pin (optional), country, observed channel and BSSIDs (from HELLO), `hub_host` (= `scutil --get LocalHostName` + `.local`), hub id (6 random bytes, for M3 nonces), (M3) key references |
 | `hub.db` → `bindings` | resolved bindings per source device (re-pushed on change) |
-| `hub.db` → `ports_seen`, `builds`, `artifacts` | USB serial ↔ last path; manifests and blob references |
+| `hub.db` → `ports_seen`, `builds`, `artifacts` | USB serial ↔ last path; manifests and blob references; `artifacts.fault` (the fault kind, NULL for a normal build) keeps fault builds out of implicit picks |
+| `hub.db` → `ota_jobs` | one row per OTA child: `job_id`, `parent`, `device`, `state`, times, and the record `ota_status` answers (`json`). A hub start marks rows a stopped hub left unfinished `FAILED hub_restarted` |
 | `hub.db` → `jobs` | durable, retained ≥ 24 h. On hub restart, `working` jobs become `failed: HUB_RESTARTED` |
 | `hub.db` → `events`, `logs` | cursor-indexed rings in one cursor space (§8.7); retention configurable (7 days / 1M rows; kv `<table>.retention_days` and `<table>.retention_rows`). Retention counts cursors: each table keeps at most `rows` rows, and both together at most `rows` |
 | `hub.db` → `kv` | settings, `hub_run`, `hub_epoch` (u16, +1 and fsynced at every start, skipping 0), `registry.addr_hwm`, `device_fw:<device>` (the `fw=` prefix from a device's boot banner, for frame names, §8.3) |
@@ -188,8 +196,11 @@ The dashboard uses the same WS and REST API as agents and never uses Web Serial.
 |---|---|---|
 | 7420/tcp | `127.0.0.1` and `::1` | REST, `/ws`, dashboard, `/app` (SDK), `/apps/<name>` (hosted games) |
 | 7421/tcp+udp | `0.0.0.0` | node envelope links |
-| 7422/tcp | `0.0.0.0` | **node HTTP only**: `GET /ota/<fw_id>.bin` (Range; only for an `fw_id` with an outstanding OFFER to that node) and `POST /node/v1/coredump/<device_id>`. Requests are accepted only from source IPs currently bound to a registered node's 7421 link. No control, dashboard or SDK routes |
+| 7422/tcp | `0.0.0.0` (`--node-host`, `--node-http-port`) | **node HTTP only** (plain `node:http`): `GET` and `HEAD /ota/<fw_id>.bin`, and `POST /node/v1/coredump/<device_id>` (501 until crash reports land). No control, dashboard or SDK routes |
 
+- **7422 gate.** `/ota/<fw_id>.bin` answers 404 unless a Wi-Fi OTA child is OFFERED or DOWNLOADING that `fw_id` to the device whose live TCP session (`router.tcpAddress`) comes from the request's source IP: no credentials, and nothing for a host without a node link. Every other path is 404.
+- **7422 ranges.** One range (`bytes=a-`, `a-b`, `-n`) answers 206 with Content-Range; a range outside the image, several ranges or another unit answer 416, so a node that asked for a tail never writes the head over its partial image. The app blob streams from the artifact store. Bytes served count as download progress when exactly one child matches ([06 §6.7](06-identity-ota.md)).
+- **7422 failure.** A failed bind does not stop the hub: the `listening` log line carries `node_http_error`, `hub_status` warns (`ota.listen_error`), and Wi-Fi OTA children fail `no_http_listener` (not retried). Tests use port 0.
 - **Opening up 7420.** `--listen-app 0.0.0.0` lets games on other devices reach `/app` (the SDK token is required). `--listen-api 0.0.0.0` exposes the control API on the LAN and requires the bearer token.
 - **Hub address for nodes.** Nodes get `hub_host = <LocalHostName>.local` (here `dimas-3.local`) at provisioning. They resolve it by mDNS on every reconnect; macOS's own mDNSResponder answers it.
 - **Service advert (C6).** `_fractonica._tcp` is advertised with SRV port 7421 and TXT `http=7422 api=7420`. The advert is retried every 30 s, since Local Network Privacy may deny it. Until then nodes use `hub_host` ([05 §5.12.5](05-network.md)).

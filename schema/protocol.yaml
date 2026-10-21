@@ -153,14 +153,25 @@ messages:
     size: { id: 3, type: u32 }
     version: { id: 4, type: string, max: 31 }
     flags: { id: 5, type: u32, doc: "b0 FORCE, b1 DEFER_COMMIT, b2 ALLOW_DOWNGRADE" }
-  OTA.ACCEPT: { job_id: { id: 1, type: string, max: 23 }, code: { id: 2, type: u8 } }
-  OTA.REJECT: { job_id: { id: 1, type: string, max: 23 }, code: { id: 2, type: u8 } }
-  OTA.STATUS: { job_id: { id: 1, type: string, max: 23 }, state: { id: 2, type: u8 }, bytes: { id: 3, type: u32 } }
+  # node -> hub: the answer to an OFFER (an OTA frame, not a RESULT; design c4 §3).
+  OTA.ACCEPT:
+    job_id: { id: 1, type: string, max: 23 }
+    code: { id: 2, type: u8, doc: "0 fresh, 1 resumed from the offset an earlier boot stored" }
+  OTA.REJECT:
+    job_id: { id: 1, type: string, max: 23 }
+    code: { id: 2, type: u8, doc: "1 busy, 2 chip, 3 identity, 4 size, 5 same_fw, 6 downgrade, 7 bad_image" }
+  OTA.STATUS:
+    job_id: { id: 1, type: string, max: 23 }
+    state: { id: 2, type: u8, doc: "1 downloading, 2 staged, 3 rebooting" }
+    bytes: { id: 3, type: u32 }
+  # hub -> node: install a STAGED image (an OFFER with DEFER_COMMIT), or drop the job (design c4 §3).
+  OTA.COMMIT: { job_id: { id: 1, type: string, max: 23 } }
+  OTA.ABORT: { job_id: { id: 1, type: string, max: 23 } }
   OTA.RESULT:
     job_id: { id: 1, type: string, max: 23 }
     outcome: { id: 2, type: u8, doc: "0 success, 1 failed, 2 rolled_back" }
     fw_id_prefix: { id: 3, type: bytes, max: 8 }
-    reason: { id: 4, type: u8 }
+    reason: { id: 4, type: u8, doc: "failed: 1 download, 2 digest, 3 flash; rolled_back: 1 health_timeout, 2 crash, 3 unknown" }
   TIME.SYNC_REQ: { t1: { id: 1, type: u64 } }
   TIME.SYNC_RES: { t1: { id: 1, type: u64 }, t2: { id: 2, type: u64 }, t3: { id: 3, type: u64 } }
   MSG.MSG: { topic: { id: 1, type: string, max: 32 }, data: { id: 2, type: bytes, max: 168 } }

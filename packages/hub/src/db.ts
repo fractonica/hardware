@@ -37,6 +37,13 @@ const MIGRATIONS = [
      type TEXT NOT NULL, device TEXT, json TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS events_device ON events(device, seq)`,
   `CREATE INDEX IF NOT EXISTS events_type ON events(type, seq)`,
+  // OTA child jobs (design c4 §4, ota/orchestrator.ts): one row per device and ota_deploy, `json` the
+  // OtaRecord (state, attempt, bytes, timings) that ota_status answers; the parent is an ordinary job.
+  `CREATE TABLE IF NOT EXISTS ota_jobs (
+     job_id TEXT PRIMARY KEY, parent TEXT NOT NULL, device TEXT NOT NULL, state TEXT NOT NULL,
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, json TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS ota_jobs_device ON ota_jobs(device, created_at)`,
+  `CREATE INDEX IF NOT EXISTS ota_jobs_parent ON ota_jobs(parent)`,
 ];
 
 /** Columns added to tables that earlier hubs created (CREATE TABLE IF NOT EXISTS leaves those as they were). */
@@ -44,6 +51,8 @@ const ADDED_COLUMNS: { table: string; column: string; decl: string }[] = [
   // C3: the network id nodes are provisioned with and the hub's mDNS name (network.ts fills both).
   { table: 'networks', column: 'net_id', decl: 'INTEGER CHECK (net_id BETWEEN 1 AND 65535)' },
   { table: 'networks', column: 'hub_host', decl: 'TEXT' },
+  // C4: a fault build's kind (spec 03 §3.8; NULL for every other build): implicit picks skip those rows.
+  { table: 'artifacts', column: 'fault', decl: 'TEXT' },
 ];
 
 export function openDb(file: string): Db {

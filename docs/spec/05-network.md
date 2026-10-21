@@ -21,7 +21,7 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 ```
  Hub (Mac) ◄── TCP 7421 (node-initiated; all hub → node traffic) ──┐
            ◄── UDP 7421 (node → hub: input, presence, ACK/RESULT) ──┤     Wi-Fi router, FIXED channel C, one BSSID
-           ◄── HTTP 7422 (node → hub: OTA download, core dumps) ────┤
+           ◄── HTTP 7422 (node → hub: OTA pull; core dumps later) ─┤
        node A ◄──── ESP-NOW on channel C ────► node B ◄─────────────┘ ... node N
        (every node: STA associated, WIFI_PS_NONE, ESP-NOW on the same radio)
 ```
@@ -221,12 +221,15 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | NET/DIRECTORY (hub → node) | `page u8, pages u8, entries [{addr u16, mac bytes6}] ≤ 14`. In protobuf-wire an entry is ≤ 14 B, so a page is ≤ 200 B while `page` and `pages` stay below 128, and ≤ 202 B at worst (from 128 on, each takes 3 B: tag plus a 2-byte varint). DIRECTORY may fragment (§5.8), so the 200 B realtime check does not apply to it ([07 §7.5](07-capabilities-sdk.md)) |
 | NET/RESOLVE (node → hub) | `addr u16`; answered with a one-entry DIRECTORY |
 | NET/BEACON (gateway, M2) | `channel, flags, hub_epoch, bcast_floor u32, hub_time_us u64, hub_ipv4, hub_port, beacon_interval_ms, bcast_watermark u32` |
-| OTA/OFFER | `job_id string≤23, fw_id bytes32, size u32, version string≤31, flags u32 (FORCE, DEFER_COMMIT, ALLOW_DOWNGRADE)`. The node always GETs `http://<hub_host>:7422/ota/<lowercase hex fw_id>.bin` |
-| OTA/ACCEPT, REJECT | `job_id, code u8` |
-| OTA/STATUS | `job_id, state u8, bytes u32` |
-| OTA/RESULT | `job_id, outcome u8 (success, failed, rolled_back), fw_id_prefix bytes8, reason u8` |
+| OTA/OFFER (hub → node, ACK_REQ) | `job_id string≤23, fw_id bytes32, size u32, version string≤31, flags u32 (b0 FORCE, b1 DEFER_COMMIT, b2 ALLOW_DOWNGRADE)`. The node GETs `http://<hub IP of its TCP session>:7422/ota/<lowercase hex fw_id>.bin` ([06 §6.6](06-identity-ota.md)) |
+| OTA/ACCEPT | `job_id, code u8 (0 fresh, 1 resumed)` |
+| OTA/REJECT | `job_id, code u8 (1 busy, 2 chip, 3 identity, 4 size, 5 same_fw, 6 downgrade, 7 bad_image)` ([06 §6.6](06-identity-ota.md)) |
+| OTA/STATUS | `job_id, state u8 (1 downloading, 2 staged, 3 rebooting), bytes u32` |
+| OTA/RESULT (node → hub, ACK_REQ) | `job_id, outcome u8 (0 success, 1 failed, 2 rolled_back), fw_id_prefix bytes8, reason u8` (failed: 1 download, 2 digest, 3 flash; rolled_back: 1 health_timeout, 2 crash, 3 unknown) |
+| OTA/COMMIT, ABORT (hub → node) | `job_id` |
 
 - **HELLO hashes.** `descriptor_hash` is FNV-1a 32 over the encoded `Descriptor` that `fr.node.describe` returns ([07 §7.4](07-capabilities-sdk.md)); `board_hash` is FNV-1a 32 over the board id (`esp32c6-supermini`). C++ (`fr/hash.hpp`) and TS compute both the same way.
+- **OTA frames.** OFFER (answered by ACCEPT or REJECT, §5.8) and RESULT (the hub ACKs it) carry ACK_REQ; ACCEPT, REJECT, STATUS, COMMIT and ABORT do not. `CHUNK` is for ESP-NOW relay OTA (M2+); the hub sends no COMMIT in M1. OTA frames go over TCP, else serial (§5.10), never UDP: the hub drops OTA frames that arrive over UDP or off port 240 (`ota_dropped`), and the node drops any off port 240 or not unicast. The node's rules are in [06 §6.6](06-identity-ota.md), the hub's in [06 §6.7](06-identity-ota.md).
 - **Hub framing.** Hub frames carry `src = 0x0000`, `epoch` = the hub epoch, `dst` = the node's HELLO `src` (0xFFFE while unprovisioned), `net` = its HELLO `net`, and `ttl` 0x11. WELCOME's `ucast_floor` is the WELCOME's own seq; DIRECTORY pages count from 0, and there is always at least one page.
 
 **Status codes** (RESULT, ACK, REJECT):
@@ -282,10 +285,10 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | PING | PONG |
 | TIME/SYNC_REQ | SYNC_RES |
 | NET/JOIN_REQ | JOIN_ACCEPT |
-| OTA/OFFER | ACCEPT or REJECT |
+| OTA/OFFER | ACCEPT or REJECT (the immediate one is cached for a DUP OFFER; one decided from the image's first bytes follows later, [06 §6.6](06-identity-ota.md)) |
 | PRESENCE/HELLO | NET/WELCOME. WELCOME also sets the node's `HUB_ACK` health bit ([06 §6.6](06-identity-ota.md)) |
 
-- **ACK frames** are used only for EVENT, MSG, the last fragment, and the hub's echo of a UDP-received HEARTBEAT (§5.10). The echo has `status = OK`, goes over TCP, never sets ACK_REQ, and is decided per receiving link, before duplicate filtering.
+- **ACK frames** are used only for EVENT, MSG, OTA/RESULT, the last fragment, and the hub's echo of a UDP-received HEARTBEAT (§5.10). The echo has `status = OK`, goes over TCP, never sets ACK_REQ, and is decided per receiving link, before duplicate filtering.
 - **RESULT only when asked.** A node answers a CMD with a RESULT only when it is unicast with ACK_REQ; a `fast` CMD and a port-0 broadcast get none. The hub sets ACK_REQ on every CMD whose RESULT it awaits, and matches RESULTs on `(device, req_seq, req_epoch)` (`req_epoch` = the hub epoch) from any link.
 - **RESULT is sent when the generated dispatch returns.** Effects that outlast it (a blink) report through events (`effect_done`). Its fields go into a `Reply` sized by the link the request came on: 200 B over UDP, 1,445 B over TCP or serial, where the RESULT may go BULK; fields that do not fit answer `FAILED` with none ([07 §7.7](07-capabilities-sdk.md)).
 - **Response cache.** Every node caches its RESULTs, keyed by `(src, epoch, req_seq)`: 8 entries of ≤ 250 B plus one shared bulk slot. A DUP request gets the cached response back byte-identical, and the command is not executed twice. This makes non-idempotent commands (`toggle`) safe under retries and floods. A DUP of a request whose entry was evicted is dropped, never run twice. A DUP PING or SYNC_REQ is dropped; a DUP Q1 EVENT or MSG gets a fresh ACK.
@@ -367,22 +370,26 @@ Rules:
 | Frame | Path |
 |---|---|
 | HEARTBEAT, PONG, ACK, RESULT, URGENT EVENT, LATEST STATE | UDP once `udp_ok`. While `udp_ok` is false or unknown: HEARTBEAT, URGENT and Q1 frames go over **both** UDP and TCP (same bytes; the hub deduplicates), and LATEST frames go over TCP |
-| HELLO, LOG, fragments, OTA control, anything over 250 B (BULK), everything else | TCP |
+| HELLO, LOG, fragments, OTA frames (never UDP), anything over 250 B (BULK), everything else | TCP |
 
 **Which session** (a node can have a serial session and a TCP session at once):
-- With a TCP session, frames take TCP/UDP as in the table. An UNASSIGNED node (`0xFFFE`) never uses UDP (§5.5). A UDP send the socket refuses falls back to TCP (except under the `udp_block` hook).
+- With a TCP session, frames take TCP/UDP as in the table. An UNASSIGNED node (`0xFFFE`) never uses UDP (§5.5). A UDP send the socket refuses falls back to TCP (except under the `udp_block` and `ip_block` hooks).
+- **Wi-Fi silent.** Wi-Fi can stall without dropping (an AP gone without a FIN, IP traffic lost). A node with a serial session whose TCP session heard nothing from the hub for more than 2 heartbeat intervals sends everything over serial instead, and goes back to TCP/UDP with the next hub frame on TCP (its TCP session still times out at 3.5 intervals, §5.11). The hub keeps the same rule toward the node (below), so both ends move to the USB line together.
 - Without a TCP session but with a serial session, everything goes over serial.
 - With neither, events are dropped and counted (`events_dropped`); `state_seq` still advances, and `get_state` resends the properties after the next WELCOME.
+- **HEARTBEAT and PONG go on every session**: TCP/UDP as in the table (also while TCP is silent: that copy tells the hub Wi-Fi carries again) and a serial session, standby or not, as the same bytes; the hub deduplicates them by its window. So a USB node whose Wi-Fi loses frames stays online through its serial session. While TCP carries, nothing else takes a standby serial session but the answers to requests that came over it.
 - A standby serial session (one alongside a TCP session) is never timed out: the hub owes it nothing, and its keepalive clock starts when the TCP session ends.
+- **A request that came over serial is answered over serial**: its RESULT, the ACCEPT or REJECT an OFFER gets at once, and a cached answer to a DUP of it (an ACCEPT or REJECT decided later, from the image's first bytes, goes as any OTA frame). A request that came over TCP is answered as in the table. The hub sends a request over USB to a node that has a TCP session only for the serial session's own handshake, or once Wi-Fi went silent at its end, which the node may not see: only its uplink may be gone while the hub's keepalives still reach it over TCP.
+- **Gap: uplink-only loss** (open after C4, [11 §11.4](11-roadmap.md)). When only the node's uplink is gone, the hub's keepalives still reach its TCP session, so the node never sees TCP silent. Requests and their answers move to serial and the heartbeats keep it online, but the STATEs and events it sends meanwhile still take TCP/UDP and are lost.
 - A RESULT whose request asked for a BYE (`fr.node.reboot`) and that BYE both leave on the link the request came on (TCP or serial), never on UDP or the other session, where the BYE could overtake the RESULT (§5.11).
-- The hub sends to a node over its TCP session, else its serial session; it never sends UDP.
+- The hub sends to a node over its TCP session, else its serial session, and over the serial session while nothing arrived over TCP or UDP from a node that has both for more than 2 intervals (commands, OTA frames, PINGs, ACKs, `get_state` and TIME resyncs; TCP again as soon as Wi-Fi carries). It never sends UDP. `device_get` lists a device's links best first.
 
 **`udp_ok` is kept by a probe, not by traffic.**
 - After WELCOME, every HEARTBEAT also goes over UDP, and one follows every WELCOME at once. The hub answers **every** HEARTBEAT that arrives over UDP with an ACK over TCP echoing its seq. It does this even when its window classifies that copy as DUP because the TCP copy arrived first.
 - If nothing went to a node on a session (TCP or serial) for one heartbeat interval (for example, because UDP is blocked and no echo was due), the hub sends its own PRESENCE/HEARTBEAT there. Either one is the hub → node keepalive (§5.11).
 - `udp_ok` means an echo arrived within 3 × the heartbeat interval. It is cleared early by a hub PING (the hub has not heard the node for 2.5 intervals, so the PONG takes TCP) and by two hub HEARTBEATs on TCP with no echo between them. Serial keepalives do not count: a standby serial session gets one every interval whatever UDP does.
 - Whenever `udp_ok` is cleared (lapse, PING, hub keepalives, UDP or TCP down), a HEARTBEAT goes at once over TCP and UDP, and every waiting Q1 frame that went over UDP alone and is not stale gets a TCP copy of the same bytes (its TCP delivery deadline starts then; its UDP retries go on).
-- If the hub gets TCP but no UDP from a node for 10 s after HELLO, it raises `hub/warning udp_blocked` (event `hub.warning {code: udp_blocked, hint}` and `hub_status`), with the Application Firewall hint ([08 §8.11](08-hub.md)), and clears it when UDP returns. Never for an UNASSIGNED node, which sends no UDP.
+- If the hub gets TCP but no UDP from a node for 10 s after HELLO, it raises `hub/warning udp_blocked` (event `hub.warning {code: udp_blocked, hint}` and `hub_status`), with the Application Firewall hint ([08 §8.11](08-hub.md)), and clears it when UDP returns. Never for an UNASSIGNED node, which sends no UDP, nor while TCP is silent too (Wi-Fi stalled: no firewall).
 
 **To the hub, gateway mode (M2):** ESP-NOW unicast to the gateway. If the gateway is lost and TCP is up, use TCP.
 
@@ -412,7 +419,7 @@ While a node's own hub link is down, apps and the hub cannot reach it except thr
 |---|---|---|---|
 | Node heartbeat to the hub | 1000 ms ±10% | 250 ms | Any frame from the node also refreshes `last_seen` |
 | SUSPECT | silent for 2.5 × interval | 625 ms | `device.suspect {silent_ms}`; the hub PINGs at 2.5 × and 3.0 × |
-| OFFLINE | silent for 3.5 × interval, ≥ 750 ms | 875 ms | `device.offline {reason: timeout}`, measured from the last frame (2.4–3.5 s after an unplug in the default profile). The hub then sends a hub BYE on a serial session and closes the TCP connection |
+| OFFLINE | silent for 3.5 × interval, ≥ 750 ms | 875 ms | `device.offline {reason: timeout}`, measured from the last frame on any link (2.4–3.5 s after an unplug in the default profile). The hub then sends a hub BYE on a serial session and closes the TCP connection. A USB node whose Wi-Fi stalls is not silent: its heartbeats on the serial session keep it online (§5.10) |
 | Graceful exit | BYE `{reason}` | — | immediate offline with the reason (`shutdown`, `reboot`, `ota`, `sleep`, `maintenance`). A BYE a request asks for (`fr.node.reboot`: `reboot`, or `maintenance` for the bootloader) follows that request's RESULT on the request's link (§5.10); any other BYE, or one whose request gets no RESULT, goes on every session. After a node's BYE the hub still takes a RESULT from it, and keeps its commands waiting, for 250 ms |
 | Session loss | — | — | Offline (`link_lost`) when the node's last session closes. A HELLO with a new epoch is offline `restarted` (or `epoch_regressed`, logged), then a new handshake |
 | USB loss | — | — | A serial session lasts only while a USB host is attached: the node's serial link is up only then, and the hub ends the session as soon as the port disappears (`device.link {link: serial, up: false, reason: 'usb port gone'}`) |
@@ -548,7 +555,8 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | Router changes channel | Associated nodes follow. ESP-NOW-only nodes are stranded (M2) | The gateway announces the switch (M2); a fixed channel is recommended |
 | Hub down or Mac asleep | No app delivery | Node ↔ node ESP-NOW (bindings, floods) keeps working. Nodes detect the loss in 3.5 intervals; buffered Q1 frames expire after 1 s |
 | Hub restart | Sessions end: the stopping hub sends a hub BYE over USB and closes TCP | Nodes HELLO again; the WELCOME with the new hub epoch resets their windows |
-| Node power loss mid-OTA | Partial image | The bootloader keeps the old image; the hub retries ([06 §6.6](06-identity-ota.md)) |
+| Node power loss mid-OTA | Partial image | The bootloader keeps the old image; the hub retries, and the node resumes from its last 64 KB stride ([06 §6.6–6.7](06-identity-ota.md)) |
+| Wi-Fi stalls without dropping on a USB node | TCP/UDP lose frames | Heartbeats on the serial session keep it online; after 2 silent intervals both ends send over serial, and back to TCP once Wi-Fi carries (§5.10) |
 | Node in download mode (BOOT held at reset) | Gone from Wi-Fi; USB still present | Hub hint, plus `esptool --after watchdog-reset` (C3/S3) or RST |
 | Node NVS wiped | The epoch would regress | `epoch_floor` from provisioning, plus session reset on HELLO |
 | Congestion | Retries, longer tail | `tx_fail` in heartbeats; fast rate profile; lower heartbeat rate |

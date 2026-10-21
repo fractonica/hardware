@@ -94,6 +94,40 @@ struct Vitals {
     bool low_batt = false;
 };
 
+/**
+ * The node's answer to an OTA-class request from the hub (05 §5.7, design c4 §3): an OFFER is answered by
+ * an ACCEPT or REJECT frame, which is its acknowledgement (05 §5.8), not by a RESULT. Host::ota_frame fills
+ * it; Net sends it from port 240 to the hub over TCP or serial and keeps it for a DUP of the request.
+ */
+class OtaReply
+{
+public:
+    /** ACCEPT/REJECT are `{job_id <= 23, code}` (<= 28 B); room for a STATUS as well. */
+    static constexpr size_t kCapacity = 48;
+
+    /** Answers with an OTA frame of `kind` carrying `body`; false, and no answer, when it does not fit. */
+    bool set(uint8_t kind, std::span<const uint8_t> body)
+    {
+        if (body.size() > kCapacity) {
+            return false;
+        }
+        std::copy(body.begin(), body.end(), buf_);
+        kind_ = kind;
+        len_ = static_cast<uint8_t>(body.size());
+        set_ = true;
+        return true;
+    }
+    bool has() const { return set_; }
+    uint8_t kind() const { return kind_; }
+    std::span<const uint8_t> body() const { return {buf_, len_}; }
+
+private:
+    bool set_ = false;
+    uint8_t kind_ = 0;
+    uint8_t len_ = 0;
+    uint8_t buf_[kCapacity] = {};
+};
+
 /** What Net needs from the node; implemented by fr_core. Called on the core task. */
 class Host
 {
@@ -109,6 +143,15 @@ public:
     virtual Identity identity() = 0;
     virtual LinkInfo link_info() = 0;
     virtual Vitals vitals() = 0;
+    /**
+     * A fresh OTA-class frame from the hub, unicast on port 240 (OFFER, COMMIT, ABORT; design c4 §3), from
+     * a TCP or serial session (the hub never sends UDP). `h` is its header (ACK_REQ on an OFFER). The host
+     * answers at once through `reply` (a REJECT decided from the OFFER alone), or leaves it empty and
+     * answers later with Net::send_ota (an ACCEPT or REJECT once the image's first bytes are read). A
+     * duplicate request never comes here: Net answers it from its response cache, or drops it. A bye()
+     * asked for in here follows the reply.
+     */
+    virtual void ota_frame(LinkKind from, const fr::wire::Header &h, std::span<const uint8_t> body, OtaReply &reply) = 0;
 
 protected:
     ~Host() = default;
@@ -160,6 +203,7 @@ struct State {
     uint32_t hook_drops = 0;       // envelopes the debug hooks swallowed, both ways
     bool hub_link_dropped = false;  // drop_hub_link() active
     bool udp_blocked = false;       // udp_block() active
+    bool ip_blocked = false;        // ip_block() active
 
     const LinkState &link(LinkKind k) const { return links[index_of(k)]; }
     bool hub_link() const { return link(LinkKind::serial).session || link(LinkKind::tcp).session; }
@@ -182,6 +226,9 @@ public:
     static constexpr uint32_t kStateRepeatMs = 20;
     /** udp_ok lasts this many heartbeat intervals after an echo (05 §5.10). */
     static constexpr uint32_t kUdpOkIntervals = 3;
+    /** A USB node whose TCP session heard nothing from the hub for more than this many tenths of an interval
+     * sends over serial instead, as the hub does to it (05 §5.10; the hub's wifiSilentX10). */
+    static constexpr uint32_t kWifiSilentX10 = 20;
 
     /** Stores the configuration only; the timer is taken at the first attach(). */
     Net(Core &core, Host &host, const Config &cfg);
@@ -203,8 +250,17 @@ public:
     State state() const;
     /** `diag stats reset`: zeroes the counters (not the flags, hub_epoch or state_seq). */
     void reset_stats();
+    /**
+     * An OTA-class frame from port 240 to the hub (design c4 §3): STATUS, RESULT, or an ACCEPT/REJECT
+     * answering an OFFER after ota_frame() returned. It goes over the TCP session, else the serial one
+     * (also while TCP is silent, kWifiSilentX10), never UDP. `ack_req`: a Q1 frame the hub ACKs; one not ACKed within tcp_delivery_ms counts in
+     * delivery_failed (TCP and serial are not retried, 05 §5.8). Fails with busy without a hub session
+     * (the caller sends it again after the next WELCOME) or when the link refuses it; invalid_args when
+     * the frame exceeds the realtime MTU.
+     */
+    Status send_ota(uint8_t kind, std::span<const uint8_t> body, bool ack_req = false);
 
-    // Debug hooks (09 §9.7) for fr_diag's `net` commands, which only FR_TEST_HOOKS builds expose. Both
+    // Debug hooks (09 §9.7) for fr_diag's `net` commands, which only FR_TEST_HOOKS builds expose. They
     // start after the RESULT of the request that asked for them; 0 seconds ends the hook at once.
     /** `net drop_hub_link <s>`: no envelopes on any link, either way, for `s` seconds, and no session
      * timeouts, HELLOs or reconnects meanwhile (T-FLOOD). */
@@ -212,6 +268,11 @@ public:
     /** `net udp_block <s>`: nothing goes out over UDP for `s` seconds, as behind a firewall: the udp_ok
      * probe has to notice (T-PRES). */
     void udp_block(uint32_t seconds);
+    /** `net ip_block <s>`: Wi-Fi that degrades without dropping: no envelopes on TCP or UDP, either way,
+     * for `s` seconds, while the TCP session stays up here (no timeout, HELLO or reconnect on it until the
+     * hook ends, which then times it out if it went silent too long). Serial carries on as usual, so a USB
+     * node stays online at the hub through the heartbeats on its serial session. */
+    void ip_block(uint32_t seconds);
 
     // cap::Sink: capability emissions become EVENT/STATE envelopes to the hub.
     void event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields,
@@ -271,9 +332,11 @@ private:
     void on_presence(LinkKind from, uint8_t kind, std::span<const uint8_t> body, bool unicast);
     void on_ack(uint8_t kind, uint16_t req_epoch, uint32_t req_seq);
     void on_cmd(const fr::wire::EnvelopeView &e, bool unicast, LinkKind from);
+    void on_ota(const fr::wire::EnvelopeView &e, bool unicast, LinkKind from);
     void on_sync_req(LinkKind from, std::span<const uint8_t> body);
     void send_ack(const fr::wire::Header &h);
-    bool resend_cached(uint16_t src, uint16_t epoch, uint32_t req_seq);
+    /** A DUP request's cached answer, again, on the path an answer to a request from `from` takes. */
+    bool resend_cached(uint16_t src, uint16_t epoch, uint32_t req_seq, LinkKind from);
     void cache(uint16_t src, uint16_t epoch, uint32_t req_seq, std::span<const uint8_t> envelope);
 
     // Sessions and timing.
@@ -281,6 +344,11 @@ private:
     void send_heartbeat();
     /** Ends a session: its Q1 frames fail, heartbeats stop with the last session. */
     void end_session(LinkKind k, bool lost);
+    /** The presence frames (HEARTBEAT, PONG) go on every live session, not only the one route() prefers:
+     * TCP/UDP as wifi_route() picks (even while TCP is silent: that copy tells the hub Wi-Fi carries again)
+     * plus serial. The hub refreshes a node on any of its links, so a USB node whose TCP path loses frames
+     * stays online over serial; the copies are the same bytes, deduplicated by the hub's window. */
+    uint8_t every_session(uint8_t cls, uint8_t kind, size_t len) const;
     /** Timeout or hub BYE: end_session, then Link::drop() and HELLO again (TCP after reconnecting). */
     void lose_session(LinkKind k, DropReason why);
     /** On every session in `via` (kVia* bits; 0: every session). */
@@ -290,18 +358,32 @@ private:
     /** udp_ok off; if it was on with a TCP session, Q1 frames sent over UDP alone get their TCP copy and a
      * heartbeat goes at once over TCP and UDP (05 §5.10, design c3 §3). */
     void clear_udp_ok();
-    /** Link::hold() on every attached link (drop_hub_link). */
-    void hold_links(bool on);
+    /** Link::hold() as the hooks want it: every link during drop_hub_link, TCP and UDP during ip_block. */
+    void update_holds();
     void tick();
     void arm();
     void run_deferred();
     void start_drop(uint32_t seconds);
     void start_udp_block(uint32_t seconds);
+    void start_ip_block(uint32_t seconds);
     void end_drop();
+    void end_ip_block();
+    /** Session timeouts resume after a hook: a session in `which` (kVia* bits) silent too long ends now. */
+    void lose_stale_sessions(uint8_t which);
     bool dropping() const { return state_.hub_link_dropped; }
+    /** A hook freezes link `k`: nothing in or out, and on a session link no timeout, HELLO or reconnect. */
+    bool frozen(LinkKind k) const { return dropping() || (state_.ip_blocked && k != LinkKind::serial); }
 
     // Send side.
+    /** kVia* bits a frame to the hub takes (05 §5.10): TCP/UDP with a TCP session, unless it is silent and
+     * there is a serial session; else serial; 0 without a session (or during drop_hub_link). */
     uint8_t route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const;
+    /** route() for an answer to a request that came from `from`: one from serial is answered on serial. */
+    uint8_t answer_route(LinkKind from, uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const;
+    /** The TCP/UDP choice of route() for a node with a TCP session. */
+    uint8_t wifi_route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const;
+    /** Nothing from the hub over the TCP session for more than kWifiSilentX10 / 10 intervals. */
+    bool wifi_silent() const;
     std::span<const uint8_t> build(uint8_t flags, uint8_t cls, uint8_t kind, uint32_t seq, uint16_t dst, uint8_t port,
                                    std::span<const uint8_t> prefix, std::span<const uint8_t> body);
     /** Sends over every link in `via` (kVia* bits); returns the links it took, a TCP fallback included. */
@@ -359,14 +441,18 @@ private:
     // Debug hooks and requests deferred until the current receive() has sent its RESULT.
     TimeUs drop_until_ = 0;
     TimeUs udp_block_until_ = 0;
+    TimeUs ip_block_until_ = 0;
+    std::array<bool, kLinkKinds> held_{};  // Link::hold() as last asked, per link
     bool in_receive_ = false;
     bool defer_bye_ = false;
     uint8_t defer_bye_reason_ = 0;
     uint8_t defer_bye_via_ = 0;  // the link its request's RESULT took (kVia* bit); 0: every session
     uint32_t defer_drop_s_ = 0;
     uint32_t defer_udp_block_s_ = 0;
+    uint32_t defer_ip_block_s_ = 0;
     bool defer_drop_ = false;
     bool defer_udp_block_ = false;
+    bool defer_ip_block_ = false;
     TimeUs rx_at_ = 0;  // when the envelope being handled arrived (TIME t2)
 
     uint32_t rng_ = 0;

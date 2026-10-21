@@ -1,6 +1,7 @@
 // fr_net sessions and presence (design c3 §3, spec 05 §5.10-5.12): HELLO until WELCOME per link, the
 // boot event, heartbeat cadence and fields, session loss after 3.5 intervals (and the serial standby rule),
-// BYE in both directions, TIME answers, and the jitter RNG's determinism.
+// heartbeats and PONGs on every session, serial as the path while TCP is silent, BYE in both directions,
+// TIME answers, and the jitter RNG's determinism.
 #include <algorithm>
 
 #include "tests/net_fakes.hpp"
@@ -289,18 +290,127 @@ TEST(net_serial_session_is_standby_while_tcp_has_one)
     r.session(LinkKind::serial);
     r.session(LinkKind::tcp);
     r.clear_sent();
-    // Keepalives only on TCP: everything goes over TCP, so the serial session is not timed meanwhile.
+    // Keepalives only on TCP: everything goes over TCP, so the serial session is not timed meanwhile. Only
+    // the heartbeats take it as well (net_heartbeats_on_every_session).
     advance_alive(r, LinkKind::tcp, 10'000);
     CHECK(r.net.state().link(LinkKind::serial).session);
-    CHECK(r.serial.sent.empty());
+    CHECK_EQ(r.serial.frames().size(), r.serial.count(kPres, kHb));
     CHECK(r.tcp.count(kPres, kHb) >= 9u);
-    // TCP goes away: serial is the path now, heartbeats included, and its clock starts.
+    // TCP goes away: serial is the path now, and its clock starts.
     r.down(LinkKind::tcp);
+    r.serial.sent.clear();
     r.core.advance_ms(1100);
     CHECK(r.serial.count(kPres, kHb) >= 1u);
     CHECK(r.net.state().link(LinkKind::serial).session);
     r.core.advance_ms(2400);
     CHECK(!r.net.state().link(LinkKind::serial).session);
+}
+
+TEST(net_heartbeats_on_every_session)
+{
+    NetRig r;
+    r.up(LinkKind::udp);
+    r.session(LinkKind::serial);
+    r.session(LinkKind::tcp);
+    r.echo_last_udp_heartbeat();
+    REQUIRE(r.net.state().link(LinkKind::udp).udp_ok);
+    r.clear_sent();
+    // A USB node whose TCP session is preferred: each HEARTBEAT goes the preferred way (UDP once udp_ok)
+    // and, the same bytes, over its serial session, so the hub hears it there too when Wi-Fi loses frames.
+    for (int i = 0; i < 5; ++i) {
+        r.core.advance_ms(1100);  // at least one heartbeat (1 s +- 10 %)
+        r.echo_last_udp_heartbeat();
+    }
+    auto on_udp = r.udp.frames(kPres, kHb);
+    auto on_serial = r.serial.frames(kPres, kHb);
+    REQUIRE(on_udp.size() >= 4u);
+    REQUIRE_EQ(on_serial.size(), on_udp.size());
+    for (size_t i = 0; i < on_udp.size(); ++i) {
+        CHECK_BYTES(on_serial[i].bytes, on_udp[i].bytes);  // one frame: the hub keeps the first copy
+    }
+    CHECK(r.tcp.frames(kPres, kHb).empty());  // udp_ok: not TCP as well
+    // Nothing else takes the standby session: an event goes the preferred way only.
+    r.net.event(1, 1, fr::cap::Priority::realtime, {}, fr::cap::kNowUs);
+    CHECK(r.serial.frames_of(wire::kClsEvent).empty());
+    CHECK_EQ(r.udp.frames_of(wire::kClsEvent).size(), 1u);
+    CHECK(r.net.state().link(LinkKind::udp).udp_ok);  // serial copies leave the UDP probe alone
+}
+
+TEST(net_pong_on_every_session)
+{
+    NetRig r;
+    r.session(LinkKind::serial);
+    r.session(LinkKind::tcp);
+    r.clear_sent();
+    // The hub PINGs over its preferred link (TCP); the PONG also takes the serial session, which the hub
+    // may still hear when the TCP uplink is what lost the node's frames.
+    r.deliver(LinkKind::tcp, r.hub.ping(0x1234));
+    auto on_tcp = r.tcp.frames(kPres, proto::kKindPresencePong);
+    auto on_serial = r.serial.frames(kPres, proto::kKindPresencePong);
+    REQUIRE_EQ(on_tcp.size(), 1u);
+    REQUIRE_EQ(on_serial.size(), 1u);
+    CHECK_BYTES(on_serial[0].bytes, on_tcp[0].bytes);
+    // Without a TCP session serial is the path, once.
+    r.down(LinkKind::tcp);
+    r.clear_sent();
+    r.deliver(LinkKind::serial, r.hub.ping(0x5678));
+    CHECK_EQ(r.serial.count(kPres, proto::kKindPresencePong), 1u);
+}
+
+TEST(net_silent_tcp_hands_the_path_to_serial)
+{
+    NetRig r;
+    r.session(LinkKind::serial);
+    r.session(LinkKind::tcp);
+    r.clear_sent();
+    auto event = [&r](uint8_t id) { r.net.event(1, id, fr::cap::Priority::realtime, {}, fr::cap::kNowUs); };
+    const auto status = frt::HubSim::body_of(proto::OtaStatus{.job_id = "ota-0042", .state = 1, .bytes = 4096});
+    // Wi-Fi stalls without dropping: the hub's keepalives reach the node over serial only. For 2 intervals
+    // everything still takes TCP...
+    r.core.advance_ms(1000);
+    r.deliver(LinkKind::serial, r.hub.heartbeat());
+    r.core.advance_ms(1000);
+    event(1);
+    CHECK_EQ(r.tcp.frames_of(wire::kClsEvent).size(), 1u);
+    CHECK(r.serial.frames_of(wire::kClsEvent).empty());
+    // ...then serial, where the hub sends to it by the same rule (05 §5.10): events and OTA frames. The
+    // heartbeats take both, so the hub hears it over Wi-Fi as soon as that carries again.
+    r.core.advance_ms(1);
+    event(2);
+    CHECK_EQ(r.serial.frames_of(wire::kClsEvent).size(), 1u);
+    CHECK_EQ(r.tcp.frames_of(wire::kClsEvent).size(), 1u);
+    CHECK(r.net.send_ota(proto::kKindOtaStatus, status).has_value());
+    CHECK_EQ(r.serial.frames_of(wire::kClsOta).size(), 1u);
+    CHECK(r.tcp.frames_of(wire::kClsOta).empty());
+    r.clear_sent();
+    r.deliver(LinkKind::serial, r.hub.heartbeat());
+    r.core.advance_ms(1100);
+    CHECK(r.serial.count(kPres, kHb) >= 1u);
+    CHECK_EQ(r.tcp.count(kPres, kHb), r.serial.count(kPres, kHb));
+    CHECK(r.net.state().link(LinkKind::tcp).session);  // 3.1 intervals: not timed out yet
+    // A hub frame over TCP: the hub path again.
+    r.deliver(LinkKind::tcp, r.hub.heartbeat());
+    r.clear_sent();
+    event(3);
+    CHECK(r.net.send_ota(proto::kKindOtaStatus, status).has_value());
+    CHECK_EQ(r.tcp.frames_of(wire::kClsEvent).size(), 1u);
+    CHECK_EQ(r.tcp.frames_of(wire::kClsOta).size(), 1u);
+    CHECK(r.serial.frames_of(wire::kClsEvent).empty());
+    CHECK(r.serial.frames_of(wire::kClsOta).empty());
+}
+
+TEST(net_silent_tcp_without_serial_stays_the_path)
+{
+    NetRig r;
+    r.session(LinkKind::tcp);
+    r.clear_sent();
+    // No other session to take: TCP carries on until its session times out at 3.5 intervals (05 §5.11).
+    r.core.advance_ms(3000);
+    r.net.event(1, 1, fr::cap::Priority::realtime, {}, fr::cap::kNowUs);
+    CHECK_EQ(r.tcp.frames_of(wire::kClsEvent).size(), 1u);
+    CHECK(r.serial.sent.empty());
+    r.core.advance_ms(500);
+    CHECK(!r.net.state().link(LinkKind::tcp).session);
 }
 
 TEST(net_link_down_ends_its_session)

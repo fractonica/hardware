@@ -12,6 +12,8 @@ export const ERROR_CODES = [
   'FLASH_FAILED',
   'TARGET_MISMATCH',
   'INCOMPATIBLE_PROFILE',
+  'OTA_FAILED',
+  'OTA_ROLLED_BACK',
   'TIMEOUT',
   'INVALID_ARGS',
   'INVALID_SOURCE',
@@ -125,6 +127,8 @@ export function exitCodeFor(code: ErrorCode | undefined): number {
     case 'BUILD_FAILED':
       return 7;
     case 'FLASH_FAILED':
+    case 'OTA_FAILED':
+    case 'OTA_ROLLED_BACK':
       return 8;
     case 'HUB_UNREACHABLE':
       return 10;

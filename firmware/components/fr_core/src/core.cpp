@@ -1,6 +1,7 @@
-// Boot and runtime wiring (spec 03 §3.4-3.5, design c2 §5, c3 §3): identity and epoch, the hub link
-// (fr_net's Net over the serial, TCP and UDP links), fr_serial and the diag channel, the port table with
-// the system capabilities, HELLO's facts, the C1 banner and the liveness log.
+// Boot and runtime wiring (spec 03 §3.4-3.5, design c2 §5, c3 §3, c4 §3): identity and epoch, the hub link
+// (fr_net's Net over the serial, TCP and UDP links), the OTA job and its health gate (fr_ota's Ota),
+// fr_serial and the diag channel, the port table with the system capabilities, HELLO's facts, the C1 banner
+// and the liveness log.
 #include "fr/core.hpp"
 
 #include <array>
@@ -20,12 +21,15 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_worker.hpp"
 #include "fr/core/descriptor.hpp"
 #include "fr/diag.hpp"
 #include "fr/envelope.hpp"
 #include "fr/hash.hpp"
 #include "fr/net/esp.hpp"
 #include "fr/net/net.hpp"
+#include "fr/ota/esp.hpp"
+#include "fr/ota/ota.hpp"
 #include "fr/serial.hpp"
 #include "fr/serial_line.hpp"
 #include "led.hpp"       // generated fr::cap::Led (identify blinks the first LED)
@@ -55,6 +59,12 @@ constexpr size_t kRxSmall = 12;
 constexpr size_t kRxSmallBytes = 256;
 constexpr size_t kRxBig = 2;
 constexpr size_t kRxBigBytes = proto::kMtuBulk;
+// 03 §3.8: a fault build never sets the CAPS health bit, so an OTA of it rolls back (T-OTA).
+#if defined(CONFIG_FR_TEST_FAULT_HEALTH) && CONFIG_FR_TEST_FAULT_HEALTH
+constexpr bool kFaultHealth = true;
+#else
+constexpr bool kFaultHealth = false;
+#endif
 
 fr_identity_t s_identity;
 char s_fw_id[13] = "unknown";
@@ -62,6 +72,8 @@ uint8_t s_fw_prefix[8] = {};
 EspCore s_core;
 // Net is the Sink, so it exists before fr::board::attach; built in start() (Kconfig, timers).
 std::optional<net::Net> s_net;
+// The OTA job and the health gate (design c4 §3); bound in start(), driven on the core task.
+ota::Ota s_ota;
 
 PortEntry s_ports[kMaxPorts];
 diag::PortInfo s_diag_ports[kMaxPorts];
@@ -100,13 +112,17 @@ net::Config net_config()
 
 void load_fw_id()
 {
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    uint8_t sha[32];
-    if (running && esp_partition_get_sha256(running, sha) == ESP_OK) {
-        snprintf(s_fw_id, sizeof(s_fw_id), "%02x%02x%02x%02x%02x%02x", sha[0], sha[1], sha[2], sha[3], sha[4],
-                 sha[5]);
-        std::memcpy(s_fw_prefix, sha, sizeof(s_fw_prefix));
+    // Ota::on_boot() already hashed the running image (esp_partition_get_sha256 verifies all of it, which
+    // takes a while); only without a bound Ota is it read again.
+    std::array<uint8_t, 32> sha = s_ota.running().fw_id;
+    if (sha == std::array<uint8_t, 32>{}) {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        if (running == nullptr || esp_partition_get_sha256(running, sha.data()) != ESP_OK) {
+            return;
+        }
     }
+    snprintf(s_fw_id, sizeof(s_fw_id), "%02x%02x%02x%02x%02x%02x", sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+    std::memcpy(s_fw_prefix, sha.data(), sizeof(s_fw_prefix));
 }
 
 const PortEntry *find_port(uint8_t port)
@@ -185,7 +201,7 @@ void build_hello()
     h.role = proto::Role::node;
     h.hb_interval_ms = CONFIG_FR_HEARTBEAT_MS;
     h.reset_reason = static_cast<uint8_t>(esp_reset_reason());
-    h.ota_state = ota_state();  // fixed for the boot until fr_ota (C4) marks the image valid
+    h.ota_state = ota_state();  // as the boot found it; hello_info() follows Ota's mark-valid
     uint32_t caps = 0;
     if (FR_TEST_HOOKS) {
         caps |= net::kCapInjectEnabled;
@@ -283,10 +299,16 @@ void release_rx(RxBuf *b)
 void on_envelope(LinkKind kind, RxBuf *b)
 {
     std::span<const uint8_t> env{b->bytes, b->len};
-    if (!wire::unpack_header(env)) {
+    auto h = wire::unpack_header(env);
+    if (!h) {
         ++s_env_bad;  // Net drops it too; counted here for diag `stats` env_bad
     }
     s_net->receive(kind, env);
+    // HUB_ACK (06 §6.6): a WELCOME that gave this link its session. Ota also sends a RESULT it holds for
+    // the hub from here (design c4 §3: after the first WELCOME).
+    if (h && h->cls == wire::kClsNet && h->kind == proto::kKindNetWelcome && s_net->state().link(kind).session) {
+        s_ota.health_set(ota::kHealthHubAck);
+    }
     release_rx(b);
 }
 
@@ -311,7 +333,13 @@ bool deliver(LinkKind kind, std::span<const uint8_t> envelope)
 /** fr_net task: a TCP or UDP link went up or down. */
 bool post_link_changed(LinkKind kind)
 {
-    return s_core.post([kind] { s_net->link_changed(kind); });
+    return s_core.post([kind] {
+        s_net->link_changed(kind);
+        // NET (06 §6.6): the links come up only with Wi-Fi associated and addressed.
+        if (net::esp::link_info().wifi_up) {
+            s_ota.health_set(ota::kHealthNet);
+        }
+    });
 }
 
 // ---- system capabilities ----
@@ -480,6 +508,10 @@ public:
     {
         net::HelloInfo h = s_hello;
         h.caps = s_hello_caps.load(std::memory_order_relaxed);
+        // The hub's VERIFYING reads ota_state (design c4 §4): valid once the health gate passed this boot.
+        if (h.ota_state == proto::OtaState::pending_verify && s_ota.running().pending_verify && !s_ota.pending_verify()) {
+            h.ota_state = proto::OtaState::valid;
+        }
         return h;
     }
 
@@ -500,11 +532,118 @@ public:
     {
         net::Vitals v;
         v.free_heap_kb = esp_get_free_heap_size() / 1024;
+        v.ota_busy = s_ota.busy();  // HEARTBEAT ota_busy (06 §6.6)
         return v;
+    }
+
+    void ota_frame(LinkKind, const wire::Header &h, std::span<const uint8_t> body, net::OtaReply &reply) override
+    {
+        s_ota.on_frame(h.kind, body, reply);  // OFFER, COMMIT, ABORT (design c4 §3)
     }
 };
 
 NetHost s_net_host;
+
+/** One line per OTA decision the node sends (not every STATUS): what an agent reads in `fr logs`. */
+void log_ota(uint8_t kind, std::span<const uint8_t> body, const Status &st)
+{
+    const char *sent = st ? "" : " (no hub session: not sent)";
+    switch (kind) {
+    case proto::kKindOtaAccept:
+        if (auto a = proto::decode_ota_accept(body)) {
+            ESP_LOGI(TAG, "ota: ACCEPT %.*s%s%s", static_cast<int>(a->job_id.size()), a->job_id.data(),
+                     a->code == static_cast<uint8_t>(ota::Accept::resumed) ? " (resumed)" : "", sent);
+        }
+        break;
+    case proto::kKindOtaReject:
+        if (auto r = proto::decode_ota_reject(body)) {
+            ESP_LOGW(TAG, "ota: REJECT %.*s code=%u%s", static_cast<int>(r->job_id.size()), r->job_id.data(),
+                     static_cast<unsigned>(r->code), sent);
+        }
+        break;
+    case proto::kKindOtaResult:
+        if (auto r = proto::decode_ota_result(body)) {
+            ESP_LOGI(TAG, "ota: RESULT %.*s outcome=%u reason=%u%s", static_cast<int>(r->job_id.size()),
+                     r->job_id.data(), static_cast<unsigned>(r->outcome), static_cast<unsigned>(r->reason), sent);
+        }
+        break;
+    case proto::kKindOtaStatus:
+        if (auto s = proto::decode_ota_status(body); s && s->state != static_cast<uint8_t>(ota::Phase::downloading)) {
+            ESP_LOGI(TAG, "ota: %s %.*s", s->state == static_cast<uint8_t>(ota::Phase::staged) ? "staged" : "installed",
+                     static_cast<int>(s->job_id.size()), s->job_id.data());
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/** What Ota needs from the runtime (design c4 §3). Core task. */
+class OtaHost final : public ota::Host
+{
+public:
+    Status send(uint8_t kind, std::span<const uint8_t> body, bool ack_req) override
+    {
+        Status st = s_net->send_ota(kind, body, ack_req);
+        log_ota(kind, body, st);
+        return st;
+    }
+
+    bool endpoint(ota::Endpoint &out) override
+    {
+        // design c4 §3: the address the TCP session is connected to, not a fresh lookup of hub_host.
+        if (!s_net->state().link(LinkKind::tcp).session) {
+            return false;
+        }
+        const net::esp::Status es = net::esp::status();
+        if (!es.tcp_up || (es.hub_ip[0] | es.hub_ip[1] | es.hub_ip[2] | es.hub_ip[3]) == 0) {
+            return false;
+        }
+        std::snprintf(out.host, sizeof(out.host), "%u.%u.%u.%u", es.hub_ip[0], es.hub_ip[1], es.hub_ip[2], es.hub_ip[3]);
+        out.port = ota::kHttpPort;
+        return true;
+    }
+
+    void restart() override
+    {
+        // 06 §6.6: BYE ota, then the restart once it has left (as fr.node.reboot).
+        ESP_LOGI(TAG, "ota: new image installed, restarting into it");
+        s_net->bye(net::kByeOta);
+        s_reboot_bootloader = false;
+        if (s_reboot_timer == nullptr) {
+            diag::restart(false);
+        }
+        s_reboot_timer->start(kRebootDelayUs);
+    }
+};
+
+OtaHost s_ota_host;
+
+/** Boot step 2 (03 §3.5): Ota on the target's slot, HTTP client and nvs:fr_ota, then its boot checks. */
+void start_ota()
+{
+    ota::Deps d;
+    d.core = &s_core;
+    d.worker = &worker::get();
+    d.flash = &ota::esp::flash();
+    d.fetch = &ota::esp::fetch();
+    d.store = &ota::esp::store();
+    d.host = &s_ota_host;
+    d.ident = ota::esp::ident();
+    d.fault_health = kFaultHealth;
+    if (!s_ota.bind(d)) {
+        ESP_LOGE(TAG, "ota: no timer left: OFFERs go unanswered and no health gate runs this boot");
+        return;
+    }
+    s_ota.on_boot();
+    if (kFaultHealth) {
+        ESP_LOGW(TAG, "ota: fault build (health): this image never passes its health gate");
+    }
+    if (s_ota.pending_verify()) {
+        ESP_LOGW(TAG, "ota: new image on probation: %u s to set health bits 0x%" PRIx32,
+                 static_cast<unsigned>(ota::kHealthDeadlineMs / 1000), s_ota.required());
+    }
+}
 
 /**
  * Counters diag `stats` shows that Net does not keep (Net has reset_stats()): the links' and fr_core's,
@@ -666,19 +805,25 @@ public:
         n.hook_dropped = st.hook_drops;
         n.hub_link_dropped = st.hub_link_dropped;
         n.udp_blocked = st.udp_blocked;
+        n.ip_blocked = st.ip_blocked;
         return n;
     }
 
     Status net_hook(diag::NetHook hook, uint32_t seconds) override
     {
         // Net defers a hook asked for inside its receive() until that request's RESULT has gone out.
-        bool drop = hook == diag::NetHook::drop_hub_link;
-        if (drop) {
+        switch (hook) {
+        case diag::NetHook::drop_hub_link:
             s_net->drop_hub_link(seconds);
-        } else {
+            break;
+        case diag::NetHook::udp_block:
             s_net->udp_block(seconds);
+            break;
+        case diag::NetHook::ip_block:
+            s_net->ip_block(seconds);
+            break;
         }
-        ESP_LOGW(TAG, "debug hook %s %" PRIu32 " s", drop ? "drop_hub_link" : "udp_block", seconds);
+        ESP_LOGW(TAG, "debug hook %s %" PRIu32 " s", diag::hook_name(hook), seconds);
         return {};
     }
 
@@ -839,7 +984,8 @@ void start_wifi()
 {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kAlivePeriodMs));
-        ESP_LOGI(TAG, "alive id=%s uptime_s=%" PRId64 " heap=%" PRIu32, s_identity.device_id,
+        // fw= lets a deploy's expect_log tell the new image's heartbeat from the old one's.
+        ESP_LOGI(TAG, "alive fw=%s id=%s uptime_s=%" PRId64 " heap=%" PRIu32, s_fw_id, s_identity.device_id,
                  esp_timer_get_time() / 1000000, static_cast<uint32_t>(esp_get_free_heap_size()));
     }
 }
@@ -862,7 +1008,10 @@ Core &start()
     fr_id_load(&s_identity);
     // Before anything can transmit (05 §5.5): frames only start once the core task runs.
     fr_id_commit_boot_epoch(&s_identity);
-    load_fw_id();
+    // Slow work (OTA download, flash and NVS writes) runs there from now on (03 §3.4).
+    if (!worker::start()) {
+        ESP_LOGE(TAG, "no fr_worker: OTA and other slow work cannot run this boot");
+    }
     init_rx_pool();
     // The runtime's timers are taken before fr::board::init can drain the pool, so `reboot` always
     // answers before it restarts. Without the wake-up alarm no timer would fire: reboot then restarts
@@ -871,6 +1020,10 @@ Core &start()
         s_reboot_timer = s_core.timer([] { diag::restart(s_reboot_bootloader); });
         s_serial_timer = s_core.timer([] {
             s_serial.poll();
+            // NET for an image on probation even when the hub's address never resolves (no link comes up).
+            if ((s_ota.required() & ~s_ota.health() & ota::kHealthNet) != 0 && net::esp::link_info().wifi_up) {
+                s_ota.health_set(ota::kHealthNet);
+            }
             s_serial_timer->start(kSerialPollUs);
         });
     }
@@ -881,6 +1034,10 @@ Core &start()
     s_net->attach(s_serial);
     s_net->attach(net::esp::tcp_link());
     s_net->attach(net::esp::udp_link());
+    // 03 §3.5 step 2, with its timer taken before the board's: a PENDING_VERIFY image's health deadline
+    // runs from here, and the running image's fw_id is read once for HELLO, the banner and CHECK.
+    start_ota();
+    load_fw_id();
     if (!serial::start({.frame = on_frame_line, .text = on_text_line})) {
         ESP_LOGE(TAG, "fr_serial did not start: no frames and no diag channel this boot");
     }
@@ -928,6 +1085,13 @@ void run_ports(std::span<const PortEntry> instances, SelftestFn selftest, size_t
     // The core task's first round: every property once (C2 behaviour; with no session yet Net drops
     // them, and get_state resends them after WELCOME).
     s_core.post([] { report_all_ports(); });
+    // Health bits CORE (boot complete: the core task runs) and CAPS (every bound capability's init
+    // succeeded, none left out), 06 §6.6. Ota drops CAPS in a fault build.
+    bool caps_ok = left_out == 0;
+    for (const PortEntry &p : instances) {
+        caps_ok = caps_ok && p.ok;
+    }
+    s_core.post([caps_ok] { s_ota.health_set(ota::kHealthCore | (caps_ok ? ota::kHealthCaps : 0)); });
     if (s_serial_timer != nullptr) {
         s_serial_timer->start(kSerialPollUs);
     }

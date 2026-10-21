@@ -4,88 +4,21 @@
 // before a board runs it: the handshake (describe for an unknown firmware, get_state, node.boot), udp_ok
 // and heartbeat echoes, commands through the response cache, presence (silence, BYE, reboot, and a reboot's
 // RESULT on another link than its BYE), udp_blocked, the drop_hub_link hook, a hub restart, and a USB
-// node's standby serial session (Wi-Fi gone, the hub's BYE there).
+// node's standby serial session (Wi-Fi gone; Wi-Fi silent both ways, or only its uplink: online on its USB
+// heartbeats, both ends sending over USB). OTA against the orchestrator is in interop-ota.test.ts.
 // `pnpm test:host` builds the binary (run it again after changing C++); without it the suite is skipped.
 
-import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import { existsSync } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
 import type { HubEvent } from '../src/context.ts';
 import { HANDLERS } from '../src/ops.ts';
 import { createRouter, type RouterConfig } from '../src/router/index.ts';
+import { BIN, CppNode } from './cpp-node.ts';
 import { rig, type Rig, until, waitForEvent } from './fake-node.ts';
-
-const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const BIN = resolve(REPO, 'build', 'host-tests', 'fr_net_node');
-
-type Line = { ev: string; [k: string]: unknown };
-
-/** One fr_net_node process: its JSON lines, and stdin commands (state, udp_block <s>, tcp 0|1, usb 0|1, bye, quit). */
-class CppNode {
-  readonly lines: Line[] = [];
-  readonly proc: ChildProcessWithoutNullStreams;
-  exited: number | null = null;
-  /** With --serial: the node's `@fr1:` lines, as its USB port would print them. */
-  onSerial: (line: string) => void = () => undefined;
-  #buf = '';
-
-  constructor(args: string[]) {
-    this.proc = spawn(BIN, args, { env: { ...process.env, ASAN_OPTIONS: 'detect_leaks=0:abort_on_error=1' } });
-    this.proc.stdout.setEncoding('utf8');
-    this.proc.stdout.on('data', (chunk: string) => {
-      this.#buf += chunk;
-      let nl: number;
-      while ((nl = this.#buf.indexOf('\n')) >= 0) {
-        const text = this.#buf.slice(0, nl);
-        this.#buf = this.#buf.slice(nl + 1);
-        if (text.startsWith('@fr1:')) {
-          this.onSerial(text);
-          continue;
-        }
-        try {
-          this.lines.push(JSON.parse(text) as Line);
-        } catch {
-          this.lines.push({ ev: 'text', text });
-        }
-      }
-    });
-    this.proc.stderr.on('data', (chunk: Buffer) => process.stderr.write(chunk));
-    this.proc.stdin.on('error', () => undefined); // a line written after the node exited
-    this.proc.on('exit', (code) => (this.exited = code ?? -1));
-  }
-
-  send(cmd: string): void {
-    this.proc.stdin.write(`${cmd}\n`);
-  }
-
-  of(ev: string): Line[] {
-    return this.lines.filter((l) => l.ev === ev);
-  }
-
-  /** Dispatches of `port/cmd` the node ran. */
-  ran(port: number, cmd: number): number {
-    return this.of('dispatch').filter((l) => l.port === port && l.cmd === cmd).length;
-  }
-
-  async state(): Promise<Line> {
-    const n = this.of('state').length;
-    this.send('state');
-    await until(() => this.of('state').length > n, 2000, 'a state line');
-    return this.of('state').at(-1)!;
-  }
-
-  stop(): void {
-    if (this.exited === null) {
-      this.proc.kill('SIGKILL');
-    }
-  }
-}
 
 const rigs: Rig[] = [];
 const nodes: CppNode[] = [];
@@ -129,9 +62,10 @@ async function udpRelay(to: number, delayMs: number): Promise<number> {
 /**
  * A TCP proxy to the router whose `silence()` drops everything both ways and passes no close on: Wi-Fi
  * gone (an AP rebooting) without a FIN to either end. `silence('up')` drops only what the node sends (its
- * uplink is gone, the hub's frames still reach it), and passes no close on either.
+ * uplink is gone, the hub's frames still reach it), and passes no close on either. `resume()`: Wi-Fi
+ * carries again.
  */
-async function tcpProxy(to: number): Promise<{ port: number; silence(dir?: 'both' | 'up'): void }> {
+async function tcpProxy(to: number): Promise<{ port: number; silence(dir?: 'both' | 'up'): void; resume(): void }> {
   let silent: 'both' | 'up' | null = null;
   const sockets: Socket[] = [];
   const server = createServer((client) => {
@@ -148,7 +82,7 @@ async function tcpProxy(to: number): Promise<{ port: number; silence(dir?: 'both
   });
   proxies.push({ server, sockets });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
-  return { port: (server.address() as { port: number }).port, silence: (dir = 'both') => (silent = dir) };
+  return { port: (server.address() as { port: number }).port, silence: (dir = 'both') => (silent = dir), resume: () => (silent = null) };
 }
 
 async function setup(
@@ -203,6 +137,8 @@ describe.skipIf(!existsSync(BIN))('the C++ fr_net node against the router', () =
   it('finishes the handshake: WELCOME, TIME, describe for an unknown firmware, get_state, node.boot, online', async () => {
     const { r, node, mac } = await setup({ addr: 21 });
     // The hub has no manifest for this fw_id: it asked for the descriptor (bulk reply) before get_state.
+    // (The node's lines come over a pipe: they may trail the frames the hub already acted on.)
+    await until(() => node.of('dispatch').length >= 2, 2000, 'two dispatch lines');
     const dispatched = node.of('dispatch').map((l) => `${String(l.port)}/${String(l.cmd)}`);
     expect(dispatched.slice(0, 2)).toEqual(['0/2', '0/7']);
     expect(node.of('dispatch')[0].capacity).toBe(1445);
@@ -404,41 +340,49 @@ describe.skipIf(!existsSync(BIN))('the C++ fr_net node against the router', () =
     expect(seen.filter((t) => t === 'device.offline' || t === 'device.suspect')).toEqual([]);
   }, 20_000);
 
-  it('brings a USB node whose Wi-Fi went silent back over its USB line at once: the hub BYE there makes it HELLO', async () => {
-    const { r, node, mac, proxy } = await setup({ addr: 30, mac: '58e6c5d55e0a', serial: true, tcpProxy: true });
+  it('keeps a USB node whose Wi-Fi went silent online over its USB line, and takes TCP again once Wi-Fi carries', async () => {
+    const { r, node, mac, proxy } = await setup({ addr: 30, mac: '58e6c5d55e0a', hbMs: 200, serial: true, tcpProxy: true });
     await until(() => r.router.info(mac)?.links.length === 2, 4000, 'both sessions');
-    const seen: { type: string; at: number; fields?: Record<string, unknown> }[] = [];
-    r.events.subscribe((e) => e.device === mac && (e.type === 'device.offline' || e.type === 'device.online') && seen.push({ type: e.type, at: Date.now(), fields: e.fields }));
+    const seen: string[] = [];
+    r.events.subscribe((e) => e.device === mac && e.type.startsWith('device.') && seen.push(e.type));
     node.send('udp_block 30');
     proxy!.silence(); // the AP is gone: nothing over Wi-Fi either way, and no FIN
-    await until(() => seen.some((e) => e.type === 'device.online'), 9000, 'online again');
-    expect(seen.map((e) => e.type)).toEqual(['device.offline', 'device.online']);
-    expect(seen[0].fields).toEqual({ reason: 'timeout' });
-    // Without the BYE the node HELLOs over USB only when its own serial keepalive runs out, 3.5 intervals
-    // after it loses TCP; with it, at once (the handshake's get_state may wait for a RESULT that the node
-    // still routes to TCP, up to 2 s).
-    expect(seen[1].at - seen[0].at).toBeLessThan(3000);
-    expect(r.router.info(mac)!.links).toEqual(['serial']);
-    expect(r.router.status().counters.no_session).toBe(0);
+    // After 2 silent intervals both ends send over USB (05 §5.10). The node's heartbeats there keep it
+    // online, and its TCP session times out at 3.5 intervals (the hub keeps its own: no FIN came).
+    await until(() => r.router.info(mac)!.links[0] === 'serial', 3000, 'the USB line first');
+    await eventually(async () => (await node.state()).session === false, 3000, 'the TCP session to time out at the node');
     expect(r.router.presence(mac)).toBe('online');
+    expect(await node.state()).toMatchObject({ serial_session: true, session: false, sessions_lost: 1 });
+    const send = (command: string) =>
+      HANDLERS.command_send({ selector: r.registry.get(mac)!.alias, command, ack: 'result', timeout_s: 3, duplicate: false }, r.hub) as Promise<{ results: { status: string; link: string }[] }>;
+    expect((await send('status.toggle')).results).toMatchObject([{ status: 'ok', link: 'serial' }]);
+    // Wi-Fi carries again: the HELLO on the node's new connection gets a session, and TCP is first again.
+    proxy!.resume();
+    await until(() => r.router.info(mac)?.links[0] === 'tcp', 6000, 'TCP first again');
+    expect((await send('status.toggle')).results).toMatchObject([{ status: 'ok', link: 'tcp' }]);
+    expect(seen.filter((t) => t === 'device.offline' || t === 'device.suspect')).toEqual([]);
+    expect(r.router.status().counters.no_session).toBe(0);
   }, 20_000);
 
-  it('ends both sessions of a USB node at the hub BYE, so a TCP connection that only looks open takes no RESULT', async () => {
-    // The Wi-Fi uplink is gone: the hub hears nothing over Wi-Fi, but its keepalives still reach the node
-    // over TCP until it times the node out, and the close of that connection never arrives. The BYE over
-    // USB must end the TCP session as well, or the USB handshake's get_state is answered on TCP (lost),
-    // and device.online waits handshakeCmdTimeoutMs (2 s) for it.
-    const { r, node, mac, proxy } = await setup({ addr: 32, mac: '58e6c5d55e0c', serial: true, tcpProxy: true });
+  it('answers a request from its USB line there, so a TCP connection that only looks open takes no RESULT', async () => {
+    // The Wi-Fi uplink is gone: the hub hears nothing over Wi-Fi and sends over USB after 2 intervals,
+    // while its keepalives still reach the node over TCP, whose session therefore looks alive at the node.
+    // The node answers a request on the link it came on (05 §5.10): a RESULT on that TCP connection would
+    // be lost.
+    const { r, node, mac, proxy } = await setup({ addr: 32, mac: '58e6c5d55e0c', hbMs: 200, serial: true, tcpProxy: true });
     await until(() => r.router.info(mac)?.links.length === 2, 4000, 'both sessions');
-    const seen: { type: string; at: number }[] = [];
-    r.events.subscribe((e) => e.device === mac && (e.type === 'device.offline' || e.type === 'device.online') && seen.push({ type: e.type, at: Date.now() }));
+    const seen: string[] = [];
+    r.events.subscribe((e) => e.device === mac && e.type.startsWith('device.') && seen.push(e.type));
     node.send('udp_block 30');
     proxy!.silence('up');
-    await until(() => seen.some((e) => e.type === 'device.online'), 9000, 'online again');
-    expect(seen.map((e) => e.type)).toEqual(['device.offline', 'device.online']);
-    expect(seen[1].at - seen[0].at).toBeLessThan(1000);
-    expect(r.router.info(mac)!.links).toEqual(['serial']);
-    expect(await node.state()).toMatchObject({ serial_session: true, session: false });
+    await until(() => r.router.info(mac)!.links[0] === 'serial', 3000, 'the USB line first');
+    await new Promise((res) => setTimeout(res, 1000)); // past the 3.5 intervals that would be offline
+    expect(await node.state()).toMatchObject({ serial_session: true, session: true });
+    const send = (command: string) =>
+      HANDLERS.command_send({ selector: r.registry.get(mac)!.alias, command, ack: 'result', timeout_s: 3, duplicate: false }, r.hub) as Promise<{ results: { status: string; link: string }[] }>;
+    expect((await send('status.toggle')).results).toMatchObject([{ status: 'ok', link: 'serial' }]);
+    expect(seen.filter((t) => t === 'device.offline' || t === 'device.suspect')).toEqual([]);
+    expect(r.router.presence(mac)).toBe('online');
   }, 20_000);
 
   it('brings an unprovisioned node (0xFFFE) online over TCP only: it never sends UDP, and gets no udp_blocked', async () => {

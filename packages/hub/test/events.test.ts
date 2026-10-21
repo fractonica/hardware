@@ -63,6 +63,11 @@ function hubWith(opts: { run?: number; db?: Db } = {}) {
     online: () => [...presence].filter(([, p]) => p === 'online').map(([id]) => id),
     sendCommand: () => Promise.reject(new Error('no links in this test')),
     pushAlias: () => undefined,
+    sendOta: () => {
+      throw new Error('no links in this test');
+    },
+    onOta: () => () => undefined,
+    tcpAddress: () => null,
   };
   const hub = { db, logs, events, registry, router, seq } as unknown as HubContext;
   const publish = (type: string, device?: string, extra: Partial<HubEvent> = {}) =>

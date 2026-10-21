@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const JOB_STATUSES = ['queued', 'working', 'completed', 'failed', 'cancelled'] as const;
-export const JOB_KINDS = ['build', 'flash', 'reset', 'provision'] as const;
+export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy'] as const;
 
 export const JobSchema = z.object({
   job_id: z.string(),
@@ -65,6 +65,23 @@ export const PartitionSchema = z.object({
   readonly: z.boolean(),
 });
 
+/** Fault builds (spec 03 §3.8): `health` never passes the OTA health check, so it rolls back. */
+export const FAULT_KINDS = ['health'] as const;
+export type FaultKind = (typeof FAULT_KINDS)[number];
+
+/**
+ * The image's fr_app_desc (spec 06 §6.8, design c4 §2), parsed at image offset 288 by the ingest, which
+ * fails the build when it disagrees with the manifest. `fault` is the raw byte: 0 none, 1 health.
+ */
+export const AppDescSchema = z.object({
+  board: z.string(),
+  profile: z.string(),
+  part_profile: z.string(),
+  catalog_hash: z.number().int().min(0).max(0xffffffff),
+  fault: z.number().int().min(0).max(255),
+});
+export type AppDesc = z.infer<typeof AppDescSchema>;
+
 /** One capability instance of a build, from the generated fr_manifest.json (design c2 §6). */
 export const ManifestCapSchema = z.looseObject({
   name: z.string(),
@@ -107,6 +124,10 @@ export const ArtifactManifestSchema = z.object({
   caps: z.array(ManifestCapSchema).optional(),
   /** FNV-1a 32 of the canonical catalog JSON the firmware was generated from. */
   catalog_hash: z.number().int().min(0).max(0xffffffff).optional(),
+  /** The image's fr_app_desc (absent before C4 builds). */
+  app_desc: AppDescSchema.optional(),
+  /** A fault build (`fr build --fault health`): build_id `<app>/<profile>/debug-fault/<fw>`; never picked implicitly. */
+  fault: z.enum(FAULT_KINDS).optional(),
   /** ELF and linker map, kept to decode panics and core dumps of this fw_id; never flashed. */
   debug: z
     .object({

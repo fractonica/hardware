@@ -5,9 +5,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname } from 'node:path';
 
 import { checkSourceDir, paths, pytoolsSource } from '@fractonica/host';
-import { formatCursor, FrError, HUB_VERSION, MAX_WAIT_S, parseCursor, REGISTRY_HASH, type LogLine, type OpName } from '@fractonica/protocol';
+import { type FaultKind, formatCursor, FrError, HUB_VERSION, MAX_WAIT_S, parseCursor, REGISTRY_HASH, type LogLine, type OpName } from '@fractonica/protocol';
 
-import { listArtifacts } from './artifacts.ts';
+import { buildVariant, listArtifacts } from './artifacts.ts';
 import { runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
 import { mintCursor } from './events/index.ts';
@@ -19,6 +19,7 @@ import { REGISTRY_HANDLERS } from './registry/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
 import { routerStatus } from './router/index.ts';
 import { LINKS_HANDLERS } from './router/ops.ts';
+import { OTA_HANDLERS } from './ota/ops.ts';
 import { normalizeMac } from './serial.ts';
 
 // Moved to context.ts (design c3 §4); re-exported for existing importers.
@@ -227,6 +228,11 @@ export const HANDLERS: Record<OpName, Handler> = {
     // Node links (design c3 §4): devices online, sessions per link, udp_blocked and listener warnings.
     const router = routerStatus(hub.router);
     warnings.push(...(router?.warnings ?? []));
+    // OTA (design c4 §4): without the node HTTP listener no device can pull an image over Wi-Fi.
+    const otaListenError = hub.ota?.listenError() ?? null;
+    if (otaListenError) {
+      warnings.push(`OTA over Wi-Fi is unavailable: ${otaListenError}`);
+    }
     let registered = 0;
     try {
       registered = hub.registry?.list().length ?? 0;
@@ -246,6 +252,7 @@ export const HANDLERS: Record<OpName, Handler> = {
       ports: { total: ports.length, open: ports.filter((p) => p.state === 'open').length },
       devices: { registered, online: hub.router?.online().length ?? 0 },
       ...(router ? { links: { ...router.links, sessions: router.sessions } } : {}),
+      ...(hub.ota ? { ota: { http_port: hub.ota.httpPort(), listen_error: otaListenError, active: hub.ota.active() } } : {}),
       jobs: hub.jobs.counts(),
       head: mintCursor(hub),
       warnings,
@@ -281,12 +288,27 @@ export const HANDLERS: Record<OpName, Handler> = {
     return { ...net, password_set: readSecrets().wifi_password !== undefined };
   },
 
-  build_start: async (input: { source_dir: string; profile: string; build_type: 'debug' | 'release'; app: string; clean: boolean; wait_s?: number }, hub) => {
+  build_start: async (
+    input: { source_dir: string; profile: string; build_type: 'debug' | 'release'; app: string; clean: boolean; fault?: FaultKind; wait_s?: number },
+    hub,
+  ) => {
+    if (input.fault && input.build_type !== 'debug') {
+      throw new FrError('INVALID_ARGS', 'fault builds are debug only (spec 03 §3.8): drop --build-type release');
+    }
     // Canonical path, so /tmp/x, /private/tmp/x and x/ take the same build lock.
     const src = checkSourceDir(input.source_dir);
     const srcKey = Buffer.from(src).toString('base64url');
-    const job = hub.jobs.start('build', [input.profile], [`build:${srcKey}:${input.app}`, `build:${srcKey}:${input.app}:${input.profile}:${input.build_type}`], (ctx) =>
-      runBuild(hub.db, ctx, { sourceDir: src, profile: input.profile, buildType: input.build_type, app: input.app, clean: input.clean }),
+    // The second lock is the build dir's: a fault build has its own (<profile>-debug-fault).
+    const dirKey = `build:${srcKey}:${input.app}:${input.profile}:${buildVariant(input.build_type, input.fault)}`;
+    const job = hub.jobs.start('build', [input.profile], [`build:${srcKey}:${input.app}`, dirKey], (ctx) =>
+      runBuild(hub.db, ctx, {
+        sourceDir: src,
+        profile: input.profile,
+        buildType: input.build_type,
+        app: input.app,
+        clean: input.clean,
+        ...(input.fault ? { fault: input.fault } : {}),
+      }),
     );
     return startedJob(hub, job.job_id, input.wait_s);
   },
@@ -431,4 +453,6 @@ export const HANDLERS: Record<OpName, Handler> = {
   // Checkpoint C3 groups (design c3 §4): registry and provisioning (H1), node links, router, events (H2).
   ...REGISTRY_HANDLERS,
   ...LINKS_HANDLERS,
+  // Checkpoint C4 (design c4 §4): ota_deploy, ota_status (H1), deploy (H2).
+  ...OTA_HANDLERS,
 };

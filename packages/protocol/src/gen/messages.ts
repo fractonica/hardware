@@ -753,6 +753,7 @@ export function decodeOtaOffer(bytes: Uint8Array): Decoded<OtaOffer> {
 export interface OtaAccept {
   /** (<= 23 UTF-8 bytes) */
   job_id: string;
+  /** 0 fresh, 1 resumed from the offset an earlier boot stored */
   code: number;
 }
 
@@ -788,6 +789,7 @@ export function decodeOtaAccept(bytes: Uint8Array): Decoded<OtaAccept> {
 export interface OtaReject {
   /** (<= 23 UTF-8 bytes) */
   job_id: string;
+  /** 1 busy, 2 chip, 3 identity, 4 size, 5 same_fw, 6 downgrade, 7 bad_image */
   code: number;
 }
 
@@ -823,6 +825,7 @@ export function decodeOtaReject(bytes: Uint8Array): Decoded<OtaReject> {
 export interface OtaStatus {
   /** (<= 23 UTF-8 bytes) */
   job_id: string;
+  /** 1 downloading, 2 staged, 3 rebooting */
   state: number;
   bytes: number;
 }
@@ -860,6 +863,35 @@ export function decodeOtaStatus(bytes: Uint8Array): Decoded<OtaStatus> {
   return $.done(r, v);
 }
 
+/** OTA.COMMIT (class 0x09, kind 6). */
+export interface OtaCommit {
+  /** (<= 23 UTF-8 bytes) */
+  job_id: string;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeOtaCommit(v: Partial<OtaCommit> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.str(v.job_id ?? '', 23, 'job_id');
+  if (f1.length > 0) w.fieldBytes(1, f1);
+  return w.finish();
+}
+
+export function decodeOtaCommit(bytes: Uint8Array): Decoded<OtaCommit> {
+  const r = new Reader(bytes);
+  const v: OtaCommit = { job_id: '' };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.job_id = r.readString(23);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
 /** OTA.RESULT (class 0x09, kind 7). */
 export interface OtaResult {
   /** (<= 23 UTF-8 bytes) */
@@ -868,6 +900,7 @@ export interface OtaResult {
   outcome: number;
   /** (<= 8 bytes) */
   fw_id_prefix: Uint8Array;
+  /** failed: 1 download, 2 digest, 3 flash; rolled_back: 1 health_timeout, 2 crash, 3 unknown */
   reason: number;
 }
 
@@ -901,6 +934,35 @@ export function decodeOtaResult(bytes: Uint8Array): Decoded<OtaResult> {
         break;
       case 4:
         v.reason = r.readUint(255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** OTA.ABORT (class 0x09, kind 8). */
+export interface OtaAbort {
+  /** (<= 23 UTF-8 bytes) */
+  job_id: string;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeOtaAbort(v: Partial<OtaAbort> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.str(v.job_id ?? '', 23, 'job_id');
+  if (f1.length > 0) w.fieldBytes(1, f1);
+  return w.finish();
+}
+
+export function decodeOtaAbort(bytes: Uint8Array): Decoded<OtaAbort> {
+  const r = new Reader(bytes);
+  const v: OtaAbort = { job_id: '' };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.job_id = r.readString(23);
         break;
       default:
         r.skip();
@@ -998,7 +1060,9 @@ export const MESSAGES: readonly $.MessageInfo[] = [
   { key: 'OTA.ACCEPT', cls: 9, kind: 2, codec: { fields: [{ name: 'job_id' }, { name: 'code' }], maxSize: 28, encode: encodeOtaAccept, decode: decodeOtaAccept } },
   { key: 'OTA.REJECT', cls: 9, kind: 3, codec: { fields: [{ name: 'job_id' }, { name: 'code' }], maxSize: 28, encode: encodeOtaReject, decode: decodeOtaReject } },
   { key: 'OTA.STATUS', cls: 9, kind: 5, codec: { fields: [{ name: 'job_id' }, { name: 'state' }, { name: 'bytes' }], maxSize: 34, encode: encodeOtaStatus, decode: decodeOtaStatus } },
+  { key: 'OTA.COMMIT', cls: 9, kind: 6, codec: { fields: [{ name: 'job_id' }], maxSize: 25, encode: encodeOtaCommit, decode: decodeOtaCommit } },
   { key: 'OTA.RESULT', cls: 9, kind: 7, codec: { fields: [{ name: 'job_id' }, { name: 'outcome' }, { name: 'fw_id_prefix', json: 'bytes' }, { name: 'reason' }], maxSize: 41, encode: encodeOtaResult, decode: decodeOtaResult } },
+  { key: 'OTA.ABORT', cls: 9, kind: 8, codec: { fields: [{ name: 'job_id' }], maxSize: 25, encode: encodeOtaAbort, decode: decodeOtaAbort } },
   { key: 'TIME.SYNC_REQ', cls: 10, kind: 1, codec: { fields: [{ name: 't1', json: 'u64' }], maxSize: 11, encode: encodeTimeSyncReq, decode: decodeTimeSyncReq } },
   { key: 'TIME.SYNC_RES', cls: 10, kind: 2, codec: { fields: [{ name: 't1', json: 'u64' }, { name: 't2', json: 'u64' }, { name: 't3', json: 'u64' }], maxSize: 33, encode: encodeTimeSyncRes, decode: decodeTimeSyncRes } },
 ];

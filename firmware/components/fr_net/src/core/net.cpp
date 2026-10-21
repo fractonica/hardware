@@ -67,6 +67,8 @@ void Net::attach(Link &l)
         end_session(k, false);
     }
     links_[index_of(k)] = &l;
+    held_[index_of(k)] = false;
+    update_holds();  // a link attached while a hook runs is held like the others
     LinkState &s = ls(k);
     s.attached = true;
     s.up = l.up();
@@ -89,7 +91,7 @@ void Net::link_changed(LinkKind k)
     } else if (k != LinkKind::udp && !s.session) {
         // A fresh TCP connection or USB host: HELLO at once, then every hello_retry_ms until WELCOME.
         sess(k).hello_due = core_.now();
-        if (!dropping()) {
+        if (!frozen(k)) {
             send_hello(k);
             sess(k).hello_due = core_.now() + ms_us(cfg_.hello_retry_ms);
         }
@@ -195,6 +197,25 @@ void Net::udp_block(uint32_t seconds)
     start_udp_block(seconds);
 }
 
+void Net::ip_block(uint32_t seconds)
+{
+    if (seconds == 0) {
+        defer_ip_block_ = false;
+        if (state_.ip_blocked) {
+            end_ip_block();
+            tick();
+        }
+        return;
+    }
+    // Deferred like the others: the RESULT of `net ip_block` itself may be going over TCP or UDP.
+    if (in_receive_) {
+        defer_ip_block_ = true;
+        defer_ip_block_s_ = seconds;
+        return;
+    }
+    start_ip_block(seconds);
+}
+
 // ---- capability emissions ----
 
 void Net::event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields, TimeUs at)
@@ -237,7 +258,7 @@ void Net::property(uint8_t port, uint8_t prop_id, std::span<const uint8_t> value
 void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
 {
     LinkState &s = ls(from);
-    if (dropping()) {
+    if (frozen(from)) {
         ++state_.hook_drops;
         ++s.rx_drop;
         return;
@@ -299,10 +320,10 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
         ++state_.dup;
         ++s.rx_drop;
         if (unicast && (h.flags & kFlagAckReq) != 0) {
-            if (h.cls == kClsCmd) {
-                // A retried request: its response again, byte-identical, and the command not run twice
-                // (05 §5.8).
-                resend_cached(h.src, h.epoch, h.seq);
+            if (h.cls == kClsCmd || h.cls == kClsOta) {
+                // A retried request (a CMD, an OFFER): its response again, byte-identical, and the request
+                // not run twice (05 §5.8).
+                resend_cached(h.src, h.epoch, h.seq, from);
             } else if (h.cls == kClsEvent || h.cls == kClsMsg) {
                 send_ack(h);  // the first ACK was lost: an ACK is idempotent, so a fresh one does
             }
@@ -329,6 +350,9 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
     case kClsCmd:
         on_cmd(*e, unicast, from);
         break;
+    case kClsOta:
+        on_ota(*e, unicast, from);
+        break;
     case kClsTime:
         if (unicast && h.kind == fr::proto::kKindTimeSyncReq) {
             on_sync_req(from, e->body);
@@ -343,7 +367,7 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
         }
         break;
     default:
-        // NET.DIRECTORY (directory use is C5), OTA (C4): accepted, nothing to do yet.
+        // NET.DIRECTORY (directory use is C5): accepted, nothing to do yet.
         break;
     }
 }
@@ -428,7 +452,7 @@ void Net::on_presence(LinkKind from, uint8_t kind, std::span<const uint8_t> body
         Writer w(buf, sizeof(buf));
         encode(fr::proto::PresencePong{.t0 = ping->t0, .t1 = low32(rx_at_)}, w);
         const size_t len = kHeaderSize + w.size();
-        const uint8_t via = route(kClsPresence, fr::proto::kKindPresencePong, 0, len);
+        const uint8_t via = every_session(kClsPresence, fr::proto::kKindPresencePong, len);
         if (via != 0) {
             transmit(via, build(0, kClsPresence, fr::proto::kKindPresencePong, ++seq_, fr::proto::kAddrHub,
                                 fr::proto::kPortNode, {}, w.bytes()));
@@ -528,10 +552,63 @@ void Net::on_cmd(const EnvelopeView &e, bool unicast, LinkKind from)
         transmit_on(from, env);
         return;
     }
-    const uint8_t via = route(kClsResult, h.kind, flags, env.size());
+    const uint8_t via = answer_route(from, kClsResult, h.kind, flags, env.size());
     if (via != 0) {
         transmit(via, env);
     }
+}
+
+void Net::on_ota(const EnvelopeView &e, bool unicast, LinkKind from)
+{
+    const Header &h = e.header;
+    // 05 §5.7: OTA traffic is unicast and always on port 240; anything else is no job of this node's.
+    if (!unicast || h.port != fr::proto::kPortOta) {
+        ++ls(from).rx_drop;
+        return;
+    }
+    OtaReply reply;
+    host_.ota_frame(from, h, e.body, reply);
+    if (!reply.has()) {
+        return;  // answered later through send_ota (an ACCEPT after the first bytes), or never (COMMIT)
+    }
+    auto env = build(0, kClsOta, reply.kind(), ++seq_, h.src, fr::proto::kPortOta, {}, reply.body());
+    if (env.empty()) {
+        return;  // cannot happen: OtaReply::kCapacity keeps it realtime-sized
+    }
+    if ((h.flags & kFlagAckReq) != 0) {
+        // The answer is the OFFER's acknowledgement (05 §5.8): a DUP of the OFFER gets these bytes again
+        // and is not handed to the host twice.
+        cache(h.src, h.epoch, h.seq, env);
+    }
+    const uint8_t via = answer_route(from, kClsOta, reply.kind(), 0, env.size());
+    if (via != 0) {
+        transmit(via, env);
+    }
+}
+
+Status Net::send_ota(uint8_t kind, std::span<const uint8_t> body, bool ack_req)
+{
+    const size_t len = kHeaderSize + body.size();
+    if (len > kRtSize) {
+        return std::unexpected(Err::invalid_args);  // STATUS, RESULT, ACCEPT, REJECT are all a few dozen bytes
+    }
+    const uint8_t flags = ack_req ? kFlagAckReq : 0;
+    const uint8_t via = route(kClsOta, kind, flags, len);
+    if (via == 0) {
+        return std::unexpected(Err::busy);  // no session (or drop_hub_link): the job reports after WELCOME
+    }
+    const uint32_t seq = ++seq_;
+    auto env = build(flags, kClsOta, kind, seq, fr::proto::kAddrHub, fr::proto::kPortOta, {}, body);
+    if (env.empty() || !transmit_on(via == kViaTcp ? LinkKind::tcp : LinkKind::serial, env)) {
+        return std::unexpected(Err::busy);
+    }
+    if (ack_req) {
+        // Q1 on TCP or serial: no re-send, only the give-up after tcp_delivery_ms (05 §5.8). Not input, so
+        // exempt from the event age rule.
+        track(env, seq, via, core_.now(), true);
+        arm();
+    }
+    return {};
 }
 
 void Net::on_sync_req(LinkKind from, std::span<const uint8_t> body)
@@ -554,12 +631,12 @@ void Net::on_sync_req(LinkKind from, std::span<const uint8_t> body)
     ls(from).time_synced = true;
 }
 
-bool Net::resend_cached(uint16_t src, uint16_t epoch, uint32_t req_seq)
+bool Net::resend_cached(uint16_t src, uint16_t epoch, uint32_t req_seq, LinkKind from)
 {
     for (const Cached &c : cache_) {
         if (c.used && c.src == src && c.epoch == epoch && c.req_seq == req_seq) {
             const std::span<const uint8_t> env(c.bulk ? bulk_cache_ : c.bytes, c.len);
-            const uint8_t via = route(env[2], env[3], env[1], env.size());
+            const uint8_t via = answer_route(from, env[2], env[3], env[1], env.size());
             if (via != 0) {
                 transmit(via, env);
             }
@@ -688,7 +765,7 @@ void Net::send_heartbeat()
     uint8_t body[fr::proto::PresenceHeartbeat::kMaxSize];
     Writer w(body, sizeof(body));
     encode(m, w);
-    const uint8_t via = route(kClsPresence, fr::proto::kKindPresenceHeartbeat, 0, kHeaderSize + w.size());
+    const uint8_t via = every_session(kClsPresence, fr::proto::kKindPresenceHeartbeat, kHeaderSize + w.size());
     if (via == 0) {
         return;
     }
@@ -701,6 +778,15 @@ void Net::send_heartbeat()
         hb_udp_seqs_[hb_udp_next_] = seq;
         hb_udp_next_ = (hb_udp_next_ + 1) % hb_udp_seqs_.size();
     }
+}
+
+uint8_t Net::every_session(uint8_t cls, uint8_t kind, size_t len) const
+{
+    if (dropping()) {
+        return 0;
+    }
+    const uint8_t via = ls(LinkKind::tcp).session ? wifi_route(cls, kind, 0, len) : 0;
+    return ls(LinkKind::serial).session ? static_cast<uint8_t>(via | kViaSerial) : via;
 }
 
 void Net::end_session(LinkKind k, bool lost)
@@ -795,11 +881,13 @@ void Net::clear_udp_ok()
     hb_due_ = std::min(hb_due_, now);
 }
 
-void Net::hold_links(bool on)
+void Net::update_holds()
 {
-    for (Link *l : links_) {
-        if (l != nullptr) {
-            l->hold(on);
+    for (size_t i = 0; i < kLinkKinds; ++i) {
+        const bool on = frozen(static_cast<LinkKind>(i));
+        if (links_[i] != nullptr && held_[i] != on) {
+            held_[i] = on;
+            links_[i]->hold(on);
         }
     }
 }
@@ -820,6 +908,10 @@ void Net::run_deferred()
         defer_udp_block_ = false;
         start_udp_block(defer_udp_block_s_);
     }
+    if (defer_ip_block_) {
+        defer_ip_block_ = false;
+        start_ip_block(defer_ip_block_s_);
+    }
 }
 
 void Net::start_drop(uint32_t seconds)
@@ -827,7 +919,7 @@ void Net::start_drop(uint32_t seconds)
     state_.hub_link_dropped = true;
     drop_until_ = core_.now() + static_cast<TimeUs>(seconds) * 1'000'000;
     // No reconnects either (09 §9.7): a connection the hub closes meanwhile stays closed until the end.
-    hold_links(true);
+    update_holds();
     arm();
 }
 
@@ -838,17 +930,42 @@ void Net::start_udp_block(uint32_t seconds)
     arm();
 }
 
+void Net::start_ip_block(uint32_t seconds)
+{
+    state_.ip_blocked = true;
+    ip_block_until_ = core_.now() + static_cast<TimeUs>(seconds) * 1'000'000;
+    // The TCP connection stays as it is: one the hub closes meanwhile is not reconnected until the end.
+    update_holds();
+    arm();
+}
+
 void Net::end_drop()
 {
     state_.hub_link_dropped = false;
     drop_until_ = 0;
-    hold_links(false);
+    update_holds();
     // Session timeouts resume from the last hub frame before the drop: a drop longer than the timeout
     // ends every session at once, the standby serial one included (the hub declared the node offline
     // long ago), and they re-HELLO. HELLOs that fell due during the drop go at the next tick.
+    lose_stale_sessions(kViaSerial | kViaTcp);
+}
+
+void Net::end_ip_block()
+{
+    state_.ip_blocked = false;
+    ip_block_until_ = 0;
+    update_holds();
+    // As after a drop, for TCP: a session the hub went silent on for longer than the timeout ends now and
+    // reconnects; serial kept its own clock (standby while TCP lasts).
+    lose_stale_sessions(kViaTcp);
+}
+
+void Net::lose_stale_sessions(uint8_t which)
+{
     const TimeUs now = core_.now();
     for (LinkKind k : kSessionLinks) {
-        if (ls(k).session && now - sess(k).last_rx >= session_timeout_us()) {
+        if ((which & (1u << index_of(k))) != 0 && !frozen(k) && ls(k).session &&
+            now - sess(k).last_rx >= session_timeout_us()) {
             lose_session(k, DropReason::hub_silent);
         }
     }
@@ -864,10 +981,13 @@ void Net::tick()
     if (state_.udp_blocked && now >= udp_block_until_) {
         state_.udp_blocked = false;
     }
+    if (state_.ip_blocked && now >= ip_block_until_) {
+        end_ip_block();
+    }
     for (LinkKind k : kSessionLinks) {
         LinkState &s = ls(k);
         Session &x = sess(k);
-        if (s.session && !dropping()) {
+        if (s.session && !frozen(k)) {
             if (k == LinkKind::serial && ls(LinkKind::tcp).session) {
                 // Standby: everything goes over TCP/UDP, so the hub owes the serial link nothing. Its
                 // clock starts when it becomes the path (from design c3 §9, decision 4).
@@ -876,7 +996,7 @@ void Net::tick()
                 lose_session(k, DropReason::hub_silent);
             }
         }
-        if (!s.session && s.up && !dropping() && x.hello_due <= now) {
+        if (!s.session && s.up && !frozen(k) && x.hello_due <= now) {
             send_hello(k);
             x.hello_due = now + ms_us(cfg_.hello_retry_ms);
         }
@@ -908,6 +1028,9 @@ void Net::arm()
         for (LinkKind k : kSessionLinks) {
             const LinkState &s = ls(k);
             const Session &x = sessions_[index_of(k)];
+            if (frozen(k)) {
+                continue;  // ip_block: the TCP session's clock and HELLOs wait for its end
+            }
             if (s.session) {
                 if (!(k == LinkKind::serial && ls(LinkKind::tcp).session)) {
                     next = std::min(next, x.last_rx + session_timeout_us());
@@ -919,6 +1042,9 @@ void Net::arm()
     }
     if (state_.udp_blocked) {
         next = std::min(next, udp_block_until_);
+    }
+    if (state_.ip_blocked) {
+        next = std::min(next, ip_block_until_);
     }
     if (ls(LinkKind::udp).udp_ok) {
         next = std::min(next, last_echo_ + ms_us(cfg_.heartbeat_ms) * kUdpOkIntervals);
@@ -953,26 +1079,53 @@ uint8_t Net::route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const
     if (dropping()) {
         return 0;
     }
-    // 05 §5.10 router mode and design c3 §9 decision 4: TCP/UDP first, serial otherwise, else nothing.
-    if (ls(LinkKind::tcp).session) {
-        const LinkState &u = ls(LinkKind::udp);
-        // A BULK frame never fits a datagram the hub's realtime path expects, and the hub drops UDP from
-        // an UNASSIGNED node (05 §5.5): its frames have no addr to dedup by.
-        const bool udp = len <= kRtSize && u.attached && u.up && addr_ != fr::proto::kAddrUnassigned;
-        const bool heartbeat = cls == kClsPresence && kind == fr::proto::kKindPresenceHeartbeat;
-        if (udp && u.udp_ok) {
-            const bool fast = heartbeat || (cls == kClsPresence && kind == fr::proto::kKindPresencePong) ||
-                              cls == kClsAck || cls == kClsResult || (flags & (kFlagUrgent | kFlagLatest)) != 0;
-            return fast ? kViaUdp : kViaTcp;
-        }
-        // UDP unproven: HEARTBEAT (the probe), URGENT and Q1 frames take both, same bytes; the rest TCP.
-        const bool dual = udp && (heartbeat || (flags & (kFlagUrgent | kFlagAckReq)) != 0);
-        return dual ? kViaUdp | kViaTcp : kViaTcp;
+    // 05 §5.10 router mode and design c3 §9 decision 4: TCP/UDP first, serial otherwise, else nothing. Wi-Fi
+    // can stall without dropping (an AP gone, IP traffic lost; the ip_block hook): with nothing from the hub
+    // over TCP for 2 intervals, a USB node sends over serial, where the hub sends to it by the same rule,
+    // and goes back to TCP with the next hub frame there (its TCP session times out at 3.5 intervals).
+    const bool serial = ls(LinkKind::serial).session;
+    if (ls(LinkKind::tcp).session && !(serial && wifi_silent())) {
+        return wifi_route(cls, kind, flags, len);
     }
-    if (ls(LinkKind::serial).session) {
-        return kViaSerial;
+    return serial ? kViaSerial : 0;
+}
+
+uint8_t Net::answer_route(LinkKind from, uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const
+{
+    // A request from serial is answered there. The hub sends one over USB to a node that has TCP only for
+    // the serial session's own handshake, or once nothing reached it over Wi-Fi for 2 intervals, which the
+    // node does not see when only its uplink is gone (the hub's keepalives still arrive over TCP).
+    if (from == LinkKind::serial && !dropping()) {
+        return ls(LinkKind::serial).session ? kViaSerial : 0;
     }
-    return 0;
+    return route(cls, kind, flags, len);
+}
+
+bool Net::wifi_silent() const
+{
+    // The hub's echoes and keepalives reach a TCP session at least every interval while Wi-Fi carries.
+    const TimeUs silent = core_.now() - sessions_[index_of(LinkKind::tcp)].last_rx;
+    return silent > ms_us(cfg_.heartbeat_ms) * kWifiSilentX10 / 10;
+}
+
+uint8_t Net::wifi_route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const
+{
+    if (cls == kClsOta) {
+        return kViaTcp;  // design c4 §3: OTA frames never ride UDP
+    }
+    const LinkState &u = ls(LinkKind::udp);
+    // A BULK frame never fits a datagram the hub's realtime path expects, and the hub drops UDP from
+    // an UNASSIGNED node (05 §5.5): its frames have no addr to dedup by.
+    const bool udp = len <= kRtSize && u.attached && u.up && addr_ != fr::proto::kAddrUnassigned;
+    const bool heartbeat = cls == kClsPresence && kind == fr::proto::kKindPresenceHeartbeat;
+    if (udp && u.udp_ok) {
+        const bool fast = heartbeat || (cls == kClsPresence && kind == fr::proto::kKindPresencePong) ||
+                          cls == kClsAck || cls == kClsResult || (flags & (kFlagUrgent | kFlagLatest)) != 0;
+        return fast ? kViaUdp : kViaTcp;
+    }
+    // UDP unproven: HEARTBEAT (the probe), URGENT and Q1 frames take both, same bytes; the rest TCP.
+    const bool dual = udp && (heartbeat || (flags & (kFlagUrgent | kFlagAckReq)) != 0);
+    return dual ? kViaUdp | kViaTcp : kViaTcp;
 }
 
 std::span<const uint8_t> Net::build(uint8_t flags, uint8_t cls, uint8_t kind, uint32_t seq, uint16_t dst, uint8_t port,
@@ -1001,10 +1154,10 @@ std::span<const uint8_t> Net::build(uint8_t flags, uint8_t cls, uint8_t kind, ui
 uint8_t Net::transmit(uint8_t via, std::span<const uint8_t> envelope)
 {
     // UDP first: it is the fast path, and before udp_ok the TCP copy is only the backup.
-    if ((via & kViaUdp) != 0 && !transmit_on(LinkKind::udp, envelope) && !dropping() && !state_.udp_blocked &&
-        (via & kViaTcp) == 0 && ls(LinkKind::tcp).session) {
+    if ((via & kViaUdp) != 0 && !transmit_on(LinkKind::udp, envelope) && !frozen(LinkKind::udp) &&
+        !state_.udp_blocked && (via & kViaTcp) == 0 && ls(LinkKind::tcp).session) {
         // The UDP socket refused it (lwIP out of buffers, say): TCP takes it rather than lose a RESULT or
-        // a heartbeat. The udp_block hook loses frames on purpose and gets no such help.
+        // a heartbeat. The udp_block and ip_block hooks lose frames on purpose and get no such help.
         via |= kViaTcp;
     }
     if ((via & kViaTcp) != 0) {
@@ -1021,7 +1174,7 @@ bool Net::transmit_on(LinkKind k, std::span<const uint8_t> envelope)
     if (envelope.empty()) {
         return false;
     }
-    if (dropping() || (k == LinkKind::udp && state_.udp_blocked)) {
+    if (frozen(k) || (k == LinkKind::udp && state_.udp_blocked)) {
         ++state_.hook_drops;  // as if the network ate it: nothing else notices
         return false;
     }

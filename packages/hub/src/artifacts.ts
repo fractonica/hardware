@@ -5,7 +5,15 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { dirname, join } from 'node:path';
 
 import { paths } from '@fractonica/host';
-import { type ArtifactManifest, ArtifactManifestSchema, FrError, type ManifestCap, ManifestCapSchema } from '@fractonica/protocol';
+import {
+  type AppDesc,
+  type ArtifactManifest,
+  ArtifactManifestSchema,
+  type FaultKind,
+  FrError,
+  type ManifestCap,
+  ManifestCapSchema,
+} from '@fractonica/protocol';
 import { z } from 'zod';
 
 import { type Db, kvGet, kvSet } from './db.ts';
@@ -13,6 +21,17 @@ import { type Db, kvGet, kvSet } from './db.ts';
 const IMAGE_MAGIC = 0xe9;
 const APP_DESC_OFFSET = 32;          // esp_app_desc_t follows the 24 B image header and 8 B segment header
 const APP_DESC_MAGIC = 0xabcd5432;
+
+/**
+ * fr_app_desc_t (firmware/components/fr_core/include/fr/app_desc.h; spec 06 §6.8, design c4 §2): IDF links
+ * `.rodata_custom_desc` right after esp_app_desc_t, so it starts at 24 + 8 + 256 = 288 and ends at 400.
+ */
+export const FR_APP_DESC_OFFSET = 288;
+export const FR_APP_DESC_SIZE = 112;
+const FR_APP_DESC_MAGIC = 0x46524144; // "FRAD"
+const FR_APP_DESC_VERSION = 1;
+/** fr_app_desc.fault byte per fault build kind (0: none). */
+const FAULT_BYTE: Record<FaultKind, number> = { health: 1 };
 
 function sha256(buf: Buffer): string {
   return createHash('sha256').update(buf).digest('hex');
@@ -31,6 +50,31 @@ export interface AppImageInfo {
   project_name: string;
   idf_ver: string;
   elf_sha256: string;
+  /** The image's fr_app_desc; null when there is none at offset 288 (a pre-C4 or foreign image). */
+  app_desc: AppDesc | null;
+}
+
+/**
+ * fr_app_desc at image offset 288 (layout: magic u32, version u8, proto major/minor u8, reserved u8,
+ * catalog_hash u32, board[32], profile[32], part_profile[16], fault u8, reserved2[19]); null without its
+ * magic. A descriptor of an unknown version is an error: its fields may mean something else.
+ */
+export function parseFrAppDesc(bin: Buffer): AppDesc | null {
+  const at = FR_APP_DESC_OFFSET;
+  if (bin.length < at + FR_APP_DESC_SIZE || bin.readUInt32LE(at) !== FR_APP_DESC_MAGIC) {
+    return null;
+  }
+  const version = bin[at + 4];
+  if (version !== FR_APP_DESC_VERSION) {
+    throw new FrError('BUILD_FAILED', `fr_app_desc at image offset ${at} has version ${version}; this hub reads version ${FR_APP_DESC_VERSION}`);
+  }
+  return {
+    board: cstr(bin, at + 12, 32),
+    profile: cstr(bin, at + 44, 32),
+    part_profile: cstr(bin, at + 76, 16),
+    catalog_hash: bin.readUInt32LE(at + 8),
+    fault: bin[at + 92],
+  };
 }
 
 /** Image length through its checksum: 24 B header, the segments, then padding so the checksum byte ends a 16 B block. */
@@ -81,7 +125,50 @@ export function parseAppImage(bin: Buffer): AppImageInfo {
     project_name: cstr(bin, APP_DESC_OFFSET + 48, 32),
     idf_ver: cstr(bin, APP_DESC_OFFSET + 112, 32),
     elf_sha256: bin.subarray(APP_DESC_OFFSET + 144, APP_DESC_OFFSET + 176).toString('hex'),
+    app_desc: parseFrAppDesc(bin),
   };
+}
+
+/** What the image's fr_app_desc must say for the build that produced it. */
+export interface AppDescExpected {
+  board: string;
+  profile: string;
+  partProfile: string;
+  /** fr_manifest.json's catalog_hash; undefined: not checked (a build without one). */
+  catalogHash?: number;
+  fault?: FaultKind;
+}
+
+/**
+ * The ingest check of design c4 §2: the image carries fr_app_desc at offset 288 and it names the board,
+ * profile, partition profile, catalog and fault kind the hub built. A miss means the link layout moved
+ * (IDF changed `.flash.appdesc`, or another `.rodata_custom_desc` came first), or a layer the build
+ * asked for did not take effect (sdkconfig.fault without fr_ota's Kconfig): the image must not be
+ * offered to nodes, whose OTA CHECK reads the same bytes.
+ */
+export function checkAppDesc(desc: AppDesc | null, want: AppDescExpected): AppDesc {
+  if (!desc) {
+    throw new FrError('BUILD_FAILED', `the app image has no fr_app_desc at offset ${FR_APP_DESC_OFFSET} (magic FRAD)`, {
+      hint: 'fr_core defines it in section .rodata_custom_desc and links it with -u fr_app_desc; check that fr_core is in the build and nothing else uses that section',
+      details: { stage: 'ingest', offset: FR_APP_DESC_OFFSET },
+    });
+  }
+  const expected: Partial<AppDesc> = {
+    board: want.board,
+    profile: want.profile,
+    part_profile: want.partProfile,
+    fault: want.fault ? FAULT_BYTE[want.fault] : 0,
+    ...(want.catalogHash !== undefined ? { catalog_hash: want.catalogHash } : {}),
+  };
+  const differ = (Object.keys(expected) as (keyof AppDesc)[]).filter((k) => expected[k] !== desc[k]);
+  if (differ.length) {
+    throw new FrError('BUILD_FAILED', `fr_app_desc disagrees with the build: ${differ.map((k) => `${k} ${JSON.stringify(desc[k])} != ${JSON.stringify(expected[k])}`).join(', ')}`, {
+      ...(differ.includes('fault') ? { hint: 'sdkconfig.fault did not take effect: CONFIG_FR_TEST_FAULT_HEALTH needs fr_ota in the build and CONFIG_FR_TEST_HOOKS' } : {}),
+      ...(differ.includes('catalog_hash') ? { hint: 'the firmware was compiled against other generated capability code: run `fr gen`' } : {}),
+      details: { stage: 'ingest', offset: FR_APP_DESC_OFFSET, app_desc: desc, expected },
+    });
+  }
+  return desc;
 }
 
 export interface Partition {
@@ -163,6 +250,8 @@ export interface IngestInput {
   idf: { version: string; commit: string };
   /** `fr gen firmware` output dir; its fr_manifest.json gives the manifest `caps` and `catalog_hash`. */
   genDir?: string;
+  /** A fault build (spec 03 §3.8): build_id `<app>/<profile>/<build_type>-fault/<fw>`, manifest `fault`. */
+  fault?: FaultKind;
 }
 
 /** The parts of fr_manifest.json (fractonica/fr-manifest@1, written by `fr gen firmware`) the artifact keeps. */
@@ -231,8 +320,16 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
   const map = existsSync(mapFile) ? storeBlob(mapFile) : null;
   const debug = { elf: { blob: elf.ref, size: elf.size }, ...(map ? { map: { blob: map.ref, size: map.size } } : {}) };
   const fr = inp.genDir ? readFrManifest(inp.genDir) : null;
+  const appDesc = checkAppDesc(image.app_desc, {
+    board: inp.board,
+    profile: inp.profile,
+    partProfile: inp.partProfile,
+    catalogHash: fr?.catalog_hash,
+    fault: inp.fault,
+  });
   const fwShort = image.fw_id.slice(0, 12);
-  const build_id = `${inp.app}/${inp.profile}/${inp.buildType}/${fwShort}`;
+  const variant = buildVariant(inp.buildType, inp.fault);
+  const build_id = `${inp.app}/${inp.profile}/${variant}/${fwShort}`;
   const manifest: ArtifactManifest = ArtifactManifestSchema.parse({
     schema: 'fractonica.artifact/1',
     build_id,
@@ -243,7 +340,7 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
     target: inp.target,
     chip_id: image.chip_id,
     part_profile: inp.partProfile,
-    version: inp.git.dirty ? `${image.version}.dirty.${image.fw_id.slice(0, 8)}` : image.version,
+    version: versionLabel(image.version, inp.git.dirty, image.fw_id),
     source_dir: inp.sourceDir,
     git: inp.git,
     idf: inp.idf,
@@ -254,6 +351,8 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
     flash: { mode: flasher.flash_settings.flash_mode, freq: flasher.flash_settings.flash_freq, size: flasher.flash_settings.flash_size, files },
     partitions: parsePartitionTable(ptable),
     ...(fr ? { caps: fr.caps, catalog_hash: fr.catalog_hash } : {}),
+    app_desc: appDesc,
+    ...(inp.fault ? { fault: inp.fault } : {}),
     debug,
   });
   const manifestPath = join(paths.artifacts(), 'builds', build_id, 'manifest.json');
@@ -262,14 +361,30 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
   // Two clean checkouts of one commit build the same image (reproducible builds), hence the same
   // build_id: the row follows the latest manifest, and cache_hit is tracked per source_dir in kv.
   db.prepare(
-    'INSERT INTO artifacts (build_id, source_dir, profile, build_type, fw_id, built_at, manifest_path) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(build_id) DO UPDATE SET source_dir = excluded.source_dir, built_at = excluded.built_at, manifest_path = excluded.manifest_path',
-  ).run(build_id, inp.sourceDir, inp.profile, inp.buildType, image.fw_id, manifest.built_at, manifestPath);
-  kvSet(db, lastFwKey(inp.sourceDir, inp.profile, inp.buildType), image.fw_id);
+    'INSERT INTO artifacts (build_id, source_dir, profile, build_type, fw_id, built_at, manifest_path, fault) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(build_id) DO UPDATE SET source_dir = excluded.source_dir, built_at = excluded.built_at, manifest_path = excluded.manifest_path, fault = excluded.fault',
+  ).run(build_id, inp.sourceDir, inp.profile, inp.buildType, image.fw_id, manifest.built_at, manifestPath, inp.fault ?? null);
+  kvSet(db, lastFwKey(inp.sourceDir, inp.profile, variant), image.fw_id);
   return { manifest, manifestPath };
 }
 
-function lastFwKey(sourceDir: string, profile: string, buildType: string): string {
-  return `last_fw_id:${JSON.stringify([sourceDir, profile, buildType])}`;
+/**
+ * The manifest's display version (spec 06 §6.8): the image's own, which IDF takes from `git describe
+ * --always --tags --dirty` when the build configures (`<sha>` or `<sha>-dirty`), with the tree's state at
+ * ingest deciding `-dirty` (a reconfigure is not forced by edits alone). A dirty tree's label adds the
+ * image, `<sha>-dirty.<fw_id[0:8]>`, as two dirty builds of one commit differ.
+ */
+export function versionLabel(imageVersion: string, dirty: boolean, fwId: string): string {
+  const base = imageVersion.replace(/-dirty$/, '');
+  return dirty ? `${base}-dirty.${fwId.slice(0, 8)}` : base;
+}
+
+/** The build_id part and build dir suffix of a build: `debug`, `release`, or `debug-fault` (spec 03 §3.8). */
+export function buildVariant(buildType: string, fault?: FaultKind | null): string {
+  return fault ? `${buildType}-fault` : buildType;
+}
+
+function lastFwKey(sourceDir: string, profile: string, variant: string): string {
+  return `last_fw_id:${JSON.stringify([sourceDir, profile, variant])}`;
 }
 
 export function loadManifest(db: Db, buildId: string): ArtifactManifest {
@@ -294,24 +409,29 @@ export function manifestCapsByFwPrefix(db: Db, prefix: string): ManifestCap[] | 
   return ArtifactManifestSchema.parse(JSON.parse(readFileSync(row.manifest_path, 'utf8'))).caps ?? null;
 }
 
-/** Newest artifact of (app, profile, build_type); build_id is `<app>/<profile>/<build_type>/<fw>`. */
+/**
+ * Newest artifact of (app, profile, build_type); build_id is `<app>/<profile>/<build_type>/<fw>`. Never a
+ * fault build: flash, provision, ota and deploy pick one only when it is named (spec 03 §3.8).
+ */
 export function newestBuildId(db: Db, q: { app: string; profile: string; buildType: string }): string | null {
   const row = db
-    .prepare('SELECT build_id FROM artifacts WHERE profile = ? AND build_type = ? AND substr(build_id, 1, ?) = ? ORDER BY built_at DESC LIMIT 1')
+    .prepare(
+      'SELECT build_id FROM artifacts WHERE profile = ? AND build_type = ? AND fault IS NULL AND substr(build_id, 1, ?) = ? ORDER BY built_at DESC LIMIT 1',
+    )
     .get(q.profile, q.buildType, q.app.length + 1, `${q.app}/`) as { build_id: string } | undefined;
   return row?.build_id ?? null;
 }
 
-/** fw_id of the last build of (source_dir, profile, build_type), for cache_hit (spec 03 §3.8). */
-export function lastFwId(db: Db, sourceDir: string, profile: string, buildType: string): string | null {
-  const known = kvGet(db, lastFwKey(sourceDir, profile, buildType));
+/** fw_id of the last build of (source_dir, profile, build_type[, fault]), for cache_hit (spec 03 §3.8). */
+export function lastFwId(db: Db, sourceDir: string, profile: string, buildType: string, fault?: FaultKind): string | null {
+  const known = kvGet(db, lastFwKey(sourceDir, profile, buildVariant(buildType, fault)));
   if (known) {
     return known;
   }
   // Builds ingested before the kv entry existed.
   const row = db
-    .prepare('SELECT fw_id FROM artifacts WHERE source_dir = ? AND profile = ? AND build_type = ? ORDER BY built_at DESC LIMIT 1')
-    .get(sourceDir, profile, buildType) as { fw_id: string } | undefined;
+    .prepare('SELECT fw_id FROM artifacts WHERE source_dir = ? AND profile = ? AND build_type = ? AND fault IS ? ORDER BY built_at DESC LIMIT 1')
+    .get(sourceDir, profile, buildType, fault ?? null) as { fw_id: string } | undefined;
   return row?.fw_id ?? null;
 }
 
@@ -327,6 +447,6 @@ export function listArtifacts(db: Db, opts: { profile?: string; buildType?: stri
     args.push(opts.buildType);
   }
   return db
-    .prepare(`SELECT build_id, profile, build_type, fw_id, built_at, source_dir FROM artifacts ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY built_at DESC LIMIT ?`)
+    .prepare(`SELECT build_id, profile, build_type, fault, fw_id, built_at, source_dir FROM artifacts ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY built_at DESC LIMIT ?`)
     .all(...args, opts.limit);
 }

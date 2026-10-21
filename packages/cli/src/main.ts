@@ -236,10 +236,13 @@ const gen = program
   .action(async (opts: { check?: boolean }) => emit(await genAll({ check: Boolean(opts.check), cwd: process.cwd() }), 'gen'));
 gen
   .command('firmware')
-  .description("Generate a profile's firmware composition (fr_board, components.cmake, sdkconfig.board, fr_manifest.json)")
+  .description("Generate a profile's firmware composition (fr_board, components.cmake, sdkconfig.board, fr_manifest.json; sdkconfig.fault with --fault)")
   .requiredOption('--profile <name>', 'profile name, e.g. c6-pad')
   .option('--out <dir>', 'output directory (default: firmware/apps/<app>/build/<profile>-debug/fr_gen, as fr build uses)')
-  .action(async (opts: { profile: string; out?: string }) => emit(await genFirmware({ profile: opts.profile, out: opts.out, cwd: process.cwd() }), 'gen_firmware'));
+  .addOption(new Option('--fault <kind>', 'a fault build: also write the sdkconfig.fault layer (default out dir <profile>-debug-fault)').choices(['health']))
+  .action(async (opts: { profile: string; out?: string; fault?: 'health' }) =>
+    emit(await genFirmware({ profile: opts.profile, out: opts.out, fault: opts.fault, cwd: process.cwd() }), 'gen_firmware'),
+  );
 
 const hub = group(['hub']).description('Run and inspect the hub daemon');
 hub

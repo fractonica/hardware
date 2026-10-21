@@ -334,7 +334,7 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     return { matched: true, events: found, cursor: mintCursor(hub) };
   },
 
-  wait_for_device: async (input: { selector: string; state: 'online' | 'offline'; fw_id?: string; since?: string; timeout_s: number }, hub) => {
+  wait_for_device: async (input: { selector: string; state: 'online' | 'offline'; fw_id?: string; ota_state?: string; since?: string; timeout_s: number }, hub) => {
     const devices = selectDevices(hub, input.selector);
     const after = sinceSeq(input.since, hub);
     const want = input.state;
@@ -353,9 +353,12 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     // in it; a suspect device coming back is not such a change.
     const changed = new Set<string>();
     const transition = (e: HubEvent) => e.type === `device.${want}` && e.device !== undefined && ids.includes(e.device) && !e.fields?.recovered;
+    // The HELLO's ota_state, live only: the registry keeps no image state.
+    const otaOf = (d: Device) => routerInfo(hub.router, d.device_id)?.ota_state ?? null;
+    const otaOk = (d: Device) => !input.ota_state || otaOf(d) === input.ota_state;
     const ok = (d: Device) =>
       (want === 'online' ? isUp(hub.router.presence(d.device_id)) : !isUp(hub.router.presence(d.device_id))) &&
-      (want === 'offline' || fwOk(d)) &&
+      (want === 'offline' || (fwOk(d) && otaOk(d))) &&
       (after === undefined || changed.has(d.device_id));
     const all = () => devices.every(ok);
     let wake = () => {};
@@ -390,9 +393,17 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
       clearTimeout(timer);
       clearInterval(poll);
     }
-    const report = devices.map((d) => ({ device: d.device_id, alias: d.alias, presence: hub.router.presence(d.device_id), fw_id: fwOf(d) ?? null, ok: ok(d) }));
+    const report = devices.map((d) => ({
+      device: d.device_id,
+      alias: d.alias,
+      presence: hub.router.presence(d.device_id),
+      fw_id: fwOf(d) ?? null,
+      ...(input.ota_state ? { ota_state: otaOf(d) } : {}),
+      ok: ok(d),
+    }));
     if (!report.every((r) => r.ok)) {
-      throw new FrError('TIMEOUT', `${report.filter((r) => !r.ok).map((r) => r.alias).join(', ')} not ${want}${fwWant ? ` on ${fwWant}` : ''} within ${input.timeout_s}s`, {
+      const on = [fwWant ? ` on ${fwWant}` : '', want === 'online' && input.ota_state ? ` with ota_state ${input.ota_state}` : ''].join('');
+      throw new FrError('TIMEOUT', `${report.filter((r) => !r.ok).map((r) => r.alias).join(', ')} not ${want}${on} within ${input.timeout_s}s`, {
         details: { devices: report },
       });
     }

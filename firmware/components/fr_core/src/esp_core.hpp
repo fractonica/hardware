@@ -110,7 +110,8 @@ class EspCore final : public Core
 public:
     /**
      * 23 for the board's services (fr gen firmware's budget, spec 03 §3.4) plus the runtime's own, taken
-     * in start() before the board: fr_core's two (reboot, serial link poll) and Net's one, and two spare.
+     * in start() before the board: fr_core's two (reboot, serial link poll), Net's one and Ota's one (its
+     * health deadline and 1 s tick, design c4 §3), and one spare.
      */
     static constexpr size_t kTimers = 28;
     static constexpr size_t kSlots = 8;

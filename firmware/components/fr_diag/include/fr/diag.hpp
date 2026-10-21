@@ -100,13 +100,29 @@ struct NetStatus {
     // Debug hooks in force.
     bool hub_link_dropped = false;
     bool udp_blocked = false;
+    bool ip_blocked = false;
 };
 
 /** Debug hooks of `net` (spec 09 §9.7, design c3 §3), FR_TEST_HOOKS builds only. */
 enum class NetHook : uint8_t {
     drop_hub_link,  // drop every envelope on TCP, UDP and serial ENV, both ways; no reconnect
     udp_block,      // send nothing over UDP (T-PRES)
+    ip_block,       // drop every envelope on TCP and UDP, both ways, serial untouched; no reconnect
 };
+
+/** The hook as `net <name> <seconds>` names it. */
+constexpr const char *hook_name(NetHook hook)
+{
+    switch (hook) {
+    case NetHook::drop_hub_link:
+        return "drop_hub_link";
+    case NetHook::udp_block:
+        return "udp_block";
+    case NetHook::ip_block:
+        return "ip_block";
+    }
+    return "?";
+}
 
 /** What the command channel needs from the runtime; every call happens on the core task. */
 class Host

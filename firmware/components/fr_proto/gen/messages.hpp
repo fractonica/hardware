@@ -226,7 +226,7 @@ bool operator==(const OtaOffer &a, const OtaOffer &b);
 // OTA.ACCEPT
 struct OtaAccept {
     std::string_view job_id{};
-    uint8_t code = 0;
+    uint8_t code = 0;  // 0 fresh, 1 resumed from the offset an earlier boot stored
 
     static constexpr uint8_t kCls = fr::wire::kClsOta;
     static constexpr uint8_t kKind = kKindOtaAccept;
@@ -239,7 +239,7 @@ bool operator==(const OtaAccept &a, const OtaAccept &b);
 // OTA.REJECT
 struct OtaReject {
     std::string_view job_id{};
-    uint8_t code = 0;
+    uint8_t code = 0;  // 1 busy, 2 chip, 3 identity, 4 size, 5 same_fw, 6 downgrade, 7 bad_image
 
     static constexpr uint8_t kCls = fr::wire::kClsOta;
     static constexpr uint8_t kKind = kKindOtaReject;
@@ -252,7 +252,7 @@ bool operator==(const OtaReject &a, const OtaReject &b);
 // OTA.STATUS
 struct OtaStatus {
     std::string_view job_id{};
-    uint8_t state = 0;
+    uint8_t state = 0;  // 1 downloading, 2 staged, 3 rebooting
     uint32_t bytes = 0;
 
     static constexpr uint8_t kCls = fr::wire::kClsOta;
@@ -263,12 +263,24 @@ size_t encode(const OtaStatus &v, fr::wire::Writer &w);
 std::expected<OtaStatus, fr::wire::DecodeErr> decode_ota_status(std::span<const uint8_t> in);
 bool operator==(const OtaStatus &a, const OtaStatus &b);
 
+// OTA.COMMIT
+struct OtaCommit {
+    std::string_view job_id{};
+
+    static constexpr uint8_t kCls = fr::wire::kClsOta;
+    static constexpr uint8_t kKind = kKindOtaCommit;
+    static constexpr size_t kMaxSize = 25;
+};
+size_t encode(const OtaCommit &v, fr::wire::Writer &w);
+std::expected<OtaCommit, fr::wire::DecodeErr> decode_ota_commit(std::span<const uint8_t> in);
+bool operator==(const OtaCommit &a, const OtaCommit &b);
+
 // OTA.RESULT
 struct OtaResult {
     std::string_view job_id{};
     uint8_t outcome = 0;  // 0 success, 1 failed, 2 rolled_back
     std::span<const uint8_t> fw_id_prefix{};
-    uint8_t reason = 0;
+    uint8_t reason = 0;  // failed: 1 download, 2 digest, 3 flash; rolled_back: 1 health_timeout, 2 crash, 3 unknown
 
     static constexpr uint8_t kCls = fr::wire::kClsOta;
     static constexpr uint8_t kKind = kKindOtaResult;
@@ -277,6 +289,18 @@ struct OtaResult {
 size_t encode(const OtaResult &v, fr::wire::Writer &w);
 std::expected<OtaResult, fr::wire::DecodeErr> decode_ota_result(std::span<const uint8_t> in);
 bool operator==(const OtaResult &a, const OtaResult &b);
+
+// OTA.ABORT
+struct OtaAbort {
+    std::string_view job_id{};
+
+    static constexpr uint8_t kCls = fr::wire::kClsOta;
+    static constexpr uint8_t kKind = kKindOtaAbort;
+    static constexpr size_t kMaxSize = 25;
+};
+size_t encode(const OtaAbort &v, fr::wire::Writer &w);
+std::expected<OtaAbort, fr::wire::DecodeErr> decode_ota_abort(std::span<const uint8_t> in);
+bool operator==(const OtaAbort &a, const OtaAbort &b);
 
 // TIME.SYNC_REQ
 struct TimeSyncReq {

@@ -45,6 +45,7 @@ function hello(over: Partial<HelloSeen> = {}): HelloSeen {
     caps: 0,
     alias: '',
     alias_rev: 0,
+    ota_state: 'valid',
     link: 'serial',
     ...over,
   };

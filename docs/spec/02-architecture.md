@@ -101,7 +101,7 @@ fractonica/                       # this folder; unrelated experiments move to e
 | Capability names | `fr.<name>` (`fr.button`, `fr.led`) |
 | Device id | 12 lowercase hex digits of the factory MAC (`1cdbd416ba34`) |
 | Alias | RFC 1123 label `^[a-z]([a-z0-9-]{0,29}[a-z0-9])?$` (`pad-red-1`). `broadcast`, `all`, `online` and `offline` are reserved |
-| Hub ports | 7420/tcp on loopback (API, WS, dashboard, SDK `/app`); 7421/tcp + udp on the LAN (node links); 7422/tcp on the LAN (node HTTP: OTA images, core dumps) |
+| Hub ports | 7420/tcp on loopback (API, WS, dashboard, SDK `/app`); 7421/tcp + udp on the LAN (node links); 7422/tcp on the LAN (node HTTP: OTA images; core dumps later) |
 
 ## 2.6 Key flows
 
@@ -129,9 +129,9 @@ Target: p50 ≤ 10 ms in router mode and ≤ 5 ms in gateway mode, measured, not
 `fr deploy tag:poc --expect-event node.boot --json`, or the MCP `deploy` tool with `source_dir` = the agent's checkout:
 
 1. Build from that checkout, once per distinct registry profile among the selected devices, as `debug` unless `--build-type release`. An unchanged tree is a near no-op, and devices already running the `fw_id` report `already_current`.
-2. For each device, pick serial flashing if it is attached and idle, otherwise HTTP OTA (`--via` overrides this).
+2. For each device, pick serial flashing if the hub holds its USB port open, otherwise HTTP OTA (`--via` overrides this; a `--fault` build always goes over the air).
 3. Wait until each device reports the new `fw_id`.
-4. Assert the expected log line or event since the cursor taken before the deploy.
+4. Assert the expected event, or log line (in M1 only for a device on a USB port the hub holds open), since the device last went down for the update ([09 §9.4](09-agent-api.md)).
 
 It returns one JSON result per device ([09-agent-api](09-agent-api.md)).
 

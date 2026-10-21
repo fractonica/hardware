@@ -1,4 +1,4 @@
-# Host C++ suite (design c2 §8, c3 §5): fr_proto, fr_caps, the fr_core services and the fr_net core
+# Host C++ suite (design c2 §8, c3 §5, c4 §5): fr_proto, fr_caps, the fr_core services, the fr_net and fr_ota cores
 # built without ESP-IDF, under ASan + UBSan. `pnpm test:host` configures, builds and runs it through
 # tools/host-test.mjs. Sources are globbed, so later work only drops files into the listed directories.
 cmake_minimum_required(VERSION 3.24)
@@ -33,7 +33,9 @@ endif()
 set(FR_CXX_WARNINGS -Wall -Wextra -Werror)
 set(FR_CXX_FLAGS "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 
-# fr_net/src/core is IDF-free like fr_core/src/services (design c3 §3); fr_net/src/esp is not built here.
+# fr_net/src/core and fr_ota/src/core are IDF-free like fr_core/src/services (design c3 §3, c4 §3); their
+# src/esp directories are not built here. fr_ota/src/http is the image GET over BSD sockets, the same source
+# on lwIP and POSIX: fr_net_node downloads with it.
 file(GLOB FR_LIB_SRCS CONFIGURE_DEPENDS
     ${COMPONENTS_DIR}/fr_proto/src/*.cpp
     ${COMPONENTS_DIR}/fr_proto/gen/*.cpp
@@ -41,7 +43,9 @@ file(GLOB FR_LIB_SRCS CONFIGURE_DEPENDS
     ${COMPONENTS_DIR}/fr_caps/gen/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/services/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/host/*.cpp
-    ${COMPONENTS_DIR}/fr_net/src/core/*.cpp)
+    ${COMPONENTS_DIR}/fr_net/src/core/*.cpp
+    ${COMPONENTS_DIR}/fr_ota/src/core/*.cpp
+    ${COMPONENTS_DIR}/fr_ota/src/http/*.cpp)
 file(GLOB FR_TEST_SRCS CONFIGURE_DEPENDS ${HOST_DIR}/tests/*.cpp)
 file(GLOB FR_FUZZ_SRCS CONFIGURE_DEPENDS ${HOST_DIR}/fuzz/*.cpp)
 # Fuzz targets are also linked into the test binary, which checks their digests against the TS suite.
@@ -56,6 +60,7 @@ target_include_directories(fr_host_lib PUBLIC
     ${COMPONENTS_DIR}/fr_caps/gen
     ${COMPONENTS_DIR}/fr_core/include
     ${COMPONENTS_DIR}/fr_net/include
+    ${COMPONENTS_DIR}/fr_ota/include
     ${HOST_DIR}
     ${HOST_DIR}/gen)
 target_compile_definitions(fr_host_lib PUBLIC FR_TEST_HOOKS=1)

@@ -59,7 +59,9 @@ if (spec.error) {
 }
 const out = argv[argv.indexOf('--out') + 1];
 const profile = argv[argv.indexOf('--profile') + 1];
-for (const [rel, content] of Object.entries(spec.files)) {
+const fault = argv.includes('--fault') ? argv[argv.indexOf('--fault') + 1] : null;
+const files = { ...spec.files, ...(fault ? { 'sdkconfig.fault': 'CONFIG_FR_TEST_FAULT_HEALTH=y\\n' } : {}) };
+for (const [rel, content] of Object.entries(files)) {
   mkdirSync(dirname(join(out, rel)), { recursive: true });
   writeFileSync(join(out, rel), content);
 }
@@ -67,7 +69,7 @@ const manifest = { schema: 'fractonica/fr-manifest@1', profile, board: 'test-boa
 console.log(JSON.stringify({
   ok: true,
   cursor: '',
-  data: { source_dir: process.cwd(), profile, out_dir: out, files: Object.keys(spec.files), slots_lock: 'firmware/profiles/' + profile + '.slots.lock', slots_lock_changed: spec.slotsLockChanged, warnings: spec.warnings, manifest, part_profile: 'fr-4mb-v1' },
+  data: { source_dir: process.cwd(), profile, out_dir: out, files: Object.keys(files), slots_lock: 'firmware/profiles/' + profile + '.slots.lock', slots_lock_changed: spec.slotsLockChanged, warnings: spec.warnings, manifest, part_profile: 'fr-4mb-v1', fault },
 }));
 `;
 
@@ -76,6 +78,8 @@ const PROFILE = 'c6-test';
 let tmp = '';
 let src = '';
 let buildDir = '';
+let outputs = '';
+let faultOutputs = '';
 let argsFile = '';
 let cmakeFail = '';
 let spec: GenSpec;
@@ -94,14 +98,29 @@ function write(file: string, content: string | Buffer): void {
 
 const sha256 = (b: Buffer) => createHash('sha256').update(b).digest();
 
-/** An unsigned app image as esptool lays it out (header, segments, checksum, digest); see build.test.ts. */
-function appImage(elfSha: Buffer): Buffer {
-  const desc = Buffer.alloc(256);
-  desc.writeUInt32LE(0xabcd5432, 0);
-  desc.write('0.1.0', 16);
-  desc.write('fr_node', 48);
-  desc.write('v6.1', 112);
-  elfSha.copy(desc, 144);
+/** The catalog_hash fr_manifest.json reports in these tests; the image's fr_app_desc must carry it. */
+const CATALOG = 0x1234abcd;
+
+/**
+ * An unsigned app image as esptool lays it out (header, segments, checksum, digest), its first segment
+ * holding esp_app_desc_t and fr_app_desc_t for test-board/c6-test (see build.test.ts).
+ */
+function appImage(elfSha: Buffer, fault = 0): Buffer {
+  const esp = Buffer.alloc(256);
+  esp.writeUInt32LE(0xabcd5432, 0);
+  esp.write('0.1.0', 16);
+  esp.write('fr_node', 48);
+  esp.write('v6.1', 112);
+  elfSha.copy(esp, 144);
+  const fr = Buffer.alloc(112);
+  fr.writeUInt32LE(0x46524144, 0);
+  fr[4] = 1;
+  fr.writeUInt32LE(CATALOG, 8);
+  fr.write('test-board', 12);
+  fr.write(PROFILE, 44);
+  fr.write('fr-4mb-v1', 76);
+  fr[92] = fault;
+  const desc = Buffer.concat([esp, fr]);
   const header = Buffer.alloc(24);
   header[0] = 0xe9;
   header[1] = 1;
@@ -115,11 +134,11 @@ function appImage(elfSha: Buffer): Buffer {
   return Buffer.concat([body, sha256(body)]);
 }
 
-/** What a finished idf.py build leaves for ingest. */
-function fixture(dir: string): void {
+/** What a finished idf.py build leaves for ingest (`fault`: the image of a fault build). */
+function fixture(dir: string, fault = 0): void {
   const elf = Buffer.from('\x7fELF fake fr_node');
   write(join(dir, 'fr_node.elf'), elf);
-  write(join(dir, 'fr_node.bin'), appImage(sha256(elf)));
+  write(join(dir, 'fr_node.bin'), appImage(sha256(elf), fault));
   write(join(dir, 'bootloader.bin'), Buffer.alloc(64, 0xe9));
   const entry = Buffer.alloc(32);
   entry.writeUInt16LE(0x50aa, 0);
@@ -154,8 +173,10 @@ beforeAll(() => {
   write(join(src, 'packages/cli/package.json'), JSON.stringify({ type: 'module' }));
   write(join(src, 'packages/cli/src/main.ts'), FAKE_FR);
   buildDir = join(src, 'firmware/apps/node/build', `${PROFILE}-debug`);
-  const outputs = join(tmp, 'outputs');
+  outputs = join(tmp, 'outputs');
   fixture(outputs);
+  faultOutputs = join(tmp, 'outputs-fault');
+  fixture(faultOutputs, 1);
   const bin = join(tmp, 'bin');
   argsFile = join(tmp, 'idf-args.txt');
   cmakeFail = join(tmp, 'cmake-error.txt');
@@ -184,6 +205,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+  h.env.FR_TEST_OUTPUTS = outputs;
   spec = {
     files: {
       'sdkconfig.board': 'CONFIG_IDF_TARGET="esp32c6"\n',
@@ -192,7 +214,7 @@ beforeEach(() => {
       'fr_manifest.json': JSON.stringify({
         schema: 'fractonica/fr-manifest@1',
         profile: PROFILE,
-        catalog_hash: 0x1234abcd,
+        catalog_hash: CATALOG,
         caps: [{ name: 'boot', port: 1, cap: 'fr.button', cap_id: 1, version: '1.0', driver: 'button_gpio', config: { debounce_ms: 20 } }],
       }),
     },
@@ -243,7 +265,9 @@ const CMAKE_DIAGNOSTICS: Diagnostic[] = [
   { file: '/Users/dev/esp/esp-idf/tools/cmake/component.cmake', line: 470, col: 0, severity: 'error', message: "Include directory '/x/fr_core/include2' is not a directory." },
 ];
 
-describe('fr build with fr gen firmware', () => {
+// These run fake generator and idf.py children (node, type stripping): seconds apiece while the whole
+// suite runs in parallel, so they get more than vitest's 5 s.
+describe('fr build with fr gen firmware', { timeout: 20_000 }, () => {
   it("runs the checkout's own fr gen firmware into <build>/fr_gen, passes FR_GEN_DIR to idf.py and surfaces warnings", async () => {
     spec.warnings = ['GPIO9 is a strapping pin: it must read high at reset'];
     spec.slotsLockChanged = true;
@@ -283,7 +307,7 @@ describe('fr build with fr gen firmware', () => {
     await build(steady);
     expect(steady).not.toContain(changed);
 
-    spec.files['fr_manifest.json'] = JSON.stringify({ schema: 'fractonica/fr-manifest@1', catalog_hash: 1, caps: [] });
+    spec.files['fr_manifest.json'] = JSON.stringify({ schema: 'fractonica/fr-manifest@1', catalog_hash: CATALOG, caps: [] });
     const manifestOnly: string[] = [];
     await build(manifestOnly);
     expect(manifestOnly).not.toContain(changed);
@@ -344,6 +368,40 @@ describe('fr build with fr gen firmware', () => {
   });
 });
 
+describe('fault builds (spec 03 §3.8)', { timeout: 20_000 }, () => {
+  const ctx = (): JobCtx => ({ jobId: 'j_fault', signal: new AbortController().signal, log: () => undefined, stage: () => undefined, progress: () => undefined });
+
+  it('build into <profile>-debug-fault with sdkconfig.fault after the build layer, and ingest as fault: health', async () => {
+    writeFileSync(join(src, 'gen-spec.json'), JSON.stringify(spec));
+    h.env.FR_TEST_OUTPUTS = faultOutputs;
+    const db = openDb(':memory:');
+    const r = await runBuild(db, ctx(), { sourceDir: src, profile: PROFILE, buildType: 'debug', app: 'node', clean: false, fault: 'health' });
+    const faultDir = join(src, 'firmware/apps/node/build', `${PROFILE}-debug-fault`);
+    const genDir = join(faultDir, 'fr_gen');
+    expect(genCalls().at(-1)?.argv).toEqual(['--json', 'gen', 'firmware', '--profile', PROFILE, '--out', genDir, '--fault', 'health']);
+    const args = readFileSync(argsFile, 'utf8').trim().split('\n');
+    expect(args).toContain('-B');
+    expect(args[args.indexOf('-B') + 1]).toBe(faultDir);
+    const layers = args.find((a) => a.startsWith('-DSDKCONFIG_DEFAULTS='))!.slice('-DSDKCONFIG_DEFAULTS='.length).split(';');
+    expect(layers.slice(-2)).toEqual([join(src, 'firmware/config/sdkconfig.build.debug'), join(genDir, 'sdkconfig.fault')]);
+    expect(r).toMatchObject({ fault: 'health', build_id: `node/${PROFILE}/debug-fault/${r.fw_id.slice(0, 12)}` });
+    expect(loadManifest(db, r.build_id)).toMatchObject({ build_type: 'debug', fault: 'health', app_desc: { fault: 1 } });
+  });
+
+  it('fails the build when the image does not say fault (the layer did not take effect)', async () => {
+    writeFileSync(join(src, 'gen-spec.json'), JSON.stringify(spec));
+    await expect(
+      runBuild(openDb(':memory:'), ctx(), { sourceDir: src, profile: PROFILE, buildType: 'debug', app: 'node', clean: false, fault: 'health' }),
+    ).rejects.toMatchObject({ code: 'BUILD_FAILED', message: expect.stringContaining('fault 0 != 1') });
+  });
+
+  it('is debug only', async () => {
+    await expect(
+      runBuild(openDb(':memory:'), ctx(), { sourceDir: src, profile: PROFILE, buildType: 'release', app: 'node', clean: false, fault: 'health' }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+  });
+});
+
 describe('CmakeErrors', () => {
   it('takes the file, line and indented message of each `CMake Error at` block', () => {
     const found: Diagnostic[] = [];
@@ -376,6 +434,17 @@ describe('genFirmwareFromSource with this checkout', () => {
     expect(r.part_profile).toMatch(/^fr-/);
     expect(r.files).toContain('fr_board/fr_board.cpp');
     expect(existsSync(join(out, 'fr_manifest.json'))).toBe(true);
+    expect(existsSync(join(out, 'sdkconfig.fault'))).toBe(false);
+  }, 30_000);
+
+  it('writes the fault layer with --fault, and removes it again without', async () => {
+    const out = join(tmp, 'real-gen-fault');
+    const r = await genFirmwareFromSource(REPO, 'c6-pad', out, undefined, undefined, 'health');
+    expect(r.fault).toBe('health');
+    expect(r.files).toContain('sdkconfig.fault');
+    expect(readFileSync(join(out, 'sdkconfig.fault'), 'utf8')).toContain('\nCONFIG_FR_TEST_FAULT_HEALTH=y\n');
+    await genFirmwareFromSource(REPO, 'c6-pad', out);
+    expect(existsSync(join(out, 'sdkconfig.fault'))).toBe(false);
   }, 30_000);
 });
 

@@ -1,7 +1,8 @@
 // The router against FakeNodes over real loopback TCP/UDP and a fake serial line (design c3 §5): the
 // handshake order, heartbeat echoes, hub keepalives and udp_blocked, presence timings on a fake clock,
-// BYE (and a RESULT trailing it), the hub's own BYE on a USB line, unplugged ports, duplicate CMDs,
-// expire_at, epochs and sessions, EVENT/STATE publication, and the ops on top.
+// BYE (and a RESULT trailing it), the hub's own BYE on a USB line, a USB node whose Wi-Fi went silent
+// (online on its USB heartbeats; commands and PINGs over USB after 2 intervals), unplugged ports,
+// duplicate CMDs, expire_at, epochs and sessions, EVENT/STATE publication, and the ops on top.
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -371,6 +372,76 @@ describe('presence', () => {
     expect(types).toEqual(['device.offline:timeout', 'device.online']);
     expect(r.router.info(id)!.links).toEqual(['serial']);
     await until(() => wifi.tcpClosed);
+  });
+
+  it('keeps a USB node whose Wi-Fi went silent online on its USB heartbeats, and sends there after 2 silent intervals', async () => {
+    const clock = new ManualClock();
+    // udp_blocked after 3 s: silent Wi-Fi is no firewall, so it must not be raised meanwhile.
+    const r = await open({ clock, config: { udpBlockedMs: 3000 } });
+    const id = '1cdbd416ba3d';
+    const usb = r.node({ mac: id, serial: r.serial, addr: 24, autoHeartbeat: false });
+    await usb.connected(r.events);
+    // One node on two links: its USB frames stay inside the window behind the TCP ones (fr_net has one
+    // sequence space for both).
+    const wifi = r.node({ mac: id, addr: 24, autoHeartbeat: false, seqStart: 100 });
+    const tcpUp = waitForEvent(r.events, (e) => e.type === 'device.link' && e.fields?.link === 'tcp');
+    await wifi.connect();
+    await tcpUp;
+    const types = record(r);
+    for (const n of [usb, wifi]) {
+      n.handlers.set('3/2', () => undefined);
+    }
+    const toggle = () => r.router.sendCommand(id, 3, 2, new Uint8Array(0), { ack: 'result', timeoutMs: 1000 });
+    expect(await toggle()).toMatchObject({ link: 'tcp' });
+    expect(r.router.info(id)!.links).toEqual(['tcp', 'serial']);
+    // Wi-Fi stalls without a FIN (the node's ip_block): nothing over TCP or UDP either way. fr_net sends
+    // its heartbeats on every session, so they keep coming over USB.
+    wifi.unplug();
+    const step = async (ms: number) => {
+      clock.advance(ms);
+      usb.heartbeat();
+      await until(() => r.router.info(id)!.last_rx_ms_ago === 0, 3000, 'the USB heartbeat');
+      r.router.tick();
+    };
+    await step(1000);
+    await step(1000); // 2 intervals since the last Wi-Fi frame: still TCP
+    expect(r.router.info(id)!.links).toEqual(['tcp', 'serial']);
+    await step(1); // more than 2: the USB line
+    expect(r.router.info(id)!.links).toEqual(['serial', 'tcp']);
+    expect(await toggle()).toMatchObject({ status: STATUS.OK, link: 'serial' });
+    expect(usb.executions.get('3/2')).toBe(1);
+    for (let i = 0; i < 5; i++) {
+      await step(1000); // 7 intervals without Wi-Fi, a USB heartbeat in each
+    }
+    expect(r.router.presence(id)).toBe('online');
+    expect(types).toEqual([]); // no suspect, no offline, no hub.warning udp_blocked
+    expect(r.router.info(id)!.links).toEqual(['serial', 'tcp']); // both sessions still up
+    // Wi-Fi carries again: TCP is the path once more.
+    wifi.silent = false;
+    wifi.heartbeat();
+    await until(() => r.router.info(id)!.links[0] === 'tcp', 3000, 'TCP first again');
+    expect(await toggle()).toMatchObject({ status: STATUS.OK, link: 'tcp' });
+    expect(wifi.executions.get('3/2')).toBe(2);
+  });
+
+  it('PINGs a suspect USB node whose Wi-Fi went silent over its USB line, where the PONG brings it back', async () => {
+    const clock = new ManualClock();
+    const r = await open({ clock });
+    const id = '1cdbd416ba3e';
+    const usb = r.node({ mac: id, serial: r.serial, addr: 25, autoHeartbeat: false });
+    await usb.connected(r.events);
+    const wifi = r.node({ mac: id, addr: 25, autoHeartbeat: false, seqStart: 100 });
+    const tcpUp = waitForEvent(r.events, (e) => e.type === 'device.link' && e.fields?.link === 'tcp');
+    await wifi.connect();
+    await tcpUp;
+    const types = record(r);
+    wifi.unplug();
+    clock.advance(2500);
+    r.router.tick();
+    await until(() => r.router.presence(id) === 'online', 3000, 'the PONG over USB');
+    expect(types).toEqual(['device.suspect', 'device.online']);
+    expect(usb.received(CLS.PRESENCE, KIND.PRESENCE.PING)).toHaveLength(1);
+    expect(wifi.received(CLS.PRESENCE, KIND.PRESENCE.PING)).toEqual([]);
   });
 
   it('says BYE on the USB line when the hub stops, and answers nothing after', async () => {

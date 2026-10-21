@@ -9,9 +9,9 @@ import { join, relative } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { checkSourceDir, idfEnv, idfStatus, readIdfLock, run } from '@fractonica/host';
-import { FrError, type ToolError } from '@fractonica/protocol';
+import { type FaultKind, FrError, type ToolError } from '@fractonica/protocol';
 
-import { ingestBuild, lastFwId } from './artifacts.ts';
+import { buildVariant, ingestBuild, lastFwId } from './artifacts.ts';
 import type { Db } from './db.ts';
 import type { JobCtx } from './jobs.ts';
 import { stripAnsi } from './logstore.ts';
@@ -162,16 +162,21 @@ export function spawnLogged(
   });
 }
 
+/** The generated layer of a fault build (spec 03 §3.8), written by `fr gen firmware --fault`. */
+export const FAULT_LAYER = 'sdkconfig.fault';
+
 /**
- * sdkconfig layers in contract order (spec 03 §3.7). Only sdkconfig.local is optional; a missing
- * required layer is an error rather than a build that silently lacks it.
+ * sdkconfig layers in contract order (spec 03 §3.7). A fault build adds fr_gen/sdkconfig.fault right after
+ * the build-type layer (03 §3.8). Only sdkconfig.local is optional; a missing required layer is an error
+ * rather than a build that silently lacks it.
  */
-export function sdkconfigLayers(src: string, appDir: string, genDir: string, buildType: string): string[] {
+export function sdkconfigLayers(src: string, appDir: string, genDir: string, buildType: string, fault?: FaultKind): string[] {
   const required = [
     join(src, 'firmware', 'config', 'sdkconfig.framework'),
     join(appDir, 'sdkconfig.defaults'),
     join(genDir, 'sdkconfig.board'),
     join(src, 'firmware', 'config', `sdkconfig.build.${buildType}`),
+    ...(fault ? [join(genDir, FAULT_LAYER)] : []),
   ];
   for (const f of required) {
     if (!existsSync(f)) {
@@ -215,6 +220,8 @@ export interface GenFirmwareOutput {
   slots_lock_changed: boolean;
   manifest: { app: string; board: string; target: string };
   part_profile: string;
+  /** The fault layer it wrote (`--fault`); absent from CLIs older than C4. */
+  fault?: FaultKind | null;
 }
 
 const tail = (text: string, n = 20) => text.trimEnd().split('\n').slice(-n);
@@ -240,13 +247,14 @@ export async function genFirmwareFromSource(
   outDir: string,
   signal?: AbortSignal,
   log?: (line: string) => void,
+  fault?: FaultKind,
 ): Promise<GenFirmwareOutput> {
   const main = join(src, 'packages', 'cli', 'src', 'main.ts');
-  const cmd = `fr gen firmware --profile ${profile}`;
+  const cmd = `fr gen firmware --profile ${profile}${fault ? ` --fault ${fault}` : ''}`;
   if (!existsSync(main)) {
     throw new FrError('INVALID_SOURCE', `${src} has no packages/cli/src/main.ts to run ${cmd} with`, { details: { stage: 'generate' } });
   }
-  const args = ['--conditions=@fractonica/source', main, '--json', 'gen', 'firmware', '--profile', profile, '--out', outDir];
+  const args = ['--conditions=@fractonica/source', main, '--json', 'gen', 'firmware', '--profile', profile, '--out', outDir, ...(fault ? ['--fault', fault] : [])];
   log?.(`${[process.execPath, ...args].join(' ')} (cwd ${src})`);
   const r = await run(process.execPath, args, { cwd: src, signal });
   if (signal?.aborted) {
@@ -278,6 +286,12 @@ export async function genFirmwareFromSource(
       details: { stage: 'generate' },
     });
   }
+  if (fault && (d.fault !== fault || !d.files.includes(FAULT_LAYER))) {
+    throw new FrError('BUILD_FAILED', `${cmd} in ${src} did not write the ${FAULT_LAYER} layer a fault build needs`, {
+      hint: "that checkout's CLI predates fault builds; update it",
+      details: { stage: 'generate' },
+    });
+  }
   return d as GenFirmwareOutput;
 }
 
@@ -296,13 +310,24 @@ export interface BuildInput {
   buildType: 'debug' | 'release';
   app: string;
   clean: boolean;
+  /** A fault build (spec 03 §3.8, debug only): its own build dir `<profile>-debug-fault` and layer. */
+  fault?: FaultKind;
+}
+
+/** The build dir of (app, profile, build type[, fault]): firmware/apps/<app>/build/<profile>-<variant>. */
+export function buildDirOf(src: string, inp: Pick<BuildInput, 'app' | 'profile' | 'buildType' | 'fault'>): string {
+  return join(src, 'firmware', 'apps', inp.app, 'build', `${inp.profile}-${buildVariant(inp.buildType, inp.fault)}`);
 }
 
 export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
   const t0 = Date.now();
+  if (inp.fault && inp.buildType !== 'debug') {
+    // Fault images need the test hooks (FR_TEST_FAULT_HEALTH depends on FR_TEST_HOOKS), never release.
+    throw new FrError('INVALID_ARGS', `fault builds are debug only (got build_type ${inp.buildType})`);
+  }
   const src = checkSourceDir(inp.sourceDir);
   const appDir = join(src, 'firmware', 'apps', inp.app);
-  const buildDir = join(appDir, 'build', `${inp.profile}-${inp.buildType}`);
+  const buildDir = buildDirOf(src, inp);
   const genDir = join(buildDir, 'fr_gen');
   if (inp.clean) {
     rmSync(buildDir, { recursive: true, force: true });
@@ -311,7 +336,7 @@ export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
   ctx.stage('generate');
   const cachedTarget = cachedIdfTarget(buildDir);
   const existed = existsSync(buildDir);
-  const gen = await genFirmwareFromSource(src, inp.profile, genDir, ctx.signal, (line) => ctx.log(`generate: ${line}`, 'event'));
+  const gen = await genFirmwareFromSource(src, inp.profile, genDir, ctx.signal, (line) => ctx.log(`generate: ${line}`, 'event'), inp.fault);
   const prof = { app: gen.manifest.app, board: gen.manifest.board, target: gen.manifest.target, partProfile: gen.part_profile };
   if (prof.app !== inp.app) {
     if (!existed) {
@@ -338,7 +363,9 @@ export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
   ctx.stage('idf_env');
   const env = await idfEnv(idf, { targets: lock.targets });
 
-  const layers = sdkconfigLayers(src, appDir, genDir, inp.buildType);
+  // The fault layer is in both hashes below (a layer, and a file under fr_gen): switching a build dir
+  // between fault and normal could never reuse a stale sdkconfig, though each has its own dir anyway.
+  const layers = sdkconfigLayers(src, appDir, genDir, inp.buildType, inp.fault);
   const hash = createHash('sha256').update(layerHash(layers, prof.target)).update(genHash(genDir)).digest('hex');
   const hashFile = join(buildDir, 'fr_layers.sha256');
   if (!existsSync(hashFile) || readFileSync(hashFile, 'utf8') !== hash) {
@@ -400,7 +427,7 @@ export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
   }
 
   ctx.stage('ingest');
-  const previous = lastFwId(db, src, inp.profile, inp.buildType);
+  const previous = lastFwId(db, src, inp.profile, inp.buildType, inp.fault);
   const git = await gitInfo(src);
   const { manifest, manifestPath } = ingestBuild(db, {
     sourceDir: src,
@@ -414,6 +441,7 @@ export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
     git,
     idf: { version: lock.idf.tag, commit: idf.actual_commit ?? '' },
     genDir,
+    ...(inp.fault ? { fault: inp.fault } : {}),
   });
   const slot = manifest.partitions.find((p) => p.label === 'ota_0');
   return {
@@ -430,5 +458,6 @@ export async function runBuild(db: Db, ctx: JobCtx, inp: BuildInput) {
     duration_ms: Date.now() - t0,
     diagnostics,
     warnings,
+    ...(inp.fault ? { fault: inp.fault } : {}),
   };
 }

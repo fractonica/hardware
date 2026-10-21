@@ -19,9 +19,15 @@ export function op<I extends z.ZodObject>(def: OpDef<I>): OpDef<I> {
   return def;
 }
 
-/** CLI option name for an input field (spec 09 §9.5): wait_s is --wait, timeout_s is --timeout, else kebab-case. */
+/**
+ * CLI option name for an input field (spec 09 §9.5): wait_s is --wait, timeout_s is --timeout and any
+ * `<x>_timeout_s` --<x>-timeout (seconds are the CLI's unit for every timeout), else kebab-case.
+ */
 export function cliFlag(key: string): string {
-  return key === 'wait_s' ? 'wait' : key === 'timeout_s' ? 'timeout' : key.replace(/_/g, '-');
+  if (key === 'wait_s') {
+    return 'wait';
+  }
+  return (key.endsWith('timeout_s') ? key.slice(0, -2) : key).replace(/_/g, '-');
 }
 
 /** Max server-side wait. Claude Code backgrounds tool calls after 2 minutes. */

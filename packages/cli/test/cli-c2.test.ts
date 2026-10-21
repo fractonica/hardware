@@ -21,7 +21,7 @@ const MAIN = resolve(REPO, 'packages', 'cli', 'src', 'main.ts');
 // The generators are mocked: these tests check the command wiring, never write generated files.
 const h = vi.hoisted(() => ({
   all: [] as { sourceDir: string; check?: boolean }[],
-  firmware: [] as { sourceDir: string; profile: string; outDir: string }[],
+  firmware: [] as { sourceDir: string; profile: string; outDir: string; fault?: string }[],
   stale: [] as string[],
   fail: null as Error | null,
 }));
@@ -116,10 +116,18 @@ describe('fr gen', () => {
         warnings: ['GPIO8 is a strapping pin'],
         manifest: { schema: 'fractonica/fr-manifest@1', profile: 'c6-pad', board: 'b', app: 'node', target: 'esp32c6', catalog_hash: 1, caps: [] },
         part_profile: 'fr-4mb-v1',
+        fault: null,
       },
     });
     await genFirmware({ profile: 'c6-pad', out: 'tmp/gen', cwd });
     expect(h.firmware[1].outDir).toBe(join(cwd, 'tmp/gen'));
+  });
+
+  it('firmware --fault: the fault build dir, the generator told, the envelope says so (spec 03 §3.8)', async () => {
+    const r = await genFirmware({ profile: 'c6-pad', fault: 'health', cwd });
+    const outDir = join(REPO, 'firmware/apps/node/build/c6-pad-debug-fault/fr_gen');
+    expect(h.firmware).toEqual([{ sourceDir: REPO, profile: 'c6-pad', outDir, fault: 'health' }]);
+    expect(r).toMatchObject({ ok: true, data: { out_dir: outDir, fault: 'health' } });
   });
 
   it('firmware: an unknown profile is NOT_FOUND with the known ones', async () => {
@@ -140,7 +148,8 @@ describe('cliExitCode', () => {
 });
 
 // The CLI against a fake hub on a random port (FR_HUB), never the real one.
-describe('fr diag, fr gen (subprocess)', () => {
+// Each test starts the CLI once or more: seconds apiece while the whole suite runs in parallel.
+describe('fr diag, fr gen (subprocess)', { timeout: 20_000 }, () => {
   let server: Server;
   let hubUrl = '';
   const requests: { op: string; body: Record<string, unknown> }[] = [];

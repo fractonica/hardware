@@ -15,6 +15,7 @@ import { JobRunner } from './jobs.ts';
 import { NODE_LINK_PORT, SerialFrameTap, SleepGuard } from './links/index.ts';
 import { holdPort, runningHubPid, writePidfile } from './lock.ts';
 import { LogStore } from './logstore.ts';
+import { createOta, NODE_HTTP_PORT } from './ota/index.ts';
 import { createRegistry, sweepIdentAtStart } from './registry/index.ts';
 import { RingRetention } from './ring.ts';
 import { createRouter } from './router/index.ts';
@@ -30,11 +31,14 @@ function arg(name: string, fallback: string): string {
 
 async function main(): Promise<void> {
   const port = Number(arg('--port', String(HUB_API_PORT)));
-  // TCP and UDP for node links (spec 08 §8.10). Other values only for a second hub in a test setup (with
-  // FR_HOME elsewhere): `--node-host 127.0.0.1` keeps it to loopback FakeNodes, and `--no-serial` leaves
-  // the USB ports, which belong to the running hub, alone.
+  // TCP and UDP for node links, and the node HTTP port (spec 08 §8.10). Other values only for a second
+  // hub in a test setup (with FR_HOME elsewhere): `--node-host 127.0.0.1` keeps it to loopback FakeNodes,
+  // and `--no-serial` leaves the USB ports, which belong to the running hub, alone.
   const nodePort = Number(arg('--node-port', String(NODE_LINK_PORT)));
   const nodeHost = arg('--node-host', '0.0.0.0');
+  // The node HTTP listener (OTA images, spec 08 §8.10) binds where the node links do; a test hub passes
+  // its own port (0: ephemeral), never the running hub's 7422.
+  const nodeHttpPort = Number(arg('--node-http-port', String(NODE_HTTP_PORT)));
   const useSerial = !process.argv.includes('--no-serial');
   mkdirSync(paths.home(), { recursive: true });
   // Single instance: hold the API address before opening hub.db or any serial port.
@@ -70,6 +74,11 @@ async function main(): Promise<void> {
   const events = createEvents(db, seq, run);
   const eventsRing = new RingRetention(db, 'events', () => seq.head());
   const sleepGuard = new SleepGuard();
+  // The Mac stays awake while a node session is up or an OTA job runs (design c4 §4): an OTA's node may
+  // be between sessions (REBOOTING) for up to a minute, and sleeping then strands it.
+  let nodeSessions = 0;
+  let otaActive = false;
+  const holdAwake = () => sleepGuard.update(nodeSessions + (otaActive ? 1 : 0));
   const router = createRouter({
     db,
     logs,
@@ -79,9 +88,24 @@ async function main(): Promise<void> {
     events,
     hubEpoch,
     links: { host: nodeHost, tcpPort: nodePort, udpPort: nodePort },
-    onSessions: (n) => sleepGuard.update(n),
+    onSessions: (n) => {
+      nodeSessions = n;
+      holdAwake();
+    },
   });
   frames.attach((device, line) => router.serialLine(device, line));
+  const ota = createOta({
+    db,
+    router,
+    registry,
+    events,
+    jobs,
+    http: { host: nodeHost, port: nodeHttpPort },
+    onActive: (active) => {
+      otaActive = active;
+      holdAwake();
+    },
+  });
 
   let idf: IdfStatus | null = null;
   let pytools: PytoolsStatus | null = null;
@@ -112,6 +136,7 @@ async function main(): Promise<void> {
       router,
       events,
       hubEpoch,
+      ota,
     },
     port,
   );
@@ -123,7 +148,23 @@ async function main(): Promise<void> {
   await events.start();
   eventsRing.start();
   await router.start(); // node links (TCP/UDP :7421) once the API is up
-  console.log(JSON.stringify({ event: 'listening', version: HUB_VERSION, registry_hash: REGISTRY_HASH, port, node_port: nodePort, ...(useSerial ? {} : { serial: false }), run, hub_epoch: hubEpoch, pid: process.pid }));
+  await ota.start(); // the node HTTP listener (:7422) serves only nodes with a session, so after the router
+  console.log(
+    JSON.stringify({
+      event: 'listening',
+      version: HUB_VERSION,
+      registry_hash: REGISTRY_HASH,
+      port,
+      node_port: nodePort,
+      node_http_port: ota.httpPort(),
+      // A node HTTP port that is taken leaves the hub up; OTA over Wi-Fi fails with no_http_listener.
+      ...(ota.listenError() ? { node_http_error: ota.listenError() } : {}),
+      ...(useSerial ? {} : { serial: false }),
+      run,
+      hub_epoch: hubEpoch,
+      pid: process.pid,
+    }),
+  );
 
   let stopping = false;
   const stop = async (signal: string) => {
@@ -139,6 +180,7 @@ async function main(): Promise<void> {
     // kills their build groups and sidecars, and lets them record "cancelled" while the db is open.
     jobs.cancelAll();
     await app.close().catch(() => undefined);
+    await Promise.resolve(ota.stop()).catch(() => undefined);
     await Promise.resolve(router.stop()).catch(() => undefined);
     frames.attach(null);
     sleepGuard.stop();
