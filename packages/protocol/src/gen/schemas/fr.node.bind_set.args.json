@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.node.bind_set.args",
+  "title": "fr.node.bind_set arguments",
+  "description": "Store a binding (07 §7.11).",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

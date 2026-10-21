@@ -1,0 +1,11 @@
+menu "Fractonica capabilities"
+
+    config FR_TEST_HOOKS
+        bool "Test hooks (inject commands, diag call)"
+        default n
+        help
+            Compiles capability commands with `visibility: test` (fr.button inject, ...) and the
+            diag `call`/`inject` JSON codecs. Set by sdkconfig.build.debug; never on in release
+            builds, where those commands answer UNSUPPORTED.
+
+endmenu

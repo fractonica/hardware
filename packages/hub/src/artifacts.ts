@@ -5,7 +5,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writ
 import { dirname, join } from 'node:path';
 
 import { paths } from '@fractonica/host';
-import { type ArtifactManifest, ArtifactManifestSchema, FrError } from '@fractonica/protocol';
+import { type ArtifactManifest, ArtifactManifestSchema, FrError, type ManifestCap, ManifestCapSchema } from '@fractonica/protocol';
+import { z } from 'zod';
 
 import { type Db, kvGet, kvSet } from './db.ts';
 
@@ -160,6 +161,34 @@ export interface IngestInput {
   partProfile: string;
   git: { sha: string; dirty: boolean };
   idf: { version: string; commit: string };
+  /** `fr gen firmware` output dir; its fr_manifest.json gives the manifest `caps` and `catalog_hash`. */
+  genDir?: string;
+}
+
+/** The parts of fr_manifest.json (fractonica/fr-manifest@1, written by `fr gen firmware`) the artifact keeps. */
+const FrManifestSchema = z.looseObject({
+  schema: z.literal('fractonica/fr-manifest@1'),
+  caps: z.array(ManifestCapSchema),
+  catalog_hash: z.number().int().min(0).max(0xffffffff),
+});
+
+/** The caps and catalog_hash of a generated fr_manifest.json; null when the build has none. */
+export function readFrManifest(genDir: string): { caps: ManifestCap[]; catalog_hash: number } | null {
+  const file = join(genDir, 'fr_manifest.json');
+  if (!existsSync(file)) {
+    return null;
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    throw new FrError('BUILD_FAILED', `${file} is not valid JSON: ${(e as Error).message}`);
+  }
+  const parsed = FrManifestSchema.safeParse(json);
+  if (!parsed.success) {
+    throw new FrError('BUILD_FAILED', `${file} does not match fractonica/fr-manifest@1: ${z.prettifyError(parsed.error)}`);
+  }
+  return { caps: parsed.data.caps, catalog_hash: parsed.data.catalog_hash };
 }
 
 export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManifest; manifestPath: string } {
@@ -201,6 +230,7 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
   const mapFile = elfFile.replace(/\.elf$/, '.map');
   const map = existsSync(mapFile) ? storeBlob(mapFile) : null;
   const debug = { elf: { blob: elf.ref, size: elf.size }, ...(map ? { map: { blob: map.ref, size: map.size } } : {}) };
+  const fr = inp.genDir ? readFrManifest(inp.genDir) : null;
   const fwShort = image.fw_id.slice(0, 12);
   const build_id = `${inp.app}/${inp.profile}/${inp.buildType}/${fwShort}`;
   const manifest: ArtifactManifest = ArtifactManifestSchema.parse({
@@ -223,6 +253,7 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
     built_at: new Date().toISOString(),
     flash: { mode: flasher.flash_settings.flash_mode, freq: flasher.flash_settings.flash_freq, size: flasher.flash_settings.flash_size, files },
     partitions: parsePartitionTable(ptable),
+    ...(fr ? { caps: fr.caps, catalog_hash: fr.catalog_hash } : {}),
     debug,
   });
   const manifestPath = join(paths.artifacts(), 'builds', build_id, 'manifest.json');
@@ -249,10 +280,25 @@ export function loadManifest(db: Db, buildId: string): ArtifactManifest {
   return ArtifactManifestSchema.parse(JSON.parse(readFileSync(row.manifest_path, 'utf8')));
 }
 
-export function newestBuildId(db: Db, profile: string, buildType?: string): string | null {
+/**
+ * Caps of the newest artifact whose fw_id starts with `prefix` (a device's boot banner prints the
+ * first 6 bytes); null when no such artifact or it predates fr_manifest caps.
+ */
+export function manifestCapsByFwPrefix(db: Db, prefix: string): ManifestCap[] | null {
   const row = db
-    .prepare(`SELECT build_id FROM artifacts WHERE profile = ? ${buildType ? 'AND build_type = ?' : ''} ORDER BY built_at DESC LIMIT 1`)
-    .get(...(buildType ? [profile, buildType] : [profile])) as { build_id: string } | undefined;
+    .prepare('SELECT manifest_path FROM artifacts WHERE substr(fw_id, 1, ?) = ? ORDER BY built_at DESC LIMIT 1')
+    .get(prefix.length, prefix.toLowerCase()) as { manifest_path: string } | undefined;
+  if (!row || !existsSync(row.manifest_path)) {
+    return null;
+  }
+  return ArtifactManifestSchema.parse(JSON.parse(readFileSync(row.manifest_path, 'utf8'))).caps ?? null;
+}
+
+/** Newest artifact of (app, profile, build_type); build_id is `<app>/<profile>/<build_type>/<fw>`. */
+export function newestBuildId(db: Db, q: { app: string; profile: string; buildType: string }): string | null {
+  const row = db
+    .prepare('SELECT build_id FROM artifacts WHERE profile = ? AND build_type = ? AND substr(build_id, 1, ?) = ? ORDER BY built_at DESC LIMIT 1')
+    .get(q.profile, q.buildType, q.app.length + 1, `${q.app}/`) as { build_id: string } | undefined;
   return row?.build_id ?? null;
 }
 

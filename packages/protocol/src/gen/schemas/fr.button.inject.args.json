@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.button.inject.args",
+  "title": "fr.button.inject arguments",
+  "description": "Replays a gesture through ButtonService exactly as a real one, including `pressed`.\npress/release emit only down/up and set/clear `pressed` (hold a button for a test).",
+  "type": "object",
+  "properties": {
+    "gesture": {
+      "type": "string",
+      "enum": [
+        "click",
+        "double_click",
+        "long_press",
+        "press",
+        "release"
+      ],
+      "default": "click"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "gesture": "double_click"
+    },
+    {
+      "gesture": "press"
+    }
+  ]
+}

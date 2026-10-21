@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.button.up.event",
+  "title": "fr.button.up event",
+  "type": "object",
+  "properties": {
+    "held_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false
+}

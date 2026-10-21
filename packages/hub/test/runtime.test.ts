@@ -208,6 +208,27 @@ describe('serial port manager', () => {
     expect(lines).toEqual(['invalid header: 0x', 'ESP-ROM:esp32c6-20220919', 'Build:Sep 19 2022']);
   });
 
+  it('reopens open ports when a poll comes much later than due (the Mac slept)', async () => {
+    const { mgr, lines } = rig();
+    const t0 = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(t0);
+    try {
+      await mgr.poll();
+      const first = last();
+      first.finishOpen();
+      clock.mockReturnValue(t0 + 600);
+      await mgr.poll(); // an ordinary tick changes nothing
+      expect(first.closes).toBe(0);
+      clock.mockReturnValue(t0 + 60_600);
+      await mgr.poll();
+      expect(first.closes).toBe(1);
+      expect(last()).not.toBe(first);
+      expect(lines.at(-1)).toBe('(hub: system resumed after 60 s; port reopened)');
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('waits for a port that vanished moments ago, but not for one never seen', async () => {
     const { mgr } = rig();
     await mgr.poll();

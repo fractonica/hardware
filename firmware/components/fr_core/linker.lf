@@ -1,0 +1,7 @@
+# input_slot_isr: the only fr_core code a driver ISR calls. `noflash` puts its text in IRAM and its
+# rodata (EspInputSlot's vtable) in DRAM, so an ESP_INTR_FLAG_IRAM handler can run it during flash
+# writes (spec 03 §3.4).
+[mapping:fr_core]
+archive: libfr_core.a
+entries:
+    input_slot_isr (noflash)

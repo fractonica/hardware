@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.node.get_state.args",
+  "title": "fr.node.get_state arguments",
+  "description": "Re-send every property with fresh LATEST seqs.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

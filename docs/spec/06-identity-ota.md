@@ -275,7 +275,7 @@ Every transition is persisted and emitted as `ota.job.state`.
   "build_id": "node/c6-pad/debug/9f2c1e07ab12",
   "app": "node", "profile": "c6-pad", "build_type": "debug", "board": "esp32c6-supermini",
   "target": "esp32c6", "chip_id": 13, "min_chip_rev": 0, "max_chip_rev": 99,
-  "part_profile": "fr-4mb-v1", "proto": "1.0", "catalog_hash": "9c1e44a0",
+  "part_profile": "fr-4mb-v1", "proto": "1.0", "catalog_hash": 3639287564,
   "version": "0.1.0+g1a2b3c4.dirty.9f2c1e07",
   "source_dir": "/Users/dimas/projects/fractonica-hardware", "git": { "sha": "…", "dirty": true },
   "idf": { "tag": "v6.1", "commit": "…" },
@@ -286,11 +286,14 @@ Every transition is persisted and emitted as `ota.job.state`.
                         { "offset": "0xe000", "blob": "sha256:…", "role": "ota_data_initial" },
                         { "offset": "0x10000", "blob": "sha256:…", "role": "app" } ] },
   "debug": { "elf": { "blob": "sha256:…", "size": 6815744 }, "map": { "blob": "sha256:…", "size": 1048576 } },
-  "caps": [ { "port": 1, "name": "boot", "cap": "fr.button", "v": "1.0" },
-            { "port": 2, "name": "status", "cap": "fr.led", "v": "1.0" } ]
+  "caps": [ { "name": "boot", "port": 1, "cap": "fr.button", "cap_id": 1, "version": "1.0", "driver": "button_gpio",
+              "config": { "debounce_ms": 20, "long_press_ms": 600, "multi_press_gap_ms": 250, "multi_press_max": 2 } },
+            { "name": "status", "port": 2, "cap": "fr.led", "cap_id": 2, "version": "1.0", "driver": "led_ws2812",
+              "config": { "max_brightness": 64 } } ]
 }
 ```
 
+- **Caps.** Ingest copies `caps` (with each port's effective service config) and `catalog_hash` (u32) from the build's `fr_manifest.json` ([03 §3.8](03-firmware.md)); the hub names a device's frames from them ([08 §8.3](08-hub.md)).
 - **Version label.** `version` is a display label. A dirty tree gets `.dirty.<fw_id[0:8]>`.
 - **Debug files.** `debug.elf` and `debug.map` keep the app ELF and linker map of every `fw_id` (never flashed), for panic and core-dump decoding after the build dir has been reused. Ingest checks `sha256(ELF) == elf_sha256`. The blob store has no GC yet: each distinct build adds about 7 MB.
 - **Flash offsets** come from `flasher_args.json`. Any esptool v4 spellings (`default_reset`) are normalised to v5 (`default-reset`).

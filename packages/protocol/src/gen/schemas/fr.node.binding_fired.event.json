@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.node.binding_fired.event",
+  "title": "fr.node.binding_fired event",
+  "type": "object",
+  "properties": {
+    "slot": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "target_status": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "rtt_us": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "trigger -> target RESULT; 0 for fast commands"
+    },
+    "path": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "0 espnow, 1 hub, 2 flood"
+    }
+  },
+  "additionalProperties": false
+}

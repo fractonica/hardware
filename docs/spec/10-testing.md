@@ -4,8 +4,8 @@
 
 | Tier | What | Runs on | Gate for |
 |---|---|---|---|
-| **T0 host** | Unit tests for the hub, SDK and codegen (vitest). C++ unit tests for L2 services (fake HAL + clock). **`fr_net` core tests** with `FakeLink` + `FakeClock`: both node sequence spaces and the hub spaces, session resets, relay suppression (K=2) and seeding from TCP, TTL, Q1 retry/backoff, response cache, presence timers, directory and binding routing | laptop and CI | every change (M1) |
-| **T1 golden vectors** | Envelope, system-message, capability and serial-line codecs: C++ and TS produce identical bytes for every case in `schema/vectors/`. Both decoders are fuzzed | laptop and CI | every schema or codec change (M1) |
+| **T0 host** | Unit tests for the hub, SDK and codegen (vitest). C++ host suite (§10.4): codecs, dispatch, `diag_json`, L2 services and `EnvelopeLink` (fake HAL + clock). **`fr_net` core tests** with `FakeLink` + `FakeClock`: both node sequence spaces and the hub spaces, session resets, relay suppression (K=2) and seeding from TCP, TTL, Q1 retry/backoff, response cache, presence timers, directory and binding routing | laptop and CI | every change (M1) |
+| **T1 golden vectors** | Envelope, system-message, capability and serial-line codecs: C++ and TS produce identical bytes for every case in `schema/vectors/`. Both decoders are fuzzed and reach the same digests (§10.4) | laptop and CI | every schema or codec change (M1) |
 | **T3 on-target** | Smoke tests on real boards, driven through the hub (`fr test run --tier target`, scenarios in `tests/e2e/`). Build and flash each profile, wait for `node.boot`, run `selftest`, inject inputs, assert events and properties, exercise bindings and OTA | bench (your boards) | each M1 checkpoint; IDF bumps |
 | **T4 HIL radio** | ESP-NOW reach, flood coverage, router outage, latency (T-LAT), OTA with power cuts | bench | protocol and RF changes |
 | **T2 virtual fleet** (M2) | The same IDF-free `fr_net` core, built for the host. N simulated nodes run against a virtual ESP-NOW medium (configurable loss, latency, duplication and RSSI; airtime modelled at 1 and 6 Mbps), with `SimTcp`/`SimUdp` links to a real hub over loopback | laptop and CI | protocol logic at scale; gateway-mode topologies |
@@ -34,7 +34,24 @@ The value of the framework is ESP-NOW flooding, node ↔ node behaviour and inpu
 - **M1 (T0).** `FakeLink` and `FakeClock` give deterministic unit tests of every rule in [05 §5.8–5.11](05-network.md).
 - **M2 (T2).** `SimEspNowLink` is a shared medium with a seeded RNG, per-pair loss and RSSI, and an airtime model. It is joined by `SimTcpLink` and `SimUdpLink` to a real hub. Scenarios are YAML (nodes, topology, loss, script, expectations) and run with `fr test run --tier sim <scenario> --json`.
 
-## 10.4 Acceptance gates
+## 10.4 Host suites, golden vectors, fuzzing
+
+| Command | Runs |
+|---|---|
+| `pnpm test` | vitest: wire runtime (hand-computed bytes), every golden vector both ways, JSON Schemas against the YAML `examples`, codegen model and board generator, hub (frame decoding, `diag_exec` with a fake port, builds), CLI. Fuzz targets at 10⁴ cases |
+| `pnpm test:host` | `tools/host-test.mjs`: configures, builds and runs the C++ host suite in `firmware/test/host` (CMake + Ninja; Homebrew LLVM `clang++` when present, `FR_HOST_CXX` overrides; `-std=c++23`, ASan + UBSan; no IDF): every golden vector, serial lines, dispatch, `diag_json`, `ButtonService`, `LedService` and `EnvelopeLink` against `FakeCore` (fake clock, timers and input slots) and a fake HAL |
+| `pnpm test:fuzz` | the T-CODEC gate: both fuzz suites at 10⁶ cases per target, then the digest comparison |
+
+- **cJSON for the host suite** (`diag_json.cpp`) comes from `$FR_CJSON_DIR`, the component manager's `espressif/cjson` (present after one node build), or an IDF 5.x install's `json` component.
+- **Golden vector files** (`schema/vectors/{header,envelope,messages,caps,serial}.json`, `schema: fractonica/vectors@1`) hold `cases: [{name, kind, type, value, hex}]`. `fr gen` writes them with a reference encoder that is independent of the generated codecs.
+  - `value` is JSON-safe: integers as numbers, `u64` as a decimal string, bytes as lowercase hex, enums by member name. An envelope case carries `header`, `prefix`, `body` and, for a known body, `body_type`/`body_value`.
+  - `decodeOnly: true`: the bytes only decode, because they are not what the encoder writes for `value` (unknown fields, field order, repeats, non-minimal varints, line terminators).
+  - `error: <DecodeError>` with `value: null`: the bytes must fail to decode with that code.
+  - `*.lenient_*` cases hold values the codec carries but the schema rejects (outside `range`, an unnamed enum value): the codecs round-trip them, while C++ dispatch and the TS JSON accessors refuse them ([07 §7.5](07-capabilities-sdk.md)).
+- **Fuzzing.** Every decoder target (header, envelope, each system message, each capability struct, serial line) runs random buffers and mutations of the golden vectors from xorshift32 seeded with FNV-1a 32 of the target name, the same in TS and C++. Each target folds its outcomes (accept or the error code) into a digest. `FR_FUZZ_N` sets the cases per target (default 10⁴).
+- **Digest parity.** Equal digests show that both decoders accept and reject exactly the same inputs with the same codes. The `wire.*` digests at 10⁴ are pinned in both suites. The gate compares every target both sides run at 10⁶: the TS suite writes its digests to `FR_FUZZ_DIGESTS`, and `host-test.mjs --fuzz N --expect <file>` checks the C++ ones against them, so the `gen.*` digests, which move with every schema or vector change, need no pins.
+
+## 10.5 Acceptance gates
 
 The protocol gates (T-CODEC, T-LAT, T-FLOOD, T-FLOOD-B, T-NN, T-PRES, T-CHAN, T-FAIL, T-SEC) are defined in [05 §5.18](05-network.md). The others:
 
@@ -48,7 +65,7 @@ The protocol gates (T-CODEC, T-LAT, T-FLOOD, T-FLOOD-B, T-NN, T-PRES, T-CHAN, T-
 | T-HIL (M2) | The fixture ESP32 presses each DUT's BOOT pin (short, double, long), reads its LED pin, and drives `test_pin` loopbacks, all through `input_simulate {layer: gpio}` | real presses produce `boot.down`/`up`/`click`/`long_press` in order; the LED level matches `status.on` within 5 ms; no human involved |
 | T-PORTS | Chrome Web Serial holds a port and provisioning is attempted; a lease holder process is killed | `PORT_BUSY_EXTERNAL` naming Chrome, success after the tab is closed; the orphaned lease is released within 2 s |
 
-## 10.5 CI (once the repo exists)
+## 10.6 CI (once the repo exists)
 
 | Trigger | Jobs |
 |---|---|

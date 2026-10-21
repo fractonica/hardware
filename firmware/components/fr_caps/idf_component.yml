@@ -1,0 +1,5 @@
+# cJSON for gen/diag_json.cpp: traits for diag `caps` in every build, the `call` codecs with FR_TEST_HOOKS.
+dependencies:
+  espressif/cjson:
+    version: "==1.7.19~2"
+    require: private

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.led.blink.args",
+  "title": "fr.led.blink arguments",
+  "description": "Flash `count` times (0 = until stop/set), then restore the steady state and emit effect_done.",
+  "type": "object",
+  "properties": {
+    "on_ms": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 10000,
+      "description": "(ms; 10..10000)",
+      "default": 200
+    },
+    "off_ms": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 10000,
+      "description": "(ms; 10..10000)",
+      "default": 200
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1000,
+      "description": "(0..1000)",
+      "default": 3
+    },
+    "color": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "on_ms": 100,
+      "off_ms": 100,
+      "count": 3,
+      "color": 16711680
+    }
+  ]
+}

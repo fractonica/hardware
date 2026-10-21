@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.button.click.event",
+  "title": "fr.button.click event",
+  "type": "object",
+  "properties": {
+    "count": {
+      "anyOf": [
+        {
+          "const": 0
+        },
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        }
+      ],
+      "description": "(1..5)"
+    }
+  },
+  "additionalProperties": false
+}

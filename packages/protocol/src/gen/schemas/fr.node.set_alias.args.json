@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.node.set_alias.args",
+  "title": "fr.node.set_alias arguments",
+  "type": "object",
+  "properties": {
+    "alias": {
+      "type": "string",
+      "maxLength": 31,
+      "description": "(<= 31 UTF-8 bytes)"
+    },
+    "rev": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false
+}

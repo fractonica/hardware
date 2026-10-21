@@ -26,8 +26,8 @@ e.g.  "pad-red-1"   "tag:poc,!pad-blue-2"   "chip:esp32c6,online"
 ```
 
 **Source directory.**
-- `build_start`, `deploy` (when it builds) and `gen` take `source_dir`, an absolute path to a checkout that contains `firmware/idf-version.lock`. `client_generate` takes no `source_dir`: it reads the live registry and the hub's catalog, so it works in app projects outside the framework repo.
-- The CLI fills it from its own working directory, resolved upward.
+- `build_start` and `deploy` (when it builds) take `source_dir`, an absolute path to a checkout that contains `firmware/idf-version.lock`. `client_generate` takes no `source_dir`: it reads the live registry and the hub's catalog, so it works in app projects outside the framework repo.
+- The CLI fills it from its own working directory, resolved upward. The local `fr gen` resolves its checkout the same way ([07 §7.6](07-capabilities-sdk.md)).
 - **Over MCP it is required.** Claude Code spawns the stdio adapter once, with the session's project directory as its working directory, so the adapter cannot see a worktree the agent enters later. Skills tell agents to pass their current working directory.
 - A path without the lock file is rejected with `INVALID_SOURCE`.
 - `client_generate` returns file contents; the CLI or MCP caller writes them relative to its own working directory.
@@ -121,6 +121,7 @@ interface Result<T> {
 | `HUB_UNREACHABLE`, `HUB_RESTARTED`, `HUB_VERSION_MISMATCH` | — | `fr hub start` / `restart`; `details.resume_cursor` |
 | `LNP_DENIED` | no | human: approve Local Network access for the launching app, or start the hub from Terminal |
 | `INVALID_ARGS` | no | schema message |
+| `INTERNAL` | no | a hub bug, or (`diag_exec`) a device answer that is not JSON; `details` keeps what was received |
 
 **CLI exit codes:**
 
@@ -148,8 +149,9 @@ Exit code 2 is avoided on purpose: Claude Code hooks treat 2 as "block".
 | Hub | **`hub_status`** (versions, IDF/esptool health, LNP, ports, devices, jobs, warnings), **`hub_doctor`** (also runs hub-less as `fr doctor`; the parity test exempts that path) |
 | Network | **`network_set`** `{ssid, password, bssid?, country}` (the password is write-only: reads return `password_set: true`), **`network_get`** |
 | Registry | **`device_list`**, **`device_get`**, **`device_update`** (alias, tags), **`device_provision`** (job), `device_forget` (destructive, M2), **`port_list`** (with holder), **`board_list`**, **`profile_list`**, **`capability_list`** |
-| Build | **`gen`** `{source_dir, check?, profile?}` (codegen; also runs hub-less as `fr gen`, exempt from the parity test like `fr doctor`), **`build_start`** `{source_dir, profile, build_type, fault?}` (job → artifact, diagnostics), **`artifact_list`**, `artifact_get` |
-| Flash | **`flash_start`** `{device \| port, build?, plan: app \| full \| identity \| recover}` (job). With `port` and no registry row, no `fr_ident` is written and the board boots UNASSIGNED. Also `flash_erase` (destructive, M2), **`device_reset`** (`hard` / `bootloader`), **`serial_lease`**, **`serial_lease_renew`**, **`serial_release`** |
+| Build | **`build_start`** `{source_dir, profile, build_type, fault?}` (job → artifact, diagnostics), **`artifact_list`**, `artifact_get`. Codegen is the local command `fr gen` (hub-less like `fr doctor`, so the parity test exempts it); a hub `gen` op is deferred |
+| Flash | **`flash_start`** `{device \| port, build?, profile?, plan: app \| full \| identity \| recover}` (job). Without `build`, the newest `debug` artifact of `profile`; a release build only through `build` ([08 §8.5](08-hub.md)). With `port` and no registry row, no `fr_ident` is written and the board boots UNASSIGNED. Also `flash_erase` (destructive, M2), **`device_reset`** (`hard` / `bootloader`), **`serial_lease`**, **`serial_lease_renew`**, **`serial_release`** |
+| Diag | **`diag_exec`** `{port, line ≤ 200, timeout_s = 5}` (query; CLI `fr diag <port> <line…>`, the trailing words joined by spaces): runs one serial command channel line (§9.7) on a USB-attached node. It resolves the port, subscribes, writes `#<id> <line>` (ids start at a random value) through the hub's handle ([08 §8.3](08-hub.md)), waits for the `#<id>` response and returns `{response, cursor}` with the parsed JSON. `cursor` is the log head *before* the write, because the device emits the frames a command causes (`inject`, `mark`) before its answer, so `wait_for_log` since it sees them. A device `{"ok":false,…}` is still an ok result; `fr diag` then exits 1 and prints `device error <error>: <detail>` on stderr. A bare `caps` follows the device's pages (`caps <next>`) and returns the whole list; `caps <from_port>` is one page. Errors: an answer that is not JSON is `INTERNAL`; no answer is `TIMEOUT` with the log tail; the port must be `open` (`PORT_LEASED`, `PORT_BUSY_EXTERNAL`, `DEVICE_OFFLINE` when not open within 1 s, `DEVICE_BUSY`). Over a hub link (C3) the same op will use `fr.diag.exec` |
 | OTA | **`ota_deploy`** `{selector, build?, via: auto \| serial \| wifi, max_parallel, on_failure}` (job with per-device children), **`ota_status`** |
 | Coarse | **`deploy`** `{selector, source_dir, build_type=debug, via=auto, fault?, expect_log?, expect_event?}`: builds once per distinct registry profile among the selected devices; then per device, serial or OTA (`via`); waits for the new `fw_id`; then an optional expect-log or expect-event. The happy path in one call. `fault: "health"` (debug only) deploys a build that deliberately fails its health check, to exercise rollback |
 | Logs | **`logs_read`** (cursor, level, grep, bounded, `follow` on CLI), **`logs_assert`** (ordered patterns, forbid list), **`crash_list`**, **`crash_get`** (decoded backtrace) |
@@ -171,10 +173,11 @@ fr hub start [--foreground] | stop [--force] | restart [--force] | status
 fr net set --ssid S --password-stdin [--bssid B] [--country CC] | get
 fr devices ls [sel] | get <dev> | set <dev> --alias A --tag +t | provision --port <usb-serial> [--profile P] [--build B] [--alias A] | reset <dev> [--mode bootloader]
 fr ports ls          fr boards ls          fr profiles ls          fr caps ls [--device D]
-fr gen [--check]     fr gen firmware --profile P
+fr gen [--check]   |   fr gen firmware --profile P [--out DIR]   # local, like fr doctor (07 §7.6)
 fr build --profile P [--build-type debug|release] [--fault health] [--wait 110]
 fr artifacts ls [--profile P] [--build-type debug|release]
-fr flash <dev>|--port <usb-serial> [--build B] [--plan app|full|identity|recover] [--dry-run] [--wait 110]
+fr flash <dev>|--port <usb-serial> [--build B | --profile P] [--plan app|full|identity|recover] [--dry-run] [--wait 110]
+fr diag <port> <line…>                     # serial command channel (§9.7); exits 1 on a device error
 fr ota <sel> [--build B] [--via auto|serial|wifi] [--max-parallel 4] [--dry-run] [--wait 110]   |   fr ota status <sel>
 fr deploy <sel> [--profile P] [--build-type debug|release] [--via auto|serial|wifi] [--fault health] [--expect-log PAT | --expect-event TYPE] [--dry-run] [--wait 110]
 fr logs <sel> [--since c:R.N|boot|-5m] [--follow] [--level W] [--grep RE]
@@ -227,30 +230,37 @@ Fractonica hub: ESP32 nodes — registry, build, flash, OTA, logs, commands, bin
 
 ## 9.7 Firmware hooks for agents (`fr_diag`)
 
-**Diag commands** are available on the USB **serial command channel** (line protocol over `fr_serial`; [05 §5.12.3](05-network.md)) and as `fr.diag.exec` (port 241) over any hub link. Responses are single-line JSON.
+**Diag commands** are available on the USB **serial command channel** (line protocol over `fr_serial`; [05 §5.12.3](05-network.md)) and as `fr.diag.exec` (port 241) over any hub link (the node answers it from C2; the hub sends it from C3). The hub op is `diag_exec` (`fr diag <port> <line…>`, §9.4).
 
-| Command | Purpose |
-|---|---|
-| `info` | id, alias, addr, chip, board, profile, flash size, PSRAM size and mode, fw (version, `fw_id`, ELF sha), IDF, uptime, heap, reset reason, `inject_enabled`, link states |
-| `caps` | descriptor (ports, instances, traits) |
-| `call <inst>.<command> <json>` | (debug, `CONFIG_FR_TEST_HOOKS`) run a capability command locally through the same dispatch as a hub CMD. Uses the generated `diag_json` encoders ([07 §7.6](07-capabilities-sdk.md)) |
-| `stats [reset]` | per-boot counters: MSGs delivered per topic, DUP/OLD drops, relay seeds sent and cancelled, binding fires and RTTs. Kept across hub-link drops |
-| `inject <inst> <gesture>` | serial equivalent of `input_simulate` (debug builds) |
-| `selftest [inst]` | driver self-tests. LED: drive the pin in input-output mode and read the level back. Button: check the idle level |
-| `mark <token>` | emits the event `diag.mark {token}` so test steps can synchronise |
-| `log <tag> <level>` | set a runtime log level |
-| `ota` | OTA state (running slot, pending, last result) |
-| `net drop_hub_link <s>` | (debug) after sending its RESULT, stop sending and accepting envelopes on TCP, UDP **and the serial ENV channel** for `s` seconds; serial log lines and diag commands continue. Suppresses reconnects and keeps the STA associated (T-FLOOD, demo step 5) |
-| `net loss <pct> <s>` | (debug) drop `pct`% of received hub-link envelopes for `s` seconds (T-INPUT) |
-| `pin_pulse <us>` | (debug) pulse the board manifest's `test_pin` (T-LAT loopback rig) |
-| `reboot [bootloader]` | restart, or enter ROM download mode |
+- **Request:** one line, `[#<id> ]<command> [args…]`. **Response:** exactly one line, `[#<id> ]<json>`, where `<json>` is `{"ok":true,...}` or `{"ok":false,"error":"<code>","detail":"…"}`. The `#<id>` (1–8 decimal digits) correlates the two and is echoed when present; a blank line gets no response.
+- Error codes are the status names (`invalid_args`, `unsupported`, `busy`, `failed`, `not_found`, …) plus `unknown_command`.
+- Handlers run on the core task (posted) and return their output; they never `printf`. A request line over 512 characters, or one that arrives when no buffer or queue slot is free, is answered by the reader task (`invalid_args` or `busy`), keeping the `#<id>`.
+- `fr.diag.exec` nests one level: an `exec` line that calls `diag.exec` again answers `BUSY`. Its RESULT (up to 1,400 B, BULK) must still fit the 200 B `Reply`, so over an ENV link answers longer than about 195 B (`info`, `caps`) are `FAILED` until C3 gives bulk commands a larger `Reply` or fragments it ([11 §11.4](11-roadmap.md)).
+- **From:** C2 implements the commands marked C2; the others arrive with the checkpoint whose gate needs them.
+
+| Command | From | Response (`ok:true` plus) and purpose |
+|---|---|---|
+| `info` | C2 | `id, alias, addr, state, epoch, chip, chip_rev, board, profile, part, app, ver, fw_id, idf, uptime_ms, heap, reset, slot, inject_enabled`. Planned additions: flash size, PSRAM size and mode, ELF sha, link states |
+| `caps [from_port]` | C2 | `caps: [{port, name, cap, cap_id, v, traits: {…}, ok}]` for the board ports (1–239) in port order from `from_port` (default 1), plus `next: <port>` when the rest does not fit the 2,048-character line (the first entry always does). `v` is `"major.minor"`; `ok` is false for a port whose init failed; traits come from the generated `traits_to_json` |
+| `call <inst>.<command> [json]` | C2 | `status` (`ok` or the error name) and `fields` (the RESULT fields). Debug builds only (`CONFIG_FR_TEST_HOOKS`; otherwise `error: "unsupported"`). Runs a capability command locally through the same dispatch as a hub CMD; the arguments are parsed with the generated `diag_json` ([07 §7.6](07-capabilities-sdk.md)), so U+0000 is `invalid_args`. A malformed request is `ok:false` |
+| `inject <inst> <gesture>` | C2 | `status`; the same as `call <inst>.inject {"gesture": …}`, the serial equivalent of `input_simulate` (debug builds) |
+| `selftest [inst]` | C2 | `results: [{name, ok, detail}]` from the drivers. `led_gpio`: drive the pin in input-output mode and read the level back. `led_ws2812`: re-send the colour, then check that the data line idles low. `button_gpio`: check the idle level; `detail` also counts the interrupts since boot |
+| `mark <token>` | C2 | emits the event `diag.mark {token}` (1–32 bytes) so test steps can synchronise |
+| `log <tag\|*> <level>` | C2 | `tag, level`; sets a runtime log level (`none\|error\|warn\|info\|debug\|verbose` or `N E W I D V`). Debug builds compile in DEBUG ([03 §3.7](03-firmware.md)) |
+| `stats [reset]` | C2 | `frames_tx, frames_dropped, logs_dropped, lines_discarded, rx_frames, rx_bad, cmds, env_ignored, env_bad, rx_dropped, posts_dropped` (`cmds` counts CMD envelopes plus `call`/`inject`); `reset` answers with the counts it clears. Planned per-boot additions, kept across hub-link drops: MSGs delivered per topic, DUP/OLD drops, relay seeds sent and cancelled, binding fires and RTTs |
+| `reboot [bootloader]` | C2 | `ok`, then restarts (about 250 ms later, once the answer is out), or enters ROM download mode |
+| `ota` | later (C4) | OTA state (running slot, pending, last result) |
+| `net drop_hub_link <s>` | later (T-FLOOD) | (debug) after sending its RESULT, stop sending and accepting envelopes on TCP, UDP **and the serial ENV channel** for `s` seconds; serial log lines and diag commands continue. Suppresses reconnects and keeps the STA associated (T-FLOOD, demo step 5) |
+| `net loss <pct> <s>` | later (T-INPUT) | (debug) drop `pct`% of received hub-link envelopes for `s` seconds |
+| `pin_pulse <us>` | later (T-LAT) | (debug) pulse the board manifest's `test_pin` (loopback rig) |
+| anything else | C2 | `{"ok":false,"error":"unknown_command"}` |
 
 **Verifying physical I/O without hands**
 
 | Method | Exercises | Use |
 |---|---|---|
 | `input_simulate` (the `inject` CMD) | capability → protocol → hub → SDK (bypasses only GPIO/ISR and debounce) | default, every change |
-| `selftest` | pin drive and readback | LED wiring |
+| `selftest` | pin drive and readback, data-line idle level, button idle level and interrupt count | LED and button wiring |
 | HIL fixture ESP32 (M2, required) | the real electrical path. An open-drain output drives the DUT's BOOT pin; the DUT's LED pin is wired to a fixture input. The fixture releases BOOT on any DUT reset | true end-to-end |
 | Human-assisted | everything | `wait_for_event {prompt_human: "Press BOOT on pad-red-1"}` shows a dashboard toast |
 

@@ -45,7 +45,7 @@ A framework for prototyping networks of ESP32 devices. It has five parts:
 
 | Concern | Source of truth | Generated / derived outputs |
 |---|---|---|
-| Device wire protocol (envelope, classes, system payloads) | `schema/protocol.yaml` | C header and codec (`fr_proto`), TS codec (`@fractonica/protocol`), golden test vectors |
+| Device wire protocol (envelope, classes, system payloads) | `schema/protocol.yaml` | C++ system-message codecs and constants (`fr_proto/gen`), TS codecs (`@fractonica/protocol/gen`), golden test vectors; the hand-written wire runtimes are checked against it ([07 §7.6](07-capabilities-sdk.md)) |
 | Capabilities (button, led, display, …) | `schema/capabilities/*.cap.yaml` | C++ interfaces and dispatch, C++ and TS codecs, TS typed clients, JSON Schemas (MCP/REST), `catalog.json`, `.proto` (documentation and interop only) |
 | Hardware facts | `hardware/boards/*.board.yaml` | per-board sdkconfig fragment, pin reservations, detection rules |
 | Driver implementations | `hardware/drivers/<driver>/` (IDF component plus `driver.yaml`) | driver catalog for the dashboard and agents |
@@ -74,6 +74,7 @@ fractonica/                       # this folder; unrelated experiments move to e
 │  ├─ apps/node/  apps/gateway/    # thin IDF projects
 │  ├─ profiles/*.profile.yaml      # board + capability→driver bindings (+ .slots.lock)
 │  ├─ partitions/fr-{4,8,16}mb-v1.csv
+│  ├─ test/host/                   # host C++ suite: codecs, vectors, fuzz, services (`pnpm test:host`, 10 §10.4)
 │  └─ config/                      # sdkconfig.framework[.<target>], sdkconfig.build.{debug,release}, sdkconfig.local (git-ignored)
 ├─ packages/                       # TypeScript (pnpm workspace)
 │  ├─ protocol/                    # Zod control-plane schemas + generated device codecs

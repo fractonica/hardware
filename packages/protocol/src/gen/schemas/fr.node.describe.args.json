@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.node.describe.args",
+  "title": "fr.node.describe arguments",
+  "description": "Returns the node descriptor (07 §7.4).",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

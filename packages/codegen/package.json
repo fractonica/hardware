@@ -1,0 +1,14 @@
+{
+  "name": "@fractonica/codegen",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "@fractonica/source": "./src/index.ts", "default": "./dist/index.js" }
+  },
+  "dependencies": {
+    "@fractonica/protocol": "workspace:*",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  }
+}

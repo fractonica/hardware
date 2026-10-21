@@ -1,0 +1,5 @@
+# cJSON builds every diag response (espressif/cjson: IDF 6 removed its json component). Same pin as fr_caps.
+dependencies:
+  espressif/cjson:
+    version: "==1.7.19~2"
+    require: private

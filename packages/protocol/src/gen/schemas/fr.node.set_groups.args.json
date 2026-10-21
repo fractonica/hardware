@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.node.set_groups.args",
+  "title": "fr.node.set_groups arguments",
+  "description": "M2",
+  "type": "object",
+  "properties": {
+    "groups": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 65535
+      },
+      "description": "(<= 8 items)"
+    }
+  },
+  "additionalProperties": false
+}

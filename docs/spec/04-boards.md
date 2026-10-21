@@ -53,6 +53,7 @@ leds:
 pins:
   reserved: { usb: [12, 13], flash: [24, 25, 26, 27, 28, 29, 30], not_bonded: [10, 11] }
   strapping: [4, 5, 8, 9, 15]
+  strapping_levels: { 4: none, 5: none, 8: high, 9: high, 15: none }   # level each needs at reset (high|low|none)
   free: [0, 1, 2, 3, 14, 18, 19, 20, 21, 22, 23]
 rf: { max_tx_power_qdbm: null }
 test_pin: 20                                                 # free GPIO for the T-LAT loopback rig (diag pin_pulse)
@@ -70,9 +71,11 @@ sources:
 ```
 
 The validator (`fr gen firmware`) enforces the following:
-- No driver may claim a `reserved` pin (in particular the USB D−/D+ pins; touching them makes the board unflashable until BOOT+RST).
-- Any binding on a strapping pin produces a warning that names the level the pin needs at reset. That covers outputs, pull-down inputs and external loads.
-- The peripheral budget (RMT channels, LEDC timers and channels) is not exceeded.
+- No driver may claim a `reserved` pin (in particular the USB D−/D+ pins; touching them makes the board unflashable until BOOT+RST), and no pin is claimed twice.
+- Any binding on a strapping pin produces a warning that names the level the pin needs at reset (`pins.strapping_levels`). That covers outputs, pull-down inputs and external loads.
+- The peripheral budget (RMT channels, LEDC timers and channels, against `resources`) and `fr_core`'s pools (23 timers for services, 8 input slots; [03 §3.4](03-firmware.md)) are not exceeded.
+- The driver supports the target and accepts the board entry's `kind` (an entry without `kind` is kind `gpio`); config keys and values are known and well-typed ([07 §7.8](07-capabilities-sdk.md)); instance names are snake_case, ≤ 31 characters and not reserved ([03 §3.6](03-firmware.md)).
+- All problems are reported together; warnings are returned alongside the result.
 
 The PSRAM mode and voltage are checked against the device later, at provisioning, against what esptool reported ([06 §6.4](06-identity-ota.md)).
 
@@ -82,7 +85,7 @@ The PSRAM mode and voltage are checked against the device later, at provisioning
 |---|---|---|---|
 | esptool USJ reset into the loader, `--after hard-reset`, or an RTS pulse from the hub | core reset; the USJ itself is not reset | stays enumerated (measured at checkpoint C1: C3 `rst:0x15 (USB_UART_CHIP_RESET)`, C6 `rst:0x15 (USB_UART_HPSYS)`; the port never closed) | no |
 | Blank or erased flash: the ROM prints `invalid header: 0xffffffff` until its watchdog fires | C6: `rst:0x7 (TG0_WDT_HPSYS)` about every 0.7 s, ~270 lines per cycle | stays enumerated (C6, measured at C1) | no |
-| `esp_restart()` (including the reboot after OTA) | CPU reset | expected to stay (from the IDF source; measure in spike S1) | no |
+| `esp_restart()` (including the reboot after OTA) | CPU reset | stays enumerated (measured at checkpoint C2 on the C6: `rst:0xc (SW_CPU)`; the whole boot log is captured) | no |
 | RST button, power-on, brownout, RTC watchdog | chip reset | re-enumerates | **yes** |
 | Deep sleep | USJ powered down | disconnects; reconnects on wake | — |
 | Firmware touches the USB pins or disables the USJ | — | disappears until BOOT+RST | — |
@@ -92,6 +95,7 @@ Rules:
 - **Identity is the MAC** (USB serial number), never the `/dev/cu.usbmodemXXXX` path. On macOS the path comes from the USB location ID, so it changes when you move the board to another socket. The hub re-resolves paths on every hotplug.
 - **Open ports with DTR and RTS deasserted.** On USJ, RTS drives a core reset. A careless open can reset a node, and that rolls back an image that is still pending verification ([06 §6.6](06-identity-ota.md)).
 - **Always attach a reader.** USJ output blocks for 50 ms and is then dropped when no host reads it.
+- **After macOS sleep** (observed once, at C2). Overnight, a C6 stopped producing output (no liveness log, no diag answers) while the hub still showed its port open, and one boot happened with no output captured. The Mac's power log shows a maintenance wake from sleep minutes later. A hub-side reset recovered it. The cause is not known and was not reproduced; the hub's open sequence was ruled out (serialport sets DTR and RTS with one `TIOCMSET`). Mitigation: the hub treats a poll tick more than 10 s late as a system resume and reopens every open port ([08 §8.3](08-hub.md)). C3's 1 s HEARTBEAT will make such silence visible within seconds.
 - **The console is the native USJ** on every USJ-only board (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`). As the secondary console it would be output-only, with no command input from agents. DevKitC-1 boards keep UART0 as their primary console.
 - **One serial channel carries logs, machine frames and diag commands.** They are separated by line framing. The `fr_serial` task is the only reader and writer ([05 §5.12.3](05-network.md), [03 §3.4](03-firmware.md)).
 

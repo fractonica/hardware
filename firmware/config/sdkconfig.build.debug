@@ -1,2 +1,5 @@
 CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_FR_TEST_HOOKS=y
+# diag `log <tag> D` can raise a tag at runtime only up to the compiled-in maximum.
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y

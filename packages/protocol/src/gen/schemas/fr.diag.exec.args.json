@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.diag.exec.args",
+  "title": "fr.diag.exec arguments",
+  "description": "Runs one diag command line (info, caps, call, inject, stats, selftest, mark, log, ota, net, pin_pulse, reboot) and returns single-line JSON (BULK).",
+  "type": "object",
+  "properties": {
+    "line": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "(<= 200 UTF-8 bytes)"
+    }
+  },
+  "additionalProperties": false
+}

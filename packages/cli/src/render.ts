@@ -1,7 +1,7 @@
 // Human-mode output. `--json` bypasses all of this and prints the Result envelope verbatim.
 
 import type { Check } from '@fractonica/host';
-import { cliFlag, findOp, type Job, type LogLine, type PortInfo, type Remediation, type Result, type ToolError } from '@fractonica/protocol';
+import { cliFlag, exitCodeForResult, findOp, type Job, type LogLine, type PortInfo, type Remediation, type Result, type ToolError } from '@fractonica/protocol';
 
 function yamlish(v: unknown, indent = ''): string {
   if (v === null || v === undefined) {
@@ -70,7 +70,28 @@ function remediationCli(rem: Remediation): string {
   return words.join(' ');
 }
 
+/**
+ * The device's error when `fr diag` got a `{"ok":false,...}` answer. The hub did its part, so the
+ * Result is ok and --json prints it unchanged, but the command failed: the CLI exits 1.
+ */
+export function diagFailure(op: string, r: Result): { error: string; detail?: string } | null {
+  const res = (r.data as { response?: { ok?: unknown; error?: unknown; detail?: unknown } } | undefined)?.response;
+  if (op !== 'diag_exec' || !r.ok || !res || typeof res !== 'object' || res.ok !== false) {
+    return null;
+  }
+  return { error: String(res.error ?? 'failed'), ...(res.detail !== undefined ? { detail: String(res.detail) } : {}) };
+}
+
+/** Exit status of a command's Result: exitCodeForResult, and 1 for a diag command the device failed. */
+export function cliExitCode(op: string, r: Result): number {
+  return diagFailure(op, r) ? 1 : exitCodeForResult(r);
+}
+
 export function renderResult(op: string, r: Result): { out: string; err: string } {
+  if (op === 'gen' && !r.ok && !r.error) {
+    const stale = (r.data as { stale?: string[] } | undefined)?.stale ?? [];
+    return { out: '', err: [`${stale.length} generated file(s) are stale:`, ...stale.map((f) => `  ${f}`), 'try: fr gen'].join('\n') };
+  }
   if (!r.ok) {
     const e: ToolError = r.error ?? { code: 'INTERNAL', message: 'the hub returned an error without details', retryable: false };
     const lines = [`error ${e.code}: ${e.message}`];
@@ -95,6 +116,14 @@ export function renderResult(op: string, r: Result): { out: string; err: string 
   if (op === 'logs_read' || op === 'wait_for_log') {
     const lines = ((data as { lines?: LogLine[]; matches?: LogLine[] }).lines ?? (data as { matches: LogLine[] }).matches) || [];
     return { out: renderLogs(lines) + `\n(cursor ${(data as { next_cursor?: string; cursor?: string }).next_cursor ?? (data as { cursor?: string }).cursor ?? r.cursor})`, err: '' };
+  }
+  if (op === 'diag_exec') {
+    // The device's own one-line JSON, as `fr_diag` printed it; its error is repeated on stderr.
+    const failure = diagFailure(op, r);
+    return {
+      out: JSON.stringify((data as { response?: unknown }).response),
+      err: failure ? `device error ${failure.error}${failure.detail ? `: ${failure.detail}` : ''}` : '',
+    };
   }
   if (op === 'job_logs') {
     return { out: ((data as { lines: { text: string }[] }).lines ?? []).map((l) => l.text).join('\n'), err: '' };

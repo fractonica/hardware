@@ -1,16 +1,17 @@
 #!/usr/bin/env node
-// `fr`: the Fractonica CLI. Op commands are generated from the operation registry; `doctor` and
-// `hub start|stop|restart` run locally without a hub (spec 09 §9.5).
+// `fr`: the Fractonica CLI. Op commands are generated from the operation registry; `doctor`, `gen`
+// and `hub start|stop|restart` run locally without a hub (spec 09 §9.5).
 
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import { z } from 'zod';
 
 import { findSourceDir, runDoctor } from '@fractonica/host';
-import { cliFlag, exitCodeForResult, MAX_WAIT_S, OPS, REGISTRY_HASH, type ErrorCode, type OpDef, type Result } from '@fractonica/protocol';
+import { cliFlag, MAX_WAIT_S, OPS, REGISTRY_HASH, type ErrorCode, type OpDef, type Result } from '@fractonica/protocol';
 
 import { callTimeoutMs, hubCall, hubHealth } from './client.ts';
+import { genAll, genFirmware } from './gen.ts';
 import { restartHub, startHub, stopHub } from './hub.ts';
-import { renderChecks, renderResult } from './render.ts';
+import { cliExitCode, renderChecks, renderResult } from './render.ts';
 
 const program = new Command('fr')
   .description('Fractonica: build, flash, monitor and drive ESP32 device networks')
@@ -38,10 +39,10 @@ async function exit(code: number, out = '', err = ''): Promise<never> {
 
 async function emit(r: Result, op: string): Promise<never> {
   if (isJson()) {
-    return exit(exitCodeForResult(r), JSON.stringify(r) + '\n');
+    return exit(cliExitCode(op, r), JSON.stringify(r) + '\n');
   }
   const { out, err } = renderResult(op, r);
-  return exit(exitCodeForResult(r), out && out + '\n', err && err + '\n');
+  return exit(cliExitCode(op, r), out && out + '\n', err && err + '\n');
 }
 
 function fail(code: ErrorCode, message: string, op: string, remediation?: { cli?: string; human?: string }[]): Promise<never> {
@@ -140,9 +141,10 @@ function addOp(op: OpDef): void {
   // (`wait log [selector] <pattern>`) would take a lone word. Such commands declare every
   // positional optional to commander and place the words in the action instead.
   const optionalFirst = positional.some((p, i) => isOptional(p) && positional.slice(i + 1).some((q) => !isOptional(q)));
-  for (const p of positional) {
-    cmd.argument(optionalFirst || isOptional(p) ? `[${p}]` : `<${p}>`, shape[p].description ?? '');
-  }
+  positional.forEach((p, i) => {
+    const name = op.cli.variadic && i === positional.length - 1 ? `${p}...` : p;
+    cmd.argument(optionalFirst || isOptional(p) ? `[${name}]` : `<${name}>`, shape[p].description ?? '');
+  });
   if (optionalFirst) {
     cmd.usage(`[options] ${positional.map((p) => (isOptional(p) ? `[${p}]` : `<${p}>`)).join(' ')}`);
   }
@@ -185,7 +187,10 @@ function addOp(op: OpDef): void {
   cmd.action(async (...args: unknown[]) => {
     const opts = cmd.opts() as Record<string, unknown>;
     const input: Record<string, unknown> = {};
-    const words = positional.map((_, i) => args[i]).filter((a): a is string => typeof a === 'string');
+    // A variadic positional arrives as an array; its words are joined back into one value.
+    const words = positional
+      .map((_, i) => (Array.isArray(args[i]) && args[i].length ? args[i].join(' ') : args[i]))
+      .filter((a): a is string => typeof a === 'string');
     let slots = positional;
     for (const p of positional) {
       if (slots.length > words.length && isOptional(p)) {
@@ -223,6 +228,18 @@ program
     const ok = !checks.some((c) => c.level === 'error');
     await exit(ok ? 0 : 1, (isJson() ? JSON.stringify({ ok, data: { checks }, cursor: '' }) : renderChecks(checks)) + '\n');
   });
+
+const gen = program
+  .command('gen')
+  .description('Regenerate the committed codec, catalog and golden-vector outputs from schema/ (works without a hub)')
+  .option('--check', 'only compare; list stale files and exit 1 if any')
+  .action(async (opts: { check?: boolean }) => emit(await genAll({ check: Boolean(opts.check), cwd: process.cwd() }), 'gen'));
+gen
+  .command('firmware')
+  .description("Generate a profile's firmware composition (fr_board, components.cmake, sdkconfig.board, fr_manifest.json)")
+  .requiredOption('--profile <name>', 'profile name, e.g. c6-pad')
+  .option('--out <dir>', 'output directory (default: firmware/apps/<app>/build/<profile>-debug/fr_gen, as fr build uses)')
+  .action(async (opts: { profile: string; out?: string }) => emit(await genFirmware({ profile: opts.profile, out: opts.out, cwd: process.cwd() }), 'gen_firmware'));
 
 const hub = group(['hub']).description('Run and inspect the hub daemon');
 hub

@@ -1,0 +1,15 @@
+# Driver manifest (design c2 §6, spec 07 §7.8). `fr gen firmware` validates profiles against it and
+# fills fr::drv::LedGpio::Config from the bound board entry.
+schema: fractonica/driver@1
+id: led_gpio
+summary: On/off indicator LED on one GPIO (active-high or active-low); not dimmable in C2.
+implements: hal.LightOutput
+class: fr::drv::LedGpio                 # header: include/fr/drv/led_gpio.hpp
+targets: [esp32c3, esp32c6, esp32s3]
+binds: leds
+accepts_kinds: [gpio]
+config:                                 # same order as LedGpio::Config
+  gpio:         { type: gpio, from: board.gpio }
+  active_level: { type: enum, values: [low, high], from: board.active_level, default: high }
+resources: { gpio: 1 }
+dependencies: {}

@@ -15,6 +15,9 @@ displays:
 pins:
   reserved: { usb: [18, 19], flash: [11, 12, 13, 14, 15, 16, 17], display: [5, 6] }
   strapping: [2, 8, 9]
+  # Level each strapping pin needs at reset (spec 04 §4.1): GPIO9 low selects download mode, download
+  # mode needs GPIO8 high, and Espressif recommends keeping GPIO2 pulled up.
+  strapping_levels: { 2: high, 8: high, 9: high }
   free: [0, 1, 2, 3, 4, 7, 10, 20, 21]
   adc1: [0, 1, 2, 3, 4]
 rf: { max_tx_power_qdbm: null, antenna: ceramic }

@@ -2,9 +2,10 @@
 // published synchronously; SQLite writes are batched every 50 ms. The table is a ring trimmed to the
 // retention limits (spec 08 §8.8) in small batches off a timer.
 
-import { formatCursor, type LogLine } from '@fractonica/protocol';
+import { formatCursor, SERIAL_PREFIX, type LogKind, type LogLine } from '@fractonica/protocol';
 
 import { type Db, kvGet } from './db.ts';
+import type { FrameDecoder } from './frames.ts';
 
 export interface StoredLine {
   seq: number;
@@ -14,7 +15,7 @@ export interface StoredLine {
   port: string;
   level: string | null;
   tag: string | null;
-  kind: 'esp_log' | 'raw' | 'boot';
+  kind: LogKind;
   text: string;
 }
 
@@ -34,6 +35,8 @@ const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
 export const stripAnsi = (s: string): string => s.replace(ANSI_RE, '');
 const BOOT_RE = /^(ESP-ROM:|Build:|rst:0x|boot:0x|SPIWP:|mode:|load:0x|entry 0x|Saved PC:)/;
+// fr_diag response on the serial command channel (design c2 §5): `#<id> {...}`.
+const DIAG_RE = /^#\d{1,8} [{]/;
 
 export function parseLine(raw: string): Pick<StoredLine, 'level' | 'tag' | 'kind' | 'text'> {
   const text = raw.replace(ANSI_RE, '').replace(/\r$/, '');
@@ -41,7 +44,7 @@ export function parseLine(raw: string): Pick<StoredLine, 'level' | 'tag' | 'kind
   if (m) {
     return { level: m[1], tag: m[3], kind: 'esp_log', text };
   }
-  return { level: null, tag: null, kind: BOOT_RE.test(text) ? 'boot' : 'raw', text };
+  return { level: null, tag: null, kind: BOOT_RE.test(text) ? 'boot' : DIAG_RE.test(text) ? 'diag' : 'raw', text };
 }
 
 /** Ring defaults (spec 08 §8.8); kv `logs.retention_days` / `logs.retention_rows` override them. */
@@ -63,10 +66,13 @@ export class LogStore {
   #listeners = new Set<(line: StoredLine) => void>();
   #pruneTimers: NodeJS.Timeout[] = [];
   #pruning = false;
+  #frames: FrameDecoder | null;
 
-  constructor(db: Db, run: number, opts: { retention?: boolean } = {}) {
+  /** `frames` decodes `@fr1:` lines into readable text; without it they are stored raw. */
+  constructor(db: Db, run: number, opts: { retention?: boolean; frames?: FrameDecoder } = {}) {
     this.#db = db;
     this.run = run;
+    this.#frames = opts.frames ?? null;
     const row = db.prepare('SELECT MAX(seq) AS m FROM logs').get() as { m: number | null };
     this.#nextSeq = (row.m ?? 0) + 1;
     if (opts.retention !== false) {
@@ -95,7 +101,13 @@ export class LogStore {
   }
 
   append(device: string, port: string, raw: string): StoredLine {
-    const line: StoredLine = { seq: this.#nextSeq++, run: this.run, ts_us: nowUs(), device, port, ...parseLine(raw) };
+    const parsed = parseLine(raw);
+    if (this.#frames && parsed.kind === 'raw' && parsed.text.startsWith(SERIAL_PREFIX)) {
+      Object.assign(parsed, this.#frames.format(device, parsed.text));
+    } else if (this.#frames && parsed.kind === 'esp_log') {
+      this.#frames.observe(device, parsed.text);
+    }
+    const line: StoredLine = { seq: this.#nextSeq++, run: this.run, ts_us: nowUs(), device, port, ...parsed };
     this.#pending.push(line);
     this.#timer ??= setTimeout(() => this.flush(), 50);
     for (const fn of this.#listeners) {

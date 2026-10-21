@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.analog_in.crossed.event",
+  "title": "fr.analog_in.crossed event",
+  "type": "object",
+  "properties": {
+    "index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "direction": {
+      "type": "string",
+      "enum": [
+        "rising",
+        "falling"
+      ]
+    },
+    "value": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    }
+  },
+  "additionalProperties": false
+}

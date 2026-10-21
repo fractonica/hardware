@@ -19,7 +19,7 @@
 ```
  fractonica hub (one Node process, detached daemon)
  ├─ SerialPortManager      main thread; owns every /dev/cu.* fd (serialport binds to libuv's default loop)
- │   ├─ LinePipeline       splits `@fr1:` frames (→ Router) from log lines (→ LogStore + bus)
+ │   ├─ LinePipeline       splits `@fr1:` frames (→ Router from C3; stored decoded, §8.3) from log lines (→ LogStore + bus)
  │   └─ Leases             hand-off to pytools jobs or external tools (TTL, holder pid, visible in UI)
  ├─ NodeLinks              TCP :7421 (node-initiated), UDP :7421 (inbound), serial ENV frames, gateway (M2)
  ├─ Router                 windows per 05 §5.8, hub sequence spaces, WELCOME/DIRECTORY/TIME, get_state, fan-out
@@ -60,13 +60,16 @@ Rules:
 - **Line control.** Open with `hupcl` off, then set DTR and RTS false at once. Resets happen only through explicit actions. S1 checks whether node-serialport toggles them during `open()` on macOS; if it does, use the plan-B transport.
 - **Busy ports.** On `EBUSY`, `lsof` finds the holder, and the error is `PORT_BUSY_EXTERNAL` with app name and PID (today: Chrome, PID 715).
 - **Logs.**
-  - Each line is stored with a global **cursor**, timestamp, level and tag (parsed from the `ESP_LOGx` prefix).
+  - Each line is stored with a global **cursor**, timestamp, level and tag (parsed from the `ESP_LOGx` prefix), and a `kind`: `esp_log`, `boot` (ROM and bootloader lines), `frame` (a decoded `@fr1:` line), `diag` (a `#<id> {…}` response of the serial command channel) or `raw`.
+  - **Frames are stored readable.** An `@fr1:` line is decoded with the generated TS serial codec and stored as `kind: frame`, for example `@fr1 EVENT boot.click {"count":1} (src=fffe seq=12 epoch=3 port=1)`; RESULT and ACK add `status=<name> req_seq=<n>`. Names come from the `fr_manifest` caps of the artifact whose `fw_id` starts with the boot banner's `fw=` (the device's prefix is kept in kv as `device_fw:<device>`, so names survive a hub restart). The system ports are named from the protocol constants, with or without a manifest, and a manifest entry cannot rename them (0 `node`, 240 `ota`, 241 `diag`: `@fr1 EVENT diag.mark {"token":"step1"} (…)`). An unknown port or member prints as `port=<p> kind=<k>` with hex fields; system classes print as `@fr1 <CLS> kind=<k> <hex>`, other serial types as `@fr1 <TYPE> <hex>`. A line that fails to decode is stored as `kind: raw` with `(decode error: <what> <code>)`.
   - **Repeats collapse.** Consecutive identical lines from one port are stored once, then as `(previous line repeated N more times)` at most once a second or when the text changes. A blank board's ROM loop prints ~400 identical lines a second; `ESP_LOG` lines carry a timestamp and never collapse.
   - **ROM banner split.** A reset cuts the line being printed, so `ESP-ROM:` can arrive glued to its tail. The hub stores the banner as its own line, so it still classifies as `boot`.
   - Panic blocks are decoded against the ELF of the running `fw_id` (`crash.detected`).
   - Logs live in a SQLite ring (7 days by default).
 - **Download-mode detection.** "USB present and no HELLO or log for 5 s after a reset" sets `maybe_download_mode`, with a recovery hint.
 - **Lease end.** When a lease ends, the port is reopened with DTR and RTS deasserted.
+- **System resume.** A poll tick more than 10 s late means the Mac slept. The hub then closes and reopens every open port and logs `(hub: system resumed after <n> s; port reopened)`. At C2 a C6 stayed silent after a night's sleep on a handle that still looked open, and a hub-side reset recovered it ([04 §4.4](04-boards.md)).
+- **Writing lines** (`diag_exec`, [09 §9.4](09-agent-api.md)). `writeLine` sends one line, LF appended, through the hub's open handle and refuses CR or LF inside it. It never drains: `tcdrain` would hold a libuv pool thread while the firmware does not read. A line is sent once its write callback fires, and concurrent lines on one handle queue in order. Only a handle whose write has been pending for more than 2 s refuses new lines, with `DEVICE_BUSY`, until that write completes (`TIMEOUT` for the stuck write itself).
 
 ## 8.4 Node links and routing
 
@@ -102,6 +105,7 @@ The **Router** does the following:
   - `nvs_gen {csv, size}` → bin.
   - `panic_decode {elf, text}`.
 - **Plans** come from the artifact manifest ([06 §6.4](06-identity-ota.md)): `full`, `app` (always including otadata), `identity`, `recover`. Never `idf.py flash`, and never merged images padded to full flash size (they would wipe `fr_ident`).
+- **Artifact choice.** `fr flash --profile <p>` takes the newest `debug` artifact of (`node`, `p`); a release build only through `--build`. With none, the result is `NOT_FOUND` with `build_start` as remediation.
 - **Speed.** `write_flash --diff-with` (esptool ≥ 5.2) rewrites only changed sectors in the dev loop.
 
 ## 8.6 Builds
@@ -109,9 +113,14 @@ The **Router** does the following:
 `BuildRunner` runs the contract in [03 §3.8](03-firmware.md):
 
 - **Source.** Every build names an absolute `source_dir` (the agent's checkout or worktree). The hub never builds an implicit "own" tree.
+- **Stages:** `generate`, `idf_env`, `compile`, `ingest`.
+- **Generator from the checkout.** `generate` runs the checkout's own `fr gen firmware` (03 §3.8 step 3); the hub never loads `@fractonica/codegen`.
+  - Errors: `NOT_FOUND` (unknown profile) passes through; schema issues are `BUILD_FAILED` with `{stage, issues}`; a CLI that cannot start or prints no envelope is `BUILD_FAILED` with its stderr tail and a `pnpm install` hint; an envelope without `manifest` or `part_profile` comes from a CLI older than the hub.
+  - A changed `.slots.lock` adds a "commit it" warning.
+  - Generation comes first, so `--clean` deletes the build dir before it, a target change found afterwards empties the build dir except `fr_gen`, and `INCOMPATIBLE_PROFILE` removes a build dir this run created.
 - **Environment.** Native IDF, with the environment from `export.sh` cached per IDF commit. Docker is optional, for reproducibility checks.
 - **No tree-hash cache.** `idf.py`, ninja and ccache always run, and an unchanged tree is a near no-op. `cache_hit` means the resulting `fw_id` matches the last one for `(source_dir, profile, build_type)`. `deploy` then reports `already_current` per device.
-- **Diagnostics.** GCC output is parsed into `diagnostics[]`.
+- **Diagnostics.** GCC output and CMake's `CMake Error at <file>:<line> (<cmd>):` blocks (with their indented message; stdout and stderr each have a parser) go into `diagnostics[]`.
 - **Locks.** `build:<sha1(source_dir)>:<app>` during dependency resolution, then `build:<sha1(source_dir)>:<app>:<profile>:<build_type>`. A global limit of ⌈cores/4⌉ builds.
 
 ## 8.7 Event bus and cursors
@@ -142,7 +151,7 @@ The **Router** does the following:
 | `hub.db` → `ports_seen`, `builds`, `artifacts` | USB serial ↔ last path; manifests and blob references |
 | `hub.db` → `jobs` | durable, retained ≥ 24 h. On hub restart, `working` jobs become `failed: HUB_RESTARTED` |
 | `hub.db` → `events`, `logs` | cursor-indexed rings; retention configurable (7 days / 1M rows) |
-| `hub.db` → `kv` | settings, `hub_run`, hub epoch |
+| `hub.db` → `kv` | settings, `hub_run`, hub epoch, `device_fw:<device>` (the `fw=` prefix from a device's boot banner, for frame names, §8.3) |
 | `secrets.json` (0600) | Wi-Fi passwords, API token. **Never in SQLite, never in results or logs** |
 
 ## 8.9 Dashboard
@@ -183,7 +192,7 @@ The dashboard uses the same WS and REST API as agents and never uses Web Serial.
 | **Application Firewall** (per app, not per port) | `fr doctor` checks `socketfilterfw` and tells you to allow the hub's `node` binary for inbound. Router-mode nodes surface it as `udp_blocked` ([05 §5.10](05-network.md)) |
 | **VPN** (your default route currently goes through `utun4`) | `fr doctor` checks that the LAN subnet is routed via the Wi-Fi or Ethernet interface, not the tunnel. Full-tunnel VPNs that block LAN access break router mode |
 | **Wi-Fi hub** (MacBook Pro, no Ethernet port) | Latency panel and T-LAT measure it; the M0 go/no-go decides on Ethernet (USB-C adapter), a lab AP, or gateway mode ([11 §11.2](11-roadmap.md)) |
-| Sleep (lid close) | A `PreventUserIdleSystemSleep` assertion while nodes are linked; the dashboard warns that closing the lid still sleeps the Mac |
+| Sleep (lid close) | A `PreventUserIdleSystemSleep` assertion while nodes are linked; the dashboard warns that closing the lid still sleeps the Mac. After a detected resume the hub reopens every open serial port (§8.3) |
 | Docker has no USB | The hub runs natively; Docker is for builds only |
 | `/dev/cu.*` paths change with the socket | Devices are keyed by MAC |
 | Several Node installs (nvm 24.11, Homebrew 25.2 which is end-of-life, /usr/local 22.19) | `fr doctor --fix` pins an absolute Node ≥ 24.12 path into the `fr` shim (§8.12) |

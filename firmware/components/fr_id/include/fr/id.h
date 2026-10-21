@@ -27,6 +27,7 @@ typedef struct {
     char alias[32];
     uint32_t alias_rev;
     uint16_t epoch_floor;
+    uint16_t epoch;    // this boot's epoch; 0 until fr_id_commit_boot_epoch()
     char board[32];    // compiled in (CONFIG_FR_BOARD)
     char profile[32];  // compiled in (CONFIG_FR_PROFILE)
 } fr_identity_t;
@@ -38,6 +39,16 @@ esp_err_t fr_id_get_mac(uint8_t out[6]);
 esp_err_t fr_id_load(fr_identity_t *out);
 
 const char *fr_id_state_name(fr_id_state_t state);
+
+/**
+ * Boot epoch (spec 05 §5.5, 03 §3.5 step 1): max(stored, epoch_floor) + 1, the max taken in RFC 1982
+ * serial order as receivers compare epochs (epoch_floor + 1 when nothing is stored, as after an NVS
+ * erase), committed to the RW `nvs` partition (namespace fr_boot) and
+ * then set in id->epoch. Call once per boot, after nvs_flash_init() and fr_id_load(), before anything
+ * transmits. On an NVS error id->epoch is set all the same and the error is returned: the next boot
+ * may then repeat this epoch.
+ */
+esp_err_t fr_id_commit_boot_epoch(fr_identity_t *id);
 
 #ifdef __cplusplus
 }

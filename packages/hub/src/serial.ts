@@ -1,6 +1,7 @@
 // The hub is the only owner of USB serial ports (spec 08 §8.2-8.3). Espressif USB-Serial/JTAG
 // ports are discovered by polling, keyed by their USB serial number (the chip MAC), opened with
-// DTR/RTS deasserted, and split into log lines. Flashing borrows a port through a lease.
+// DTR/RTS deasserted, and split into log lines. Flashing borrows a port through a lease. The serial
+// command channel (fr_diag) writes lines through the hub's own handle.
 
 import { StringDecoder } from 'node:string_decoder';
 
@@ -19,8 +20,16 @@ const MAX_LINE = 4096;
 /** A port gone for less than this is still waited for (USB re-enumerating after a chip reset). */
 const RECENTLY_GONE_MS = 60_000;
 const REAPPEAR_WAIT_MS = 5000;
+/** writeLine: how long a port the hub is (re)opening may take, and how long the kernel may take the bytes. */
+const WRITE_OPEN_WAIT_MS = 1000;
+const WRITE_SEND_MS = 2000;
 /** Consecutive identical lines are stored once, then as one "repeated N times" line per this period. */
 const REPEAT_FLUSH_MS = 1000;
+/**
+ * A poll tick this late means the Mac slept. USB was suspended meanwhile, and at C2 a C6 stayed
+ * silent after wake on a handle that still looked open, so every open port is closed and reopened.
+ */
+const RESUME_GAP_MS = 10_000;
 
 type State = PortInfo['state'];
 
@@ -50,6 +59,15 @@ export function normalizeMac(s: string): string {
   return /^[0-9a-f]{12}$/.test(hex) ? hex : s;
 }
 
+/**
+ * Handles whose output is stuck: a line the kernel had not taken after WRITE_SEND_MS, with the write
+ * still pending, because the firmware does not read (the tty queue is full). Further lines are refused
+ * until that write completes. writeLine never calls drain(): tcdrain() blocks a libuv pool thread until
+ * the device has taken the bytes, and a few non-reading devices would stall every serial call. The fd is
+ * non-blocking, so a pending write waits on the poller and holds no thread.
+ */
+const stuck = new WeakMap<SerialPort, Promise<void>>();
+
 function cuPath(path: string): string {
   return path.replace('/dev/tty.', '/dev/cu.');
 }
@@ -69,6 +87,7 @@ export class SerialPortManager {
   #db: Db;
   #timer: NodeJS.Timeout | null = null;
   #polling = false;
+  #lastPoll = 0;
 
   constructor(logs: LogStore, db: Db) {
     this.#logs = logs;
@@ -94,6 +113,10 @@ export class SerialPortManager {
     this.#polling = true;
     try {
       const now = Date.now();
+      if (this.#lastPoll && now - this.#lastPoll > RESUME_GAP_MS) {
+        await this.#reopenAfterResume(now - this.#lastPoll);
+      }
+      this.#lastPoll = now;
       const listed = (await SerialPort.list()).filter((p) => p.vendorId?.toLowerCase() === ESPRESSIF_VID);
       for (const p of listed) {
         const key = p.serialNumber ? normalizeMac(p.serialNumber) : cuPath(p.path);
@@ -245,6 +268,19 @@ export class SerialPortManager {
     e.repeat = undefined;
   }
 
+  async #reopenAfterResume(gapMs: number): Promise<void> {
+    for (const e of this.#entries.values()) {
+      if (e.state !== 'open') {
+        continue;
+      }
+      await this.#close(e);
+      e.state = 'closed';
+      e.nextOpenAt = 0;
+      e.lastSeen = Date.now(); // the gap is not an absence: do not let the gone debounce fire
+      this.#logs.append(e.key, e.path, `(hub: system resumed after ${Math.round(gapMs / 1000)} s; port reopened)`);
+    }
+  }
+
   async #close(e: Entry): Promise<void> {
     const port = e.port;
     const opening = e.opening;
@@ -343,19 +379,72 @@ export class SerialPortManager {
    */
   async hardReset(selector: string, waitOpenMs = 3000): Promise<{ path: string; key: string }> {
     const e = await this.resolveWait(selector);
-    const deadline = Date.now() + waitOpenMs;
-    while (!(e.state === 'open' && e.port?.isOpen)) {
-      if (Date.now() > deadline) {
-        throw new FrError('DEVICE_OFFLINE', `${e.path} is ${e.state}, not open by the hub; cannot reset through it`);
-      }
-      await sleep(25);
-    }
-    const port = e.port;
+    const port = await this.#waitOpen(e, waitOpenMs, 'cannot reset through it');
     const set = (rts: boolean) => new Promise<void>((res, rej) => port.set({ dtr: false, rts }, (err) => (err ? rej(err) : res())));
     await set(true);
     await sleep(200);
     await set(false);
     return { path: e.path, key: e.key };
+  }
+
+  /**
+   * Writes one line (LF appended) to the device through the hub's open handle: the serial command
+   * channel (design c2 §5). A leased port belongs to its holder until released.
+   */
+  async writeLine(selector: string, line: string): Promise<{ path: string; key: string }> {
+    if (/[\r\n]/.test(line)) {
+      throw new FrError('INVALID_ARGS', 'a serial line must not contain CR or LF');
+    }
+    const e = await this.resolveWait(selector);
+    if (e.state === 'leased') {
+      throw new FrError('PORT_LEASED', `${e.path} is leased to ${e.holder}`, { details: { holder: e.holder } });
+    }
+    if (e.state === 'busy_external') {
+      throw new FrError('PORT_BUSY_EXTERNAL', `${e.path} is held by ${e.holder ?? 'another program'}`, { details: { holder: e.holder } });
+    }
+    const port = await this.#waitOpen(e, WRITE_OPEN_WAIT_MS, 'cannot write to it');
+    if (stuck.has(port)) {
+      throw new FrError('DEVICE_BUSY', `${e.path}: the device has not taken an earlier line yet`, {
+        hint: 'its firmware is not reading serial input (no serial command channel, or stuck)',
+      });
+    }
+    // The port's stream queues writes in order, so concurrent lines go out one after the other.
+    // "Sent" means the kernel has the bytes; a firmware that never answers is diag_exec's TIMEOUT.
+    const sent = new Promise<void>((resolve, reject) => port.write(`${line}\n`, (err) => (err ? reject(err) : resolve())));
+    let timer: NodeJS.Timeout | undefined;
+    let outcome: 'sent' | 'timeout';
+    try {
+      outcome = await Promise.race([
+        sent.then(() => 'sent' as const),
+        new Promise<'timeout'>((resolve) => (timer = setTimeout(() => resolve('timeout'), WRITE_SEND_MS))),
+      ]);
+    } catch (err) {
+      throw new FrError('DEVICE_OFFLINE', `${e.path}: write failed: ${(err as Error).message}`);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (outcome === 'timeout') {
+      // Writes complete in order, so the last stuck write completing means the queue moves again.
+      stuck.set(port, sent);
+      const clear = () => stuck.get(port) === sent && stuck.delete(port);
+      sent.then(clear, clear);
+      throw new FrError('TIMEOUT', `${e.path}: the device did not take the line within ${WRITE_SEND_MS} ms`, {
+        hint: 'its firmware is not reading serial input (no serial command channel, or stuck)',
+      });
+    }
+    return { path: e.path, key: e.key };
+  }
+
+  /** The hub's own handle on `e` once it is open, waiting up to `ms` for an open in progress. */
+  async #waitOpen(e: Entry, ms: number, what: string): Promise<SerialPort> {
+    const deadline = Date.now() + ms;
+    while (!(e.state === 'open' && e.port?.isOpen)) {
+      if (Date.now() > deadline) {
+        throw new FrError('DEVICE_OFFLINE', `${e.path} is ${e.state}, not open by the hub; ${what}`);
+      }
+      await sleep(25);
+    }
+    return e.port;
   }
 
   list(): PortInfo[] {

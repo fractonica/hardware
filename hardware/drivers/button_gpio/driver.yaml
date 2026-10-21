@@ -1,0 +1,16 @@
+# Driver manifest (design c2 §6, spec 07 §7.8). `fr gen firmware` validates profiles against it and
+# fills fr::drv::ButtonGpio::Config from the bound board entry.
+schema: fractonica/driver@1
+id: button_gpio
+summary: Push button on one GPIO; an any-edge interrupt feeds the core input slot, ButtonService debounces.
+implements: hal.ButtonSource
+class: fr::drv::ButtonGpio              # header: include/fr/drv/button_gpio.hpp
+targets: [esp32c3, esp32c6, esp32s3]
+binds: buttons
+accepts_kinds: [gpio]                   # a board entry without `kind` is a plain GPIO
+config:                                 # same order as ButtonGpio::Config
+  gpio:         { type: gpio, from: board.gpio }
+  active_level: { type: enum, values: [low, high], from: board.active_level, default: low }
+  pull:         { type: enum, values: [up, down, external, none], from: board.pull, default: up, doc: "external and none leave the internal pulls off" }
+resources: { gpio: 1, input_slot: 1 }   # input_slot: fr_core's pool (8), fed by the edge ISR
+dependencies: {}

@@ -8,6 +8,7 @@
     ".": { "@fractonica/source": "./src/main.ts", "default": "./dist/main.js" }
   },
   "dependencies": {
+    "@fractonica/codegen": "workspace:*",
     "@fractonica/host": "workspace:*",
     "@fractonica/protocol": "workspace:*",
     "commander": "15.0.0",

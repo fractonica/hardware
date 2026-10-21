@@ -103,7 +103,7 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 | `addr` | u16 | network address assigned by the hub at provisioning |
 | `alias` | ≤ 31 B | RFC 1123 label |
 | `net` | u16 | network id; several networks can share a room |
-| `epoch` | u16 | boot counter = `max(nvs epoch, fr_ident.epoch_floor) + 1`, committed to NVS **before the first transmit** of each boot |
+| `epoch` | u16 | boot counter = `max(nvs epoch, fr_ident.epoch_floor) + 1` (max in RFC 1982 serial order, as receivers compare epochs), committed to NVS **before the first transmit** of each boot |
 
 | `addr` | Meaning |
 |---|---|
@@ -191,7 +191,7 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 **Payload encoding.**
 - Only the header, plus three raw class prefixes, are fixed layout: `t_us u32` for EVENT/STATE, and `req_epoch u16 | req_seq u32 | status u8` for RESULT/ACK.
 - Everything else (system messages and capability fields) is **protobuf-wire**, declared in `schema/protocol.yaml` or `*.cap.yaml` and generated ([07 §7.5](07-capabilities-sdk.md)).
-- `t_us` is device-local µs (u32; wraps every ~71.6 min) and is compared with RFC 1982 serial arithmetic.
+- `t_us` is device-local µs (u32; wraps every ~71.6 min) and is compared with RFC 1982 serial arithmetic. It is when the event or change happened, not when the frame was sent: the low 32 bits of the emission's `at`, such as a button edge's ISR timestamp ([07 §7.7](07-capabilities-sdk.md)).
 
 | Code | Class | `kind` | Payload |
 |---|---|---|---|
@@ -201,7 +201,7 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | 0x03 | EVENT | capability event id | `t_us` + fields |
 | 0x04 | CMD | capability command id | fields |
 | 0x05 | RESULT | the command id it answers | `req_epoch, req_seq, status` + result fields |
-| 0x06 | STATE | capability property id | `t_us` + value (always LATEST) |
+| 0x06 | STATE | capability property id | `t_us` + value, as a message with the value in field 1 (always LATEST) |
 | 0x07 | MSG | 0 | `{topic string≤32, data bytes}`; `data` is UTF-8 JSON from the SDK and agents |
 | 0x08 | LOG | level (1 = E … 5 = V) | `{tag, text}`; ≤ 20/s |
 | 0x09 | OTA | `OFFER 1`, `ACCEPT 2`, `REJECT 3`, `CHUNK 4`, `STATUS 5`, `COMMIT 6`, `RESULT 7`, `ABORT 8` | always on port 240 |
@@ -215,7 +215,7 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | PRESENCE/HELLO | `mac bytes6, chip u8 (image chip id: C3=5, S3=9, C6=13), chip_rev u16, fw_id_prefix bytes8, descriptor_hash u32, board_hash u32, role u8 (0 node, 1 gateway), caps u32 (b0 espnow_v2, b1 wifi, b2 sleepy, b3 sec, b4 inject_enabled, b5 provisioned), hb_interval_ms u32, reset_reason u8 (esp_reset_reason_t), ota_state u8 (the esp_ota_img_states_t value: 0 new, 1 pending_verify, 2 valid, 3 invalid, 4 aborted; 255 undefined), alias string≤31, alias_rev u32, channel u8, bssid bytes6` |
 | PRESENCE/HEARTBEAT | `uptime_s u32, state u32 (b0 wifi_up, b1 hub_link, b2 ota_busy, b3 time_synced, b4 low_batt, b5 swept), rssi_ap i8, tx_fail u32, rx_drop u32, queue_hwm u8, free_heap_kb u32, vbat_mv u32, bcast_watermark u32, state_seq u32` |
 | NET/WELCOME (hub → node, the answer to HELLO) | `hub_epoch u16, ucast_floor u32, bcast_base u32, hub_time_us u64, net_mode u8, channel u8` |
-| NET/DIRECTORY (hub → node) | `page u8, pages u8, entries [{addr u16, mac bytes6}] ≤ 14`. In protobuf-wire an entry is ≤ 14 B, so a page stays within the 200 B realtime budget |
+| NET/DIRECTORY (hub → node) | `page u8, pages u8, entries [{addr u16, mac bytes6}] ≤ 14`. In protobuf-wire an entry is ≤ 14 B, so a page is ≤ 200 B while `page` and `pages` stay below 128, and ≤ 202 B at worst (from 128 on, each takes 3 B: tag plus a 2-byte varint). DIRECTORY may fragment (§5.8), so the 200 B realtime check does not apply to it ([07 §7.5](07-capabilities-sdk.md)) |
 | NET/RESOLVE (node → hub) | `addr u16`; answered with a one-entry DIRECTORY |
 | NET/BEACON (gateway, M2) | `channel, flags, hub_epoch, bcast_floor u32, hub_time_us u64, hub_ipv4, hub_port, beacon_interval_ms, bcast_watermark u32` |
 | OTA/OFFER | `job_id string≤23, fw_id bytes32, size u32, version string≤31, flags u32 (FORCE, DEFER_COMMIT, ALLOW_DOWNGRADE)`. The node always GETs `http://<hub_host>:7422/ota/<lowercase hex fw_id>.bin` |
@@ -433,7 +433,8 @@ One datagram per envelope to `hub_host:7421/udp`. The hub never sends UDP; answe
 - **Line endings.** A `\r` before the `\n` is ignored.
 - **Length limit.** The maximum line is 2,048 characters; longer lines are discarded and counted.
 - **Everything else is log text.** Lines without the prefix are logs, including ROM and bootloader output.
-- **Single reader/writer.** The device side is the `fr_serial` task ([03 §3.4](03-firmware.md)). It is the only reader and writer of the USB-Serial/JTAG. It routes `@fr1:` lines to `fr_net` and other lines to the command parser. **IDF's console REPL and linenoise are not used**: against a non-terminal host linenoise falls into dumb mode and echoes every byte, which would reflect frames back to the hub.
+- **Single reader/writer.** The device side is the `fr_serial` task ([03 §3.4](03-firmware.md)). It is the only reader and writer of the USB-Serial/JTAG. It routes `@fr1:` lines to `fr_net` and other lines to the serial command channel ([09 §9.7](09-agent-api.md)). **IDF's console REPL and linenoise are not used**: against a non-terminal host linenoise falls into dumb mode and echoes every byte, which would reflect frames back to the hub. Nothing echoes input.
+- **Before a session (checkpoint C2).** Until C3 adds HELLO/WELCOME, `fr_core`'s `EnvelopeLink` stands in for `fr_net`. The node sends its EVENT and STATE envelopes as ENV frames without a session and without ACK_REQ (nothing would answer it). It dispatches an ENV `CMD` addressed to it (its own `addr`, `0xFFFE` while UNASSIGNED, or a port-0 broadcast) to the capability on `port` (`NOT_FOUND` for an empty port, `FAILED` for one whose init failed) and answers a unicast one with a RESULT ENV frame; a broadcast gets none (§5.8). The hub decodes these frames into log lines ([08 §8.3](08-hub.md)); its sending side arrives with C3.
 - **Golden vectors** include serial lines in both directions.
 
 | type | Direction | Body |
@@ -551,7 +552,7 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 
 | Id | Test | Pass |
 |---|---|---|
-| T-CODEC | C++ and TS golden vectors for every class, every system message and serial lines; fuzz both decoders | identical bytes; no crash in 10⁶ cases per decoder |
+| T-CODEC | C++ and TS golden vectors for every class, every system message, every capability member and serial lines in both directions; fuzz both decoders with the same seeds ([10 §10.4](10-testing.md)) | identical bytes; no crash in 10⁶ cases per decoder; equal fuzz digests for every target both sides run |
 | T-LAT | GPIO loopback: node A's `test_pin` is wired to node B's input. The hub sends `CMD exec_at`; also PING/PONG. 10k samples per path and rate. **Primary metric:** hub-clock round trip (CMD send → B's EVENT received) minus A's RTT/2. Also report the `exec_at` one-way figure with its sync uncertainty | Router mode, with the hub attached as chosen at the M0 go/no-go: p50 ≤ 10 ms; p99 ≤ 30 ms when wired, published when on Wi-Fi. Gateway: p50 ≤ 5 ms, p99 ≤ 20 ms |
 | T-FLOOD | 1,000 hub broadcasts with relays on. One node's hub link is blocked with the debug hook `net drop_hub_link 600` ([09 §9.7](09-agent-api.md)). The hook blocks envelopes on TCP, UDP **and** the serial link, keeps the STA associated on C and suppresses reconnects. Counts come from `diag stats` | ≥ 99.9% delivery; zero duplicate deliveries. Mean ESP-NOW transmissions per broadcast (relay seeds sent, from `diag stats`) ≤ 3 on the bench; ≤ K + 3 with 10 nodes in the virtual fleet (M2) |
 | T-FLOOD-B | Router powered off for 120 s while the hub sends `message_send broadcast` at 1 Hz. During the outage it reaches only a USB-attached node (over serial), which seeds the flood. Delivery is read with `diag stats` after the router returns | node ↔ node delivery ≥ 99% during the outage; all nodes back online < 10 s after the router returns |

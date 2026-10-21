@@ -9,6 +9,7 @@ import { idfStatus, paths, pytoolsStatus, readIdfLock, type IdfStatus, type Pyto
 import { HUB_API_PORT, HUB_VERSION, REGISTRY_HASH } from '@fractonica/protocol';
 
 import { nextHubRun, openDb } from './db.ts';
+import { FrameDecoder } from './frames.ts';
 import { buildServer } from './http.ts';
 import { JobRunner } from './jobs.ts';
 import { holdPort, runningHubPid, writePidfile } from './lock.ts';
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
   const hubSourceDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
   const db = openDb(paths.db());
   const run = nextHubRun(db);
-  const logs = new LogStore(db, run);
+  const logs = new LogStore(db, run, { frames: new FrameDecoder(db) });
   const serial = new SerialPortManager(logs, db);
   const jobs = new JobRunner(db);
 

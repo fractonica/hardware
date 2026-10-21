@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.node.net_set.args",
+  "title": "fr.node.net_set arguments",
+  "type": "object",
+  "properties": {
+    "ssid": {
+      "type": "string",
+      "maxLength": 32,
+      "description": "(<= 32 UTF-8 bytes)"
+    },
+    "pass": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "(<= 64 UTF-8 bytes)"
+    },
+    "bssid": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{2}){0,6}$",
+      "contentEncoding": "base16",
+      "description": "(<= 6 bytes)"
+    },
+    "hub_host": {
+      "type": "string",
+      "maxLength": 32,
+      "description": "(<= 32 UTF-8 bytes)"
+    }
+  },
+  "additionalProperties": false
+}

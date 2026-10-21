@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.node.identify.args",
+  "title": "fr.node.identify arguments",
+  "type": "object",
+  "properties": {
+    "ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "default": 3000
+    }
+  },
+  "additionalProperties": false
+}

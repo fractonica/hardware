@@ -1,5 +1,6 @@
 // Handlers for the operation registry (packages/protocol/src/ops.ts).
 
+import { randomInt } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -108,6 +109,76 @@ export function linesWithinBudget(lines: LogLine[], maxBytes: number, fromEnd: b
   return lines.length;
 }
 
+/**
+ * Correlation ids for diag requests (`#<id> `, 1-8 digits). Random start, so a late answer to a
+ * request from an earlier hub run cannot be taken for one of this run's.
+ */
+let diagId = randomInt(1, 100_000_000);
+
+function nextDiagId(): number {
+  diagId = (diagId % 99_999_999) + 1;
+  return diagId;
+}
+
+/** One diag request on an open port: writes `#<id> <line>`, returns the parsed JSON of its answer. */
+async function diagRequest(hub: HubContext, key: string, line: string, timeoutS: number): Promise<unknown> {
+  const tag = `#${nextDiagId()} `;
+  const from = hub.logs.headSeq();
+  let answer!: (l: StoredLine) => void;
+  const answered = new Promise<StoredLine>((r) => (answer = r));
+  // Subscribed before writing: a quick device answers before writeLine has resolved.
+  const unsubscribe = hub.logs.subscribe((l) => {
+    if (l.device === key && l.kind === 'diag' && l.text.startsWith(tag)) {
+      answer(l);
+    }
+  });
+  let timer: NodeJS.Timeout | undefined;
+  let got: StoredLine | null;
+  try {
+    await hub.serial.writeLine(key, tag + line);
+    got = await Promise.race([answered, new Promise<null>((r) => (timer = setTimeout(() => r(null), timeoutS * 1000)))]);
+  } finally {
+    unsubscribe();
+    clearTimeout(timer);
+  }
+  if (!got) {
+    const tail = hub.logs.query({ devices: [key], afterSeq: from, limit: 20, direction: 'tail' }).map((l) => l.text);
+    throw new FrError('TIMEOUT', `no answer to ${tag.trim()} from ${key} within ${timeoutS}s`, {
+      hint: 'firmware without the serial command channel (C1 images) never answers; the boot banner in the logs names the running fw',
+      remediation: [{ tool: 'logs_read', args: { selector: key } }],
+      details: { line: tag + line, tail },
+    });
+  }
+  try {
+    return JSON.parse(got.text.slice(tag.length));
+  } catch {
+    throw new FrError('INTERNAL', `${key} answered ${tag.trim()} with malformed JSON`, { details: { line: got.text } });
+  }
+}
+
+type CapsPage = { ok?: unknown; caps?: unknown; next?: unknown };
+
+/**
+ * `caps` pages its answer to fit one response line (`next`: the port to continue from). A bare `caps`
+ * fetches every page and answers with the whole list; `caps <from_port>` stays one page. A page that
+ * fails is returned as it is; a `next` that does not move forward ends the walk and stays in the answer.
+ */
+async function diagCapsAll(hub: HubContext, key: string, first: CapsPage, timeoutS: number): Promise<unknown> {
+  const caps: unknown[] = Array.isArray(first.caps) ? [...first.caps] : [];
+  let page = first;
+  let after = 0;
+  while (page.ok === true && Array.isArray(page.caps) && typeof page.next === 'number' && page.next > after && page.next < 240) {
+    after = page.next;
+    page = (await diagRequest(hub, key, `caps ${after}`, timeoutS)) as CapsPage;
+    if (page?.ok !== true || !Array.isArray(page.caps)) {
+      return page;
+    }
+    caps.push(...page.caps);
+  }
+  const { next: _next, ...rest } = first;
+  return typeof page.next === 'number' ? { ...rest, caps, next: page.next } : { ...rest, caps };
+}
+
 /** Hard reset through the hub's open port (boot log captured); falls back to esptool if the hub cannot. */
 async function hardResetCapturing(hub: HubContext, key: string, ctx: JobCtx): Promise<'hub' | 'esptool'> {
   try {
@@ -199,10 +270,19 @@ export const HANDLERS: Record<OpName, Handler> = {
   }),
 
   flash_start: async (input: { port: string; build?: string; profile?: string; plan: 'app' | 'full'; dry_run: boolean; wait_s?: number }, hub) => {
-    const buildId = input.build ?? (input.profile ? newestBuildId(hub.db, input.profile) : null);
-    if (!buildId) {
-      throw new FrError('INVALID_ARGS', 'give --build <build_id> or --profile <profile> (newest artifact is used)', {
+    if (!input.build && !input.profile) {
+      throw new FrError('INVALID_ARGS', 'give --build <build_id> or --profile <profile> (its newest debug artifact is used)', {
         remediation: [{ tool: 'artifact_list', cli: 'fr artifacts ls' }],
+      });
+    }
+    // Spec 06 §6.4: --build, else the newest debug artifact of (node, profile); a release build is
+    // flashed only by naming it.
+    const buildId = input.build ?? newestBuildId(hub.db, { app: 'node', profile: input.profile!, buildType: 'debug' });
+    if (!buildId) {
+      const release = newestBuildId(hub.db, { app: 'node', profile: input.profile!, buildType: 'release' });
+      throw new FrError('NOT_FOUND', `no debug artifact for profile ${input.profile}`, {
+        ...(release ? { hint: `a release build exists; flash it with --build ${release}` } : {}),
+        remediation: [{ tool: 'build_start', args: { profile: input.profile } }],
       });
     }
     const manifest = loadManifest(hub.db, buildId);
@@ -334,6 +414,21 @@ export const HANDLERS: Record<OpName, Handler> = {
       });
     }
     return { matched, matches: found.map(toLogLine), cursor: hub.logs.head() };
+  },
+
+  diag_exec: async (input: { port: string; line: string; timeout_s: number }, hub) => {
+    if (/[\r\n]/.test(input.line)) {
+      throw new FrError('INVALID_ARGS', 'line must be one line (no CR or LF)');
+    }
+    const { key } = await hub.serial.resolveWait(input.port);
+    const from = hub.logs.headSeq();
+    let response = await diagRequest(hub, key, input.line, input.timeout_s);
+    if (input.line.trim() === 'caps' && response !== null && typeof response === 'object') {
+      response = await diagCapsAll(hub, key, response as CapsPage, input.timeout_s);
+    }
+    // The head before the write, not the response line: the device emits the frames a command causes
+    // (`inject` -> down/up/click, `mark` -> diag.mark) before it answers, so `since` must precede them.
+    return { response, cursor: formatCursor({ run: hub.logs.run, seq: from }) };
   },
 
   job_get: (input: { job_id: string }, hub) => hub.jobs.get(input.job_id),

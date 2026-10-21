@@ -7,7 +7,7 @@
 | **M0 — Toolchain + spikes** | Install IDF v6.1, ccache, Node ≥ 24.12 and uv Python 3.12. Run spikes S0–S5 (§11.2) | Each spike has a one-page result in `docs/spikes/`. The **router-mode go/no-go** is decided and recorded in README D2/D3. The spec is updated wherever reality differed |
 | **M1 — PoC (router mode)** | Your three PoC items plus the framework spine (§11.3), built as integration checkpoints (§11.4) | T-CODEC, T-LAT (router), T-FLOOD, T-FLOOD-B, T-NN, T-PRES, T-PROV, T-OTA, T-INPUT, T-LED, T-PORTS and T-AGENT pass on the **C3 and C6**. The S3 joins once identified |
 | **M2 — Fixture, inputs, gateway, scale** | **HIL fixture rig first** (a spare ESP32 wired to DUT BOOT pins, LED pins and `test_pin`; `input_simulate {layer: gpio}`; `hil` test tier); **`fr.analog_in`** and **`fr.display`** (the C3 boards' 0.42" OLED) capabilities; `gateway` app (any board) on USB; ESP-NOW-only nodes; channel ownership, beacons, discovery; ESP-NOW relay OTA; gateway + router dual-homing (link preference and failover; cross-link dedupe itself is already M1); groups; adoption over the link; T2 virtual fleet; destructive operations with human confirmation; idempotency keys; capability multicast decision | T-HIL (real BOOT presses and LED readback driven by the fixture, no human), T-CHAN, T-FAIL, T-LAT (gateway) and T2 scenarios at 30+ nodes pass; latency comparison published |
-| **M3 — Grow** | Canary/wave rollouts; HTTP MCP and resources; more capabilities (`fr.audio_out`, `fr.haptic`, `fr.encoder`); battery profile; delta OTA; optional binary SDK mode. Envelope security stays unplanned (§5.13 keeps the notes) | Each new capability has a driver on ≥ 1 board, a host test and an on-target smoke test |
+| **M3 — Grow** | Canary/wave rollouts; HTTP MCP and resources; more capabilities (`fr.audio_out`, `fr.haptic`, `fr.encoder`); battery profile; delta OTA; optional binary SDK mode. Envelope security stays unplanned ([05 §5.13](05-network.md) keeps the notes) | Each new capability has a driver on ≥ 1 board, a host test and an on-target smoke test |
 
 ## 11.2 Spikes (M0): answer the risky unknowns first
 
@@ -92,11 +92,16 @@ Steps 3a and 4a, the flash-plan half of 4b, and the `build`/`flash`/`logs`/`wait
 | Checkpoint | Contents | Gates |
 |---|---|---|
 | **C1 flash + monitor** ✅ 2026-10-21 | `fr build`, `fr flash --port <usb-serial> --plan full\|app`, `fr logs` and `fr wait log --json` work on the C3 and C6. A board with no registry row gets no `fr_ident` and boots UNASSIGNED. The node is minimal: it logs its id and `fw_id`. Passed on both boards ([spike note](../spikes/2026-10-21-c1-c3-c6.md)) | — |
-| **C2 local capabilities** | Button and LED services on real boards, driven through the serial command channel (`call`, `inject`, `selftest`), plus host tests | T-CODEC |
-| **C3 hub link** | Registry + provisioning; TCP/UDP HELLO/WELCOME/HEARTBEAT/BYE, presence, `command_send`, `wait_for_event` | T-PRES, T-LED |
+| **C2 local capabilities** ✅ 2026-10-21 on the C6 (`c6-pad`, `c6-pad-mono`); C3 board run pending | Button and LED services on real boards, driven through the serial command channel (`call`, `inject`, `selftest`), plus host tests. `fr gen`, `fr diag`, frames decoded in `fr logs`. `c3o-pad` builds; its on-board run waits for the C3 to be attached ([spike note](../spikes/2026-10-21-c2-c6.md)) | T-CODEC ✅ (identical golden-vector bytes; 10⁶ fuzz cases per decoder target in C++ and TS, no failure, equal digests) |
+| **C3 hub link** | Registry + provisioning; TCP/UDP HELLO/WELCOME/HEARTBEAT/BYE, presence, `command_send`, `wait_for_event`; the hub side of serial ENV CMDs and `fr.diag.exec`. Plus the items carried from C2 (below) | T-PRES, T-LED |
 | **C4 OTA** | HTTP pull + rollback | T-OTA, T-PROV |
 | **C5 ESP-NOW** | Unicast, bindings, flood seeding | T-NN, T-FLOOD, T-FLOOD-B |
 | **C6 apps and agents** | SDK + demo, dashboard, `fr mcp` + plugin | T-INPUT, T-PORTS, T-AGENT, T-LAT |
+
+**Carried into C3** (open items from C2; [design note §11](../design/c2-local-capabilities.md)):
+- **`fr.node.describe` and the descriptor type.** The node answers `UNSUPPORTED` until the schema gives `describe` a result; the descriptor's `caps` array of structs needs capability fields that use protocol types, or a `bytes` field holding a protobuf-wire `Descriptor` ([07 §7.4](07-capabilities-sdk.md)).
+- **`Reply` capacity for bulk diag over links.** `Reply` holds 200 B (the realtime budget), but `fr.diag.exec` results reach 1,400 B (BULK), so over an ENV link `info` and `caps` answer `FAILED`. Bulk commands need a larger, caller-provided `Reply`, or fragmentation ([09 §9.7](09-agent-api.md)).
+- **cJSON for the host suite on a fresh checkout.** A machine with neither an IDF 5.x install nor the component manager's `espressif/cjson` needs one node build (or `FR_CJSON_DIR`) before `pnpm test:host`. Vendoring cJSON, or a hash-pinned fetch, makes the suite self-contained for CI ([10 §10.4](10-testing.md)).
 
 ## 11.5 M1 demo script (definition of done)
 

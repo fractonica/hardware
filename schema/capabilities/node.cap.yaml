@@ -1,7 +1,7 @@
 capability: fr.node
 id: 0x00F0
 version: "1.0"
-summary: System capability on port 0 of every device (instance "node"): identity, description, reboot, alias, bindings, state resync.
+summary: 'System capability on port 0 of every device (instance "node"): identity, description, reboot, alias, bindings, state resync.'
 commands:
   identify:  { id: 1, delivery: reliable, idempotent: true, fields: { ms: { id: 1, type: u16, default: 3000 } } }
   describe:  { id: 2, delivery: reliable, idempotent: true, doc: "Returns the node descriptor (07 §7.4)." }

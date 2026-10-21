@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.diag.mark.event",
+  "title": "fr.diag.mark event",
+  "type": "object",
+  "properties": {
+    "token": {
+      "type": "string",
+      "maxLength": 32,
+      "description": "(<= 32 UTF-8 bytes)"
+    }
+  },
+  "additionalProperties": false
+}

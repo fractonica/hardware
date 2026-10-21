@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": { "@fractonica/source": "./src/index.ts", "default": "./dist/index.js" }
+    ".": { "@fractonica/source": "./src/index.ts", "default": "./dist/index.js" },
+    "./wire": { "@fractonica/source": "./src/wire/index.ts", "default": "./dist/wire/index.js" },
+    "./gen": { "@fractonica/source": "./src/gen/index.ts", "default": "./dist/gen/index.js" }
   },
   "dependencies": {
     "zod": "4.6.7"

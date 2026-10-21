@@ -33,7 +33,9 @@ export const PortInfoSchema = z.object({
 });
 export type PortInfo = z.infer<typeof PortInfoSchema>;
 
-export const LOG_KINDS = ['esp_log', 'raw', 'boot'] as const;
+/** `frame`: a decoded `@fr1:` serial line; `diag`: a `#<id> {...}` serial command channel response. */
+export const LOG_KINDS = ['esp_log', 'raw', 'boot', 'frame', 'diag'] as const;
+export type LogKind = (typeof LOG_KINDS)[number];
 
 export const LogLineSchema = z.object({
   cursor: z.string(),
@@ -63,6 +65,19 @@ export const PartitionSchema = z.object({
   readonly: z.boolean(),
 });
 
+/** One capability instance of a build, from the generated fr_manifest.json (design c2 §6). */
+export const ManifestCapSchema = z.looseObject({
+  name: z.string(),
+  port: z.number().int().min(0).max(255),
+  cap: z.string(),
+  cap_id: z.number().int().min(0).max(0xffff),
+  version: z.string(),
+  driver: z.string(),
+  /** Effective service config (capability defaults, driver, profile). */
+  config: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()])),
+});
+export type ManifestCap = z.infer<typeof ManifestCapSchema>;
+
 export const ArtifactManifestSchema = z.object({
   schema: z.literal('fractonica.artifact/1'),
   build_id: z.string(),
@@ -88,6 +103,10 @@ export const ArtifactManifestSchema = z.object({
     files: z.array(ArtifactFileSchema),
   }),
   partitions: z.array(PartitionSchema),
+  /** Capability instances by port (absent before C2 builds); the hub names decoded frames from them. */
+  caps: z.array(ManifestCapSchema).optional(),
+  /** FNV-1a 32 of the canonical catalog JSON the firmware was generated from. */
+  catalog_hash: z.number().int().min(0).max(0xffffffff).optional(),
   /** ELF and linker map, kept to decode panics and core dumps of this fw_id; never flashed. */
   debug: z
     .object({
