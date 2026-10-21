@@ -58,9 +58,9 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 | ESP-NOW version | v2 driver. Realtime frames ≤ 250 B. Frames > 250 B only for BULK, and only to peers that advertised `espnow_v2` | v1 receivers drop frames > 250 B |
 | PHY rate | per peer via `esp_now_set_peer_rate_config()`, called right after **every** `esp_now_add_peer()` (including the broadcast peer and every LRU re-add; the setting belongs to the peer entry). Robust = `{.phymode = WIFI_PHY_MODE_11B, .rate = WIFI_PHY_RATE_1M_L}`; fast = `{.phymode = WIFI_PHY_MODE_11G, .rate = WIFI_PHY_RATE_6M}`, with `.ersu = .dcm = false`. **Never leave `phymode` zero-initialised: 0 is `WIFI_PHY_MODE_LR`.** On error, keep the driver default and count it. Verify on C3/S3 and the broadcast peer (spike S2) | `esp_wifi_config_espnow_rate()` was removed in IDF 6.0; no IDF example uses the per-peer API |
 | Wi-Fi 6 (C6) | The C6 STA may associate in 11ax. TWT is used only if explicitly set up, which we never do. S2 A/B-tests 11ax against `esp_wifi_set_protocol(WIFI_IF_STA, 11B\|11G\|11N)` | mixed fleet |
-| TX power | per board manifest (C3 Super Mini: 8.5 dBm cap by default) | board quirk |
+| TX power | per board manifest `rf.max_tx_power_qdbm` (0.25 dBm units), applied with `esp_wifi_set_max_tx_power()` right after `esp_wifi_start()`; the C3 0.42" OLED board defaults to 34 (8.5 dBm) | board quirk ([04 §4.6](04-boards.md)) |
 | BLE / 802.15.4 | deinitialised in realtime profiles | coexistence time-slicing sleeps the radio and loses ESP-NOW frames |
-| Country | set explicitly | legal channel set |
+| Country | set explicitly, from `fr_ident` `country` (manual policy, 802.11d off); without one, the driver default and a warning | legal channel set |
 
 **Peer table** (20 entries maximum, including the broadcast peer):
 - Node: `[broadcast, gateway(s), up to 17 unicast peers (LRU)]`.
@@ -83,10 +83,11 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 ## 5.4 Channel rules
 
 - **Router mode.** The channel is the router's (C), with one pinned BSSID.
-  - **Where C and the BSSID come from.** After every successful association (including after a router channel change), the node persists the AP's channel and BSSID in RW `nvs:fr_link` (`chan`, `bssid`). It reports them in HELLO. The hub stores them in `networks` and raises `hub/warning bssid_mismatch` if nodes disagree. On the first boot after provisioning nothing is stored yet, so the node does one normal SSID connect, using `fr_ident` `bssid` if set, otherwise the strongest BSSID.
+  - **Where C and the BSSID come from.** After every successful association (including after a router channel change), the node persists the AP's channel and BSSID in RW `nvs:fr_link` (`chan`, `bssid`, and `ssid_h`, a hash of the SSID they belong to). It reports them in HELLO. The hub stores them in `networks` and raises `hub/warning bssid_mismatch` if nodes disagree. On the first boot after provisioning nothing is stored yet, so the node does one normal SSID connect, using `fr_ident` `bssid` if set, otherwise the strongest BSSID.
+  - **Pin rules.** The pin is used only for the SSID it was taken on (`ssid_h`), never while a `net_set` override is on trial, and never when `fr_ident` names a different BSSID: `fr_link` survives a reprovision, so a stale pin yields to `fr_ident`'s BSSID.
   - While disconnected, a node scans **only channel C**: `esp_wifi_scan_start()` with `.channel = C`, active, ≤ 30 ms.
   - It calls `esp_wifi_connect()` (with `bssid_set` and `channel = C`) only after that scan has found the BSSID. Setting the channel in `wifi_sta_config_t` alone does not prevent a full sweep.
-  - An all-channel sweep runs only after ≥ 60 s with no ESP-NOW neighbour or gateway heard. Heartbeats report each sweep.
+  - An all-channel sweep runs only after ≥ 60 s with no ESP-NOW neighbour or gateway heard (until ESP-NOW arrives in C5: 60 s without the pinned AP). Heartbeats report each sweep: HEARTBEAT `swept` is set once per sweep, until a HEARTBEAT carrying it has gone out.
   - So during a router outage, node ↔ node ESP-NOW keeps working on C.
 - **Mesh Wi-Fi homes.** Pinning one BSSID keeps every node on one channel. Without the pin, nodes may sit on different APs and channels and stop hearing each other.
 - **Router changes channel.** Associated nodes follow it, and ESP-NOW follows with them. In gateway mode the gateway gets `WIFI_EVENT_HOME_CHANNEL_CHANGE`, beacons at 4 Hz on the new channel for 10 s, and announces `NET/CHANNEL_SWITCH` on the old one with `esp_now_switch_channel_tx()` (IDF ≥ 5.5.2 / 6.x).
@@ -111,7 +112,7 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 | `0x0001–0xEFFF` | nodes (gateways included) |
 | `0xF000–0xFEFF` | groups (M2: membership set by the hub, stored in NVS, ≤ 8 per node) |
 | `0xFF00–0xFFFD` | reserved well-known groups (`0xFF01` = all gateways) |
-| `0xFFFE` | UNASSIGNED (unprovisioned device). Duplicate state is keyed by the ESP-NOW source MAC, or by the HELLO MAC of a TCP/serial session; UDP from `0xFFFE` is dropped |
+| `0xFFFE` | UNASSIGNED (unprovisioned device). Duplicate state is keyed by the ESP-NOW source MAC, or by the HELLO MAC of a TCP/serial session. Such a node never sends UDP, and the hub drops UDP from `0xFFFE` (`udp_unknown`) |
 | `0xFFFF` | BROADCAST |
 
 | Port | Endpoint |
@@ -170,20 +171,22 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | 6 | BULK | may exceed 250 B; lowest priority |
 | 7 | EXT | extension TLVs present |
 
-**EXT TLVs.**
-- Each TLV is `type u8 | len u8 | value`. Unknown types are skipped by `len`.
-- Types ≥ 0x80 are *critical*: if the type is unknown, the frame is dropped.
+**EXT TLVs** (supported by both runtimes since C3).
+- Each TLV is `type u8 | len u8 | value`. TLVs are present exactly when the `EXT` flag is set.
+- Unknown types are skipped by `len` and kept in wire order, so decode then encode is byte-exact. A repeated type: the last wins.
+- Types ≥ 0x80 are *critical*: if the type is unknown, the frame is dropped (decode error `unsupported_ext`). A known type whose value has the wrong length is `bad_ext` ([07 §7.5](07-capabilities-sdk.md)).
+- FRAG and SEC are still rejected (`unsupported`).
 
 | Type | Value | Meaning |
 |---|---|---|
-| `0x81 exec_at_us` (critical) | u32 | execute at this time on the **destination's** `esp_timer` clock (low 32 bits); the hub converts using the TIME offset. Executed if 0–2 s in the future; otherwise RESULT `LATE`. Critical, because a node that ignored it would execute immediately |
+| `0x81 exec_at_us` (critical) | u32 | execute at this time on the **destination's** `esp_timer` clock (low 32 bits); the hub converts using the TIME offset. Executed if 0–2 s in the future; otherwise RESULT `LATE`. Critical, because a node that ignored it would execute immediately. Until T-LAT a node answers a CMD carrying it with `UNSUPPORTED` (counted in `cmds_refused`) |
 | `0x02 trace_id` | u32 | correlation for latency tracing |
 | `0x03 valid_ms` | u16 | lifetime of a hub broadcast, for repair (default 2000) |
 | `0x04 expire_at_us` | u32 | a CMD arriving after this time (destination clock) is not executed; RESULT `EXPIRED`. Ignored by nodes that are not time-synced |
 
 **MTU.**
 - Realtime: 250 B, so the payload is ≤ 232 B (≤ 224 B with SEC).
-- Bulk: 1470 B.
+- Bulk: 1470 B. To the hub a BULK frame goes over TCP or serial, never UDP (ESP-NOW: §5.3).
 - One UDP datagram, one TCP frame or one serial line carries exactly one envelope.
 
 ## 5.7 Classes and payloads
@@ -223,6 +226,9 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | OTA/STATUS | `job_id, state u8, bytes u32` |
 | OTA/RESULT | `job_id, outcome u8 (success, failed, rolled_back), fw_id_prefix bytes8, reason u8` |
 
+- **HELLO hashes.** `descriptor_hash` is FNV-1a 32 over the encoded `Descriptor` that `fr.node.describe` returns ([07 §7.4](07-capabilities-sdk.md)); `board_hash` is FNV-1a 32 over the board id (`esp32c6-supermini`). C++ (`fr/hash.hpp`) and TS compute both the same way.
+- **Hub framing.** Hub frames carry `src = 0x0000`, `epoch` = the hub epoch, `dst` = the node's HELLO `src` (0xFFFE while unprovisioned), `net` = its HELLO `net`, and `ttl` 0x11. WELCOME's `ucast_floor` is the WELCOME's own seq; DIRECTORY pages count from 0, and there is always at least one page.
+
 **Status codes** (RESULT, ACK, REJECT):
 
 | Code | Meaning |
@@ -253,7 +259,8 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 - A lower `epoch` than stored means drop; a higher one resets the window. Comparison uses RFC 1982 serial arithmetic on u16.
 - `seq > top` slides the window. Inside the window with the bit set means DUP. Below the window means OLD.
 - **Sessions reset windows.** A HELLO from a known `device_id` with a lower epoch resets that source's entries; the hub logs `epoch_regressed` (for example after an NVS wipe). A node resets its hub entries on every WELCOME and sets their floors to `ucast_floor` and `bcast_base`.
-- The **hub epoch** increments and is persisted at every hub start. Per-space counters start at 1 and are not persisted.
+- **What a node drops.** Hub frames from another hub epoch, before a session, over UDP, or from a source other than `0x0000`; a provisioned node also drops other nets.
+- The **hub epoch** increments and is persisted (fsynced) at every hub start: kv `hub_epoch`, a u16 that skips 0 when it wraps. Per-space counters start at 1 and are not persisted.
 
 ### Acknowledgement
 
@@ -279,14 +286,16 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | PRESENCE/HELLO | NET/WELCOME. WELCOME also sets the node's `HUB_ACK` health bit ([06 §6.6](06-identity-ota.md)) |
 
 - **ACK frames** are used only for EVENT, MSG, the last fragment, and the hub's echo of a UDP-received HEARTBEAT (§5.10). The echo has `status = OK`, goes over TCP, never sets ACK_REQ, and is decided per receiving link, before duplicate filtering.
-- **RESULT is sent when the generated dispatch returns.** Effects that outlast it (a blink) report through events (`effect_done`).
-- **Response cache.** Every node caches its last 8 response envelopes, keyed by `(src, epoch, req_seq)`. A DUP request gets the cached response back byte-identical, and the command is not executed twice. This makes non-idempotent commands (`toggle`) safe under retries and floods.
+- **RESULT only when asked.** A node answers a CMD with a RESULT only when it is unicast with ACK_REQ; a `fast` CMD and a port-0 broadcast get none. The hub sets ACK_REQ on every CMD whose RESULT it awaits, and matches RESULTs on `(device, req_seq, req_epoch)` (`req_epoch` = the hub epoch) from any link.
+- **RESULT is sent when the generated dispatch returns.** Effects that outlast it (a blink) report through events (`effect_done`). Its fields go into a `Reply` sized by the link the request came on: 200 B over UDP, 1,445 B over TCP or serial, where the RESULT may go BULK; fields that do not fit answer `FAILED` with none ([07 §7.7](07-capabilities-sdk.md)).
+- **Response cache.** Every node caches its RESULTs, keyed by `(src, epoch, req_seq)`: 8 entries of ≤ 250 B plus one shared bulk slot. A DUP request gets the cached response back byte-identical, and the command is not executed twice. This makes non-idempotent commands (`toggle`) safe under retries and floods. A DUP of a request whose entry was evicted is dropped, never run twice. A DUP PING or SYNC_REQ is dropped; a DUP Q1 EVENT or MSG gets a fresh ACK.
 
 ### Retries
 
 - **Q1 on ESP-NOW and UDP hops.** Timeout = 20 ms + 10 ms × expected hops, ×2 backoff, ±25% jitter, up to 4 attempts. That gives up after ~300 ms at 0 hops and ~450 ms at 1 hop. A retry keeps its `seq`.
-- **TCP hops** get no end-to-end retransmission. TCP does it. A Q1 frame written to TCP is re-sent only on a replacement connection. Give-up (`delivery_failed`) comes after `FR_TCP_DELIVERY_MS` (2000) or on connection loss.
-- **No late execution.** Every hub CMD carries `expire_at_us` (default: hub send time + 1000 ms), so a late TCP delivery never executes after the hub has reported failure.
+- **TCP hops** get no end-to-end retransmission. TCP does it. A Q1 frame written to TCP is re-sent only on a replacement connection. Give-up (`delivery_failed`) comes after `FR_TCP_DELIVERY_MS` (2000) or on connection loss. Serial hops behave like TCP hops.
+- **Outbox.** A node holds up to 8 Q1 frames awaiting their ACK; a full outbox evicts its oldest (`delivery_failed`).
+- **No late execution.** Every hub CMD to a time-synced node carries `expire_at_us` (hub send time + `FR_CMD_EXPIRE_MS` 1000 ms, in node time), so a late TCP delivery never executes after the hub has reported failure.
 
 ### Commands to many devices
 
@@ -297,8 +306,8 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 
 ### Properties and ordering
 
-- **Resync.** Every HEARTBEAT to the hub carries `state_seq`: the seq of the newest STATE frame the node sent to the hub. LATEST frames that never go to the hub (such as the router-mode ESP-NOW heartbeat) do not count. If the hub has seen less, it calls `fr.node.get_state`, and the node re-sends every property with fresh seqs.
-- **Double send.** Each on-change STATE is sent twice; the second copy goes 20 ms later with the same bytes and is deduplicated by seq.
+- **Resync.** Every HEARTBEAT to the hub carries `state_seq`: the seq of the newest STATE frame the node meant for the hub, counted even when it found no path, so a lost STATE triggers a resync. LATEST frames that never go to the hub (such as the router-mode ESP-NOW heartbeat) do not count. If the hub has seen less, it calls `fr.node.get_state`, and the node re-sends every property with fresh seqs.
+- **Double send.** Each on-change STATE sent over UDP is sent twice; the second copy goes 20 ms later with the same bytes and is deduplicated by seq. Over TCP or serial it is sent once.
 - **On every (re)connect** the hub calls `get_state` before announcing `device.online` to apps.
 - **Mirror updates.** The hub applies EVENTs and STATEs to the property mirror only if `(epoch, t_us)` is newer than the mirror's. A higher `epoch` always wins; within one epoch, `t_us` is compared with RFC 1982. The SDK applies `state` frames in arrival order, because the hub forwards only accepted values. An event older than one already delivered for the same instance, in the same epoch, is delivered with `late: true` and does not touch the mirror.
 - **Ordering.** Frames are delivered immediately (freshness beats order). Ports marked `ordered` in the descriptor get a 50 ms reorder buffer.
@@ -358,13 +367,22 @@ Rules:
 | Frame | Path |
 |---|---|
 | HEARTBEAT, PONG, ACK, RESULT, URGENT EVENT, LATEST STATE | UDP once `udp_ok`. While `udp_ok` is false or unknown: HEARTBEAT, URGENT and Q1 frames go over **both** UDP and TCP (same bytes; the hub deduplicates), and LATEST frames go over TCP |
-| HELLO, LOG, fragments, OTA control, everything else | TCP |
+| HELLO, LOG, fragments, OTA control, anything over 250 B (BULK), everything else | TCP |
+
+**Which session** (a node can have a serial session and a TCP session at once):
+- With a TCP session, frames take TCP/UDP as in the table. An UNASSIGNED node (`0xFFFE`) never uses UDP (§5.5). A UDP send the socket refuses falls back to TCP (except under the `udp_block` hook).
+- Without a TCP session but with a serial session, everything goes over serial.
+- With neither, events are dropped and counted (`events_dropped`); `state_seq` still advances, and `get_state` resends the properties after the next WELCOME.
+- A standby serial session (one alongside a TCP session) is never timed out: the hub owes it nothing, and its keepalive clock starts when the TCP session ends.
+- A RESULT whose request asked for a BYE (`fr.node.reboot`) and that BYE both leave on the link the request came on (TCP or serial), never on UDP or the other session, where the BYE could overtake the RESULT (§5.11).
+- The hub sends to a node over its TCP session, else its serial session; it never sends UDP.
 
 **`udp_ok` is kept by a probe, not by traffic.**
-- After WELCOME, every HEARTBEAT also goes over UDP. The hub answers **every** HEARTBEAT that arrives over UDP with an ACK over TCP echoing its seq. It does this even when its window classifies that copy as DUP because the TCP copy arrived first.
-- If no echo went to a node within one heartbeat interval (for example, because UDP is blocked), the hub sends its own PRESENCE/HEARTBEAT over TCP. Either one is the hub → node keepalive (§5.11).
-- `udp_ok` means an echo arrived within 3 × the heartbeat interval.
-- If the hub gets TCP but no UDP from a node for 10 s after HELLO, it raises `hub/warning udp_blocked`, with the Application Firewall hint ([08 §8.11](08-hub.md)).
+- After WELCOME, every HEARTBEAT also goes over UDP, and one follows every WELCOME at once. The hub answers **every** HEARTBEAT that arrives over UDP with an ACK over TCP echoing its seq. It does this even when its window classifies that copy as DUP because the TCP copy arrived first.
+- If nothing went to a node on a session (TCP or serial) for one heartbeat interval (for example, because UDP is blocked and no echo was due), the hub sends its own PRESENCE/HEARTBEAT there. Either one is the hub → node keepalive (§5.11).
+- `udp_ok` means an echo arrived within 3 × the heartbeat interval. It is cleared early by a hub PING (the hub has not heard the node for 2.5 intervals, so the PONG takes TCP) and by two hub HEARTBEATs on TCP with no echo between them. Serial keepalives do not count: a standby serial session gets one every interval whatever UDP does.
+- Whenever `udp_ok` is cleared (lapse, PING, hub keepalives, UDP or TCP down), a HEARTBEAT goes at once over TCP and UDP, and every waiting Q1 frame that went over UDP alone and is not stale gets a TCP copy of the same bytes (its TCP delivery deadline starts then; its UDP retries go on).
+- If the hub gets TCP but no UDP from a node for 10 s after HELLO, it raises `hub/warning udp_blocked` (event `hub.warning {code: udp_blocked, hint}` and `hub_status`), with the Application Firewall hint ([08 §8.11](08-hub.md)), and clears it when UDP returns. Never for an UNASSIGNED node, which sends no UDP.
 
 **To the hub, gateway mode (M2):** ESP-NOW unicast to the gateway. If the gateway is lost and TCP is up, use TCP.
 
@@ -393,28 +411,33 @@ While a node's own hub link is down, apps and the hub cannot reach it except thr
 | Signal | Default | Game | Rule |
 |---|---|---|---|
 | Node heartbeat to the hub | 1000 ms ±10% | 250 ms | Any frame from the node also refreshes `last_seen` |
-| SUSPECT | silent for 2.5 × interval | 625 ms | The hub sends PING up to 2 times |
-| OFFLINE | silent for 3.5 × interval, ≥ 750 ms | 875 ms | `device.offline {reason: timeout}`, measured from the last frame (2.4–3.5 s after an unplug in the default profile) |
-| Graceful exit | BYE `{reason}` | — | immediate offline with the reason (`shutdown`, `reboot`, `ota`, `sleep`, `maintenance`) |
-| Hub keepalive (router mode) | the heartbeat echo, or a hub PRESENCE/HEARTBEAT, at least every interval | same | A node declares the hub lost after 3.5 intervals with nothing from it. It closes the socket, clears `hub_link`, and reconnects with backoff (0.25 → 5 s), re-resolving `hub_host` by mDNS on every attempt (the cached IPv4 is only a fallback) |
-| TCP | `SO_KEEPALIVE` both ends (idle 5 s, interval 1 s, count 3) | — | A HELLO from a `device_id` supersedes and closes that device's older link of the same kind |
+| SUSPECT | silent for 2.5 × interval | 625 ms | `device.suspect {silent_ms}`; the hub PINGs at 2.5 × and 3.0 × |
+| OFFLINE | silent for 3.5 × interval, ≥ 750 ms | 875 ms | `device.offline {reason: timeout}`, measured from the last frame (2.4–3.5 s after an unplug in the default profile). The hub then sends a hub BYE on a serial session and closes the TCP connection |
+| Graceful exit | BYE `{reason}` | — | immediate offline with the reason (`shutdown`, `reboot`, `ota`, `sleep`, `maintenance`). A BYE a request asks for (`fr.node.reboot`: `reboot`, or `maintenance` for the bootloader) follows that request's RESULT on the request's link (§5.10); any other BYE, or one whose request gets no RESULT, goes on every session. After a node's BYE the hub still takes a RESULT from it, and keeps its commands waiting, for 250 ms |
+| Session loss | — | — | Offline (`link_lost`) when the node's last session closes. A HELLO with a new epoch is offline `restarted` (or `epoch_regressed`, logged), then a new handshake |
+| USB loss | — | — | A serial session lasts only while a USB host is attached: the node's serial link is up only then, and the hub ends the session as soon as the port disappears (`device.link {link: serial, up: false, reason: 'usb port gone'}`) |
+| Hub keepalive (router mode) | the heartbeat echo, or a hub PRESENCE/HEARTBEAT, at least every interval on every session | same | A node declares the hub lost on a link after 3.5 intervals with nothing from it there (`sessions_timed_out`; a standby serial session excepted, §5.10), or at once on a hub BYE, which ends every session of that hub run (the hub sends one over USB when it times the node out or stops, and closes TCP, whose close may never reach the node). It ends that session (`hub_link` clears with the last one); TCP closes the socket and reconnects with backoff (0.25 → 5 s), re-resolving `hub_host` by mDNS on every attempt (the cached IPv4 is only a fallback), then HELLOs again (every 1 s, `FR_HELLO_RETRY_MS`, until WELCOME). A WELCOME with a new hub epoch ends the other link's session from the old run |
+| TCP | `SO_KEEPALIVE` both ends (idle 5 s, interval 1 s, count 3) | — | A HELLO from a `device_id` supersedes and closes that device's older link of the same kind. The hub closes a connection that sends no HELLO within 30 s |
 | Stale input | Q1 EVENTs older than `FR_EVENT_MAX_AGE_MS` (1000) are dropped at send time and counted. `node.boot` is exempt; it is emitted after the first WELCOME of each boot | — | Presses from minutes ago never reach a game as fresh input |
 | Gateway beacon (M2) | 1 s (4 Hz after a channel change) | 500 ms | 3 missed beacons: use the TCP link or run discovery |
 
-**Mac sleep.** While any node link is up, the hub holds a `PreventUserIdleSystemSleep` assertion (like `caffeinate -i`). The dashboard warns that closing the lid still sleeps the Mac.
+**Mac sleep.** While at least one node session is up, the hub runs a child `caffeinate -i -w <hub pid>` (the `PreventUserIdleSystemSleep` assertion), killed when the last session ends; it exits by itself if the hub dies. The dashboard warns that closing the lid still sleeps the Mac.
 
 ## 5.12 Hub links
 
 ### 5.12.1 TCP (router mode; node-initiated)
 
-- **Connection.** The node connects to `hub_host:7421`. Framing is `len u16 LE | envelope`. `TCP_NODELAY` is set on both ends.
-- **Handshake:**
+- **Connection.** The node connects to `hub_host:7421`. Framing is `len u16 LE | envelope`; a length of 0 closes the connection, as does one over the bulk MTU at the node or over 2,048 at the hub. `TCP_NODELAY` is set on both ends.
+- **Handshake** (the same on a serial session):
   1. node HELLO
   2. hub **WELCOME**
-  3. DIRECTORY
+  3. DIRECTORY (all provisioned devices)
   4. TIME sync burst (§5.12.4)
-  5. `get_state`
-  6. online
+  5. `fr.node.describe` (BULK), only when no artifact manifest names the HELLO's `fw_id_prefix`; cached per `descriptor_hash`
+  6. `get_state`
+  7. online: `device.online` for the node's first session, `device.link {link, up: true}` for every session
+- **Node TX ring.** 8 KB, a power of two so ring positions stay continuous across the 32-bit byte counters' wrap; a frame that does not fit is dropped and counted (`tcp_tx_dropped`).
+- **Close log.** Every close of an established connection logs one WARN line on the node, `hub: TCP closed after <ms> ms: <reason>` (the hub closed it; keepalive or retransmit timeout; socket error; bad frame length; session lost, with its reason; Wi-Fi lost, with the disconnect reason), and is counted by reason in diag `stats` ([09 §9.7](09-agent-api.md)).
 - **lwIP tuning** (in the framework sdkconfig): `CONFIG_LWIP_TCP_TMR_INTERVAL=50` and `CONFIG_LWIP_TCP_RTO_TIME=300`. The defaults retransmit on 500 ms ticks with a 1.5 s initial RTO. The tuned values give an effective node → hub retransmit of 200–300 ms; CPU cost is measured in S2.
 - **Hub → node retransmit** follows macOS TCP (RTO floor ~300 ms), which is one reason inputs never ride TCP.
 - **Log cap.** At most 1 KB of LOG may be queued in the socket. The excess is dropped and counted.
@@ -434,7 +457,7 @@ One datagram per envelope to `hub_host:7421/udp`. The hub never sends UDP; answe
 - **Length limit.** The maximum line is 2,048 characters; longer lines are discarded and counted.
 - **Everything else is log text.** Lines without the prefix are logs, including ROM and bootloader output.
 - **Single reader/writer.** The device side is the `fr_serial` task ([03 §3.4](03-firmware.md)). It is the only reader and writer of the USB-Serial/JTAG. It routes `@fr1:` lines to `fr_net` and other lines to the serial command channel ([09 §9.7](09-agent-api.md)). **IDF's console REPL and linenoise are not used**: against a non-terminal host linenoise falls into dumb mode and echoes every byte, which would reflect frames back to the hub. Nothing echoes input.
-- **Before a session (checkpoint C2).** Until C3 adds HELLO/WELCOME, `fr_core`'s `EnvelopeLink` stands in for `fr_net`. The node sends its EVENT and STATE envelopes as ENV frames without a session and without ACK_REQ (nothing would answer it). It dispatches an ENV `CMD` addressed to it (its own `addr`, `0xFFFE` while UNASSIGNED, or a port-0 broadcast) to the capability on `port` (`NOT_FOUND` for an empty port, `FAILED` for one whose init failed) and answers a unicast one with a RESULT ENV frame; a broadcast gets none (§5.8). The hub decodes these frames into log lines ([08 §8.3](08-hub.md)); its sending side arrives with C3.
+- **A session-bearing link (since C3).** The serial link is up while a USB host is attached (it sends SOFs, even when no program holds the port open; a board on a charger has none). On it the node HELLOs and keeps a session like on TCP (§5.10–5.11). The hub takes incoming ENV lines from its log store's frame decoder after each line is stored (they are also stored decoded, [08 §8.3](08-hub.md)) and writes its own frames through `writeLine`, one line at a time per port. `@fr1:` lines are never collapsed by the hub's repeat filter: identical lines are distinct envelopes. (C2's sessionless `EnvelopeLink` in `fr_core` is gone; `fr_net`'s `Net` owns the serial link.)
 - **Golden vectors** include serial lines in both directions.
 
 | type | Direction | Body |
@@ -451,16 +474,17 @@ One datagram per envelope to `hub_host:7421/udp`. The hub never sends UDP; answe
 
 - **The hub initiates.** Each sync is a burst of 8 `SYNC_REQ`s. The hub keeps the minimum-RTT sample, estimates skew linearly, and reports the offset uncertainty (RTT_min / 2) per node.
 - **Cadence.** At connect, then every 60 s (every 10 s in the game profile and during latency tests).
-- **Effect.** The node sets `time_synced` after its first answered request. `exec_at_us` and `expire_at_us` depend on it.
+- **Per link.** The node answers `SYNC_RES` on the link the request came on, since the hub measures that link. `t2` is when `Net::receive` ran on the core task, `t3` when the answer was sent, both node `esp_timer` µs.
+- **Effect.** The first answered request on a session sets that link's `time_synced`; a new WELCOME clears it. `exec_at_us` and `expire_at_us` depend on it.
 
 ### 5.12.5 Finding the hub (node side)
 
 Tried in order:
 
-1. The provisioned `hub_host`. This is the Mac's `<LocalHostName>.local` (here `dimas-3.local`), resolved by mDNS on every reconnect. macOS's mDNSResponder answers for it regardless of Local Network Privacy.
-2. The last-known IPv4 (a fallback; DHCP may change it).
+1. The provisioned `hub_host`. This is the Mac's `<LocalHostName>.local` (here `dimas-3.local`), resolved by mDNS (`espressif/mdns`) on every connect attempt; a name that is not `.local` goes to DNS, and an IPv4 literal is used as is. macOS's mDNSResponder answers for it regardless of Local Network Privacy. An UNASSIGNED node uses `CONFIG_FR_DEV_HUB_HOST` ([06 §6.4](06-identity-ota.md)).
+2. The last address that worked, then `hub_ip` from `fr_ident` (fallbacks; DHCP may change them).
 3. Gateway BEACON (M2).
-4. An mDNS query for `_fractonica._tcp`. Its SRV port is 7421, with TXT `http=7422 api=7420`.
+4. An mDNS query for `_fractonica._tcp` (C6, with the hub's advert; C3 nodes use `hub_host`). Its SRV port is 7421, with TXT `http=7422 api=7420`.
 
 ## 5.13 Security (not planned; design notes kept)
 
@@ -523,6 +547,7 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | Router reboot | IP links drop; ESP-NOW between nodes continues on C (nodes scan only C) | The node reconnects when the BSSID returns; the hub sees HELLO, WELCOMEs it and resyncs state |
 | Router changes channel | Associated nodes follow. ESP-NOW-only nodes are stranded (M2) | The gateway announces the switch (M2); a fixed channel is recommended |
 | Hub down or Mac asleep | No app delivery | Node ↔ node ESP-NOW (bindings, floods) keeps working. Nodes detect the loss in 3.5 intervals; buffered Q1 frames expire after 1 s |
+| Hub restart | Sessions end: the stopping hub sends a hub BYE over USB and closes TCP | Nodes HELLO again; the WELCOME with the new hub epoch resets their windows |
 | Node power loss mid-OTA | Partial image | The bootloader keeps the old image; the hub retries ([06 §6.6](06-identity-ota.md)) |
 | Node in download mode (BOOT held at reset) | Gone from Wi-Fi; USB still present | Hub hint, plus `esptool --after watchdog-reset` (C3/S3) or RST |
 | Node NVS wiped | The epoch would regress | `epoch_floor` from provisioning, plus session reset on HELLO |
@@ -547,6 +572,11 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | `FR_RATE_PROFILE` | robust |
 | `FR_HUB_PORT` / `FR_HUB_HTTP_PORT` | 7421 (tcp + udp) / 7422 |
 | `FR_DIRECTORY_MAX` | 64 |
+| `FR_HELLO_RETRY_MS` | 1000 (HELLO on an up link until WELCOME) |
+| `FR_WIFI_MAX_TX_POWER_QDBM` | 0 = driver default; `fr gen firmware` sets it from the board manifest ([04 §4.6](04-boards.md)) |
+| `FR_DEV_WIFI_SSID` / `FR_DEV_WIFI_PASS` / `FR_DEV_HUB_HOST` | empty; UNASSIGNED nodes only, set in `sdkconfig.local` ([03 §3.7](03-firmware.md)) |
+
+`FR_SUSPECT_X10` and `FR_CMD_EXPIRE_MS` are hub rules; the node does not use them.
 
 ## 5.18 Acceptance tests (protocol gates)
 
@@ -557,7 +587,7 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | T-FLOOD | 1,000 hub broadcasts with relays on. One node's hub link is blocked with the debug hook `net drop_hub_link 600` ([09 §9.7](09-agent-api.md)). The hook blocks envelopes on TCP, UDP **and** the serial link, keeps the STA associated on C and suppresses reconnects. Counts come from `diag stats` | ≥ 99.9% delivery; zero duplicate deliveries. Mean ESP-NOW transmissions per broadcast (relay seeds sent, from `diag stats`) ≤ 3 on the bench; ≤ K + 3 with 10 nodes in the virtual fleet (M2) |
 | T-FLOOD-B | Router powered off for 120 s while the hub sends `message_send broadcast` at 1 Hz. During the outage it reaches only a USB-attached node (over serial), which seeds the flood. Delivery is read with `diag stats` after the router returns | node ↔ node delivery ≥ 99% during the outage; all nodes back online < 10 s after the router returns |
 | T-NN | Binding `pad-c6.boot.down → pad-c3.status.blink`, tested with the hub running and with the hub stopped | the LED blinks both times. With the hub running, `node.binding_fired.rtt_us` p50 ≤ 10 ms on `path = espnow`; with the hub stopped only the blink is checked |
-| T-PRES | Unplug a node; send BYE; block UDP | offline 2.4–3.5 s after unplug (default); immediate on BYE; `udp_blocked` warning with no false offline (the hub falls back to its own TCP heartbeat as keepalive) |
+| T-PRES | Unplug a node; send BYE (`fr.node.reboot`); block UDP (`diag net udp_block 30`, [09 §9.7](09-agent-api.md)) | offline 2.4–3.5 s after unplug (default); immediate on BYE; `udp_blocked` warning with no false offline (the hub falls back to its own TCP heartbeat as keepalive) |
 | T-CHAN (M2) | Change the router channel | all nodes recover in < 5 s |
 | T-FAIL (M2) | Unplug the gateway | dual-homed nodes reach the hub over TCP within 3 s; no duplicate events |
 | T-SEC (only if security is ever built) | Replay a captured frame; reboot a node; wipe its NVS | replay rejected; the epoch never regresses; AEAD cost measured per chip |

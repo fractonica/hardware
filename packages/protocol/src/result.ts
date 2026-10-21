@@ -19,6 +19,10 @@ export const ERROR_CODES = [
   'HUB_UNREACHABLE',
   'HUB_RESTARTED',
   'HUB_VERSION_MISMATCH',
+  'DELIVERY_FAILED',
+  'EXPIRED',
+  'CAPABILITY_UNSUPPORTED',
+  'INJECTION_DISABLED',
   'INTERNAL',
 ] as const;
 
@@ -56,6 +60,8 @@ const RETRYABLE: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
   'PORT_LEASED',
   'TIMEOUT',
   'HUB_UNREACHABLE',
+  'DELIVERY_FAILED',
+  'EXPIRED',
 ]);
 
 /** Thrown by op handlers; converted to a failed Result at the API boundary. */

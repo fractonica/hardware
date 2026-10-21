@@ -27,6 +27,17 @@ std::expected<NodeIdentifyArgs, fr::wire::DecodeErr> decode_node_identify_args(s
 bool operator==(const NodeIdentifyArgs &a, const NodeIdentifyArgs &b);
 bool valid(const NodeIdentifyArgs &v);
 
+// fr.node.describe result.
+struct NodeDescribeResult {
+    std::span<const uint8_t> descriptor{};  // a protobuf-wire Descriptor (schema/protocol.yaml types)
+
+    static constexpr size_t kMaxSize = 1203;
+};
+size_t encode(const NodeDescribeResult &v, fr::wire::Writer &w);
+std::expected<NodeDescribeResult, fr::wire::DecodeErr> decode_node_describe_result(std::span<const uint8_t> in);
+bool operator==(const NodeDescribeResult &a, const NodeDescribeResult &b);
+bool valid(const NodeDescribeResult &v);
+
 // fr.node.reboot arguments.
 struct NodeRebootArgs {
     bool bootloader = false;
@@ -142,8 +153,9 @@ public:
     // Commands. Generated dispatch decodes the arguments (defaults applied) and refuses what valid()
     // rejects, so implementations see only in-range values and known enum members.
     virtual Status identify(const NodeIdentifyArgs &args) = 0;  // reliable, idempotent
-    // Returns the node descriptor (07 §7.4).
-    virtual Status describe() = 0;  // reliable, idempotent
+    // Returns the node descriptor (07 §7.4), encoded; HELLO descriptor_hash is FNV-1a 32 over it. BULK:
+    // TCP or serial only.
+    virtual std::expected<NodeDescribeResult, Err> describe() = 0;  // reliable, idempotent
     virtual Status reboot(const NodeRebootArgs &args) = 0;  // reliable
     virtual Status set_alias(const NodeSetAliasArgs &args) = 0;  // reliable, idempotent
     // M2

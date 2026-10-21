@@ -1,6 +1,6 @@
-# Host C++ suite (design c2 §8): fr_proto, fr_caps and the fr_core services built without ESP-IDF,
-# under ASan + UBSan. `pnpm test:host` configures, builds and runs it through tools/host-test.mjs.
-# Sources are globbed, so later work only drops files into the listed directories.
+# Host C++ suite (design c2 §8, c3 §5): fr_proto, fr_caps, the fr_core services and the fr_net core
+# built without ESP-IDF, under ASan + UBSan. `pnpm test:host` configures, builds and runs it through
+# tools/host-test.mjs. Sources are globbed, so later work only drops files into the listed directories.
 cmake_minimum_required(VERSION 3.24)
 
 # Homebrew clang 22: one C++23 toolchain on every Mac (Apple clang lags on the library side).
@@ -33,13 +33,15 @@ endif()
 set(FR_CXX_WARNINGS -Wall -Wextra -Werror)
 set(FR_CXX_FLAGS "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 
+# fr_net/src/core is IDF-free like fr_core/src/services (design c3 §3); fr_net/src/esp is not built here.
 file(GLOB FR_LIB_SRCS CONFIGURE_DEPENDS
     ${COMPONENTS_DIR}/fr_proto/src/*.cpp
     ${COMPONENTS_DIR}/fr_proto/gen/*.cpp
     ${COMPONENTS_DIR}/fr_caps/src/*.cpp
     ${COMPONENTS_DIR}/fr_caps/gen/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/services/*.cpp
-    ${COMPONENTS_DIR}/fr_core/src/host/*.cpp)
+    ${COMPONENTS_DIR}/fr_core/src/host/*.cpp
+    ${COMPONENTS_DIR}/fr_net/src/core/*.cpp)
 file(GLOB FR_TEST_SRCS CONFIGURE_DEPENDS ${HOST_DIR}/tests/*.cpp)
 file(GLOB FR_FUZZ_SRCS CONFIGURE_DEPENDS ${HOST_DIR}/fuzz/*.cpp)
 # Fuzz targets are also linked into the test binary, which checks their digests against the TS suite.
@@ -53,53 +55,27 @@ target_include_directories(fr_host_lib PUBLIC
     ${COMPONENTS_DIR}/fr_caps/include
     ${COMPONENTS_DIR}/fr_caps/gen
     ${COMPONENTS_DIR}/fr_core/include
+    ${COMPONENTS_DIR}/fr_net/include
     ${HOST_DIR}
     ${HOST_DIR}/gen)
 target_compile_definitions(fr_host_lib PUBLIC FR_TEST_HOOKS=1)
 target_compile_options(fr_host_lib PUBLIC "${FR_CXX_FLAGS}" PRIVATE ${FR_CXX_WARNINGS})
 
-# cJSON for gen/diag_json.cpp. IDF 6 dropped components/json in favour of espressif/cjson, so look in
-# the old IDF location, then wherever the component manager put espressif/cjson (the version the
-# firmware builds), then in any older IDF install (5.x still ships components/json), so a fresh checkout
-# on a machine with IDF 5 needs no node build first.
-set(FR_CJSON_CANDIDATES "")
+# cJSON for gen/diag_json.cpp: the pinned copy in third_party/cjson (the version the firmware's
+# espressif/cjson component carries; see its PROVENANCE), so a fresh checkout needs neither an IDF install
+# nor managed_components. FR_CJSON_DIR (a directory holding cJSON.c and cJSON.h) overrides it.
+set(FR_CJSON_DIR ${HOST_DIR}/third_party/cjson)
 if(DEFINED ENV{FR_CJSON_DIR})
-    list(APPEND FR_CJSON_CANDIDATES $ENV{FR_CJSON_DIR})
+    set(FR_CJSON_DIR $ENV{FR_CJSON_DIR})
 endif()
-if(DEFINED ENV{IDF_PATH})
-    list(APPEND FR_CJSON_CANDIDATES $ENV{IDF_PATH}/components/json/cJSON)
-else()
-    list(APPEND FR_CJSON_CANDIDATES $ENV{HOME}/esp/v6.1/esp-idf/components/json/cJSON)
+if(NOT EXISTS ${FR_CJSON_DIR}/cJSON.c)
+    message(FATAL_ERROR "cJSON not found in ${FR_CJSON_DIR}")
 endif()
-file(GLOB FR_CJSON_MANAGED
-    ${FW_DIR}/apps/*/managed_components/espressif__cjson/cJSON
-    $ENV{HOME}/Library/Caches/Espressif/ComponentManager/*/espressif__cjson_*/cJSON
-    $ENV{HOME}/.cache/Espressif/ComponentManager/*/espressif__cjson_*/cJSON)
-list(SORT FR_CJSON_MANAGED ORDER DESCENDING)
-list(APPEND FR_CJSON_CANDIDATES ${FR_CJSON_MANAGED})
-file(GLOB FR_CJSON_OLD_IDF $ENV{HOME}/esp/*/esp-idf/components/json/cJSON)
-list(SORT FR_CJSON_OLD_IDF COMPARE NATURAL ORDER DESCENDING)
-list(APPEND FR_CJSON_CANDIDATES ${FR_CJSON_OLD_IDF})
-set(FR_CJSON_DIR "")
-foreach(dir ${FR_CJSON_CANDIDATES})
-    if(EXISTS ${dir}/cJSON.c)
-        set(FR_CJSON_DIR ${dir})
-        break()
-    endif()
-endforeach()
-
-if(FR_CJSON_DIR)
-    message(STATUS "cJSON: ${FR_CJSON_DIR}")
-    add_library(fr_cjson STATIC ${FR_CJSON_DIR}/cJSON.c)
-    target_include_directories(fr_cjson PUBLIC ${FR_CJSON_DIR})
-    # Third-party C: its sprintf deprecation warnings are not ours to fix.
-    target_compile_options(fr_cjson PRIVATE -w)
-    target_link_libraries(fr_host_lib PUBLIC fr_cjson)
-elseif(EXISTS ${COMPONENTS_DIR}/fr_caps/gen/diag_json.cpp)
-    message(FATAL_ERROR "fr_caps/gen/diag_json.cpp needs cJSON, which was not found. Build a node "
-                        "profile once (the component manager fetches espressif/cjson) or set FR_CJSON_DIR "
-                        "to a directory containing cJSON.c.")
-endif()
+add_library(fr_cjson STATIC ${FR_CJSON_DIR}/cJSON.c)
+target_include_directories(fr_cjson PUBLIC ${FR_CJSON_DIR})
+# Third-party C: its sprintf deprecation warnings are not ours to fix.
+target_compile_options(fr_cjson PRIVATE -w)
+target_link_libraries(fr_host_lib PUBLIC fr_cjson)
 
 add_executable(fr_host_tests ${FR_TEST_SRCS} ${FR_FUZZ_TARGET_SRCS})
 target_link_libraries(fr_host_tests PRIVATE fr_host_lib)
@@ -108,3 +84,9 @@ target_compile_options(fr_host_tests PRIVATE ${FR_CXX_WARNINGS})
 add_executable(fr_host_fuzz ${FR_FUZZ_SRCS})
 target_link_libraries(fr_host_fuzz PRIVATE fr_host_lib)
 target_compile_options(fr_host_fuzz PRIVATE ${FR_CXX_WARNINGS})
+
+# fr_net_node: the fr_net core and the real services over POSIX TCP/UDP, a node for interop runs against a
+# hub on loopback (packages/hub/test/interop.test.ts and the C3 loopback check; design c3 §5).
+add_executable(fr_net_node ${HOST_DIR}/tools/net_node.cpp)
+target_link_libraries(fr_net_node PRIVATE fr_host_lib)
+target_compile_options(fr_net_node PRIVATE ${FR_CXX_WARNINGS})

@@ -4,7 +4,7 @@
 
 | Tier | What | Runs on | Gate for |
 |---|---|---|---|
-| **T0 host** | Unit tests for the hub, SDK and codegen (vitest). C++ host suite (§10.4): codecs, dispatch, `diag_json`, L2 services and `EnvelopeLink` (fake HAL + clock). **`fr_net` core tests** with `FakeLink` + `FakeClock`: both node sequence spaces and the hub spaces, session resets, relay suppression (K=2) and seeding from TCP, TTL, Q1 retry/backoff, response cache, presence timers, directory and binding routing | laptop and CI | every change (M1) |
+| **T0 host** | Unit tests for the hub, SDK and codegen (vitest). C++ host suite (§10.4): codecs, dispatch, `diag_json`, L2 services and the node descriptor (fake HAL + clock). **`fr_net` core tests** with `FakeLink` + `FakeCore` (C3): HELLO until WELCOME, window resets, DUP → the cached response byte-identical, OLD dropped, UDP Q1 retry/backoff and give-up, the dual path before `udp_ok`, `udp_ok` from the echo and its clearing, session loss, heartbeat cadence and fields, event max age, BYE, TIME answers, `expire_at`, the debug hooks; from C5 relay suppression (K=2) and seeding from TCP, TTL, directory and binding routing. **Interop** (§10.3): the real `fr_net` core against the hub's router on loopback | laptop and CI | every change (M1) |
 | **T1 golden vectors** | Envelope, system-message, capability and serial-line codecs: C++ and TS produce identical bytes for every case in `schema/vectors/`. Both decoders are fuzzed and reach the same digests (§10.4) | laptop and CI | every schema or codec change (M1) |
 | **T3 on-target** | Smoke tests on real boards, driven through the hub (`fr test run --tier target`, scenarios in `tests/e2e/`). Build and flash each profile, wait for `node.boot`, run `selftest`, inject inputs, assert events and properties, exercise bindings and OTA | bench (your boards) | each M1 checkpoint; IDF bumps |
 | **T4 HIL radio** | ESP-NOW reach, flood coverage, router outage, latency (T-LAT), OTA with power cuts | bench | protocol and RF changes |
@@ -23,26 +23,32 @@ The value of the framework is ESP-NOW flooding, node ↔ node behaviour and inpu
 
 ## 10.3 `fr_net` core on the host
 
-- **Structure.** `fr_net` core has no IDF includes. Link drivers implement one interface:
+- **Structure.** `fr_net` core (`src/core`, `Net`) has no IDF includes. Link drivers implement one envelope-level interface; the link adds and strips its own framing:
   ```cpp
-  struct Link {
-    virtual Status send(Dest, std::span<const uint8_t>, TxOpts) = 0;
-    virtual void   on_receive(RxHandler) = 0;
-    virtual TimeUs now() const = 0;
+  class Link {
+   public:
+    virtual LinkKind kind() const = 0;                            // serial, tcp, udp (espnow in C5)
+    virtual bool up() const = 0;                                  // TCP connected, USB host present, UDP bound
+    virtual Status send(std::span<const uint8_t> envelope) = 0;   // never blocks the core task
+    virtual void drop(DropReason) {}                              // session lost: TCP closes and reconnects
+    virtual void hold(bool) {}                                    // drop_hub_link: no reconnect while held
+   protected: ~Link() = default;
   };
   ```
-- **M1 (T0).** `FakeLink` and `FakeClock` give deterministic unit tests of every rule in [05 §5.8–5.11](05-network.md).
+  Received envelopes reach `Net::receive(LinkKind, envelope)` on the core task; time, timers and posting come from `fr::Core`, and dispatch and identity from `fr::net::Host` (implemented by `fr_core`).
+- **M1 (T0).** `FakeLink` and `FakeCore` (fake clock and timers) give deterministic unit tests of every rule in [05 §5.8–5.11](05-network.md) (`firmware/test/host/tests/net_*.cpp`).
+- **Interop (C3).** `fr_net_node` (`firmware/test/host/tools`, built by `pnpm test:host`) runs the real `fr_net` core, button and LED services and descriptor builder over POSIX TCP/UDP. `packages/hub/test/interop.test.ts` runs it against the hub's router on loopback: handshake with `describe`, `udp_ok`, commands through the response cache, reboot → RESULT then BYE (also with a serial session and slow UDP), silence → suspect/offline, `udp_block` → `udp_blocked` with no false offline, `drop_hub_link` (no reconnect until it ends), a hub restart, a USB node whose Wi-Fi goes silent, and an unprovisioned node. The suite skips when the binary is absent.
 - **M2 (T2).** `SimEspNowLink` is a shared medium with a seeded RNG, per-pair loss and RSSI, and an airtime model. It is joined by `SimTcpLink` and `SimUdpLink` to a real hub. Scenarios are YAML (nodes, topology, loss, script, expectations) and run with `fr test run --tier sim <scenario> --json`.
 
 ## 10.4 Host suites, golden vectors, fuzzing
 
 | Command | Runs |
 |---|---|
-| `pnpm test` | vitest: wire runtime (hand-computed bytes), every golden vector both ways, JSON Schemas against the YAML `examples`, codegen model and board generator, hub (frame decoding, `diag_exec` with a fake port, builds), CLI. Fuzz targets at 10⁴ cases |
-| `pnpm test:host` | `tools/host-test.mjs`: configures, builds and runs the C++ host suite in `firmware/test/host` (CMake + Ninja; Homebrew LLVM `clang++` when present, `FR_HOST_CXX` overrides; `-std=c++23`, ASan + UBSan; no IDF): every golden vector, serial lines, dispatch, `diag_json`, `ButtonService`, `LedService` and `EnvelopeLink` against `FakeCore` (fake clock, timers and input slots) and a fake HAL |
+| `pnpm test` | vitest: wire runtime (hand-computed bytes, EXT TLVs), every golden vector both ways, JSON Schemas against the YAML `examples`, codegen model and board generator, hub (frame decoding, `diag_exec` with a fake port, builds; registry, selectors and alias rules; provisioning with a fake sidecar and `nvs_gen` CSV rendering with no secret in any output; the router against **FakeNode**, a TS node speaking the generated codecs over real loopback TCP/UDP, with a fake clock for presence; events and waits; the interop suite, §10.3), CLI. Fuzz targets at 10⁴ cases |
+| `pnpm test:host` | `tools/host-test.mjs`: configures, builds and runs the C++ host suite in `firmware/test/host` (CMake + Ninja; Homebrew LLVM `clang++` when present, `FR_HOST_CXX` overrides; `-std=c++23`, ASan + UBSan; no IDF): every golden vector, serial lines, dispatch, `diag_json`, `ButtonService`, `LedService`, the descriptor and the `fr_net` core against `FakeCore` (fake clock, timers and input slots), `FakeLink` and a fake HAL. It also builds `fr_net_node` for the interop suite |
 | `pnpm test:fuzz` | the T-CODEC gate: both fuzz suites at 10⁶ cases per target, then the digest comparison |
 
-- **cJSON for the host suite** (`diag_json.cpp`) comes from `$FR_CJSON_DIR`, the component manager's `espressif/cjson` (present after one node build), or an IDF 5.x install's `json` component.
+- **cJSON for the host suite** (`diag_json.cpp`) is vendored in `firmware/test/host/third_party/cjson`: 1.7.19, unmodified, the version the firmware's `espressif/cjson` carries (its `PROVENANCE` lists the checksums; the two must stay in step). A fresh checkout needs neither an IDF install nor `managed_components`. `FR_CJSON_DIR` overrides it.
 - **Golden vector files** (`schema/vectors/{header,envelope,messages,caps,serial}.json`, `schema: fractonica/vectors@1`) hold `cases: [{name, kind, type, value, hex}]`. `fr gen` writes them with a reference encoder that is independent of the generated codecs.
   - `value` is JSON-safe: integers as numbers, `u64` as a decimal string, bytes as lowercase hex, enums by member name. An envelope case carries `header`, `prefix`, `body` and, for a known body, `body_type`/`body_value`.
   - `decodeOnly: true`: the bytes only decode, because they are not what the encoder writes for `value` (unknown fields, field order, repeats, non-minimal varints, line terminators).

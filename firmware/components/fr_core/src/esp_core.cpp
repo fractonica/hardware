@@ -112,20 +112,31 @@ InputSlot *EspCore::input_slot(Callback<void(const InputSample &), 24> on_change
 
 bool EspCore::post(Callback<void(), 32> fn)
 {
-    bool ok = false;
-    portENTER_CRITICAL_SAFE(&pool_mux_);
-    if (posts_len_ < kPosts) {
-        posts_[(posts_head_ + posts_len_) % kPosts] = std::move(fn);
-        ++posts_len_;
-        ok = true;
-    } else {
-        ++posts_dropped_;
-    }
-    portEXIT_CRITICAL_SAFE(&pool_mux_);
+    bool ok = posts_.push(std::move(fn), pool_mux_);
     if (ok) {
         notify(kBitPost);
     }
     return ok;
+}
+
+bool EspCore::post_net(Callback<void(), 32> fn)
+{
+    bool ok = net_posts_.push(std::move(fn), pool_mux_);
+    if (ok) {
+        notify(kBitPost);
+    }
+    return ok;
+}
+
+template <size_t N>
+bool EspCore::run_one(PostQueue<N> &q)
+{
+    Callback<void(), 32> fn;
+    bool have = q.pop(fn, pool_mux_);
+    if (have) {
+        fn();
+    }
+    return have;
 }
 
 void EspCore::task_main(void *arg)
@@ -149,11 +160,12 @@ void EspCore::notify(uint32_t bits)
 void EspCore::loop()
 {
     for (;;) {
-        // Inputs before timers before posted work (spec 03 §3.4); one post per round, so a burst of
-        // posts never delays an edge or a due timer by more than one handler.
+        // Inputs before timers before posted work (spec 03 §3.4); one post and one received envelope per
+        // round, so a burst of either never delays an edge or a due timer by more than one handler.
         bool busy = service_inputs();
         busy = service_timers() || busy;
-        busy = run_one_post() || busy;
+        busy = run_one(posts_) || busy;
+        busy = run_one(net_posts_) || busy;
         if (!busy) {
             xTaskNotifyWait(0, UINT32_MAX, nullptr, portMAX_DELAY);
         }
@@ -233,24 +245,6 @@ void EspCore::rearm()
         return;
     }
     armed_at_ = earliest;
-}
-
-bool EspCore::run_one_post()
-{
-    Callback<void(), 32> fn;
-    portENTER_CRITICAL_SAFE(&pool_mux_);
-    bool have = posts_len_ > 0;
-    if (have) {
-        fn = std::move(posts_[posts_head_]);
-        posts_[posts_head_].reset();
-        posts_head_ = (posts_head_ + 1) % kPosts;
-        --posts_len_;
-    }
-    portEXIT_CRITICAL_SAFE(&pool_mux_);
-    if (have) {
-        fn();
-    }
-    return have;
 }
 
 }  // namespace fr

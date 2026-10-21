@@ -1,11 +1,16 @@
 // Device log lines with a hub-wide monotonic cursor (spec 08 §8.3, §8.7). Lines are appended and
-// published synchronously; SQLite writes are batched every 50 ms. The table is a ring trimmed to the
-// retention limits (spec 08 §8.8) in small batches off a timer.
+// published synchronously; SQLite writes are batched every 50 ms. Seqs come from the cursor space the
+// lines share with events (seq.ts); the table is a ring trimmed to the retention limits (ring.ts).
 
 import { formatCursor, SERIAL_PREFIX, type LogKind, type LogLine } from '@fractonica/protocol';
 
-import { type Db, kvGet } from './db.ts';
+import type { Seq } from './context.ts';
+import type { Db } from './db.ts';
 import type { FrameDecoder } from './frames.ts';
+import { nowUs, RING_RETENTION, RingRetention, type Retention } from './ring.ts';
+import { CursorSeq } from './seq.ts';
+
+export { nowUs } from './ring.ts';
 
 export interface StoredLine {
   seq: number;
@@ -48,56 +53,46 @@ export function parseLine(raw: string): Pick<StoredLine, 'level' | 'tag' | 'kind
 }
 
 /** Ring defaults (spec 08 §8.8); kv `logs.retention_days` / `logs.retention_rows` override them. */
-export const LOG_RETENTION = { days: 7, rows: 1_000_000 };
-const PRUNE_FIRST_MS = 5_000;
-const PRUNE_EVERY_MS = 60_000;
-const PRUNE_BATCH = 5_000;
-
-export function nowUs(): number {
-  return Math.round(performance.timeOrigin * 1000 + performance.now() * 1000);
-}
+export const LOG_RETENTION: Retention = RING_RETENTION;
 
 export class LogStore {
   readonly run: number;
   #db: Db;
-  #nextSeq: number;
+  #seq: Seq;
   #pending: StoredLine[] = [];
   #timer: NodeJS.Timeout | null = null;
   #listeners = new Set<(line: StoredLine) => void>();
-  #pruneTimers: NodeJS.Timeout[] = [];
-  #pruning = false;
+  #ring: RingRetention;
   #frames: FrameDecoder | null;
 
-  /** `frames` decodes `@fr1:` lines into readable text; without it they are stored raw. */
-  constructor(db: Db, run: number, opts: { retention?: boolean; frames?: FrameDecoder } = {}) {
+  /**
+   * `frames` decodes `@fr1:` lines into readable text; without it they are stored raw. `seq` is the
+   * cursor space shared with events; by default one of the store's own (over both tables).
+   */
+  constructor(db: Db, run: number, opts: { retention?: boolean; frames?: FrameDecoder; seq?: Seq } = {}) {
     this.#db = db;
     this.run = run;
     this.#frames = opts.frames ?? null;
-    const row = db.prepare('SELECT MAX(seq) AS m FROM logs').get() as { m: number | null };
-    this.#nextSeq = (row.m ?? 0) + 1;
+    this.#seq = opts.seq ?? new CursorSeq(db);
+    this.#ring = new RingRetention(db, 'logs', () => this.#seq.head());
     if (opts.retention !== false) {
-      // Unref'd: retention never keeps the process alive, and prune() stops once the db is closed.
-      const tick = () => void this.prune().catch((e: Error) => console.error(JSON.stringify({ event: 'logs_prune_failed', message: e.message })));
-      this.#pruneTimers = [setTimeout(tick, PRUNE_FIRST_MS).unref(), setInterval(tick, PRUNE_EVERY_MS).unref()];
+      this.#ring.start();
     }
   }
 
   /** Stops retention and writes pending lines; call before closing the db. */
   close(): void {
-    for (const t of this.#pruneTimers) {
-      clearTimeout(t);
-    }
-    this.#pruneTimers = [];
+    this.#ring.stop();
     this.flush();
   }
 
-  /** Cursor of the newest line (or of "nothing yet" in this run). */
+  /** Cursor of the newest line or event (or of "nothing yet" in this run). */
   head(): string {
-    return formatCursor({ run: this.run, seq: this.#nextSeq - 1 });
+    return formatCursor({ run: this.run, seq: this.#seq.head() });
   }
 
   headSeq(): number {
-    return this.#nextSeq - 1;
+    return this.#seq.head();
   }
 
   append(device: string, port: string, raw: string): StoredLine {
@@ -107,7 +102,7 @@ export class LogStore {
     } else if (this.#frames && parsed.kind === 'esp_log') {
       this.#frames.observe(device, parsed.text);
     }
-    const line: StoredLine = { seq: this.#nextSeq++, run: this.run, ts_us: nowUs(), device, port, ...parsed };
+    const line: StoredLine = { seq: this.#seq.next(), run: this.run, ts_us: nowUs(), device, port, ...parsed };
     this.#pending.push(line);
     this.#timer ??= setTimeout(() => this.flush(), 50);
     for (const fn of this.#listeners) {
@@ -147,48 +142,13 @@ export class LogStore {
     return this.#db.prepare('SELECT 1 FROM logs WHERE device = ? LIMIT 1').get(device) !== undefined;
   }
 
-  retention(): { days: number; rows: number } {
-    const num = (k: string, fallback: number) => {
-      const v = Number(kvGet(this.#db, k));
-      return Number.isFinite(v) && v > 0 ? v : fallback;
-    };
-    return { days: num('logs.retention_days', LOG_RETENTION.days), rows: num('logs.retention_rows', LOG_RETENTION.rows) };
+  retention(): Retention {
+    return this.#ring.retention();
   }
 
-  /**
-   * Trims the ring, oldest first, to the newest `rows` seqs and the last `days` days. Works in
-   * batches of PRUNE_BATCH rows and yields between them, so a large backlog never stalls serial
-   * ingestion or HTTP behind one long DELETE. Resolves with the number of rows deleted.
-   */
-  async prune(): Promise<number> {
-    if (this.#pruning) {
-      return 0;
-    }
-    this.#pruning = true;
-    let total = 0;
-    try {
-      while (this.#db.open) {
-        const n = this.#pruneBatch();
-        total += n;
-        if (n < PRUNE_BATCH) {
-          break;
-        }
-        await new Promise((r) => setImmediate(r));
-      }
-    } finally {
-      this.#pruning = false;
-    }
-    return total;
-  }
-
-  #pruneBatch(): number {
-    const { days, rows } = this.retention();
-    // Look only at the oldest PRUNE_BATCH rows (a bounded rowid range scan) and delete through the
-    // newest of them that is past either limit.
-    const cut = this.#db
-      .prepare('SELECT MAX(seq) AS s FROM (SELECT seq, ts_us FROM logs ORDER BY seq LIMIT ?) WHERE seq <= ? OR ts_us < ?')
-      .get(PRUNE_BATCH, this.headSeq() - rows, Math.round(nowUs() - days * 86_400e6)) as { s: number | null };
-    return cut.s === null ? 0 : this.#db.prepare('DELETE FROM logs WHERE seq <= ?').run(cut.s).changes;
+  /** Trims the ring now (ring.ts); resolves with the number of rows deleted. */
+  prune(): Promise<number> {
+    return this.#ring.prune();
   }
 
   query(q: LogQuery): StoredLine[] {

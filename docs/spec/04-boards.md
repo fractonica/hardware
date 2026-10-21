@@ -21,7 +21,7 @@ Confidence: **H** = official document or schematic, or two or more independent s
 | board id | flash / PSRAM | BOOT button | LEDs | USB | Notes |
 |---|---|---|---|---|---|
 | `esp32c3-supermini` | 4 MB in-package / none | GPIO9, active-low, external 10k pull-up (H) | `status`: GPIO8, blue, **active-low** (H). Red power LED (not a GPIO) | USJ only | Weak RF on many units. Cap TX at 8.5 dBm (`esp_wifi_set_max_tx_power(34)` after `esp_wifi_start`) (M). The "Plus" variant has a WS2812 on GPIO8 and a u.FL socket. |
-| `esp32c3-oled042` | 4 MB in-package (XMC, measured) / none | GPIO9, active-low (H, measured idle-high) | `status`: GPIO8, blue, **active-low** (H, confirmed on the bench). **0.42" OLED**: SSD1306B, I2C **SDA GPIO5 / SCL GPIO6**, address 0x3C, 72×40 window at RAM column 28 with no row offset, needs internal IREF (0xAD 0x30) (H, measured and confirmed by eye) | USJ only | Abrobot-style "ESP32-C3 OLED 0.42" board, two owned. GPIO5/6 are taken by the OLED, so they are not free for SPI or ADC2. Ceramic antenna; −67 dBm at the desk. Vendor pinout pictures show the generic Super Mini I2C labels (8/9), which are wrong for the OLED. The 01Space ESP32-C3-0.42LCD variant differs: it has a WS2812 on GPIO2 and a Qwiic connector |
+| `esp32c3-oled042` | 4 MB in-package (XMC, measured) / none | GPIO9, active-low (H, measured idle-high) | `status`: GPIO8, blue, **active-low** (H, confirmed on the bench). **0.42" OLED**: SSD1306B, I2C **SDA GPIO5 / SCL GPIO6**, address 0x3C, 72×40 window at RAM column 28 with no row offset, needs internal IREF (0xAD 0x30) (H, measured and confirmed by eye) | USJ only | Abrobot-style "ESP32-C3 OLED 0.42" board, two owned. GPIO5/6 are taken by the OLED, so they are not free for SPI or ADC2. Ceramic antenna; −67 dBm at the desk. TX power capped at 8.5 dBm by default (`rf.max_tx_power_qdbm: 34`): board #2 did not associate at full power ([4.6](#46-quirks-and-rules)). Vendor pinout pictures show the generic Super Mini I2C labels (8/9), which are wrong for the OLED. The 01Space ESP32-C3-0.42LCD variant differs: it has a WS2812 on GPIO2 and a Qwiic connector |
 | `esp32c6-supermini` | 4 MB in-package (ESP32-C6FH4) / none | GPIO9, active-low, external 10k pull-up (H) | `rgb`: WS2812 on GPIO8, GRB (H). `status`: GPIO15, blue, active-high (M; confirm with the LED probe). Green charge LED (not a GPIO) | USJ only | Both LEDs sit on strapping pins (harmless with default eFuses). TP4054 charger and BAT pad. `esptool --after watchdog-reset` is unavailable on C6. |
 | `esp32s3-supermini` | 4 MB quad / 2 MB **quad** PSRAM (ESP32-S3FH4R2) | GPIO0, active-low (H/M) | `rgb`: WS2812 on GPIO48 (M) | USJ + OTG | PSRAM mode must be QUAD. Do not pull GPIO45/46 high at reset. |
 | `waveshare-esp32s3-zero` | 4 MB quad / 2 MB quad (FH4R2) | GPIO0, active-low, ext 10k (H) | `rgb`: WS2812 on GPIO21 (H) | USJ + OTG | Waveshare's wiki says "octal" PSRAM; the Espressif datasheet says quad. Trust the datasheet. |
@@ -55,7 +55,7 @@ pins:
   strapping: [4, 5, 8, 9, 15]
   strapping_levels: { 4: none, 5: none, 8: high, 9: high, 15: none }   # level each needs at reset (high|low|none)
   free: [0, 1, 2, 3, 14, 18, 19, 20, 21, 22, 23]
-rf: { max_tx_power_qdbm: null }
+rf: { max_tx_power_qdbm: null }                              # TX cap in 0.25 dBm (8–84); null: driver default (4.6)
 test_pin: 20                                                 # free GPIO for the T-LAT loopback rig (diag pin_pulse)
 resources: { rmt_tx: 2, ledc_timers: 4, ledc_channels: 6 }   # peripheral budget for validation
 defaults:                                                    # default profile bindings
@@ -77,7 +77,7 @@ The validator (`fr gen firmware`) enforces the following:
 - The driver supports the target and accepts the board entry's `kind` (an entry without `kind` is kind `gpio`); config keys and values are known and well-typed ([07 §7.8](07-capabilities-sdk.md)); instance names are snake_case, ≤ 31 characters and not reserved ([03 §3.6](03-firmware.md)).
 - All problems are reported together; warnings are returned alongside the result.
 
-The PSRAM mode and voltage are checked against the device later, at provisioning, against what esptool reported ([06 §6.4](06-identity-ota.md)).
+The PSRAM mode and voltage are to be checked against the device later, at provisioning, against what esptool reported ([06 §6.4](06-identity-ota.md); not done yet, [11 §11.4](11-roadmap.md)).
 
 ## 4.4 USB-Serial/JTAG behaviour the hub must handle
 
@@ -95,7 +95,7 @@ Rules:
 - **Identity is the MAC** (USB serial number), never the `/dev/cu.usbmodemXXXX` path. On macOS the path comes from the USB location ID, so it changes when you move the board to another socket. The hub re-resolves paths on every hotplug.
 - **Open ports with DTR and RTS deasserted.** On USJ, RTS drives a core reset. A careless open can reset a node, and that rolls back an image that is still pending verification ([06 §6.6](06-identity-ota.md)).
 - **Always attach a reader.** USJ output blocks for 50 ms and is then dropped when no host reads it.
-- **After macOS sleep** (observed once, at C2). Overnight, a C6 stopped producing output (no liveness log, no diag answers) while the hub still showed its port open, and one boot happened with no output captured. The Mac's power log shows a maintenance wake from sleep minutes later. A hub-side reset recovered it. The cause is not known and was not reproduced; the hub's open sequence was ruled out (serialport sets DTR and RTS with one `TIOCMSET`). Mitigation: the hub treats a poll tick more than 10 s late as a system resume and reopens every open port ([08 §8.3](08-hub.md)). C3's 1 s HEARTBEAT will make such silence visible within seconds.
+- **After macOS sleep** (observed once, at C2). Overnight, a C6 stopped producing output (no liveness log, no diag answers) while the hub still showed its port open, and one boot happened with no output captured. The Mac's power log shows a maintenance wake from sleep minutes later. A hub-side reset recovered it. The cause is not known and was not reproduced; the hub's open sequence was ruled out (serialport sets DTR and RTS with one `TIOCMSET`). Mitigation: the hub treats a poll tick more than 10 s late as a system resume and reopens every open port ([08 §8.3](08-hub.md)). Since checkpoint C3 the 1 s HEARTBEAT makes such silence visible within seconds: the hub takes the node offline after 3.5 s ([05 §5.11](05-network.md)).
 - **The console is the native USJ** on every USJ-only board (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`). As the secondary console it would be output-only, with no command input from agents. DevKitC-1 boards keep UART0 as their primary console.
 - **One serial channel carries logs, machine frames and diag commands.** They are separated by line framing. The `fr_serial` task is the only reader and writer ([05 §5.12.3](05-network.md), [03 §3.4](03-firmware.md)).
 
@@ -104,7 +104,7 @@ Rules:
 | Stage | Opens the port? | What it does |
 |---|---|---|
 | A. Passive | no | Enumerate USB with VID, PID, bcdDevice, serial and location ID (IOKit / `system_profiler SPUSBHostDataType -json`; udev on Linux). `303A:1001` + 0x0101 means C3 or S3; 0x0102 means C6; CP210x or CH34x means an S3 DevKit UART port. A MAC already in the registry means done. |
-| B. Self-report | no (reads the serial stream) | Framework firmware sends HELLO with `mac`, `chip`, `chip_rev` and `board_hash`. The hub matches `board_hash` against known manifests and reads the board id from `fr.node.describe`, and flash size plus PSRAM size and mode from diag `info`. Done. |
+| B. Self-report | no (reads the serial stream) | Framework firmware sends HELLO with `mac`, `chip`, `chip_rev` and `board_hash` (FNV-1a 32 of the board id, [05 §5.7](05-network.md)). The hub matches `board_hash` against known manifests and reads the board id from `fr.node.describe`, and flash size plus PSRAM size and mode from diag `info`. Done. |
 | C. Active probe | yes (lease, resets the chip) | esptool 5.6: `esptool.cmds.detect_chip` and `detect_flash_size`, plus the `ESPLoader` methods `get_chip_description()`, `get_chip_features()` and `read_mac('BASE_MAC')`. Yields package, embedded flash/PSRAM, revision and flash size. esptool ≥ 5.2 is needed for C6 embedded-flash reporting. |
 | D. Match | no | Match the results against every manifest's `detection` block: 0 candidates means ask, offering `generic-<target>`; 1 means done; more than 1 means stage E (M2) or asking the user (M1). |
 | E. Disambiguate (M2) | yes | Flash the generic firmware, blink each candidate LED pin, and ask the user or agent which one lit (S3 Super Mini vs S3-Zero; DevKitC-1 v1.0 vs v1.1). |
@@ -117,7 +117,8 @@ Rules:
   - Holding it during `esp_restart()` or an OTA reboot is safe.
   - The hub flags "USB present but no HELLO for 5 s" as a likely download-mode state and shows a recovery hint (release BOOT, tap RST; or `esptool --after watchdog-reset` on C3/S3).
   - **GPIO9 cannot wake the C3/C6 from deep sleep.** Battery input devices need another pin (C3: GPIO0–5; C6: GPIO0–7).
-- **Weak C3 Super Mini RF.** The TX cap is a manifest field. Heartbeats report RSSI and TX failures so the cap can be tuned ([05 §5.7](05-network.md)).
+- **Weak C3 RF.** The TX cap is the manifest field `rf.max_tx_power_qdbm` (0.25 dBm units, 8–84). `fr gen firmware` writes it into `sdkconfig.board` as `CONFIG_FR_WIFI_MAX_TX_POWER_QDBM`, and `fr_net` calls `esp_wifi_set_max_tx_power()` right after `esp_wifi_start()` (the driver refuses it earlier). Heartbeats report RSSI and TX failures so the cap can be tuned ([05 §5.7](05-network.md)).
+  - **C3 OLED board #2** (`1cdbd4175cc4`) never finished WPA2 authentication at full TX power (measured at checkpoint C3): the driver looped `init → auth → init (0x200)`, and the AP never answered. Capped at 34 (8.5 dBm), it associated on the first attempt. Board #1 (`1cdbd416ba34`) joined at full power in C1, so this is per-board RF spread, not something every unit of the board shows. 34 is now the `esp32c3-oled042` manifest default ([spike](../spikes/2026-10-21-c3-hub-link.md)).
 - **WS2812** draws about 0.6–1.5 mA even when dark (battery nodes). `led_ws2812` defaults `max_brightness` to 64 of 255.
 - **S3 as a USB HID gamepad** (a likely future input-device mode). TinyUSB takes the shared PHY, so the native USJ console and agent channel are lost. Such nodes must be managed over Wi-Fi/ESP-NOW or through a UART bridge. C3 and C6 cannot be USB devices at all.
 - **DevKitC-1** exposes two serial ports for one chip. Deduplicate them by `read_mac`: the bridge's serial number is not the chip MAC.

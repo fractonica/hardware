@@ -112,9 +112,11 @@ TEST(capability_attach_and_reply)
     CHECK_EQ(sink.id, 3);
     CHECK_EQ(sink.at, fr::cap::kNowUs);
 
-    fr::cap::Reply reply;
+    fr::cap::StaticReply<> reply;
     CHECK(d.dispatch(1, {}, reply).has_value());
     CHECK_BYTES(reply.bytes(), frt::from_hex("08 2a"));
     CHECK_EQ(d.dispatch(9, {}, reply).error(), fr::Err::unsupported);
-    CHECK_EQ(fr::cap::Reply::kCapacity, 200);
+    CHECK_EQ(fr::cap::Reply::kRealtimeCapacity, 200);
+    CHECK_EQ(reply.capacity(), 200);
+    CHECK_EQ(fr::cap::Reply::kBulkCapacity, 1445);
 }

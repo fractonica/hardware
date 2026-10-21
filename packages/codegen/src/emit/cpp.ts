@@ -194,6 +194,7 @@ const SCALAR_CPP: Record<ScalarName, string> = {
 };
 
 const UNDERLYING_CPP = { u8: 'uint8_t', u16: 'uint16_t', u32: 'uint32_t' } as const;
+const LAYOUT_BYTES = { u8: 1, u16: 2, u32: 4 } as const;
 const UINT_MAX_VAL = { u8: 0xff, u16: 0xffff, u32: 0xffffffff } as const;
 
 /** 'fr.analog_in' -> 'AnalogIn' */
@@ -888,7 +889,7 @@ function messageSpecs(model: Model): StructSpec[] {
     name: t.name,
     fields: t.fields,
     decode: `decode_${snakeOf(t.name)}`,
-    comment: [`// ${t.name} (protocol type; array element only).`],
+    comment: [`// ${t.name} (protocol type).`],
     statics: [],
     validate: false,
   }));
@@ -1002,9 +1003,12 @@ function protocolHeader(model: Model): string {
   c.line(`inline constexpr size_t kMtuBulk = ${p.mtu.bulk};`);
   c.line(`inline constexpr size_t kRealtimePayloadBudget = ${p.mtu.realtimePayloadBudget};`).line();
 
-  c.line('// EXT TLV types; types >= 0x80 are critical.');
+  // The runtime decides which TLVs it knows (unsupported_ext, bad_ext), so it owns the types: a schema type
+  // the runtime lacks stops the build here.
+  c.line('// EXT TLV types (fr/envelope.hpp) and their value sizes; types >= 0x80 are critical.');
   for (const t of p.extTlvs) {
-    c.line(`inline constexpr uint8_t kExt${pascalCase(t.name)} = ${hex(t.type, 2)};`);
+    const n = `fr::wire::kExt${pascalCase(t.name)}`;
+    c.line(`static_assert(${n} == ${hex(t.type, 2)} && fr::wire::ext_value_size(${n}) == ${LAYOUT_BYTES[t.valueType]});`);
   }
   c.line();
 
@@ -1478,8 +1482,8 @@ function capSource(cap: Capability): string {
           c.line(`const auto r = ${call};`);
           c.open('if (!r)', () => c.line('return std::unexpected(r.error());'));
           c.line('encode(*r, reply.fields());');
-          c.line('// RESULT fields beyond the Reply buffer: report a failure rather than truncated fields.');
-          c.open('if (reply.fields().overflow())', () => c.line('return std::unexpected(Err::failed);'));
+          c.line("// Fields beyond the caller's buffer (realtime or bulk): FAILED with no fields, never truncated ones.");
+          c.open('if (reply.fields().overflow())', () => c.line('reply.clear();').line('return std::unexpected(Err::failed);'));
           c.line('return {};');
         } else {
           c.line(`return ${call};`);
@@ -2391,12 +2395,13 @@ function hexOf(b: Uint8Array | readonly number[]): string {
 class VectorWriter {
   private readonly c: Code;
   private pool = 0;
+  private depth = 0;
 
   constructor(c: Code) {
     this.c = c;
   }
 
-  private staticBytes(b: readonly number[]): string {
+  staticBytes(b: readonly number[]): string {
     if (b.length === 0) {
       return 'std::span<const uint8_t>{}';
     }
@@ -2459,13 +2464,17 @@ class VectorWriter {
           throw new Error(`${where}.${k}: expected an array`);
         }
         const def = f.type.element.def;
+        // One name per nesting level: an element of an element must not shadow its parent.
+        const e = `e${this.depth}`;
+        this.depth++;
         v.forEach((el, i) => {
           this.c.block(() => {
-            this.c.line(`fr::proto::${def.name} e{};`);
-            this.assign(def.fields, el, 'e', `${where}.${k}[${i}]`);
-            this.c.line(`${x}.push_back(e);`);
+            this.c.line(`fr::proto::${def.name} ${e}{};`);
+            this.assign(def.fields, el, e, `${where}.${k}[${i}]`);
+            this.c.line(`${x}.push_back(${e});`);
           });
         });
+        this.depth--;
         continue;
       }
       this.c.line(`${x} = ${this.valueExpr(f.type, v, `${where}.${k}`)};`);
@@ -2475,7 +2484,7 @@ class VectorWriter {
 
 const HEADER_KEYS = ['flags', 'cls', 'kind', 'seq', 'net', 'src', 'dst', 'epoch', 'ttl', 'port'] as const;
 
-function emitHeaderValue(c: Code, h: Header, target: string): void {
+function emitHeaderValue(c: Code, vw: VectorWriter, h: Header, target: string): void {
   c.line(`fr::wire::Header ${target}{};`);
   for (const k of HEADER_KEYS) {
     if (h[k] !== 0) {
@@ -2483,6 +2492,15 @@ function emitHeaderValue(c: Code, h: Header, target: string): void {
       c.line(`${target}.${k} = ${bits ? hex(h[k], 2) : h[k] > 0xff ? hex(h[k], 4) : h[k]};`);
     }
   }
+  const tlvs = extBytes(h);
+  if (tlvs.length > 0) {
+    c.line(`${target}.ext = fr::wire::ExtView(${vw.staticBytes(tlvs)});`);
+  }
+}
+
+/** The TLV block of a decoded header, as on the wire after its `len` byte. */
+function extBytes(h: Header): number[] {
+  return (h.ext ?? []).flatMap((t) => [t.type, t.value.length, ...t.value]);
 }
 
 function headerFromValue(v: unknown, bytes: number[], where: string): Header {
@@ -2496,6 +2514,13 @@ function headerFromValue(v: unknown, bytes: number[], where: string): Header {
       const x = (v as Record<string, unknown>)[k];
       if (x !== undefined && x !== decoded.value[k]) {
         throw new Error(`${where}: header.${k} is ${JSON.stringify(x)} but the bytes say ${decoded.value[k]}`);
+      }
+    }
+    const ext = (v as Record<string, unknown>).ext;
+    if (ext !== undefined) {
+      const want = hexOf((ext as { type: number; value: string }[]).flatMap((t) => [t.type, t.value.length / 2, ...hexBytes(t.value)]));
+      if (want !== hexOf(extBytes(decoded.value))) {
+        throw new Error(`${where}: header.ext disagrees with the bytes`);
       }
     }
   }
@@ -2582,7 +2607,7 @@ function vectorsInc(model: Model, vectors: readonly Vector[]): string {
           case 'header': {
             const raw = vec.value as Record<string, unknown> | null;
             const h = headerFromValue(raw && typeof raw === 'object' && 'header' in raw ? raw.header : raw, bytes, where);
-            emitHeaderValue(c, h, 'h');
+            emitHeaderValue(c, vw, h, 'h');
             c.line(`v.header(${name}, h, ${hexLit});`);
             calls++;
             break;
@@ -2593,8 +2618,8 @@ function vectorsInc(model: Model, vectors: readonly Vector[]): string {
               throw new Error(`${where}: envelope bytes do not decode (${env.error})`);
             }
             const raw = (vec.value !== null && typeof vec.value === 'object' ? vec.value : {}) as Record<string, unknown>;
-            headerFromValue(raw.header ?? null, bytes.slice(0, 18), where);
-            emitHeaderValue(c, env.value.header, 'h');
+            headerFromValue(raw.header ?? null, bytes, where);
+            emitHeaderValue(c, vw, env.value.header, 'h');
             const p = env.value.prefix;
             c.line(`const uint32_t t_us = ${p.type === 'time' ? p.t_us : 0};`);
             c.line(`const fr::wire::ResultPrefix rp{${p.type === 'result' ? `${p.req_epoch}, ${p.req_seq}, ${p.status}` : ''}};`);

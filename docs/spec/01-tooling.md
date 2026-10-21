@@ -25,7 +25,7 @@ Status: inventory taken 2026-10-20 on the hub machine. The approved installs fro
 | cmake / ninja | Homebrew cmake 4.1.1 and radioconda ninja come first on PATH | IDF-managed cmake and ninja, so builds are reproducible | Builds run in a sanitized environment ([03-firmware §3.8](03-firmware.md)) |
 | ccache | **missing** | recommended (incremental agent build loop) | `brew install ccache` |
 | Docker | 29.6.1 | optional, **builds only**: Docker on macOS cannot pass USB serial through | none |
-| git / gh | 2.40.0 / 2.92.0 | yes | This folder is not a git repo yet ([README open questions](README.md#open-questions)) |
+| git / gh | 2.40.0 / 2.92.0 | yes | The repo is a local git repository with no remote yet ([README, still open](README.md#still-open)) |
 | Claude Code | 2.1.286 | yes. In this version MCP tool descriptions and server instructions are cut at 2,048 characters | Keep tool descriptions short ([09-agent-api §9.6](09-agent-api.md)) |
 | arduino-cli + esp32 core 3.3.4, PlatformIO 6.1.18, Rust 1.91 | installed | **not used** by the framework ([03-firmware §3.1](03-firmware.md)) | leave as is |
 | esp-emulator, Wokwi CLI, EIM | not installed | optional (sim tier) | later ([10-testing](10-testing.md)) |

@@ -6,6 +6,8 @@ import { parse, stringify } from 'yaml';
 
 import {
   CLS,
+  EXT,
+  EXT_VALUE_SIZE,
   FLAG,
   HEADER_SIZE,
   MAGIC_VER,
@@ -193,6 +195,20 @@ describe('loading the committed schema', () => {
     expect(p.serial.maxLine).toBe(SERIAL_MAX_LINE);
     expect(Object.fromEntries(p.serial.types.map((t) => [t.name, t.value]))).toEqual(SERIAL_TYPE);
     expect(p.serial.crc).toMatchObject({ poly: 0x1021, init: 0xffff, order: 'little-endian' });
+    expect(Object.fromEntries(p.extTlvs.map((t) => [t.name.toUpperCase(), t.type]))).toEqual(EXT);
+    expect(Object.fromEntries(p.extTlvs.map((t) => [t.type, { u8: 1, u16: 2, u32: 4 }[t.valueType]]))).toEqual(EXT_VALUE_SIZE);
+  });
+
+  it('nests protocol types: the descriptor holds an array of DescriptorCap (07 §7.4)', () => {
+    const p = model().protocol;
+    const desc = p.types.find((t) => t.name === 'Descriptor')!;
+    const caps = desc.fields.find((f) => f.name === 'caps')!;
+    expect(caps.type).toMatchObject({ kind: 'array', max: 16, element: { kind: 'struct', def: { name: 'DescriptorCap' } } });
+    expect(desc.fields.find((f) => f.name === 'frame_version')).toMatchObject({ default: 1, presence: 'always' });
+    // fr.node.describe returns it encoded, within the bulk reply.
+    expect(desc.maxSize).toBeLessThanOrEqual(1200);
+    const describe = cap(model(), 'fr.node').commands.find((c) => c.name === 'describe')!;
+    expect(describe.result).toEqual([expect.objectContaining({ name: 'descriptor', type: { kind: 'bytes', max: 1200 } })]);
   });
 });
 
@@ -309,6 +325,17 @@ describe('validation errors name the file and path', () => {
     expectIssue(issues, PROTOCOL, 'messages.EVENT.DOWN', /capability members/);
     expectIssue(issues, PROTOCOL, 'messages.NET.RESOLVE.entry.type', /only be used as an array element/);
     expectIssue(issues, PROTOCOL, 'ext_tlv.5', /critical/);
+  });
+
+  it('protocol types hold only types declared above them (no recursion)', () => {
+    const issues = issuesOf(
+      edited(PROTOCOL, (y) => {
+        y.types.DirectoryEntry.later = { id: 3, type: 'array<Descriptor>', max: 2 };
+        y.types.Descriptor.again = { id: 7, type: 'array<Descriptor>', max: 2 };
+      }),
+    );
+    expectIssue(issues, PROTOCOL, 'types.DirectoryEntry.later.type', /unknown array element type 'Descriptor'/);
+    expectIssue(issues, PROTOCOL, 'types.Descriptor.again.type', /unknown array element type 'Descriptor'/);
   });
 
   it('loadModel throws a SchemaError listing every problem', () => {

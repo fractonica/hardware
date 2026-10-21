@@ -1,0 +1,13 @@
+cJSON 1.7.19 for the host C++ suite (firmware/test/host), so a fresh checkout builds it without an
+ESP-IDF install or the component manager's managed_components. Firmware builds keep using the
+espressif/cjson component (fr_caps/idf_component.yml); this copy must stay the same version.
+
+Source: espressif/cjson 1.7.19~2 from the ESP Component Registry (dependencies.lock component_hash
+e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469), files cJSON/cJSON.c, cJSON/cJSON.h
+and cJSON/LICENSE, unmodified. The component's CHECKSUMS.json lists these sha256 values:
+
+  607e756460fa0de37d20a7a9181f2de29c97bfb7ce5a0e6c2f548243836cd852  cJSON.c
+  25b0145150d500498e4d209cec69c18c42cf818bffcc54690be3b895a2a16dee  cJSON.h
+  a36dda207c36db5818729c54e7ad4e8b0c6fba847491ba64f372c1a2037b6d5c  LICENSE
+
+License: MIT (LICENSE, Copyright (c) 2009-2017 Dave Gamble and cJSON contributors).

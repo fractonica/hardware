@@ -546,7 +546,7 @@ TEST(button_inject_through_dispatch)
     REQUIRE(r.init());
     // fr.button inject = command 1, gesture = field 1 (double_click = 1).
     auto args = frt::from_hex("08 01");
-    fr::cap::Reply reply;
+    fr::cap::StaticReply<> reply;
     CHECK(r.svc.dispatch(1, args, reply));
     CHECK_EQ(r.sink.events().size(), 5u);
     auto unknown = r.svc.dispatch(9, {}, reply);

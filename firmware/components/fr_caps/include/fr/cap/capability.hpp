@@ -7,7 +7,9 @@
 #include <span>
 
 #include "fr/base.hpp"
+#include "fr/envelope.hpp"
 #include "fr/wire.hpp"
+#include "protocol.hpp"  // generated fr::proto constants (MTU, payload budget)
 
 namespace fr::cap {
 
@@ -35,23 +37,48 @@ protected:
     ~Sink() = default;
 };
 
-/** RESULT fields, filled by dispatch. Capacity is the 200 B realtime payload budget (spec 07 §7.5). */
+/**
+ * RESULT fields, filled by dispatch into a buffer the caller provides (design c3 §2): kRealtimeCapacity
+ * for realtime dispatch (UDP), kBulkCapacity when the request arrived on TCP or serial, where the RESULT
+ * may go BULK. Fields that do not fit make the generated dispatch answer FAILED with the reply cleared,
+ * never truncated. StaticReply<N> carries its own buffer.
+ */
 class Reply
 {
 public:
-    static constexpr size_t kCapacity = 200;
+    /** The realtime payload budget (spec 07 §7.5): 200 B. */
+    static constexpr size_t kRealtimeCapacity = fr::proto::kRealtimePayloadBudget;
+    /** The bulk MTU less the header and the RESULT prefix (1445 B), so the RESULT envelope fits 1470 B. */
+    static constexpr size_t kBulkCapacity = fr::proto::kMtuBulk - fr::wire::kHeaderSize - fr::wire::kResultPrefixSize;
 
-    Reply() : w_(buf_, kCapacity) {}
-    // The writer points into this object's own buffer, so a copy would write into the original.
+    explicit Reply(std::span<uint8_t> buf) : w_(buf) {}
+    // The writer points into the caller's buffer; a copy would share it.
     Reply(const Reply &) = delete;
     Reply &operator=(const Reply &) = delete;
 
     fr::wire::Writer &fields() { return w_; }
     std::span<const uint8_t> bytes() const { return w_.bytes(); }
+    size_t capacity() const { return w_.capacity(); }
+    /** Drops what was written (and an overflow): FAILED answers carry no fields. */
+    void clear() { w_.reset(); }
 
 private:
-    uint8_t buf_[kCapacity];
     fr::wire::Writer w_;
+};
+
+namespace detail {
+template <size_t N>
+struct ReplyStorage {
+    uint8_t buf[N];
+};
+}  // namespace detail
+
+/** A Reply with inline storage (a base, so the buffer exists before Reply points at it). */
+template <size_t N = Reply::kRealtimeCapacity>
+class StaticReply : private detail::ReplyStorage<N>, public Reply
+{
+public:
+    StaticReply() : Reply(std::span<uint8_t>(detail::ReplyStorage<N>::buf)) {}
 };
 
 class Capability

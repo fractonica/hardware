@@ -11,8 +11,10 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+  boardHash,
   CLS,
   decodeSerialLine,
+  descriptorHash,
   encodeSerialLine,
   FLAG,
   packEnvelope,
@@ -28,6 +30,7 @@ import {
   CATALOG,
   CLASSES,
   decodeButtonInjectArgs,
+  decodeDescriptor,
   decodeEnvelope,
   decodeFrameLine,
   decodeJson,
@@ -37,6 +40,7 @@ import {
   decodeTraits,
   encodeButtonInjectArgs,
   encodeButtonUp,
+  encodeDescriptor,
   encodeEnvelope,
   encodeFrameLine,
   encodeJson,
@@ -141,15 +145,20 @@ function checkBody(v: Vector): void {
   }
 }
 
+/** A header from its vector JSON: EXT values are hex there. */
+function headerOf(json: any): Header {
+  return json.ext === undefined ? json : { ...json, ext: json.ext.map((t: { type: number; value: string }) => ({ type: t.type, value: bytes(t.value) })) };
+}
+
 function checkHeader(v: Vector): void {
   const d = unpackHeader(bytes(v.hex));
   if (v.error) {
     expect(d).toEqual({ ok: false, error: v.error });
     return;
   }
-  expect(d).toEqual({ ok: true, value: v.value });
+  expect(d).toEqual({ ok: true, value: headerOf(v.value) });
   if (!v.decodeOnly) {
-    expect(hex(packHeader(v.value as Header))).toBe(v.hex);
+    expect(hex(packHeader(headerOf(v.value)))).toBe(v.hex);
   }
 }
 
@@ -164,13 +173,13 @@ function checkEnvelope(v: Vector): void {
     return;
   }
   const e = d.value;
-  expect(e.header).toEqual(v.value.header);
+  expect(e.header).toEqual(headerOf(v.value.header));
   expect(e.prefix).toEqual(v.value.prefix);
   expect(hex(e.body)).toBe(v.value.body);
   expect(v.type).toBe(`envelope.${CLASSES.find((c) => c.code === e.header.cls)!.name}`);
   expect(CLASSES.find((c) => c.code === e.header.cls)!.prefix).toBe(e.prefix.type);
   if (!v.decodeOnly) {
-    expect(hex(encodeEnvelope({ header: v.value.header, prefix: v.value.prefix, body: bytes(v.value.body) }))).toBe(v.hex);
+    expect(hex(encodeEnvelope({ header: headerOf(v.value.header), prefix: v.value.prefix, body: bytes(v.value.body) }))).toBe(v.hex);
   }
   if (v.value.body_type) {
     expect(decodeJson(codecOf(v.value.body_type), e.body, false)).toEqual({ ok: true, value: v.value.body_value });
@@ -279,6 +288,28 @@ describe('golden vectors', () => {
 });
 
 describe('typed codecs', () => {
+  it('encode a C6 pad descriptor and hash it as HELLO does (firmware codec_test.cpp pins the same)', () => {
+    const d = encodeDescriptor({
+      fw_id_prefix: bytes('3f2a9c01b2d40011'),
+      catalog_hash: 0x9c1e44a0,
+      profile: 'c6-pad',
+      board: 'esp32c6-supermini',
+      caps: [
+        { port: 1, cap_id: 0x0001, version: 0x0100, name: 'boot', traits: new Uint8Array(0) },
+        { port: 2, cap_id: 0x0002, version: 0x0100, name: 'status', traits: bytes('08011001') },
+      ],
+    });
+    expect(d.length).toBe(83);
+    expect(descriptorHash(d)).toBe(0x347fd1c7);
+    expect(boardHash('esp32c6-supermini')).toBe(0x4088f3ce);
+    const back = decodeDescriptor(d);
+    expect(back.ok && back.value.frame_version).toBe(1);
+    expect(back.ok && back.value.caps.map((c) => c.name)).toEqual(['boot', 'status']);
+    // fr.node.describe carries it as bytes.
+    const r = encodeMember('fr.node', 'result', 'describe', { descriptor: hex(d) });
+    expect(r.ok).toBe(true);
+  });
+
   it('match hand-computed bytes', () => {
     // 200 = c8 01; blink fields have non-zero defaults, so all three are always written.
     expect(hex(encodeLedBlinkArgs())).toBe('08c80110c8011803');

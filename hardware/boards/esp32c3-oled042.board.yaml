@@ -20,7 +20,7 @@ pins:
   strapping_levels: { 2: high, 8: high, 9: high }
   free: [0, 1, 2, 3, 4, 7, 10, 20, 21]
   adc1: [0, 1, 2, 3, 4]
-rf: { max_tx_power_qdbm: null, antenna: ceramic }
+rf: { max_tx_power_qdbm: 34, antenna: ceramic }   # 8.5 dBm: board #2 never finished WPA2 auth at full power (C3 checkpoint)
 test_pin: 10
 resources: { rmt_tx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
 defaults:

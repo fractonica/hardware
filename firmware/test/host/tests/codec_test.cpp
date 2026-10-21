@@ -10,6 +10,7 @@
 #include "catalog.hpp"
 #include "diag.hpp"
 #include "fr/envelope.hpp"
+#include "fr/hash.hpp"
 #include "fr/serial_line.hpp"
 #include "led.hpp"
 #include "messages.hpp"
@@ -310,6 +311,39 @@ TEST(codec_hello_round_trip)
     REQUIRE(back.has_value());
     CHECK(*back == h);
     CHECK_EQ(back->alias, "pad-1");
+}
+
+// A C6 pad's descriptor (07 §7.4; the golden vector Descriptor.c6_pad): two board instances, hashed as
+// HELLO carries it. packages/protocol/test/gen.test.ts pins the same bytes and hashes.
+TEST(codec_descriptor_and_hello_hashes)
+{
+    const uint8_t fw[] = {0x3f, 0x2a, 0x9c, 0x01, 0xb2, 0xd4, 0x00, 0x11};
+    const uint8_t led_traits[] = {0x08, 0x01, 0x10, 0x01};
+    fr::proto::Descriptor d{};
+    d.fw_id_prefix = fw;
+    d.catalog_hash = 0x9c1e44a0;
+    d.profile = "c6-pad";
+    d.board = "esp32c6-supermini";
+    d.caps.push_back({.port = 1, .cap_id = 0x0001, .version = 0x0100, .name = "boot", .traits = {}});
+    d.caps.push_back({.port = 2, .cap_id = 0x0002, .version = 0x0100, .name = "status", .traits = led_traits});
+    const auto bytes = enc(d);
+    CHECK_EQ(bytes.size(), 83);
+    CHECK_EQ(fr::wire::descriptor_hash(bytes), 0x347FD1C7u);
+    CHECK_EQ(fr::wire::board_hash("esp32c6-supermini"), 0x4088F3CEu);
+    const auto back = fr::proto::decode_descriptor(bytes);
+    REQUIRE(back.has_value());
+    CHECK(*back == d);
+    CHECK_EQ(back->frame_version, 1);
+    REQUIRE_EQ(back->caps.size(), 2);
+    CHECK_EQ(back->caps[1].name, "status");
+
+    // describe carries it as bytes; the bulk Reply holds the largest one.
+    static_assert(fr::proto::Descriptor::kMaxSize <= 1200);
+    static_assert(fr::cap::NodeDescribeResult::kMaxSize <= fr::cap::Reply::kBulkCapacity);
+    const auto result = enc(fr::cap::NodeDescribeResult{.descriptor = bytes});
+    const auto again = fr::cap::decode_node_describe_result(result);
+    REQUIRE(again.has_value());
+    CHECK_BYTES(again->descriptor, bytes);
 }
 
 // ---- catalog ----

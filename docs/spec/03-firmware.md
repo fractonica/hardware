@@ -46,20 +46,21 @@ L4 code reaches other nodes only through `fr::net::send_cmd(dst_addr, port, cmd_
 
 | Component | Responsibility |
 |---|---|
-| `fr_core` | Core actor task, input slots, network queue, timers, static pools, L1 contracts, L2 services, the `cap::Sink` that turns emissions into envelopes (`EnvelopeLink`), boot sequence (`fr::core::start()`, `run()`) |
-| `fr_id` | Identity: factory MAC, `addr`, `alias`, `net`, `epoch` from `fr_ident` plus RW overrides. The only place that reads MACs ([06 §6.3](06-identity-ota.md)) |
+| `fr_core` | Core actor task, input slots, network queue, timers, static pools, L1 contracts, L2 services, the node descriptor builder ([07 §7.4](07-capabilities-sdk.md)), the `fr::net::Host` that `fr_net` runs on (dispatch, identity, the system capabilities), boot sequence (`fr::core::start()`, `run()`) |
+| `fr_id` | Identity: factory MAC, `addr`, `alias`, `net`, `epoch` from `fr_ident` plus RW overrides (`fr_ovr`, `fr_link`, `fr_net2`). The only place that reads MACs ([06 §6.3](06-identity-ota.md)) |
 | `fr_proto` | Hand-written wire runtime: protobuf-wire `Writer`/`Reader`, envelope header, `@fr1:` lines (CRC16, base64url) and the protocol constants; the vocabulary types `fr::Err`, `fr::Status`, `fr::TimeUs` and `fr::Callback` (`fr/base.hpp`). GENERATED from `schema/protocol.yaml`: system-message codecs and enums, which `static_assert` the hand-written constants. No IDF includes |
-| `fr_net` | Link-agnostic protocol core (windows, flood relay, retries, response cache, presence, link selection, directory) plus link drivers: `espnow`, `wifi_tcp_udp`, `serial_line`. The core has **no IDF includes**, so it builds on the host for tests ([10 §10.3](10-testing.md)) |
+| `fr_net` | Link-agnostic protocol core `Net` (sessions, windows, retries, response cache, presence, link selection, TIME answers; flood relay and directory from C5). `Net` is the `cap::Sink` that turns capability emissions into envelopes ([05 §5.10](05-network.md)). Link drivers: `wifi_tcp_udp` (Wi-Fi STA, `hub_host` through `espressif/mdns`) and `serial_line` (C3), `espnow` (C5). The core (`src/core`) has **no IDF includes**, so it builds on the host for tests ([10 §10.3](10-testing.md)) |
 | `fr_serial` | Sole owner of the USB-Serial/JTAG: line reader, frame and log rings ([05 §5.12.3](05-network.md)) |
 | `fr_ota` | `ota_sink` (one sink for every transport), health gate, rollback reporting |
 | `fr_diag` | Serial command channel (a line protocol over `fr_serial`; no IDF REPL; [09 §9.7](09-agent-api.md)) and `fr.diag` over any hub link; test hooks, gated by Kconfig. Builds its JSON answers with cJSON (`espressif/cjson`, a private dependency, as in `fr_caps`) |
 | `fr_caps` | Hand-written `Capability`, `Sink` and `Reply` bases; GENERATED capability interfaces, dispatch, payload codecs, catalog and `diag_json` ([07 §7.6](07-capabilities-sdk.md)). No IDF includes; `diag_json` needs cJSON (`espressif/cjson`) |
 | `fr_board` | GENERATED per profile by `fr gen firmware`, into the build directory: static driver and service instances, port assignment, `attach(Sink&)`, `init(Core&)`, `selftest(name)`, and `instances()`, a table of `Instance {port, name, cap, status, selftest}` (`status` is that port's `init()` result, so `fr_core` and `fr_diag` need not depend on `fr_board`) |
 
-**Component order** (no cycles): `fr_proto` ← `fr_caps` ← `fr_diag` (+`fr_id`; private `fr_serial`) ← `fr_core` (+`fr_id`; private `fr_serial`, `fr_diag`) ← generated `fr_board` (`PRIV_REQUIRES` the bound drivers, which `REQUIRE` `fr_core`) ← `main`. `fr_serial` privately requires only `fr_proto`.
+**Component order:** `fr_proto` ← `fr_caps` ← `fr_diag` (+`fr_id`; private `fr_serial`) ← `fr_core` (+`fr_id`; private `fr_serial`, `fr_diag`, `fr_net`) ← generated `fr_board` (`PRIV_REQUIRES` the bound drivers, which `REQUIRE` `fr_core`) ← `main`. `fr_serial` privately requires only `fr_proto`.
 - `fr_serial` and `fr_diag` sit below `fr_core` because `fr::core::start()` brings them up. `fr_diag` reaches runtime state through `fr::diag::Host`, which `fr_core` implements.
+- The one cycle is `fr_core` ↔ `fr_net`: `Net` runs on `fr::Core` (`fr_net` `REQUIRES fr_core`), and `fr_core` attaches the links and runs `Net`. IDF links the cycle by repeating the libraries.
 - `fr_core` requires `fr_caps` publicly, so `FR_TEST_HOOKS` (a public definition of `fr_caps`, set from `CONFIG_FR_TEST_HOOKS`, which changes the generated vtables) has one value in every component.
-- `fr_proto`, `fr_caps` and `fr_core`'s services (with `EnvelopeLink`) build on the host unchanged ([10 §10.4](10-testing.md)).
+- `fr_proto`, `fr_caps`, `fr_core`'s services (with the descriptor builder) and `fr_net`'s `src/core` build on the host unchanged ([10 §10.4](10-testing.md)).
 
 ## 3.4 Threading, timing, memory
 
@@ -67,7 +68,8 @@ L4 code reaches other nodes only through `fr::net::send_cmd(dst_addr, port, cmd_
 
 | Task | Prio | Owns |
 |---|---|---|
-| `fr_core` | 10 | All capability, service, driver and protocol state. Nothing else mutates it, so nothing needs locks |
+| `fr_net` | 11 | Wi-Fi control (STA, BSSID pin, reconnects), `hub_host` resolution and the TCP socket. It sleeps in `select()` on the socket and an eventfd that Wi-Fi events, TX frames and drop requests poke. Above `fr_core`, so a frame the core queues for TCP leaves as soon as the core yields |
+| `fr_core` | 10 | All capability, service, driver and protocol state, `fr_net`'s `Net` included. Nothing else mutates it, so nothing needs locks. 8 KB stack: `fr.diag.exec` over TCP or serial dispatches into a 1,445 B bulk `Reply` on it |
 | `fr_serial` | 9 | The USB-Serial/JTAG, through the IDF driver (`usb_serial_jtag_driver_install`, rx 4096 B, tx 4096 B, then `usb_serial_jtag_vfs_use_driver()` so stray `printf` goes through the driver) |
 | `fr_worker` | 5 | Slow work: NVS and flash writes (except the boot epoch), OTA download, descriptor building |
 
@@ -79,11 +81,12 @@ L4 code reaches other nodes only through `fr::net::send_cmd(dst_addr, port, cmd_
 **Core task rounds.** `fr_core` waits on task notifications, then services input slots first, then expired timers, then one function posted by another task (`Core::post`; queue depth 16, drops counted).
 
 **Network RX and send-done callbacks** run in the Wi-Fi task and are valid only during the callback.
-- They copy into a **static frame pool** (for example 16 × 256 B and 2 × 1500 B) and post the index to a separate network queue (depth 32, overflow counted).
+- They copy into a **static frame pool** (C3: 12 × 256 B and 2 × 1,470 B) and post the index to a separate network queue (depth 32, overflow counted). In C3 the producers are the `fr_net` task (TCP, UDP) and the `fr_serial` reader (ENV lines); ESP-NOW callbacks join in C5.
 - `fr_core` always services input slots and timers before the network queue.
 
 **`fr_core` never blocks.**
 - Sockets are non-blocking (`MSG_DONTWAIT`). On `EWOULDBLOCK` the frame stays in its TX queue.
+- The core task never writes the TCP socket: it appends the frame to the `fr_net` task's TX ring (8 KB, a power of two; a full ring drops the frame and counts it, `tcp_tx_dropped`). A UDP datagram is one non-blocking `sendto()` from the core task, so each socket has one writer.
 - Console and log output goes through the `fr_serial` rings: two bounded multi-producer rings, frames before logs, drop and count on overflow.
 - An `esp_log_set_vprintf` hook feeds the log ring. No lock is shared with the Wi-Fi task or `fr_core`, so a host that stops reading (USJ stalls of up to 50 ms) can only drop lines.
 - `fr_diag` handlers return their output; they never `printf`.
@@ -92,7 +95,7 @@ L4 code reaches other nodes only through `fr::net::send_cmd(dst_addr, port, cmd_
 - The logical timers share one `esp_timer`, whose deadlines the core task owns, so `stop()` or a restart never races a callback already in flight.
 
 **Pools are budgets.**
-- 24 timers: `fr::core::start()` takes 1 for `reboot`, leaving 23 for services (3 per button, 1 per LED, plus any a driver declares).
+- 28 timers: `fr::core::start()` takes the runtime's own before the board (`fr_core` 2, for `reboot` and the serial-link poll; `Net` 1) and keeps 2 spare, leaving 23 for services (3 per button, 1 per LED, plus any a driver declares).
 - 8 input slots (`button_gpio` takes 1).
 - An exhausted pool fails that port's `init()`, and `fr gen firmware` rejects a profile that would exceed either ([04 §4.3](04-boards.md)).
 
@@ -114,11 +117,11 @@ L4 code reaches other nodes only through `fr::net::send_cmd(dst_addr, port, cmd_
 2. `fr_ota_on_boot()`: if the app is `PENDING_VERIFY`, arm the health deadline ([06 §6.6](06-identity-ota.md)).
 3. **Composition root.** `fr::board::attach(fr::core::sink())` assigns ports and names before any emission. `fr::board::init(core)` inits each service, which inits its driver. A failure is recorded per port (`fr::board::Instance::status`); one failure does not stop the others.
 4. **`fr::core::run(instances, selftest)`** builds the port table (`node` 0, the board's instances, `diag` 241), prints the banner and starts the core task, which first runs `report_all` on every port. It never returns. The banner starts here because `caps=<n>` is known only after board init. It keeps the C1 format `fr: ready id=… fw=… state=…` (fields may be appended, never removed or reordered) and appends `caps=<n> epoch=<e>`.
-5. Start Wi-Fi (STA, `WIFI_PS_NONE` for mains profiles), ESP-NOW and link drivers. Load the directory and bindings from NVS.
-6. Send HELLO (with the descriptor hash). Start heartbeats. After the first WELCOME of this boot, emit `node.boot {reset_reason}`; it is exempt from `FR_EVENT_MAX_AGE_MS`.
+5. Start Wi-Fi (STA, `WIFI_PS_NONE` for mains profiles, the board's TX-power cap right after `esp_wifi_start()`; [05 §5.3](05-network.md)), ESP-NOW and link drivers. Load the directory and bindings from NVS. The serial, TCP and UDP links are attached to `Net` in step 1, so `Net` takes its timer before the board's services; nothing is sent before the core task runs.
+6. Send HELLO (with the descriptor hash) on every link that is up, every 1 s until it is WELCOMEd there. Start heartbeats. After the first WELCOME of this boot, emit `node.boot {reset_reason}`; it is exempt from `FR_EVENT_MAX_AGE_MS`.
 7. Once all health bits are set, mark the app valid if it was pending.
 
-Checkpoint C2 implements steps 1, 3 and 4; until C3 adds the hub session, frames go out on the serial link without one ([05 §5.12.3](05-network.md)).
+Checkpoint C2 implemented steps 1, 3 and 4. C3 adds steps 5 and 6 over Wi-Fi TCP/UDP and the serial link ([05 §5.10–5.12](05-network.md)), without ESP-NOW, the directory and bindings (C5). Steps 2 and 7 come with OTA (C4).
 
 ## 3.6 Device profiles and the build matrix
 
@@ -153,9 +156,9 @@ Layers are listed explicitly through `SDKCONFIG_DEFAULTS` (§3.8); later layers 
 
 1. `firmware/config/sdkconfig.framework`
 2. `firmware/apps/<app>/sdkconfig.defaults`
-3. `<build>/fr_gen/sdkconfig.board` (written by `fr gen firmware` from the board manifest and profile: target, flash size, partition CSV, console, `CONFIG_FR_BOARD`, `CONFIG_FR_PROFILE`, `CONFIG_FR_PART_PROFILE`; PSRAM mode once a PSRAM board joins)
+3. `<build>/fr_gen/sdkconfig.board` (written by `fr gen firmware` from the board manifest and profile: target, flash size, partition CSV, console, `CONFIG_FR_BOARD`, `CONFIG_FR_PROFILE`, `CONFIG_FR_PART_PROFILE`, and `CONFIG_FR_WIFI_MAX_TX_POWER_QDBM` when the manifest sets `rf.max_tx_power_qdbm` ([04 §4.3](04-boards.md)); PSRAM mode once a PSRAM board joins)
 4. `firmware/config/sdkconfig.build.<debug|release>`. Debug sets `CONFIG_FR_TEST_HOOKS=y` and `CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y`, so diag `log <tag> D` can raise a tag at runtime (the default level stays INFO; without the higher compiled-in maximum it would do nothing). Release leaves test hooks off
-5. `firmware/config/sdkconfig.local` (git-ignored, developer-only; appended only if it exists; never in published artifacts)
+5. `firmware/config/sdkconfig.local` (git-ignored, developer-only; appended only if it exists; never in published artifacts). The dev Wi-Fi of UNASSIGNED nodes goes only here: `CONFIG_FR_DEV_WIFI_SSID`, `CONFIG_FR_DEV_WIFI_PASS`, `CONFIG_FR_DEV_HUB_HOST` ([06 §6.4](06-identity-ota.md))
 
 Framework baseline:
 
@@ -168,12 +171,17 @@ CONFIG_APP_REPRODUCIBLE_BUILD=y
 CONFIG_ESP_WIFI_ESPNOW_MAX_ENCRYPT_NUM=0
 CONFIG_LWIP_TCP_TMR_INTERVAL=50
 CONFIG_LWIP_TCP_RTO_TIME=300
+# CONFIG_ESP_WIFI_NVS_ENABLED is not set
+# CONFIG_MDNS_ENABLE_CONSOLE_CLI is not set
+# CONFIG_MDNS_ENABLE_BROWSE is not set
+# CONFIG_MDNS_PREDEF_NETIF_AP is not set
 ```
 
 - ELF is the only core-dump format in IDF v6.1: `ESP_COREDUMP_ENABLE` selects the hidden `ESP_COREDUMP_DATA_FORMAT_ELF`, so there is no switch to set.
 - Apps build with `MINIMAL_BUILD`, so a symbol from a component nothing requires yet (`esp_wifi`, `lwip`) is reported by kconfgen as `unknown kconfig symbol` and ignored until a component pulls that component in. `fr_core` requires `espcoredump`, so the core-dump setting always applies.
 - `ESPNOW_MAX_ENCRYPT_NUM=0` is valid (range 0–17) and is set because native ESP-NOW encryption is not used ([05 §5.13](05-network.md)).
 - The lwIP values give router-mode TCP a sane retransmit time ([05 §5.12.1](05-network.md)).
+- The Wi-Fi driver keeps no configuration in NVS (`fr_net` also sets `WIFI_STORAGE_RAM`): credentials live only in `fr_ident` and `nvs:fr_net2` ([06 §6.3](06-identity-ota.md)). mDNS only resolves `hub_host`, so its console, browsing and soft-AP interface are off.
 
 USJ-only boards also get this in `sdkconfig.board` (`CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y` is already the IDF default):
 
@@ -214,7 +222,7 @@ fr build --profile c6-pad --build-type debug --json
 
 **Rules**
 - **Bound drivers only.** `EXTRA_COMPONENT_DIRS` lists the framework components plus only the driver components the profile binds. The component manager resolves the manifest of every component on the path, whatever `MINIMAL_BUILD` says.
-- **Pinned dependencies, one lock per profile.** `firmware/apps/<app>/dependencies.lock.<profile>` is committed (named through `FR_PROFILE`), and registry dependencies are pinned exactly (for example `espressif/led_strip: "==3.1.0~1"`, `espressif/cjson: "==1.7.19~2"`). The lock is per profile, not per target: only bound drivers are on the component path, so profiles of one target resolve different dependency sets (`c6-pad` pulls `espressif/led_strip`, `c6-pad-mono` does not), and a per-target lock was re-solved on every switch between them. `managed_components/` stays shared; the component manager removes a component the current profile does not use and reinstalls it from its download cache for the next profile that does.
+- **Pinned dependencies, one lock per profile.** `firmware/apps/<app>/dependencies.lock.<profile>` is committed (named through `FR_PROFILE`), and registry dependencies are pinned exactly (for example `espressif/led_strip: "==3.1.0~1"`, `espressif/cjson: "==1.7.19~2"`, `espressif/mdns: "==1.14.0"`). The lock is per profile, not per target: only bound drivers are on the component path, so profiles of one target resolve different dependency sets (`c6-pad` pulls `espressif/led_strip`, `c6-pad-mono` does not), and a per-target lock was re-solved on every switch between them. `managed_components/` stays shared; the component manager removes a component the current profile does not use and reinstalls it from its download cache for the next profile that does.
 - **Locks.** `build:<sha1(source_dir)>:<app>` is held while the component manager resolves the shared `managed_components/`. After that only `build:<sha1(source_dir)>:<app>:<profile>:<build_type>` (the build directory) is held. Different apps build in parallel; profiles of one app overlap after dependency resolution.
 - **Docker** (`espressif/idf:v6.1@sha256:…`) is for CI and reproducibility checks only. On the Mac, build natively; never flash from inside Docker.
 - **No `idf.py flash` in automation.** v6.1 defaults to fast reflash, which keeps per-build-directory state. The hub flashes from the manifest ([08 §8.5](08-hub.md)).

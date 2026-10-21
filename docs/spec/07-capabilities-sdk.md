@@ -134,11 +134,11 @@ events:
 
 | Capability | Commands | Events |
 |---|---|---|
-| `fr.node` (port 0, instance `node`) | `identify=1 {ms}`, `describe=2` (→ descriptor), `reboot=3 {bootloader bool}`, `set_alias=4 {alias string≤31, rev u32}`, `set_groups=5 {groups array<u16>≤8}` (M2), `net_set=6 {ssid, pass, bssid?, hub_host?}`, `get_state=7` (re-send every property), `bind_set=8`, `bind_clear=9 {slot}`, `bind_list=10` (§7.11) | `boot=1 {reset_reason}`, sent once per boot right after the first WELCOME and exempt from the event-age rule. `binding_fired=2 {slot, target_status, rtt_us u32 (trigger → target RESULT; 0 for fast), path u8 (0 espnow, 1 hub, 2 flood)}` |
+| `fr.node` (port 0, instance `node`) | `identify=1 {ms}`, `describe=2` → `{descriptor bytes≤1200}` (the encoded `Descriptor`, §7.4; BULK), `reboot=3 {bootloader bool}` (answers, then BYE `reboot`, or `maintenance` for the bootloader, then restarts; [05 §5.11](05-network.md)), `set_alias=4 {alias string≤31, rev u32}`, `set_groups=5 {groups array<u16>≤8}` (M2), `net_set=6 {ssid, pass, bssid?, hub_host?}`, `get_state=7` (re-send every property), `bind_set=8`, `bind_clear=9 {slot}`, `bind_list=10` (§7.11) | `boot=1 {reset_reason}`, sent once per boot right after the first WELCOME and exempt from the event-age rule. `binding_fired=2 {slot, target_status, rtt_us u32 (trigger → target RESULT; 0 for fast), path u8 (0 espnow, 1 hub, 2 flood)}` |
 | `fr.ota` (port 240, instance `ota`) | none. OTA control uses `cls=OTA` frames ([05 §5.7](05-network.md)) | — |
 | `fr.diag` (port 241, instance `diag`) | `exec=1 {line string≤200}` → RESULT `{json string≤1400}` (BULK). Same command set as the serial channel ([09 §9.7](09-agent-api.md)) | `mark=1 {token string≤32}` |
 
-System capabilities are generated like the others. Checkpoint C2 implements `fr.node` `identify`, `reboot` and `get_state` and `fr.diag.exec` on the node; the hub reaches them over a link from C3. `describe` answers `UNSUPPORTED` until its result type exists (§7.4).
+System capabilities are generated like the others. Since C3 the node implements `fr.node` `identify` (blinks the first `fr.led` instance, or logs when there is none), `describe`, `reboot`, `set_alias` (writes `fr_ovr`), `net_set` (the `fr_net2` override, [06 §6.3](06-identity-ota.md)) and `get_state`, and `fr.diag.exec`; the hub reaches them over every link. `set_groups` (M2) and `bind_*` (C5) answer `UNSUPPORTED`.
 
 `fr.display` (`text`, `clear`, `fill_rect`, `set_brightness`) is M2. Its first driver is the SSD1306 0.42" OLED on your C3 boards. `fr.audio_out` (`tone`, `play`, `stop`, `set_volume`) comes later. Both are drafted in [research/hal-capabilities-sdk.md](../research/hal-capabilities-sdk.md).
 
@@ -181,13 +181,15 @@ commands:
 The node sends its descriptor in reply to `fr.node.describe`; HELLO carries only its hash. For the hub's own builds the descriptor is a verification, since the hub already holds the build manifest keyed by `fw_id`. For foreign firmware it is the only description.
 
 ```
-Descriptor { frame_version u8, fw_id_prefix bytes8, catalog_hash u32, profile string, board string,
-             caps [ { port u8, cap_id u16, version u16 (major<<8|minor), name string, traits bytes } ] }
+Descriptor    { frame_version u8 (1), fw_id_prefix bytes≤8, catalog_hash u32, profile string≤31, board string≤31,
+                caps array<DescriptorCap>≤16 }
+DescriptorCap { port u8, cap_id u16, version u16 (major<<8|minor), name string≤31, traits bytes≤16 }
 ```
 
-It is about 90 B for two capabilities, protobuf-wire, and fragmented if large.
-
-**Open (C3).** `node.cap.yaml` gives `describe` no `result:` yet. The descriptor's `caps` is an array of structs, which a capability field cannot express today: capability fields cannot use protocol `types:`, and protocol types cannot nest. The options are to allow protocol `types:` in capability fields (model, both emitters, vectors, JSON), or to carry the descriptor as `bytes` holding a protobuf-wire `Descriptor` (wire-identical to a nested message field). Its consumers, HELLO's `descriptor_hash` and the hub's check of foreign firmware, arrive in C3 ([11 §11.4](11-roadmap.md)).
+- **Protocol types.** Both are declared under `types:` in `schema/protocol.yaml` and generated like the system messages. `traits` holds the capability's encoded `<Cap>Traits`.
+- **On the wire.** `fr.node.describe` returns the encoded `Descriptor` as `result: {descriptor: {id: 1, type: bytes, max: 1200}}`, which is wire-identical to a nested message field. It is about 90 B for two capabilities and at most 1,200 B, so it fits one BULK RESULT over TCP or serial.
+- **Hashes.** HELLO's `descriptor_hash` is FNV-1a 32 over those bytes, and `board_hash` FNV-1a 32 over the board id ([05 §5.7](05-network.md)).
+- **Hub use.** The hub calls `describe` during the handshake only when no artifact manifest names the HELLO's `fw_id_prefix`, and caches the result per `descriptor_hash` ([08 §8.4](08-hub.md)).
 
 ## 7.5 Wire encoding
 
@@ -219,7 +221,7 @@ It is about 90 B for two capabilities, protobuf-wire, and fragmented if large.
 
 - **Encoding** is in ascending field id. A field equal to its default is omitted unless it is `optional` (presence tracked explicitly; C++ structs carry `has_<field>`) or its default is non-zero.
 - **Decoding** skips unknown field ids of a known wire type. It rejects wire types 1, 3, 4, 6 and 7, truncated input, varints over 10 bytes, values outside the field's integer type, and lengths beyond `max` or the buffer. It never allocates and never reads past the buffer. A field that appears twice: the last wins. A packed array is one field, so a later occurrence replaces it; `array<Msg>` occurrences append. Element `max + 1` is `too_long`, reported before the element is read.
-- **Errors are values:** C++ `std::expected<T, DecodeErr>`, TS `{ok: true, value} | {ok: false, error}`; decoders never throw. Precedence: header `truncated`, `bad_magic`, `bad_flags` (ACK_REQ with LATEST), `unsupported` (SEC, FRAG, EXT: not implemented yet). Serial line, after stripping `\n` and then `\r`: `no_prefix`, `line_too_long`, `bad_base64` (strict, canonical, no padding), `too_short`, `bad_crc`. Field: a length beyond `max` is `too_long`, checked before `truncated`; `bool` above 1 is `out_of_range`; field 0 or a tag beyond u32 is `bad_field`. LINK_PING/LINK_PONG bodies are exactly 4 bytes.
+- **Errors are values:** C++ `std::expected<T, DecodeErr>`, TS `{ok: true, value} | {ok: false, error}`; decoders never throw. Precedence: header `truncated`, `bad_magic`, `bad_flags` (ACK_REQ with LATEST), `unsupported` (SEC, FRAG: not implemented yet), then per EXT TLV in wire order: `truncated` (the block or a TLV runs past its bounds), `bad_ext` (a known type whose value has the wrong length), `unsupported_ext` (an unknown critical type, ≥ 0x80). Unknown non-critical TLVs are kept ([05 §5.6](05-network.md)). `bad_ext` and `unsupported_ext` were appended to the error lists, so the existing codes keep their values. Serial line, after stripping `\n` and then `\r`: `no_prefix`, `line_too_long`, `bad_base64` (strict, canonical, no padding), `too_short`, `bad_crc`. Field: a length beyond `max` is `too_long`, checked before `truncated`; `bool` above 1 is `out_of_range`; field 0 or a tag beyond u32 is `bad_field`. LINK_PING/LINK_PONG bodies are exactly 4 bytes.
 - **Encoders.** The C++ `Writer` sets a sticky overflow flag. The TS `Writer` and line encoder throw `RangeError` on a value its type cannot carry, which is a programming error.
 - **Open enums.** Any value of the underlying type decodes (TS: `<Enum> | number`).
 - **Schema checks are not codec checks.** `range` and enum membership are checked by the generated `valid()` (C++) and the TS JSON accessors, which dispatch, diag and the hub use; generated dispatch answers `INVALID_ARGS` for a value they reject. An implicit field left at zero (an f32 -0.0 too) is exempt, being the absent field, and the JSON Schemas allow that 0 (`anyOf: [{const: 0}, {range}]`), so `fr.button.click` `{}` and `{"count": 0}` are valid. NaN is outside every range; f32 ranges compare in f32.
@@ -234,7 +236,7 @@ It is about 90 B for two capabilities, protobuf-wire, and fragmented if large.
 
 | Input | Output | Where |
 |---|---|---|
-| `schema/protocol.yaml` | system-message codecs, constants and enums (C++ + TS); envelope and serial-frame codecs on the wire runtime (TS) | `firmware/components/fr_proto/gen/`, `packages/protocol/src/gen/` (committed) |
+| `schema/protocol.yaml` | system-message codecs, protocol `types:` (`Descriptor`, `DescriptorCap`), constants and enums (C++ + TS); envelope and serial-frame codecs on the wire runtime (TS) | `firmware/components/fr_proto/gen/`, `packages/protocol/src/gen/` (committed) |
 | `schema/capabilities/*.yaml` | C++ capability interfaces, dispatch and codecs, `catalog.hpp\|cpp`; TS types, codecs and JSON accessors (typed client facades come with the SDK) | `firmware/components/fr_caps/gen/`; `packages/protocol/src/gen/caps/` (committed) |
 | `schema/capabilities/*.yaml` | `catalog.ts`, `catalog.json`; one JSON Schema per command's arguments and per event | `packages/protocol/src/gen/`, `packages/protocol/src/gen/schemas/` (committed) |
 | both schemas | golden vectors; the host suite's `vectors.inc` (every vector) and `decoders.inc` (fuzz targets) | `schema/vectors/*.json`, `firmware/test/host/gen/` (committed; [10 §10.4](10-testing.md)) |
@@ -287,8 +289,8 @@ class LightOutput {                     // gpio, ledc, ws2812…
 
 **Capability base** (`fr_caps/include/fr/cap/capability.hpp`, hand-written):
 - `Capability`: `cap_id()`, `version()`, `type_name()`, `dispatch(cmd_id, args, Reply&)`, `report_all()` (re-report every property, for `get_state`), `encode_traits(Writer&)` (descriptor traits), and `attach(port, name, Sink&)`, which the runtime calls before `init()`.
-- `Sink`, implemented by `fr_core`: `event(port, event_id, priority, fields, at)` and `property(port, prop_id, value, at)` turn emissions into envelopes ([03 §3.3](03-firmware.md)).
-- `Reply`: the RESULT fields that dispatch fills; capacity 200 B, the realtime budget.
+- `Sink`, implemented by `fr_net`'s `Net`: `event(port, event_id, priority, fields, at)` and `property(port, prop_id, value, at)` turn emissions into envelopes ([03 §3.3](03-firmware.md)).
+- `Reply`: the RESULT fields that dispatch fills, into a buffer the caller provides. `Net` sizes it by the link the request came on: `kRealtimeCapacity` 200 B (the realtime budget) over UDP, `kBulkCapacity` 1,445 B over TCP or serial (the 1,470 B bulk MTU less the 18 B header and the 7 B RESULT prefix, so the RESULT envelope fits the MTU and may go BULK). `StaticReply<N>` carries its own buffer.
 
 **L3 interfaces** are generated. This is the shape of `fr::cap::Led`:
 
@@ -313,7 +315,7 @@ class Led : public Capability {
 - Interfaces are pure virtual, with protected non-virtual destructors.
 - No RTTI: feature queries are methods.
 - `fr::Status = std::expected<void, fr::Err>`, and `fr::Err` values are the wire status codes ([05 §5.7](05-network.md)). `Err`, `Status`, `TimeUs` (`int64_t` µs on the `esp_timer` clock) and `fr::Callback<Sig, N>` live in `fr_proto` (`fr/base.hpp`), so generated `fr_caps` code needs no IDF.
-- **Dispatch.** An unknown `cmd_id` → `UNSUPPORTED`; a `visibility: test` command when `FR_TEST_HOOKS` is 0 → `UNSUPPORTED`; a decode failure or a value `valid()` rejects → `INVALID_ARGS`; defaults are applied before the call. A command with `result:` fields returns `std::expected<<Cap><Cmd>Result, Err>`, and a RESULT that does not fit `Reply` makes dispatch return `FAILED`.
+- **Dispatch.** An unknown `cmd_id` → `UNSUPPORTED`; a `visibility: test` command when `FR_TEST_HOOKS` is 0 → `UNSUPPORTED`; a decode failure or a value `valid()` rejects → `INVALID_ARGS`; defaults are applied before the call. A command with `result:` fields returns `std::expected<<Cap><Cmd>Result, Err>`, and a RESULT that does not fit `Reply` makes dispatch return `FAILED` with the reply cleared (no fields), never truncated.
 - **Event time.** `emit_*` and `report_*` take `TimeUs at` (default `kNowUs` = -1, meaning now) and forward it to the `Sink`; EVENT/STATE `t_us` is the low 32 bits of `at`, or `now()` when `at < 0` ([05 §5.7](05-network.md)). Services pass when it happened, so `t_us` excludes the core task's queueing delay: `down`, `up` and `pressed` carry the ISR edge timestamp, `long_press` and a gap-ended `click` the timer's deadline. `report_all` reports now.
 - `emit_*` and `report_*` encode into a stack buffer of the struct's `kMaxSize` and do nothing while unattached. A body that would overflow (only an over-long string or bytes view can) is dropped, never sent truncated.
 - **Structs.** Every struct gets `valid()`, `operator==` and `kMaxSize` (the worst case by type bounds). Strings and bytes are views into the decoded input; `array<T>{max}` is `fr::proto::Array<T, max>` (inline storage).

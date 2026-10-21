@@ -33,6 +33,8 @@ std::vector<frf::Bytes> envelope_corpus()
         event,
         frf::from_hex("a1 00 05 03 0c 00 00 00 02 01 fe ff 00 00 03 00 22 01 07 00 04 03 02 01 02 08 01"),
         frf::from_hex("a1 02 04 01 01 00 00 00 00 00 00 00 fe ff 01 00 22 01 08 03"),
+        // CMD with EXT: expire_at_us, trace_id and an unknown non-critical TLV.
+        frf::from_hex("a1 82 04 03 05 00 00 00 02 01 00 00 12 00 09 00 22 02 0e 04 04 04 03 02 01 02 04 ef be ad de 10 00 08 01"),
     };
 }
 
@@ -131,6 +133,18 @@ FUZZ_TARGET(wire_envelope, "wire.envelope", envelope_corpus)
     }
     for (const uint32_t v : {h.seq, uint32_t{h.net}, uint32_t{h.src}, uint32_t{h.dst}, uint32_t{h.epoch}}) {
         d.u32(v);
+    }
+    // EXT: every TLV in order, unknown non-critical ones included (the TS header keeps them all).
+    if (h.flags & kFlagExt) {
+        uint32_t n = 0;
+        for ([[maybe_unused]] const ExtTlv t : h.ext) {
+            ++n;
+        }
+        d.u32(n);
+        for (const ExtTlv t : h.ext) {
+            d.u8(t.type);
+            d.u8(static_cast<uint8_t>(t.value.size()));
+        }
     }
     switch (prefix_type(h.cls)) {
     case PrefixType::time:

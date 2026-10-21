@@ -41,6 +41,45 @@ bool valid(const NodeIdentifyArgs &)
     return true;
 }
 
+size_t encode(const NodeDescribeResult &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (!v.descriptor.empty()) {
+        w.field_bytes(1, v.descriptor);
+    }
+    return w.size() - start;
+}
+
+std::expected<NodeDescribeResult, fr::wire::DecodeErr> decode_node_describe_result(std::span<const uint8_t> in)
+{
+    NodeDescribeResult v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.descriptor = r.read_bytes(1200);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NodeDescribeResult &a, const NodeDescribeResult &b)
+{
+    return fr::proto::equal_bytes(a.descriptor, b.descriptor);
+}
+
+bool valid(const NodeDescribeResult &)
+{
+    return true;
+}
+
 size_t encode(const NodeRebootArgs &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -381,7 +420,7 @@ bool valid(const NodeBindingFired &)
     return true;
 }
 
-Status Node::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &)
+Status Node::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &reply)
 {
     switch (cmd_id) {
     case kCmdIdentify: {
@@ -395,7 +434,17 @@ Status Node::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &)
         if (!fr::proto::decode_empty(args)) {
             return std::unexpected(Err::invalid_args);
         }
-        return describe();
+        const auto r = describe();
+        if (!r) {
+            return std::unexpected(r.error());
+        }
+        encode(*r, reply.fields());
+        // Fields beyond the caller's buffer (realtime or bulk): FAILED with no fields, never truncated ones.
+        if (reply.fields().overflow()) {
+            reply.clear();
+            return std::unexpected(Err::failed);
+        }
+        return {};
     }
     case kCmdReboot: {
         const auto a = decode_node_reboot_args(args);

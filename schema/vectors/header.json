@@ -10,7 +10,21 @@
     {"name":"header.error_ack_req_latest","kind":"header","type":"header","value":null,"hex":"a11203010c0000000201feff000003002201","decodeOnly":true,"error":"bad_flags"},
     {"name":"header.error_sec","kind":"header","type":"header","value":null,"hex":"a10103010c0000000201feff000003002201","decodeOnly":true,"error":"unsupported"},
     {"name":"header.error_frag","kind":"header","type":"header","value":null,"hex":"a10403010c0000000201feff000003002201","decodeOnly":true,"error":"unsupported"},
-    {"name":"header.error_ext","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff000003002201","decodeOnly":true,"error":"unsupported"},
-    {"name":"header.error_truncated","kind":"header","type":"header","value":null,"hex":"a12003010c0000000201feff0000030022","decodeOnly":true,"error":"truncated"}
+    {"name":"header.error_frag_ext","kind":"header","type":"header","value":null,"hex":"a18403010c0000000201feff00000300220100","decodeOnly":true,"error":"unsupported"},
+    {"name":"header.error_truncated","kind":"header","type":"header","value":null,"hex":"a12003010c0000000201feff0000030022","decodeOnly":true,"error":"truncated"},
+    {"name":"header.ext_expire_at_trace_id","kind":"header","type":"header","value":{"flags":130,"seq":5,"net":258,"src":0,"dst":18,"epoch":9,"ttl":34,"port":2,"cls":4,"kind":3,"ext":[{"type":4,"value":"04030201"},{"type":2,"value":"efbeadde"}]},"hex":"a182040305000000020100001200090022020c0404040302010204efbeadde"},
+    {"name":"header.ext_valid_ms_broadcast","kind":"header","type":"header","value":{"flags":128,"seq":77,"net":258,"src":0,"dst":65535,"epoch":9,"ttl":34,"port":0,"cls":7,"kind":0,"ext":[{"type":3,"value":"d007"}]},"hex":"a18007004d00000002010000ffff09002200040302d007"},
+    {"name":"header.ext_exec_at","kind":"header","type":"header","value":{"flags":130,"seq":6,"net":258,"src":0,"dst":18,"epoch":9,"ttl":34,"port":2,"cls":4,"kind":1,"ext":[{"type":129,"value":"ffffffff"}]},"hex":"a18204010600000002010000120009002202068104ffffffff"},
+    {"name":"header.ext_empty","kind":"header","type":"header","value":{"flags":160,"cls":3,"kind":1,"seq":12,"net":258,"src":65534,"dst":0,"epoch":3,"ttl":34,"port":1,"ext":[]},"hex":"a1a003010c0000000201feff00000300220100"},
+    {"name":"header.ext_unknown_noncritical","kind":"header","type":"header","value":{"flags":160,"cls":3,"kind":1,"seq":12,"net":258,"src":65534,"dst":0,"epoch":3,"ttl":34,"port":1,"ext":[{"type":16,"value":"aabb"},{"type":127,"value":""},{"type":2,"value":"07000000"}]},"hex":"a1a003010c0000000201feff0000030022010c1002aabb7f00020407000000"},
+    {"name":"header.error_ext_no_len","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff000003002201","decodeOnly":true,"error":"truncated"},
+    {"name":"header.error_ext_block_truncated","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff000003002201060404010203","decodeOnly":true,"error":"truncated"},
+    {"name":"header.error_ext_tlv_overruns_block","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff00000300220105040401020304","decodeOnly":true,"error":"truncated"},
+    {"name":"header.error_ext_tlv_header_truncated","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff0000030022010104","decodeOnly":true,"error":"truncated"},
+    {"name":"header.error_ext_unknown_critical","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff00000300220103900100","decodeOnly":true,"error":"unsupported_ext"},
+    {"name":"header.error_ext_unknown_critical_empty","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff00000300220102ff00","decodeOnly":true,"error":"unsupported_ext"},
+    {"name":"header.error_ext_expire_at_short","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff0000030022010404020102","decodeOnly":true,"error":"bad_ext"},
+    {"name":"header.error_ext_valid_ms_long","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff00000300220106030401020304","decodeOnly":true,"error":"bad_ext"},
+    {"name":"header.error_ext_first_refusal_wins","kind":"header","type":"header","value":null,"hex":"a1a003010c0000000201feff00000300220106900004020102","decodeOnly":true,"error":"unsupported_ext"}
   ]
 }

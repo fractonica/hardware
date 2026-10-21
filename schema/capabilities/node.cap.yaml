@@ -4,7 +4,12 @@ version: "1.0"
 summary: 'System capability on port 0 of every device (instance "node"): identity, description, reboot, alias, bindings, state resync.'
 commands:
   identify:  { id: 1, delivery: reliable, idempotent: true, fields: { ms: { id: 1, type: u16, default: 3000 } } }
-  describe:  { id: 2, delivery: reliable, idempotent: true, doc: "Returns the node descriptor (07 §7.4)." }
+  describe:
+    id: 2
+    delivery: reliable
+    idempotent: true
+    result: { descriptor: { id: 1, type: bytes, max: 1200, doc: "a protobuf-wire Descriptor (schema/protocol.yaml types)" } }
+    doc: "Returns the node descriptor (07 §7.4), encoded; HELLO descriptor_hash is FNV-1a 32 over it. BULK: TCP or serial only."
   reboot:    { id: 3, delivery: reliable, fields: { bootloader: { id: 1, type: bool, default: false } } }
   set_alias: { id: 4, delivery: reliable, idempotent: true, fields: { alias: { id: 1, type: string, max: 31 }, rev: { id: 2, type: u32 } } }
   set_groups: { id: 5, delivery: reliable, idempotent: true, fields: { groups: { id: 1, type: "array<u16>", max: 8 } }, doc: "M2" }

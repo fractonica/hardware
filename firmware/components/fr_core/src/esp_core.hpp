@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 #include "esp_timer.h"
 #include "fr/core/core.hpp"
@@ -62,14 +63,64 @@ private:
     bool running_ = false;
 };
 
+/** A bounded FIFO of posted functions, filled from any task and drained by the core task. */
+template <size_t N>
+class PostQueue
+{
+public:
+    bool push(Callback<void(), 32> &&fn, portMUX_TYPE &mux)
+    {
+        bool ok = false;
+        portENTER_CRITICAL_SAFE(&mux);
+        if (len_ < N) {
+            fns_[(head_ + len_) % N] = std::move(fn);
+            ++len_;
+            ok = true;
+        } else {
+            ++dropped_;
+        }
+        portEXIT_CRITICAL_SAFE(&mux);
+        return ok;
+    }
+    bool pop(Callback<void(), 32> &out, portMUX_TYPE &mux)
+    {
+        portENTER_CRITICAL_SAFE(&mux);
+        bool have = len_ > 0;
+        if (have) {
+            out = std::move(fns_[head_]);
+            fns_[head_].reset();
+            head_ = (head_ + 1) % N;
+            --len_;
+        }
+        portEXIT_CRITICAL_SAFE(&mux);
+        return have;
+    }
+    uint32_t dropped() const { return dropped_; }
+    void reset_dropped() { dropped_ = 0; }
+
+private:
+    Callback<void(), 32> fns_[N];
+    size_t head_ = 0;
+    size_t len_ = 0;
+    uint32_t dropped_ = 0;
+};
+
 class EspCore final : public Core
 {
 public:
-    static constexpr size_t kTimers = 24;
+    /**
+     * 23 for the board's services (fr gen firmware's budget, spec 03 §3.4) plus the runtime's own, taken
+     * in start() before the board: fr_core's two (reboot, serial link poll) and Net's one, and two spare.
+     */
+    static constexpr size_t kTimers = 28;
     static constexpr size_t kSlots = 8;
     static constexpr size_t kPosts = 16;
+    /** Received envelopes (spec 03 §3.4: a separate network queue, depth 32). */
+    static constexpr size_t kNetPosts = 32;
     static constexpr UBaseType_t kPriority = 10;
-    static constexpr uint32_t kStack = 6144;
+    // fr.diag.exec over TCP or serial dispatches with a bulk Reply (1445 B) on this stack, under Net's own
+    // frames and cJSON's recursion.
+    static constexpr uint32_t kStack = 8192;
 
     /** Creates the wake-up esp_timer; timers may be started from then on (they fire once run() runs). */
     bool begin();
@@ -80,9 +131,18 @@ public:
     Timer *timer(Callback<void(), 24> on_fire) override;
     InputSlot *input_slot(Callback<void(const InputSample &), 24> on_change) override;
     bool post(Callback<void(), 32> fn) override;
+    /**
+     * Like post(), for received envelopes: its own queue, serviced after inputs, timers and one post per
+     * round, so a burst from the network can neither starve nor be starved by other posted work.
+     */
+    bool post_net(Callback<void(), 32> fn);
 
-    uint32_t posts_dropped() const { return posts_dropped_; }
-    void reset_posts_dropped() { posts_dropped_ = 0; }
+    uint32_t posts_dropped() const { return posts_.dropped() + net_posts_.dropped(); }
+    void reset_posts_dropped()
+    {
+        posts_.reset_dropped();
+        net_posts_.reset_dropped();
+    }
 
 private:
     friend class EspTimer;
@@ -92,7 +152,8 @@ private:
     void loop();
     bool service_inputs();
     bool service_timers();
-    bool run_one_post();
+    template <size_t N>
+    bool run_one(PostQueue<N> &q);
     void rearm();
     void notify(uint32_t bits);
 
@@ -107,10 +168,8 @@ private:
     EspInputSlot slots_[kSlots];
     size_t slots_used_ = 0;
 
-    Callback<void(), 32> posts_[kPosts];
-    size_t posts_head_ = 0;
-    size_t posts_len_ = 0;
-    uint32_t posts_dropped_ = 0;
+    PostQueue<kPosts> posts_;
+    PostQueue<kNetPosts> net_posts_;
 };
 
 }  // namespace fr

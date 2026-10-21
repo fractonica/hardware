@@ -126,11 +126,11 @@ inline constexpr size_t kMtuRealtime = 250;
 inline constexpr size_t kMtuBulk = 1470;
 inline constexpr size_t kRealtimePayloadBudget = 200;
 
-// EXT TLV types; types >= 0x80 are critical.
-inline constexpr uint8_t kExtTraceId = 0x02;
-inline constexpr uint8_t kExtValidMs = 0x03;
-inline constexpr uint8_t kExtExpireAtUs = 0x04;
-inline constexpr uint8_t kExtExecAtUs = 0x81;
+// EXT TLV types (fr/envelope.hpp) and their value sizes; types >= 0x80 are critical.
+static_assert(fr::wire::kExtTraceId == 0x02 && fr::wire::ext_value_size(fr::wire::kExtTraceId) == 4);
+static_assert(fr::wire::kExtValidMs == 0x03 && fr::wire::ext_value_size(fr::wire::kExtValidMs) == 2);
+static_assert(fr::wire::kExtExpireAtUs == 0x04 && fr::wire::ext_value_size(fr::wire::kExtExpireAtUs) == 4);
+static_assert(fr::wire::kExtExecAtUs == 0x81 && fr::wire::ext_value_size(fr::wire::kExtExecAtUs) == 4);
 
 // Serial line framing.
 static_assert(fr::wire::kLinePrefix == "@fr1:");

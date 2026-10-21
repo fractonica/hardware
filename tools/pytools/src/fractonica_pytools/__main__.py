@@ -16,11 +16,19 @@ Requests:
      expect_chip_id (optional) is the image header chip id; a different chip fails with TARGET_MISMATCH
      before anything is written.
   {"cmd": "reset", "port": ..., "mode": "hard" | "bootloader"}
+  {"cmd": "nvs_gen", "csv_path": ..., "size": 16384 | "0x4000", "out_path": ...}
+     renders an NVS partition image (fr_ident, spec 06 §6.3) from a CSV with esp-idf-nvs-partition-gen.
+     The CSV holds the Wi-Fi password, so no event or error ever carries its content: failures name the
+     CSV row and the error type only. The result is {"out_path", "size", "rows"}.
 """
 
 from __future__ import annotations
 
+import contextlib
+import csv
+import io
 import json
+import os
 import sys
 from typing import Any
 
@@ -214,7 +222,66 @@ def cmd_reset(req: dict) -> dict:
     return {"mode": "hard"}
 
 
-HANDLERS = {"version": cmd_version, "probe": cmd_probe, "flash": cmd_flash, "reset": cmd_reset}
+# NVS pages are 4 KiB; a read/write partition reserves one of them, and needs three in all (the
+# library's check_size rule, repeated here because its own version exits the process on bad input).
+NVS_PAGE = 4096
+
+
+def nvs_size(size: Any) -> tuple[int, int, bool]:
+    """(partition size, size for data pages, read_only) for a `size` given as int or "0x4000"."""
+    try:
+        total = size if isinstance(size, int) and not isinstance(size, bool) else int(str(size), 0)
+    except ValueError:
+        raise SidecarError("INVALID_ARGS", "size must be an integer (bytes) or a 0x hex string") from None
+    if total <= 0 or total % NVS_PAGE != 0:
+        raise SidecarError("INVALID_ARGS", f"size {total} is not a positive multiple of {NVS_PAGE}")
+    data = total - NVS_PAGE
+    if data < 2 * NVS_PAGE:
+        # Smaller than 0x3000: a read-only partition without the reserved page.
+        return total, total, True
+    return total, data, False
+
+
+def cmd_nvs_gen(req: dict) -> dict:
+    from esp_idf_nvs_partition_gen import nvs_partition_gen as nvs
+
+    csv_path, out_path = req.get("csv_path"), req.get("out_path")
+    if not isinstance(csv_path, str) or not csv_path or not isinstance(out_path, str) or not out_path:
+        raise SidecarError("INVALID_ARGS", "csv_path and out_path must be non-empty strings")
+    total, data_size, read_only = nvs_size(req.get("size"))
+    set_stage("render")
+    tmp = f"{out_path}.partial"
+    row = 0
+    # The library prints progress and quotes keys and values in its messages; nothing it writes may reach
+    # the hub, so its output is captured and dropped, and only the row number and error type get out.
+    sink = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            with open(csv_path, "rt", encoding="utf8", newline="") as src, open(tmp, "wb") as out:
+                with nvs.nvs_open(out, data_size, nvs.Page.VERSION2, read_only=read_only) as image:
+                    # As the library's generate(): `#` lines are comments, the header names the columns.
+                    for entry in csv.DictReader((line for line in src if not line.startswith("#")), delimiter=","):
+                        row += 1
+                        key = entry.get("key") or ""
+                        if not key or len(key) > 15:
+                            raise ValueError("key missing or longer than 15 characters")
+                        nvs.write_entry(image, key, entry.get("type"), entry.get("encoding"), entry.get("value"))
+        os.replace(tmp, out_path)
+    except BaseException as e:  # noqa: BLE001 - SystemExit too: the library exits on some input errors
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        if isinstance(e, KeyboardInterrupt):
+            raise
+        where = f"CSV row {row}" if row else "the CSV"
+        raise SidecarError("INVALID_ARGS", f"cannot render the NVS image: {where} ({type(e).__name__})",
+                           "check the rendered CSV's types and encodings (spec 06 §6.3)") from None
+    finally:
+        sink.close()
+    return {"out_path": out_path, "size": total, "rows": row}
+
+
+HANDLERS = {"version": cmd_version, "probe": cmd_probe, "flash": cmd_flash, "reset": cmd_reset,
+            "nvs_gen": cmd_nvs_gen}
 
 
 def main() -> int:

@@ -1,0 +1,6 @@
+# mDNS resolves hub_host (`<LocalHostName>.local`) on every TCP connect attempt (spec 05 §5.12.5, design c3 §3).
+# Pinned exactly, like every registry dependency (spec 03 §3.8).
+dependencies:
+  espressif/mdns:
+    version: "==1.14.0"
+    require: private

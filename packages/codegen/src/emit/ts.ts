@@ -40,7 +40,7 @@ export const TS_GEN_DIR = 'packages/protocol/src/gen';
  * `Msg` suffix (LOG.LINE -> LogLineMsg).
  */
 const HAND_WRITTEN_NAMES: ReadonlySet<string> = new Set([
-  'ArtifactManifest', 'ClassPrefix', 'Cursor', 'Decoded', 'DecodeError', 'Envelope', 'ErrorCode', 'FrError', 'Header', 'Job', 'LogLine',
+  'ArtifactManifest', 'ClassPrefix', 'Cursor', 'Decoded', 'DecodeError', 'Envelope', 'ErrorCode', 'ExtTlv', 'FrError', 'Header', 'Job', 'LogLine',
   'OpDef', 'OpKind', 'OpName', 'PortInfo', 'Reader', 'Remediation', 'Result', 'ToolError', 'Writer',
 ]);
 
@@ -1199,6 +1199,8 @@ function prefixKind(cls: ClassDef, file: string): 'none' | 'time' | 'result' {
   throw new Error(`${file}: class ${cls.name} has a prefix the wire runtime does not implement (${layout})`);
 }
 
+const EXT_BYTES = { u8: 1, u16: 2, u32: 4 } as const;
+
 function typeLiteral(entries: [string, number][]): string {
   return `{ ${entries.map(([k, v]) => `readonly ${k}: ${v}`).join('; ')} }`;
 }
@@ -1209,18 +1211,20 @@ function emitProtocol(model: Model, names: Names): GeneratedFile {
   c.block(header(p.file, 'Protocol constants (spec 05 §5.5-5.7): classes and kinds, flags, status codes, ports, addresses, enums.').trimEnd());
   c.line();
   c.line(
-    "import type { CLS, FLAG, HEADER_SIZE, MAGIC_VER, RESULT_PREFIX_SIZE, SERIAL_MAX_LINE, SERIAL_PREFIX, SERIAL_TYPE, TIME_PREFIX_SIZE } from '../wire/index.ts';",
+    "import type { CLS, EXT, EXT_VALUE_SIZE, FLAG, HEADER_SIZE, MAGIC_VER, RESULT_PREFIX_SIZE, SERIAL_MAX_LINE, SERIAL_PREFIX, SERIAL_TYPE, TIME_PREFIX_SIZE } from '../wire/index.ts';",
   );
   c.line();
   c.line(`export const PROTOCOL_VERSION = ${p.version};`);
   c.line();
-  c.line('// The hand-written wire runtime owns the header, flag, class and serial constants; these checks stop');
+  c.line('// The hand-written wire runtime owns the header, flag, class, EXT and serial constants; these checks stop');
   c.line('// type-checking when schema/protocol.yaml and the runtime drift apart.');
   c.line('type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;');
   c.line('type Assert<T extends true> = T;');
   c.line(`type _Classes = Assert<Equal<typeof CLS, ${typeLiteral(p.classes.map((x) => [x.name, x.code]))}>>;`);
   c.line(`type _Flags = Assert<Equal<typeof FLAG, ${typeLiteral(p.flags.map((x) => [x.name, x.mask]))}>>;`);
   c.line(`type _SerialTypes = Assert<Equal<typeof SERIAL_TYPE, ${typeLiteral(p.serial.types.map((x) => [x.name, x.value]))}>>;`);
+  c.line(`type _Ext = Assert<Equal<typeof EXT, ${typeLiteral(p.extTlvs.map((t) => [upperSnake(t.name), t.type]))}>>;`);
+  c.line(`type _ExtSizes = Assert<Equal<typeof EXT_VALUE_SIZE, ${typeLiteral(p.extTlvs.map((t) => [String(t.type), EXT_BYTES[t.valueType]]))}>>;`);
   const time = p.classes.find((x) => prefixKind(x, p.file) === 'time');
   const result = p.classes.find((x) => prefixKind(x, p.file) === 'result');
   c.line(
@@ -1295,13 +1299,11 @@ function emitProtocol(model: Model, names: Names): GeneratedFile {
     `export const ADDR = { HUB: ${hex4(a.hub)}, NODE_FIRST: ${hex4(a.nodes[0])}, NODE_LAST: ${hex4(a.nodes[1])}, GROUP_FIRST: ${hex4(a.groups[0])}, GROUP_LAST: ${hex4(a.groups[1])}, ${wellKnown.join(', ')}${wellKnown.length > 0 ? ', ' : ''}UNASSIGNED: ${hex4(a.unassigned)}, BROADCAST: ${hex4(a.broadcast)} } as const;`,
   );
   c.line(`export const MTU = { REALTIME: ${p.mtu.realtime}, BULK: ${p.mtu.bulk}, REALTIME_PAYLOAD_BUDGET: ${p.mtu.realtimePayloadBudget} } as const;`);
-  c.line('/** EXT TLV types; types >= 0x80 are critical (05 §5.6). */');
-  c.line(`export const EXT_TLV = { ${p.extTlvs.map((t) => `${upperSnake(t.name)}: 0x${t.type.toString(16).padStart(2, '0')}`).join(', ')} } as const;`);
   c.line();
   for (const e of p.enums) {
     emitEnum(c, names.claim(e.name, 'protocol enum'), e);
   }
-  for (const n of ['PROTOCOL_VERSION', 'CLASSES', 'CLS_NAME', 'KIND', 'kindName', 'FLAG_NAMES', 'flagNames', 'STATUS', 'StatusName', 'statusName', 'PORT', 'ADDR', 'MTU', 'EXT_TLV']) {
+  for (const n of ['PROTOCOL_VERSION', 'CLASSES', 'CLS_NAME', 'KIND', 'kindName', 'FLAG_NAMES', 'flagNames', 'STATUS', 'StatusName', 'statusName', 'PORT', 'ADDR', 'MTU']) {
     names.claim(n, 'protocol');
   }
   return { path: `${TS_GEN_DIR}/protocol.ts`, content: c.toString() };
@@ -1468,7 +1470,7 @@ function emitMessages(model: Model, names: Names): GeneratedFile {
     c.line();
     names.claim(`encode${t.name}`, p.file);
     names.claim(`decode${t.name}`, p.file);
-    const spec: StructSpec = { typeName: t.name, fnName: t.name, fields: t.fields, where: `${p.file}: types.${t.name}`, doc: `${t.name} (protocol type; repeated in messages).`, nested: true };
+    const spec: StructSpec = { typeName: t.name, fnName: t.name, fields: t.fields, where: `${p.file}: types.${t.name}`, doc: `${t.name} (protocol type).`, nested: true };
     emitStruct(c, spec, ctx);
     structs.push(`{ name: ${q(t.name)}, codec: ${codecLit(spec, ctx)} },`);
   }

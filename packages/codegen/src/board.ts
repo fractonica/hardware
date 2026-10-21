@@ -95,6 +95,7 @@ const RawBoard = z.looseObject({
     strapping_levels: z.record(numKey, z.enum(STRAP_LEVELS)).optional(),
   }),
   resources: z.record(z.string(), int).optional(),
+  rf: z.looseObject({ max_tx_power_qdbm: int.min(8).max(84).nullable().optional() }).optional(),
 });
 type RawBoard = z.infer<typeof RawBoard>;
 
@@ -287,6 +288,8 @@ function renderFragment(inp: Inputs): string {
     `CONFIG_FR_BOARD="${board.id}"`,
     `CONFIG_FR_PROFILE="${profile.profile}"`,
     `CONFIG_FR_PART_PROFILE="${board.flash.part_profile}"`,
+    // 05 §5.3: some boards' antennas only associate with the TX power capped (C3 minis at 8.5 dBm).
+    ...(board.rf?.max_tx_power_qdbm != null ? [`CONFIG_FR_WIFI_MAX_TX_POWER_QDBM=${board.rf.max_tx_power_qdbm}`] : []),
     '',
   ].join('\n');
 }

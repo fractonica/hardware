@@ -4,6 +4,8 @@
 //   FR_GEN_STATE_DECODER(ident, "vector type", ValueType, encode_fn, decode_fn, max_size)
 // clang-format off
 FR_GEN_DECODER(directory_entry, "DirectoryEntry", fr::proto::DirectoryEntry, fr::proto::decode_directory_entry)
+FR_GEN_DECODER(descriptor_cap, "DescriptorCap", fr::proto::DescriptorCap, fr::proto::decode_descriptor_cap)
+FR_GEN_DECODER(descriptor, "Descriptor", fr::proto::Descriptor, fr::proto::decode_descriptor)
 FR_GEN_DECODER(net_welcome, "NET.WELCOME", fr::proto::NetWelcome, fr::proto::decode_net_welcome)
 FR_GEN_DECODER(net_directory, "NET.DIRECTORY", fr::proto::NetDirectory, fr::proto::decode_net_directory)
 FR_GEN_DECODER(net_resolve, "NET.RESOLVE", fr::proto::NetResolve, fr::proto::decode_net_resolve)
@@ -42,6 +44,7 @@ FR_GEN_DECODER(analog_in_inject_args, "fr.analog_in.inject.args", fr::cap::Analo
 FR_GEN_DECODER(analog_in_crossed, "fr.analog_in.crossed.event", fr::cap::AnalogInCrossed, fr::cap::decode_analog_in_crossed)
 FR_GEN_STATE_DECODER(analog_in_value_state, "fr.analog_in.value.state", uint16_t, fr::cap::encode_analog_in_value_state, fr::cap::decode_analog_in_value_state, fr::cap::kAnalogInValueStateMaxSize)
 FR_GEN_DECODER(node_identify_args, "fr.node.identify.args", fr::cap::NodeIdentifyArgs, fr::cap::decode_node_identify_args)
+FR_GEN_DECODER(node_describe_result, "fr.node.describe.result", fr::cap::NodeDescribeResult, fr::cap::decode_node_describe_result)
 FR_GEN_DECODER(node_reboot_args, "fr.node.reboot.args", fr::cap::NodeRebootArgs, fr::cap::decode_node_reboot_args)
 FR_GEN_DECODER(node_set_alias_args, "fr.node.set_alias.args", fr::cap::NodeSetAliasArgs, fr::cap::decode_node_set_alias_args)
 FR_GEN_DECODER(node_set_groups_args, "fr.node.set_groups.args", fr::cap::NodeSetGroupsArgs, fr::cap::decode_node_set_groups_args)

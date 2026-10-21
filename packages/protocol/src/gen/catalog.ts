@@ -598,8 +598,17 @@ export const CATALOG: Catalog = {
           "delivery": "reliable",
           "idempotent": true,
           "visibility": "public",
-          "doc": "Returns the node descriptor (07 §7.4).",
-          "fields": []
+          "doc": "Returns the node descriptor (07 §7.4), encoded; HELLO descriptor_hash is FNV-1a 32 over it. BULK: TCP or serial only.",
+          "fields": [],
+          "result": [
+            {
+              "name": "descriptor",
+              "id": 1,
+              "type": "bytes",
+              "max": 1200,
+              "doc": "a protobuf-wire Descriptor (schema/protocol.yaml types)"
+            }
+          ]
         },
         {
           "name": "reboot",
@@ -841,4 +850,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0xd8eb1f0c;
+export const CATALOG_HASH = 0xc7bde94d;

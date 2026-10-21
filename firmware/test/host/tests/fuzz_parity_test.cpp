@@ -15,7 +15,7 @@ struct Pin {
 
 constexpr Pin PINS[] = {
     {"wire.reader", 0xec91243a},
-    {"wire.envelope", 0x460eb7aa},
+    {"wire.envelope", 0x5956f8bf},
     {"wire.serial_line", 0x2e2fabaf},
     {"wire.base64url", 0xfd98a19c},
 };

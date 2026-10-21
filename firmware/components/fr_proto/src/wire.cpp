@@ -38,6 +38,10 @@ const char *decode_err_name(DecodeErr e)
         return "bad_crc";
     case DecodeErr::line_too_long:
         return "line_too_long";
+    case DecodeErr::unsupported_ext:
+        return "unsupported_ext";
+    case DecodeErr::bad_ext:
+        return "bad_ext";
     }
     return "unknown";
 }

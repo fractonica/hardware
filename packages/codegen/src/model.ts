@@ -6,7 +6,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
-import { varintSize } from '@fractonica/protocol/wire';
+import { fnv1a32, varintSize } from '@fractonica/protocol/wire';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 
@@ -49,7 +49,10 @@ export interface EnumDef {
   underlying: 'u8' | 'u16' | 'u32';
 }
 
-/** protocol.yaml `types:` (e.g. DirectoryEntry); only used as array elements. */
+/**
+ * protocol.yaml `types:` (DirectoryEntry, Descriptor): array elements of messages and of later types, and
+ * encodable on their own (fr.node.describe carries an encoded Descriptor as bytes).
+ */
 export interface StructDef {
   name: string;
   fields: Field[];
@@ -953,8 +956,9 @@ function buildProtocol(raw: RawProtocol, file: string, issues: Issues): Protocol
     if (!PASCAL.test(name)) {
       issues.add(file, ['types', name], `type name '${name}' must be PascalCase`);
     }
-    // Structs are flat: built against a scope without structs, so nesting is an unknown type.
-    const fields = buildFields(rawFields, { ...scope, structs: new Map() }, ['types', name]);
+    // Built against the types declared above it: a type may hold arrays of earlier types (the descriptor's
+    // caps), and a later or its own name is unknown here, so types never recurse.
+    const fields = buildFields(rawFields, { ...scope, structs: new Map(scope.structs) }, ['types', name]);
     const def: StructDef = { name, fields, maxSize: maxEncodedSize(fields) };
     types.push(def);
     scope.structs.set(name, def);
@@ -1439,16 +1443,8 @@ export function canonicalJson(value: unknown): string {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`).join(',')}}`;
 }
 
-/** FNV-1a 32 over UTF-8 bytes. */
-export function fnv1a32(data: string | Uint8Array): number {
-  const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
-  let h = 0x811c9dc5;
-  for (const b of bytes) {
-    h ^= b;
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h >>> 0;
-}
+/** FNV-1a 32 over UTF-8 bytes; the wire runtime's, which descriptor_hash and board_hash use too. */
+export { fnv1a32 };
 
 /** catalog_hash (design c2 §10.9): FNV-1a 32 of the canonical catalog JSON; C++ gets it as a constant. */
 export function catalogHash(model: Model): number {

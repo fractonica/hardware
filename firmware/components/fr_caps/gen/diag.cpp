@@ -134,8 +134,9 @@ Status Diag::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &repl
             return std::unexpected(r.error());
         }
         encode(*r, reply.fields());
-        // RESULT fields beyond the Reply buffer: report a failure rather than truncated fields.
+        // Fields beyond the caller's buffer (realtime or bulk): FAILED with no fields, never truncated ones.
         if (reply.fields().overflow()) {
+            reply.clear();
             return std::unexpected(Err::failed);
         }
         return {};

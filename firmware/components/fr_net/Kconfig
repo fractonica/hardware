@@ -1,0 +1,107 @@
+menu "Fractonica network"
+
+    # Presence and delivery (spec 05 §5.17, design c3 §6). fr_core maps these into fr::net::Config.
+
+    config FR_HEARTBEAT_MS
+        int "Heartbeat interval to the hub (ms)"
+        range 100 60000
+        default 1000
+        help
+            PRESENCE/HEARTBEAT cadence (+-10 % jitter); the `game` link profile uses 250.
+
+    config FR_SUSPECT_X10
+        int "Suspect after (heartbeat intervals x10)"
+        range 10 100
+        default 25
+        help
+            The hub marks a silent node suspect (and PINGs it) after this many tenths of an interval.
+
+    config FR_OFFLINE_X10
+        int "Offline / hub lost after (heartbeat intervals x10)"
+        range 10 200
+        default 35
+        help
+            The hub declares a silent node offline, and the node declares the hub lost (closes and
+            reconnects TCP), after this many tenths of a heartbeat interval.
+
+    config FR_OFFLINE_MIN_MS
+        int "Offline floor (ms)"
+        range 0 60000
+        default 750
+
+    config FR_HELLO_RETRY_MS
+        int "HELLO repeat until WELCOME (ms)"
+        range 100 60000
+        default 1000
+
+    config FR_ACK_BASE_MS
+        int "First Q1 retry on UDP (ms)"
+        range 5 1000
+        default 20
+        help
+            Then x2 backoff with +-25 % jitter, up to FR_MAX_ATTEMPTS attempts with the same seq.
+
+    config FR_MAX_ATTEMPTS
+        int "Q1 attempts on UDP"
+        range 1 16
+        default 4
+
+    config FR_EVENT_MAX_AGE_MS
+        int "Q1 event max age at send time (ms)"
+        range 100 60000
+        default 1000
+        help
+            Older Q1 events are dropped and counted, so stale input never reaches a game (node.boot
+            is exempt).
+
+    config FR_CMD_EXPIRE_MS
+        int "Hub command expiry (ms)"
+        range 100 60000
+        default 1000
+        help
+            How far ahead of its send time the hub sets a CMD's expire_at_us. The hub applies it; the
+            node only honours the EXT TLV.
+
+    config FR_TCP_DELIVERY_MS
+        int "TCP delivery give-up (ms)"
+        range 100 60000
+        default 2000
+
+    config FR_TTL_DEFAULT
+        int "Initial TTL"
+        range 1 7
+        default 2
+
+    config FR_HUB_PORT
+        int "Hub TCP and UDP port"
+        range 1 65535
+        default 7421
+
+    config FR_WIFI_MAX_TX_POWER_QDBM
+        int "Wi-Fi TX power cap, 0.25 dBm units (0 = driver default)"
+        default 0
+        range 0 84
+        help
+            Set from the board manifest's rf.max_tx_power_qdbm by `fr gen firmware` (spec 05 §5.3). Some
+            boards' antennas fail authentication at full power; the C3 0.42" OLED board needs 34 (8.5 dBm).
+
+    # Development fallback for UNASSIGNED nodes (spec 06 §6.4 "Adopting foreign devices"). Set them only in
+    # the git-ignored firmware/config/sdkconfig.local; they are compiled into that build's image.
+
+    config FR_DEV_WIFI_SSID
+        string "Dev Wi-Fi SSID (UNASSIGNED nodes only)"
+        default ""
+        help
+            Used when fr_ident carries no network. Empty: such a node does not join Wi-Fi.
+
+    config FR_DEV_WIFI_PASS
+        string "Dev Wi-Fi password (UNASSIGNED nodes only)"
+        default ""
+
+    config FR_DEV_HUB_HOST
+        string "Dev hub host (UNASSIGNED nodes only)"
+        default ""
+        help
+            `<LocalHostName>.local` or an IPv4 address, used with the dev Wi-Fi credentials.
+
+endmenu

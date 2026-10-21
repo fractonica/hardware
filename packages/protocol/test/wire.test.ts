@@ -5,11 +5,18 @@ import { describe, expect, it } from 'vitest';
 import {
   base64urlDecode,
   base64urlEncode,
+  boardHash,
   CLS,
   crc16CcittFalse,
   decodeSerialLine,
+  descriptorHash,
   encodeSerialLine,
+  EXT,
+  extTlv,
+  extValue,
   FLAG,
+  fnv1a32,
+  headerSize,
   packEnvelope,
   packHeader,
   Reader,
@@ -242,10 +249,83 @@ describe('header', () => {
     expect(unpackHeader(bytes(HEADER_HEX).subarray(0, 17))).toEqual({ ok: false, error: 'truncated' });
     expect(unpackHeader(patched(0, 0xa2))).toEqual({ ok: false, error: 'bad_magic' });
     expect(unpackHeader(patched(1, FLAG.ACK_REQ | FLAG.LATEST))).toEqual({ ok: false, error: 'bad_flags' });
-    for (const f of [FLAG.SEC, FLAG.FRAG, FLAG.EXT]) {
+    for (const f of [FLAG.SEC, FLAG.FRAG, FLAG.FRAG | FLAG.EXT]) {
       expect(unpackHeader(patched(1, f))).toEqual({ ok: false, error: 'unsupported' });
     }
+    // EXT is supported: without its len byte the header is cut short.
+    expect(unpackHeader(patched(1, FLAG.EXT))).toEqual({ ok: false, error: 'truncated' });
     expect(unpackHeader(patched(1, FLAG.ACK_REQ | FLAG.RELAYED | FLAG.URGENT | FLAG.BULK)).ok).toBe(true);
+  });
+
+  it('decodes EXT TLVs, keeping unknown non-critical ones, and packs them back', () => {
+    // A hub CMD with expire_at_us and a trace id; an unknown non-critical TLV is skipped but kept.
+    const input = bytes('a1 82 04 03 05 00 00 00 02 01 00 00 12 00 09 00 22 02 0e 04 04 04 03 02 01 02 04 ef be ad de 10 00');
+    const d = unpackHeader(input);
+    expect(d.ok).toBe(true);
+    if (!d.ok) {
+      return;
+    }
+    const h = d.value;
+    expect(headerSize(h)).toBe(input.length);
+    expect(extValue(h, EXT.EXPIRE_AT_US)).toBe(0x01020304);
+    expect(extValue(h, EXT.TRACE_ID)).toBe(0xdeadbeef);
+    expect(extValue(h, EXT.VALID_MS)).toBeUndefined();
+    expect(h.ext?.map((t) => [t.type, hex(t.value)])).toEqual([
+      [EXT.EXPIRE_AT_US, '04 03 02 01'],
+      [EXT.TRACE_ID, 'ef be ad de'],
+      [0x10, ''],
+    ]);
+    expect(hex(packHeader(h))).toBe(hex(input));
+    const built: Header = {
+      ...h,
+      ext: [extTlv(EXT.EXPIRE_AT_US, 0x01020304), extTlv(EXT.TRACE_ID, 0xdeadbeef), { type: 0x10, value: new Uint8Array(0) }],
+    };
+    expect(hex(packHeader(built))).toBe(hex(input));
+
+    // Last wins, as for repeated fields.
+    const twice = unpackHeader(bytes(`${HEADER_HEX.replace(/^a1 20/, 'a1 80')} 0c 02 04 01 00 00 00 02 04 02 00 00 00`));
+    expect(twice.ok && extValue(twice.value, EXT.TRACE_ID)).toBe(2);
+    // An empty block is still a block: it packs as len 0.
+    const empty = unpackHeader(bytes(`${HEADER_HEX.replace(/^a1 20/, 'a1 80')} 00`));
+    expect(empty).toEqual({ ok: true, value: { ...HEADER, flags: FLAG.EXT, ext: [] } });
+    expect(empty.ok && hex(packHeader(empty.value))).toBe(`${HEADER_HEX.replace(/^a1 20/, 'a1 80')} 00`);
+  });
+
+  it('refuses EXT TLVs it cannot honour, and the encoder refuses to write them', () => {
+    const ext = (block: string) => unpackHeader(bytes(`${HEADER_HEX.replace(/^a1 20/, 'a1 a0')} ${block}`));
+    expect(ext('06 04 04 01 02 03')).toEqual({ ok: false, error: 'truncated' }); // block past the input
+    expect(ext('05 04 04 01 02 03 04')).toEqual({ ok: false, error: 'truncated' }); // TLV past the block
+    expect(ext('01 04')).toEqual({ ok: false, error: 'truncated' }); // TLV header past the block
+    expect(ext('03 90 01 00')).toEqual({ ok: false, error: 'unsupported_ext' }); // unknown critical
+    expect(ext('02 ff 00')).toEqual({ ok: false, error: 'unsupported_ext' });
+    expect(ext('04 04 02 01 02')).toEqual({ ok: false, error: 'bad_ext' }); // expire_at_us is a u32
+    expect(ext('06 03 04 01 02 03 04')).toEqual({ ok: false, error: 'bad_ext' }); // valid_ms is a u16
+    expect(ext('06 90 00 04 02 01 02')).toEqual({ ok: false, error: 'unsupported_ext' }); // first refusal wins
+    expect(ext('04 7f 02 aa bb').ok).toBe(true); // unknown non-critical
+
+    const withExt = { ...HEADER, flags: HEADER.flags | FLAG.EXT };
+    expect(() => packHeader({ ...HEADER, ext: [extTlv(EXT.TRACE_ID, 1)] })).toThrow(/EXT flag/);
+    expect(() => packHeader({ ...withExt, ext: [{ type: EXT.EXEC_AT_US, value: bytes('01 02') }] })).toThrow(/bad_ext/);
+    expect(() => packHeader({ ...withExt, ext: [{ type: 0x90, value: new Uint8Array(0) }] })).toThrow(/unsupported_ext/);
+    expect(() => packHeader({ ...withExt, ext: Array.from({ length: 64 }, () => extTlv(EXT.TRACE_ID, 1)) })).toThrow(/max 255/);
+    expect(() => extTlv(0x10, 1)).toThrow(RangeError);
+    expect(() => extTlv(EXT.VALID_MS, 0x10000)).toThrow(RangeError);
+  });
+
+  it('finds the class prefix after the EXT block', () => {
+    const input = bytes('a1 80 05 03 01 00 00 00 02 01 12 00 00 00 03 00 22 02 06 02 04 01 00 00 00 09 00 05 00 00 00 00 08 01');
+    const e = unpackEnvelope(input);
+    expect(e.ok && e.value.prefix).toEqual({ type: 'result', req_epoch: 9, req_seq: 5, status: 0 });
+    expect(e.ok && hex(e.value.body)).toBe('08 01');
+    expect(e.ok && hex(packEnvelope(e.value))).toBe(hex(input));
+    expect(unpackEnvelope(input.subarray(0, 30))).toEqual({ ok: false, error: 'truncated' });
+  });
+
+  it('hashes with FNV-1a 32 (descriptor_hash, board_hash)', () => {
+    expect(fnv1a32('')).toBe(0x811c9dc5);
+    expect(fnv1a32('a')).toBe(0xe40c292c);
+    expect(boardHash('esp32c6-supermini')).toBe(fnv1a32(new TextEncoder().encode('esp32c6-supermini')));
+    expect(descriptorHash(bytes('08 01'))).toBe(fnv1a32(bytes('08 01')));
   });
 
   it('splits envelopes by class prefix', () => {

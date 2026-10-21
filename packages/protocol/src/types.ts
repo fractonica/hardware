@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export const JOB_STATUSES = ['queued', 'working', 'completed', 'failed', 'cancelled'] as const;
-export const JOB_KINDS = ['build', 'flash', 'reset'] as const;
+export const JOB_KINDS = ['build', 'flash', 'reset', 'provision'] as const;
 
 export const JobSchema = z.object({
   job_id: z.string(),

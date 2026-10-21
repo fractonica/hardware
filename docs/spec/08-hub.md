@@ -19,17 +19,17 @@
 ```
  fractonica hub (one Node process, detached daemon)
  ├─ SerialPortManager      main thread; owns every /dev/cu.* fd (serialport binds to libuv's default loop)
- │   ├─ LinePipeline       splits `@fr1:` frames (→ Router from C3; stored decoded, §8.3) from log lines (→ LogStore + bus)
+ │   ├─ LinePipeline       splits `@fr1:` frames (→ Router; also stored decoded, §8.3) from log lines (→ LogStore + bus)
  │   └─ Leases             hand-off to pytools jobs or external tools (TTL, holder pid, visible in UI)
  ├─ NodeLinks              TCP :7421 (node-initiated), UDP :7421 (inbound), serial ENV frames, gateway (M2)
- ├─ Router                 windows per 05 §5.8, hub sequence spaces, WELCOME/DIRECTORY/TIME, get_state, fan-out
+ ├─ Router                 windows per 05 §5.8, hub sequence spaces, WELCOME/DIRECTORY/TIME, get_state, presence, commands, fan-out
  ├─ Codec                  generated TS envelope + capability codecs
- ├─ Bus                    in-process topic trie; publish synchronously in the receive tick
+ ├─ Bus + Events           publish synchronously in the receive tick; events stored in the `events` ring (§8.7)
  ├─ Registry + Db          SQLite (WAL); writes queued to a worker_thread; main thread never blocks on disk
  ├─ JobRunner              build / flash / provision / ota / test jobs; locks; spawns children
  ├─ Listeners              :7420 API (loopback) · :7421 node links · :7422 node HTTP (OTA, coredumps)
- └─ SleepGuard             PreventUserIdleSystemSleep assertion while any node link is up (05 §5.11)
- children: pytools (flash/probe/nvs/panic) · idf.py builds (sanitized env)
+ └─ SleepGuard             child `caffeinate -i -w <hub pid>` while any node session is up (05 §5.11)
+ children: pytools (flash/probe/nvs/panic) · idf.py builds (sanitized env) · caffeinate
  separate process: `fr mcp` (stdio MCP adapter → hub REST/WS)
 ```
 
@@ -50,7 +50,7 @@ Rules:
 - **`fr mcp` auto-start.** If nothing answers on `127.0.0.1:7420`, `fr mcp` runs `fr hub start` and waits up to 10 s. The hub is **never** a child of an MCP or agent process, so ending a Claude session never kills in-flight flash or OTA jobs.
 - **Version check.** `hub_status` reports the version, `registry_hash`, Node path and version, `launched_by` (the app responsible for the process), and `lnp: allowed|denied|unknown`. `fr mcp` refuses with `HUB_VERSION_MISMATCH` (remediation: `fr hub restart`) when the hashes differ.
 - **Stop guard.** `fr hub stop|restart` refuses with `LOCKED` (retryable; `details.holder_job`, remediation `fr jobs wait <id>`) while any job is `queued` or `working`, unless `--force`. A hub whose pid is alive but does not answer `/health` is stopped only with `--force` (`HUB_UNREACHABLE` otherwise).
-- **Stop.** `fr hub stop` sends SIGTERM and waits up to 10 s for the process to exit, not only for `/health` to go away, so `restart` never races the old hub for the ports. On SIGTERM the hub cancels its remaining jobs (killing build process groups and sidecars), drops open connections including long-polls, and exits within 5 s.
+- **Stop.** `fr hub stop` sends SIGTERM and waits up to 10 s for the process to exit, not only for `/health` to go away, so `restart` never races the old hub for the ports. On SIGTERM the hub cancels its remaining jobs (killing build process groups and sidecars), sends a hub BYE on every serial node session and closes the node TCP connections ([05 §5.11](05-network.md)), drops open connections including long-polls, and exits within 5 s.
 
 ## 8.3 Serial subsystem
 
@@ -62,30 +62,36 @@ Rules:
 - **Logs.**
   - Each line is stored with a global **cursor**, timestamp, level and tag (parsed from the `ESP_LOGx` prefix), and a `kind`: `esp_log`, `boot` (ROM and bootloader lines), `frame` (a decoded `@fr1:` line), `diag` (a `#<id> {…}` response of the serial command channel) or `raw`.
   - **Frames are stored readable.** An `@fr1:` line is decoded with the generated TS serial codec and stored as `kind: frame`, for example `@fr1 EVENT boot.click {"count":1} (src=fffe seq=12 epoch=3 port=1)`; RESULT and ACK add `status=<name> req_seq=<n>`. Names come from the `fr_manifest` caps of the artifact whose `fw_id` starts with the boot banner's `fw=` (the device's prefix is kept in kv as `device_fw:<device>`, so names survive a hub restart). The system ports are named from the protocol constants, with or without a manifest, and a manifest entry cannot rename them (0 `node`, 240 `ota`, 241 `diag`: `@fr1 EVENT diag.mark {"token":"step1"} (…)`). An unknown port or member prints as `port=<p> kind=<k>` with hex fields; system classes print as `@fr1 <CLS> kind=<k> <hex>`, other serial types as `@fr1 <TYPE> <hex>`. A line that fails to decode is stored as `kind: raw` with `(decode error: <what> <code>)`.
-  - **Repeats collapse.** Consecutive identical lines from one port are stored once, then as `(previous line repeated N more times)` at most once a second or when the text changes. A blank board's ROM loop prints ~400 identical lines a second; `ESP_LOG` lines carry a timestamp and never collapse.
+  - **Repeats collapse.** Consecutive identical lines from one port are stored once, then as `(previous line repeated N more times)` at most once a second or when the text changes. A blank board's ROM loop prints ~400 identical lines a second; `ESP_LOG` lines carry a timestamp and never collapse. `@fr1:` lines never collapse either: identical lines are distinct envelopes.
+  - **ENV frames to the Router.** After a line is stored, its decoded ENV envelope also goes to the Router as a frame of that port's serial link (§8.4).
   - **ROM banner split.** A reset cuts the line being printed, so `ESP-ROM:` can arrive glued to its tail. The hub stores the banner as its own line, so it still classifies as `boot`.
   - Panic blocks are decoded against the ELF of the running `fw_id` (`crash.detected`).
   - Logs live in a SQLite ring (7 days by default).
 - **Download-mode detection.** "USB present and no HELLO or log for 5 s after a reset" sets `maybe_download_mode`, with a recovery hint.
 - **Lease end.** When a lease ends, the port is reopened with DTR and RTS deasserted.
 - **System resume.** A poll tick more than 10 s late means the Mac slept. The hub then closes and reopens every open port and logs `(hub: system resumed after <n> s; port reopened)`. At C2 a C6 stayed silent after a night's sleep on a handle that still looked open, and a hub-side reset recovered it ([04 §4.4](04-boards.md)).
-- **Writing lines** (`diag_exec`, [09 §9.4](09-agent-api.md)). `writeLine` sends one line, LF appended, through the hub's open handle and refuses CR or LF inside it. It never drains: `tcdrain` would hold a libuv pool thread while the firmware does not read. A line is sent once its write callback fires, and concurrent lines on one handle queue in order. Only a handle whose write has been pending for more than 2 s refuses new lines, with `DEVICE_BUSY`, until that write completes (`TIMEOUT` for the stuck write itself).
+- **Writing lines** (`diag_exec`, [09 §9.4](09-agent-api.md), and the Router's ENV frames). `writeLine` sends one line, LF appended, through the hub's open handle and refuses CR or LF inside it. It never drains: `tcdrain` would hold a libuv pool thread while the firmware does not read. A line is sent once its write callback fires, and concurrent lines on one handle queue in order. Only a handle whose write has been pending for more than 2 s refuses new lines, with `DEVICE_BUSY`, until that write completes (`TIMEOUT` for the stuck write itself).
 
 ## 8.4 Node links and routing
 
 | Link | Direction | Notes |
 |---|---|---|
-| TCP :7421 | node connects | `len u16` + envelope, `TCP_NODELAY`, `SO_KEEPALIVE`; one per node; carries all hub → node traffic |
-| UDP :7421 | node → hub only | inputs, presence, ACK/RESULT ([05 §5.10](05-network.md)); the hub never sends UDP |
-| Serial `@fr1` ENV | both | USB-attached nodes are full links |
+| TCP :7421 | node connects | `len u16` + envelope, `TCP_NODELAY`, `SO_KEEPALIVE`; a length of 0 or over 2,048 closes the connection. One per node: a new HELLO closes the device's older connection, and one that sends no HELLO within 30 s is closed. Carries hub → node traffic for a node with a TCP session |
+| UDP :7421 | node → hub only | inputs, presence, ACK/RESULT ([05 §5.10](05-network.md)); receive only, the hub never sends UDP |
+| Serial `@fr1` ENV | both | USB-attached nodes are full links: incoming ENV lines are taken from the log store's frame decoder after the line is stored (§8.3), outgoing ones go through `writeLine`, one line at a time per port. A port that disappears ends its session at once (`device.link {link: serial, up: false, reason: 'usb port gone'}`) |
 | Gateway (M2) | both | `@fr1` GW_* frames; several gateways allowed |
 
-The **Router** does the following:
-- **Duplicate filtering** per [05 §5.8](05-network.md): replay windows on `(src, epoch, seq)` for ordinary frames, `last_seq` per `(src, port, kind)` for LATEST frames, and sessions reset on HELLO.
-- **Hub-originated frames.** These get `src=0x0000`, the hub epoch (incremented and persisted at every start), and a seq from the right space: a per-destination UNICAST counter, the BCAST counter, or LATEST.
-- **Handshake.** On HELLO it answers WELCOME, then DIRECTORY, then a TIME burst, then `get_state`. Only then does it publish `device.online`.
-- **Liveness.** It echoes every UDP-received HEARTBEAT, DUP copies included, with an ACK over TCP; this is the `udp_ok` probe. If no echo went to a node within one heartbeat interval (for example, because UDP is blocked), it sends a hub PRESENCE/HEARTBEAT over TCP, so the node always has a keepalive. It tracks presence ([05 §5.11](05-network.md)).
-- **Routing.** It keeps `addr → {links[], best}`. It fans broadcasts out over every link, forwards node → node frames when a node has no direct path, and repairs broadcasts for nodes whose watermark lags.
+Unknown sources are accepted until their HELLO identifies them. A second hub for tests takes `--node-port`, `--node-host 127.0.0.1` and `--no-serial` (it must not touch the USB ports the real hub holds).
+
+The **Router** does the following ([05 §5.8–5.12](05-network.md)):
+- **Duplicate filtering** per [05 §5.8](05-network.md): replay windows on `(device, epoch, seq)` for ordinary frames (256 bits, keyed by device so unprovisioned nodes work), `last_seq` per `(device, port, kind)` for LATEST frames, and sessions reset on HELLO.
+- **Hub-originated frames.** These get `src=0x0000`, the hub epoch (kv `hub_epoch`, incremented and fsynced at every start, skipping 0), `dst` = the node's HELLO `src`, `net` = its HELLO `net`, ttl 0x11, and a seq from the right space: one dense UNICAST counter per device, the BCAST counter, or LATEST, all from 1 each run.
+- **Handshake.** On HELLO it upserts the registry (a first HELLO creates a `provisioned: false` row, [06 §6.3](06-identity-ota.md)) and answers WELCOME (`ucast_floor` = the WELCOME's own seq), then DIRECTORY (all provisioned devices, pages from 0), then a TIME burst (8 SYNC_REQ, min-RTT offset; again every 60 s), then `fr.node.describe` (BULK) when no artifact manifest names the HELLO's `fw_id_prefix` (cached per `descriptor_hash`), then `get_state`. Only then does it publish `device.online` (the node's first session) and `device.link {link, up: true}` (every session). It pushes `set_alias` when the HELLO's alias or rev differs from the registry's. HELLOs from another net are dropped (`foreign_net`) once a network record exists; the router reads `net_id` again on each HELLO until one does, so `fr net set` on a fresh `hub.db` needs no restart.
+- **Liveness.** It echoes every UDP-received HEARTBEAT, DUP copies included, with an ACK over TCP; this is the `udp_ok` probe. On every session (TCP and serial) on which nothing went out for one heartbeat interval, it sends a hub PRESENCE/HEARTBEAT, so the node always has a keepalive. It raises `udp_blocked` when a TCP session sees no UDP for 10 s (`hub.warning` and `hub_status`; never for an UNASSIGNED node) and clears it when UDP returns.
+- **Presence** ([05 §5.11](05-network.md)). Suspect at 2.5 × the interval, with PINGs at 2.5 × and 3.0 ×; offline at 3.5 × (≥ 750 ms), which sends a hub BYE on a serial session and closes the TCP connection; offline `link_lost` when the last session closes. A node's BYE is offline at once with its reason; commands waiting on the device keep waiting, and a RESULT from it is still taken, for 250 ms (`byeGraceMs`; over UDP, its TCP connection kept open that long, or its USB line), since a RESULT sent before the BYE on one link can arrive after it on another. A HELLO with another epoch is offline `restarted` (or `epoch_regressed`, logged), then a new handshake.
+- **Commands.** One unicast CMD per device ([05 §5.8](05-network.md)), over its TCP session, else its serial session. ACK_REQ whenever the RESULT is awaited; `expire_at_us` (hub now + 1000 ms, in node time) once the node is synced; RESULTs match on `(device, req_seq)` with `req_epoch` = the hub epoch, from any link. Q1 frames from nodes get an ACK (EVENT, MSG; again on a DUP) or are answered (PING → PONG).
+- **Publication.** Capability EVENTs and STATEs become events (§8.7); STATE also updates a per-device property mirror, which `device_get` shows.
+- **Routing (C5).** It keeps `addr → {links[], best}`. It fans broadcasts out over every link, forwards node → node frames when a node has no direct path, and repairs broadcasts for nodes whose watermark lags.
 - **Clocks.** It tracks the per-node clock offset and uncertainty ([05 §5.12.4](05-network.md)).
 
 ## 8.5 Flashing and pytools
@@ -102,9 +108,9 @@ The **Router** does the following:
   - `probe {port}`: chip, revision, features, flash size, MAC, security info. Uses ESPLoader methods; the log-only `cmds` functions are not used.
   - `flash {port, files:[{offset, path}], compress, verify, diff_with?, before, after}`.
   - `erase {port, scope, offset?, size?}`.
-  - `nvs_gen {csv, size}` → bin.
+  - `nvs_gen {csv_path, size, out_path}` → `{out_path, size, rows}`: renders `fr_ident` ([06 §6.3](06-identity-ota.md)); no event or error carries the CSV's content.
   - `panic_decode {elf, text}`.
-- **Plans** come from the artifact manifest ([06 §6.4](06-identity-ota.md)): `full`, `app` (always including otadata), `identity`, `recover`. Never `idf.py flash`, and never merged images padded to full flash size (they would wipe `fr_ident`).
+- **Plans** come from the artifact manifest ([06 §6.4](06-identity-ota.md)): `full`, `app` (always including otadata), `identity`, `recover`. `full` (for a provisioned device), `identity` and `recover` add `fr_ident` rendered from the registry. Never `idf.py flash`, and never merged images padded to full flash size (they would wipe `fr_ident`).
 - **Artifact choice.** `fr flash --profile <p>` takes the newest `debug` artifact of (`node`, `p`); a release build only through `--build`. With none, the result is `NOT_FOUND` with `build_start` as remediation.
 - **Speed.** `write_flash --diff-with` (esptool ≥ 5.2) rewrites only changed sectors in the dev loop.
 
@@ -132,8 +138,15 @@ The **Router** does the following:
   - `hub/{status,warning}`
 - **Cursors** are `c:<hub_run>.<seq>`.
   - `hub_run` increments and is fsynced at every hub start.
+  - **One cursor space.** Log lines and events take their `seq` from one counter (`Seq`), so a cursor orders both and a wait since it sees either kind. `seq` is monotonic across runs: it starts after the largest seq either table holds.
+  - **Minted cursors.** Every cursor an op hands out (the result envelope's `cursor`, `next_cursor`, `head`, `resume_cursor`) is minted: the hub records when it first handed each one out, for the newest 1,024 seqs. An older cursor is dated by the newest log line or event at or before it. Waits use that time to reject stale matches ([09 §9.2](09-agent-api.md)).
   - A `since` from an earlier run returns `HUB_RESTARTED` with `details.resume_cursor`; it is never silently re-based.
-  - Every event carries `t_hub_us` and `replayed: bool`, which marks frames that were buffered during an outage. `t_hub_us` is device time converted through the TIME offset, or the hub's receive time when it has no offset yet for the sender's current epoch.
+  - Every event carries `t_hub_us` and `replayed: bool`, which marks frames that were buffered during an outage (the node is synced and its device time is more than 2 s before arrival). `t_hub_us` is device time converted through the TIME offset, or the hub's receive time when it has no offset yet for the sender's current epoch.
+- **Event types** ([09 §9.2](09-agent-api.md)):
+  - capability EVENTs and STATEs as `<inst>.<member>` with decoded fields, or `port<p>.event<k>` / `port<p>.state<k>` with `{raw}` when nothing names the port; `node.boot` and `diag.mark` likewise. `late` flags an event older than the last of its instance. A STATE older than the mirror's is neither applied nor published;
+  - `device.online {link, addr, fw_id_prefix, provisioned}` (or `{link, recovered}` when a suspect device comes back), `device.suspect {silent_ms}`, `device.offline {reason}`, `device.link {link, up, remote | reason}`, `device.provisioned`;
+  - `hub.warning {code: udp_blocked, hint}`, `msg {topic, data, dst}`, `registry.drift`.
+- **Storage.** `publish` runs in the receive tick: it takes the cursor, notifies subscribers synchronously and queues the row; rows are written to the `events` table in one transaction every 50 ms.
 - **Delivery classes.**
   - `event`: never dropped. Per-client queue with backpressure; on overflow, send a `gap` notice and the client re-reads over REST.
   - `state`: last value cached, sent on subscribe.
@@ -145,14 +158,15 @@ The **Router** does the following:
 
 | Item | Holds |
 |---|---|
-| `hub.db` → `devices` | device_id (PK = MAC), addr, alias + alias_rev, net, board, profile, tags, role, fw, last_seen, last_epoch, provision record |
-| `hub.db` → `networks` | net id, mode, ssid, bssid pin (optional), country, observed channel and BSSIDs (from HELLO), `hub_host` (= `scutil --get LocalHostName` + `.local`), hub id (6 random bytes, for M3 nonces), (M3) key references |
+| `hub.db` → `devices` | device_id (PK = MAC), addr (NULL until provisioned; never reused for another device, kv `registry.addr_hwm`), alias (stored lower case, unique ignoring case) + alias_rev, net, board, profile, chip, tags, role, fw_id, provisioned, last_seen, last_epoch, created_at, provision record (what the last `fr_ident` write held; never the password) |
+| `hub.db` → `networks` | `net_id` (random u16 in 1..65535, created with the record and kept), mode, ssid, bssid pin (optional), country, observed channel and BSSIDs (from HELLO), `hub_host` (= `scutil --get LocalHostName` + `.local`), hub id (6 random bytes, for M3 nonces), (M3) key references |
 | `hub.db` → `bindings` | resolved bindings per source device (re-pushed on change) |
 | `hub.db` → `ports_seen`, `builds`, `artifacts` | USB serial ↔ last path; manifests and blob references |
 | `hub.db` → `jobs` | durable, retained ≥ 24 h. On hub restart, `working` jobs become `failed: HUB_RESTARTED` |
-| `hub.db` → `events`, `logs` | cursor-indexed rings; retention configurable (7 days / 1M rows) |
-| `hub.db` → `kv` | settings, `hub_run`, hub epoch, `device_fw:<device>` (the `fw=` prefix from a device's boot banner, for frame names, §8.3) |
+| `hub.db` → `events`, `logs` | cursor-indexed rings in one cursor space (§8.7); retention configurable (7 days / 1M rows; kv `<table>.retention_days` and `<table>.retention_rows`). Retention counts cursors: each table keeps at most `rows` rows, and both together at most `rows` |
+| `hub.db` → `kv` | settings, `hub_run`, `hub_epoch` (u16, +1 and fsynced at every start, skipping 0), `registry.addr_hwm`, `device_fw:<device>` (the `fw=` prefix from a device's boot banner, for frame names, §8.3) |
 | `secrets.json` (0600) | Wi-Fi passwords, API token. **Never in SQLite, never in results or logs** |
+| `tmp/ident/` (0700) | one directory per `fr_ident` render, removed after its flash; a hub start removes what a killed hub left ([06 §6.3](06-identity-ota.md)) |
 
 ## 8.9 Dashboard
 
@@ -178,7 +192,7 @@ The dashboard uses the same WS and REST API as agents and never uses Web Serial.
 
 - **Opening up 7420.** `--listen-app 0.0.0.0` lets games on other devices reach `/app` (the SDK token is required). `--listen-api 0.0.0.0` exposes the control API on the LAN and requires the bearer token.
 - **Hub address for nodes.** Nodes get `hub_host = <LocalHostName>.local` (here `dimas-3.local`) at provisioning. They resolve it by mDNS on every reconnect; macOS's own mDNSResponder answers it.
-- **Service advert.** `_fractonica._tcp` is advertised with SRV port 7421 and TXT `http=7422 api=7420`. The advert is retried every 30 s, since Local Network Privacy may deny it.
+- **Service advert (C6).** `_fractonica._tcp` is advertised with SRV port 7421 and TXT `http=7422 api=7420`. The advert is retried every 30 s, since Local Network Privacy may deny it. Until then nodes use `hub_host` ([05 §5.12.5](05-network.md)).
 - **Hosted apps (M1).**
   - `/apps/<name>/` serves the static files in `<repo>/web/<name>/dist/`, where `<repo>` is the checkout the `fr` shim runs from. `web/demo` is the M1 demo page.
   - Apps are built with Vite, which resolves `@fractonica/sdk` through the `@fractonica/source` condition (§8.12).
@@ -188,11 +202,11 @@ The dashboard uses the same WS and REST API as agents and never uses Web Serial.
 
 | Constraint | Handling |
 |---|---|
-| **Local Network Privacy** (macOS 15+). Gated, and attributed to the app that launched the hub: outgoing TCP, any UDP send or connect, receiving UDP multicast/broadcast, every Bonjour register/browse/resolve, and `.local` lookups by the hub. **Not gated:** accepting TCP, receiving unicast UDP. Only tools run from Terminal or SSH are exempt. The first attempt can be denied while the prompt is still on screen | Every node link is node-initiated; the hub never needs to originate LAN traffic. Every 30 s the hub self-tests by connecting a UDP socket to the LAN gateway (no traffic sent) and reports `LNP_DENIED` in `hub_status.warnings`. `fr doctor` reports the hub's self-test and does not probe from its own process. To fix it, approve the "Claude would like to find devices on your local network" prompt once (or start the hub from Terminal.app) |
+| **Local Network Privacy** (macOS 15+). Gated, and attributed to the app that launched the hub: outgoing TCP, any UDP send or connect, receiving UDP multicast/broadcast, every Bonjour register/browse/resolve, and `.local` lookups by the hub. **Not gated:** accepting TCP, receiving unicast UDP. Only tools run from Terminal or SSH are exempt. The first attempt can be denied while the prompt is still on screen | Every node link is node-initiated; the hub never needs to originate LAN traffic. Every 30 s the hub self-tests by connecting a UDP socket to the LAN gateway (no traffic sent) and reports `LNP_DENIED` in `hub_status.warnings` (the self-test comes in C6). `fr doctor` reports the hub's self-test and does not probe from its own process. To fix it, approve the "Claude would like to find devices on your local network" prompt once (or start the hub from Terminal.app) |
 | **Application Firewall** (per app, not per port) | `fr doctor` checks `socketfilterfw` and tells you to allow the hub's `node` binary for inbound. Router-mode nodes surface it as `udp_blocked` ([05 §5.10](05-network.md)) |
 | **VPN** (your default route currently goes through `utun4`) | `fr doctor` checks that the LAN subnet is routed via the Wi-Fi or Ethernet interface, not the tunnel. Full-tunnel VPNs that block LAN access break router mode |
 | **Wi-Fi hub** (MacBook Pro, no Ethernet port) | Latency panel and T-LAT measure it; the M0 go/no-go decides on Ethernet (USB-C adapter), a lab AP, or gateway mode ([11 §11.2](11-roadmap.md)) |
-| Sleep (lid close) | A `PreventUserIdleSystemSleep` assertion while nodes are linked; the dashboard warns that closing the lid still sleeps the Mac. After a detected resume the hub reopens every open serial port (§8.3) |
+| Sleep (lid close) | A child `caffeinate -i -w <hub pid>` (the `PreventUserIdleSystemSleep` assertion) while a node session is up; it exits by itself if the hub dies. The dashboard warns that closing the lid still sleeps the Mac. After a detected resume the hub reopens every open serial port (§8.3) |
 | Docker has no USB | The hub runs natively; Docker is for builds only |
 | `/dev/cu.*` paths change with the socket | Devices are keyed by MAC |
 | Several Node installs (nvm 24.11, Homebrew 25.2 which is end-of-life, /usr/local 22.19) | `fr doctor --fix` pins an absolute Node ≥ 24.12 path into the `fr` shim (§8.12) |

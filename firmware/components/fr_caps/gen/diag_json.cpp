@@ -37,6 +37,7 @@ cJSON *to_json(const LedEffectDone &v);
 cJSON *to_json(const AnalogInInjectArgs &v);
 cJSON *to_json(const AnalogInCrossed &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
+cJSON *to_json(const NodeDescribeResult &v);
 cJSON *to_json(const NodeRebootArgs &v);
 cJSON *to_json(const NodeSetAliasArgs &v);
 cJSON *to_json(const NodeSetGroupsArgs &v);
@@ -459,6 +460,14 @@ cJSON *to_json(const NodeIdentifyArgs &v)
     cJSON *o = cJSON_CreateObject();
     bool ok = o != nullptr;
     ok = ok && add(o, "ms", json_number(v.ms));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const NodeDescribeResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "descriptor", json_bytes(v.descriptor));
     return finish(o, ok);
 }
 
@@ -1018,7 +1027,7 @@ cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
         case Node::kCmdIdentify:
             return json_empty(body);
         case Node::kCmdDescribe:
-            return json_empty(body);
+            return json_of(decode_node_describe_result(body));
         case Node::kCmdReboot:
             return json_empty(body);
         case Node::kCmdSetAlias:

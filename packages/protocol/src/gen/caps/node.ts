@@ -33,6 +33,35 @@ export function decodeNodeIdentifyArgs(bytes: Uint8Array): Decoded<NodeIdentifyA
   return $.done(r, v);
 }
 
+/** fr.node.describe RESULT fields. */
+export interface NodeDescribeResult {
+  /** a protobuf-wire Descriptor (schema/protocol.yaml types) (<= 1200 bytes) */
+  descriptor: Uint8Array;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNodeDescribeResult(v: Partial<NodeDescribeResult> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.bytes(v.descriptor ?? $.EMPTY, 1200, 'descriptor');
+  if (f1.length > 0) w.fieldBytes(1, f1);
+  return w.finish();
+}
+
+export function decodeNodeDescribeResult(bytes: Uint8Array): Decoded<NodeDescribeResult> {
+  const r = new Reader(bytes);
+  const v: NodeDescribeResult = { descriptor: new Uint8Array(0) };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.descriptor = r.readBytes(1200).slice();
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
 /** fr.node.reboot arguments (command 3, reliable). */
 export interface NodeRebootArgs {
   /** (default false) */
@@ -295,7 +324,7 @@ export const NODE_CAP: $.CapInfo = {
   traits: $.EMPTY_CODEC,
   commands: [
     { id: 1, name: 'identify', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'ms' }], maxSize: 4, encode: encodeNodeIdentifyArgs, decode: decodeNodeIdentifyArgs }, result: null },
-    { id: 2, name: 'describe', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: null },
+    { id: 2, name: 'describe', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: { fields: [{ name: 'descriptor', json: 'bytes' }], maxSize: 1203, encode: encodeNodeDescribeResult, decode: decodeNodeDescribeResult } },
     { id: 3, name: 'reboot', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'bootloader' }], maxSize: 2, encode: encodeNodeRebootArgs, decode: decodeNodeRebootArgs }, result: null },
     { id: 4, name: 'set_alias', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'alias' }, { name: 'rev' }], maxSize: 39, encode: encodeNodeSetAliasArgs, decode: decodeNodeSetAliasArgs }, result: null },
     { id: 5, name: 'set_groups', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'groups' }], maxSize: 26, encode: encodeNodeSetGroupsArgs, decode: decodeNodeSetGroupsArgs }, result: null },

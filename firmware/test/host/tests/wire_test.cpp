@@ -311,10 +311,101 @@ TEST(header_rejections)
     CHECK_EQ(unpack_header(std::span<const uint8_t>(bytes).first(17)).error(), DecodeErr::truncated);
     CHECK_EQ(with(0, 0xA2).error(), DecodeErr::bad_magic);
     CHECK_EQ(with(1, kFlagAckReq | kFlagLatest).error(), DecodeErr::bad_flags);
-    for (const uint8_t f : {kFlagSec, kFlagFrag, kFlagExt}) {
+    for (const uint8_t f : {kFlagSec, kFlagFrag, static_cast<uint8_t>(kFlagFrag | kFlagExt)}) {
         CHECK_EQ(with(1, f).error(), DecodeErr::unsupported);
     }
+    // EXT is supported: without its len byte the header is cut short.
+    CHECK_EQ(with(1, kFlagExt).error(), DecodeErr::truncated);
     CHECK(with(1, kFlagAckReq | kFlagRelayed | kFlagUrgent | kFlagBulk).has_value());
+}
+
+TEST(header_ext_tlvs)
+{
+    // A hub CMD with expire_at_us and a trace id; an unknown non-critical TLV is skipped but kept.
+    const auto in = from_hex("a1 82 04 03 05 00 00 00 02 01 00 00 12 00 09 00 22 02"
+                             " 0e 04 04 04 03 02 01 02 04 ef be ad de 10 00");
+    const auto h = unpack_header(in);
+    REQUIRE(h.has_value());
+    CHECK_EQ(header_size(*h), in.size());
+    CHECK_EQ(h->ext.value(kExtExpireAtUs).value_or(0), 0x01020304u);
+    CHECK_EQ(h->ext.value(kExtTraceId).value_or(0), 0xDEADBEEFu);
+    CHECK(!h->ext.value(kExtValidMs).has_value());
+    REQUIRE(h->ext.find(0x10).has_value());
+    CHECK(h->ext.find(0x10)->empty());
+    size_t n = 0;
+    for (const ExtTlv t : h->ext) {
+        CHECK(t.type == kExtExpireAtUs || t.type == kExtTraceId || t.type == 0x10);
+        ++n;
+    }
+    CHECK_EQ(n, 3);
+    std::vector<uint8_t> buf(kMaxHeaderSize);
+    Writer w(buf);
+    pack_header(*h, w);
+    CHECK_BYTES(w.bytes(), in);
+
+    // Built for sending: the same bytes from an ExtBuilder.
+    ExtBuilder b;
+    CHECK(b.add_value(kExtExpireAtUs, 0x01020304));
+    CHECK(b.add_value(kExtTraceId, 0xDEADBEEF));
+    CHECK(b.add(0x10, {}));
+    Header out = *h;
+    out.ext = b.view();
+    CHECK(out == *h);
+    // The builder refuses what a decoder would.
+    CHECK(!b.add_value(kExtValidMs, 0x10000));
+    CHECK(!b.add(kExtExecAtUs, from_hex("01 02")));
+    CHECK(!b.add(0x90, {}));
+    CHECK(!b.add_value(0x10, 1));
+
+    // Last wins, as for repeated fields. (Header::ext views its input, which must outlive it.)
+    const auto twice_in = from_hex("a1 80 03 01 0c 00 00 00 02 01 fe ff 00 00 03 00 22 01"
+                                   " 0c 02 04 01 00 00 00 02 04 02 00 00 00");
+    const auto twice = unpack_header(twice_in);
+    REQUIRE(twice.has_value());
+    CHECK_EQ(twice->ext.value(kExtTraceId).value_or(0), 2u);
+
+    // An empty block is still a block: it packs as len 0.
+    const auto empty_in = from_hex("a1 80 03 01 0c 00 00 00 02 01 fe ff 00 00 03 00 22 01 00");
+    const auto empty = unpack_header(empty_in);
+    REQUIRE(empty.has_value());
+    CHECK(empty->ext.empty());
+    CHECK_EQ(header_size(*empty), kHeaderSize + 1);
+
+    // TLVs without the EXT flag are a programming error.
+    Header bad = example_header();
+    bad.ext = b.view();
+    Writer w2(buf);
+    pack_header(bad, w2);
+    CHECK(w2.overflow());
+}
+
+TEST(header_ext_rejections)
+{
+    const auto ext = [](std::string_view block) {
+        return unpack_header(from_hex(std::string("a1 a0 03 01 0c 00 00 00 02 01 fe ff 00 00 03 00 22 01 ") +
+                                      std::string(block)));
+    };
+    CHECK_EQ(ext("06 04 04 01 02 03").error(), DecodeErr::truncated);     // block past the input
+    CHECK_EQ(ext("05 04 04 01 02 03 04").error(), DecodeErr::truncated);  // TLV past the block
+    CHECK_EQ(ext("01 04").error(), DecodeErr::truncated);                 // TLV header past the block
+    CHECK_EQ(ext("03 90 01 00").error(), DecodeErr::unsupported_ext);     // unknown critical
+    CHECK_EQ(ext("02 ff 00").error(), DecodeErr::unsupported_ext);
+    CHECK_EQ(ext("04 04 02 01 02").error(), DecodeErr::bad_ext);          // expire_at_us is a u32
+    CHECK_EQ(ext("06 03 04 01 02 03 04").error(), DecodeErr::bad_ext);    // valid_ms is a u16
+    CHECK_EQ(ext("06 90 00 04 02 01 02").error(), DecodeErr::unsupported_ext);  // first refusal wins
+    CHECK(ext("04 7f 02 aa bb").has_value());                              // unknown non-critical
+}
+
+TEST(envelope_prefix_follows_the_ext_block)
+{
+    // RESULT with a trace id: the prefix starts after the block.
+    const auto in = from_hex("a1 80 05 03 01 00 00 00 02 01 12 00 00 00 03 00 22 02 06 02 04 01 00 00 00"
+                             " 09 00 05 00 00 00 00 08 01");
+    const auto e = unpack_envelope(in);
+    REQUIRE(e.has_value());
+    CHECK(e->result == (ResultPrefix{9, 5, 0}));
+    CHECK_BYTES(e->body, from_hex("08 01"));
+    CHECK_EQ(unpack_envelope(std::span<const uint8_t>(in).first(30)).error(), DecodeErr::truncated);
 }
 
 TEST(envelope_prefixes)
@@ -428,7 +519,8 @@ TEST(decode_err_names_match_ts)
     // Same order as DECODE_ERRORS in packages/protocol/src/wire/pb.ts.
     const char *names[] = {"truncated", "bad_wire_type", "varint_too_long", "out_of_range", "too_long",
                            "bad_field", "bad_utf8", "bad_magic", "bad_flags", "unsupported",
-                           "no_prefix", "bad_base64", "too_short", "bad_crc", "line_too_long"};
+                           "no_prefix", "bad_base64", "too_short", "bad_crc", "line_too_long",
+                           "unsupported_ext", "bad_ext"};
     for (size_t i = 0; i < std::size(names); ++i) {
         CHECK_EQ(decode_err_name(static_cast<DecodeErr>(i + 1)), names[i]);
     }

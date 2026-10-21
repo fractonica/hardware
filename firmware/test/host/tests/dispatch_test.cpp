@@ -21,6 +21,7 @@ using fr::Err;
 using fr::Status;
 using fr::cap::Priority;
 using fr::cap::Reply;
+using fr::cap::StaticReply;
 using frt::from_hex;
 
 namespace {
@@ -142,7 +143,7 @@ public:
         identify_ms = a.ms;
         return {};
     }
-    Status describe() override { return std::unexpected(Err::unsupported); }
+    std::expected<fr::cap::NodeDescribeResult, Err> describe() override { return std::unexpected(Err::unsupported); }
     Status reboot(const fr::cap::NodeRebootArgs &a) override
     {
         reboot_bootloader = a.bootloader;
@@ -190,7 +191,7 @@ class FakeOta final : public fr::cap::Ota
 
 Status run(fr::cap::Capability &cap, uint8_t cmd, std::string_view args_hex)
 {
-    Reply reply;
+    StaticReply<> reply;
     return cap.dispatch(cmd, from_hex(args_hex), reply);
 }
 
@@ -309,7 +310,7 @@ TEST(dispatch_test_hook_commands)
 TEST(dispatch_result_fields_go_to_the_reply)
 {
     FakeDiag diag;
-    Reply reply;
+    StaticReply<> reply;
     REQUIRE(diag.dispatch(fr::cap::Diag::kCmdExec, from_hex("0a 04 69 6e 66 6f"), reply).has_value());
     CHECK_EQ(diag.line, "info");
     CHECK_BYTES(reply.bytes(), from_hex("0a 0b 7b 22 6f 6b 22 3a 74 72 75 65 7d"));
@@ -317,19 +318,35 @@ TEST(dispatch_result_fields_go_to_the_reply)
     REQUIRE(back.has_value());
     CHECK_EQ(back->json, R"({"ok":true})");
 
-    Reply busy;
+    StaticReply<> busy;
     CHECK_EQ(err_of(diag.dispatch(fr::cap::Diag::kCmdExec, from_hex("0a 04 66 61 69 6c"), busy)), Err::busy);
     CHECK(busy.bytes().empty());
 
-    // 1.4 kB of JSON does not fit the 200 B Reply: a failure, never truncated fields.
-    Reply small;
+    // 1.4 kB of JSON does not fit the 200 B Reply: a failure with no fields, never truncated ones.
+    StaticReply<> small;
     CHECK_EQ(err_of(diag.dispatch(fr::cap::Diag::kCmdExec, from_hex("0a 03 62 69 67"), small)), Err::failed);
+    CHECK(small.bytes().empty());
+    CHECK(!small.fields().overflow());
+
+    // A bulk Reply (a request that came over TCP or serial) carries it.
+    StaticReply<Reply::kBulkCapacity> bulk;
+    REQUIRE(diag.dispatch(fr::cap::Diag::kCmdExec, from_hex("0a 03 62 69 67"), bulk).has_value());
+    const auto big = fr::cap::decode_diag_exec_result(bulk.bytes());
+    REQUIRE(big.has_value());
+    CHECK_EQ(big->json.size(), 1400);
+
+    // A caller-provided buffer.
+    uint8_t buf[16];
+    Reply own(buf);
+    CHECK_EQ(own.capacity(), 16);
+    REQUIRE(diag.dispatch(fr::cap::Diag::kCmdExec, from_hex("0a 04 69 6e 66 6f"), own).has_value());
+    CHECK_EQ(own.bytes().data(), buf);
 }
 
 TEST(dispatch_commands_without_result_leave_the_reply_empty)
 {
     FakeLed led;
-    Reply reply;
+    StaticReply<> reply;
     REQUIRE(led.dispatch(fr::cap::Led::kCmdBlink, {}, reply).has_value());
     CHECK(reply.bytes().empty());
 }
@@ -588,7 +605,7 @@ TEST(diag_json_call_runs_through_dispatch)
     const auto args = encode_json(fr::cap::Led::kId, "blink", R"({"count":3})");
     REQUIRE(args.status.has_value());
     FakeLed led;
-    Reply reply;
+    StaticReply<> reply;
     REQUIRE(led.dispatch(args.cmd_id, args.bytes, reply).has_value());
     CHECK_EQ(led.last_blink.count, 3);
     const Json result(fr::cap::decode_to_json(fr::cap::Led::kId, fr::wire::kClsResult, args.cmd_id, reply.bytes()));

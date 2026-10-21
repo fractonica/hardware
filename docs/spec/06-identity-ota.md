@@ -72,9 +72,9 @@ Rules:
 |---|---|---|
 | `device_id` | 12 lowercase hex of the factory MAC | derived (eFuse); also in `fr_ident` to detect a moved image |
 | `short_id` | last 3 bytes; display only (`pad-16ba34`) | derived |
-| `addr` | u16 network address | `fr_ident` |
-| `alias` + `alias_rev` | RFC 1123 label + revision | `fr_ident`; a runtime rename goes to RW `nvs:fr_ovr`. The **highest `alias_rev` wins** |
-| `net` | u16 network id | `fr_ident` |
+| `addr` | u16 network address, allocated from `0x0001` at provisioning and never reused for another device (kv `registry.addr_hwm`, which a HELLO on this hub's net also raises) | `fr_ident` |
+| `alias` + `alias_rev` | RFC 1123 label + revision. Default `<profile>-<short_id>` (`c6-pad-d55e64`) | `fr_ident`; a runtime rename goes to RW `nvs:fr_ovr`. The **highest `alias_rev` wins** |
+| `net` | u16 network id: the network record's `net_id`, random in 1..65535, created with the record and kept by later changes | `fr_ident` |
 | `epoch_floor` | u16, written at every provision (`registry.last_epoch + 1`) | `fr_ident`; boot epoch = `max(nvs epoch, epoch_floor) + 1` |
 | `board`, `profile`, `part_profile` | strings | `fr_ident`; the OTA compatibility gate |
 | `fw_id` | SHA-256 appended to an unsigned image (its last 32 B) | image; `esp_partition_get_sha256()` |
@@ -83,11 +83,15 @@ On-device rules:
 - `fr_id_get_mac()` wraps `esp_read_mac(mac, ESP_MAC_EFUSE_FACTORY)`. Never call `esp_efuse_mac_get_default()`: on the C6 it writes 8 bytes (an EUI-64).
 - `esp_base_mac_addr_set()` and custom MACs are banned by lint. At boot, assert that the STA MAC equals `device_id`.
 
+**Alias rules.** At most 31 characters, stored lower case and unique ignoring case. Reserved: the instance names of [03 §3.6](03-firmware.md), `all`, `offline`, and anything shaped like a 12-hex device id (a selector reads those as ids, [09 §9.2](09-agent-api.md)).
+
 **Renames.**
 1. `device_update {alias}` updates the registry (`alias_rev += 1`).
 2. If the node is online, the hub sends `fr.node.set_alias {alias, rev}`, which the node stores in `fr_ovr`.
-3. On every HELLO the hub compares alias and rev and re-sends if they differ. The registry wins.
+3. On every HELLO the hub compares alias and rev and re-sends if they differ. The registry wins: its `alias_rev` moves past any rev a HELLO reports.
 4. Bindings that name the alias are re-resolved, and SDK clients get `registry.drift`.
+
+**Devices seen only through HELLO.** A device that says HELLO without a registry row (foreign firmware, a board flashed by port) gets a row with `provisioned: false` and `addr: null`, and is WELCOMEd. Its alias is its HELLO alias when valid and free, else `<chip>-<short_id>`. Provisioning replaces that made-up alias, and the firmware's UNASSIGNED placeholder `new-<short_id>` while its `alias_rev` is 0, never one a person chose.
 
 **`fr_ident` content** (schema 1; key names ≤ 15 characters):
 
@@ -114,60 +118,63 @@ hub_host,data,string,dimas-3.local
 hub_ip,data,string,192.168.0.17
 ```
 
-- **Generation.** The image is built with `esp-idf-nvs-partition-gen` (`generate fr_ident.csv fr_ident.bin 0x4000`) and round-trip checked with `nvs_tool`.
-- **Secrets handling.** The CSV is rendered in a 0700 temp directory from the **active network record** plus its secret, and deleted when the job ends. It never appears in logs, `dry_run` output or job results.
+- **Generation.** The pytools sidecar's `nvs_gen` builds the image with `esp-idf-nvs-partition-gen` (0x4000); no event or error it emits carries the CSV's content. A round-trip check with `nvs_tool` is planned. Every write gets a fresh `prov_ts`.
+- **Secrets handling.** The CSV is rendered from the **active network record** plus its secret, in its own 0700 directory under `~/.fractonica/tmp/ident`. The CSV is deleted as soon as `nvs_gen` returns, the directory after the flash (or by an exit hook). A hub start, holding `hub.lock`, removes whatever a killed hub left there, and this user's `fr-ident-*` directories older than 10 min in the system temp directory, where older hubs rendered. The password never appears in SQLite, logs, job logs, `dry_run` output or results.
 - **Where the network record comes from.** `network_set` ([09 §9.4](09-agent-api.md)). The Wi-Fi password lives in `~/.fractonica/secrets.json` (mode 0600) and is never in SQLite.
 - **RW namespaces in `nvs`:**
   - `fr_ovr`: alias + rev, groups (M2), and `addr`/`net` written by adoption (M2);
-  - `fr_link`: the last channel C and the pinned BSSID ([05 §5.4](05-network.md));
+  - `fr_link`: the last channel C, the pinned BSSID and `ssid_h`, the hash of the SSID they belong to ([05 §5.4](05-network.md));
   - `fr_bind`: bindings, ≤ 16 ([07 §7.11](07-capabilities-sdk.md));
   - `fr_dir`: directory cache;
-  - `fr_net2`: pushed Wi-Fi override, reverted after 60 s on failure;
+  - `fr_net2`: the Wi-Fi override `fr.node.net_set` pushes, with `base` (the `prov_ts` it was pushed under) and `ok`. It is applied 300 ms after the RESULT and reverted after 60 s if it fails to connect; once it joins it stays. A reprovision (a new `prov_ts`) drops it;
   - `fr_ota`: job id, target `fw_id`, size, resume offset, `hub_seen`;
   - `fr_boot`: epoch;
   - M3 keys also go in an RW namespace, because `fr_ident` is read-only at runtime.
 
 ## 6.4 Provisioning flow (first flash)
 
-`fr devices provision --port <usb-serial> [--profile c6-pad] [--alias pad-red-1]`, the dashboard wizard, or MCP `device_provision`:
+`fr devices provision --port <usb-serial> [--profile c6-pad] [--alias pad-red-1]`, the dashboard wizard, or MCP `device_provision`. It is one job of kind `provision`. Whatever can fail without touching the board (a missing network record, an unknown `--build` or `--profile`, a taken alias) fails before the job starts.
 
 1. **Discover.** USB VID 0x303A / PID 0x1001 gives the MAC from the serial number without opening the port ([04 §4.5](04-boards.md)).
 2. **Acquire.** Take an exclusive port lease. If a foreign process holds the port, fail with `PORT_BUSY_EXTERNAL` and name it (e.g. "Google Chrome, PID 715: close the Web Serial tab").
-3. **Probe.** Using the esptool API ([§6.10](#610-esptool-integration-hub-pytools)), read chip, revision, features (embedded flash and PSRAM), flash size, MAC and security info. Refuse if secure boot or flash encryption is enabled.
-4. **Registry.** Upsert by `device_id`:
-   - reuse `addr` and `alias` if known, otherwise allocate the next `addr` and an alias (`{profile}-{short_id}`, or the requested one);
-   - set `epoch_floor = last_epoch + 1`;
-   - enforce uniqueness.
-5. **Select.**
-   - Choose the profile: requested, then registry, then board detection.
+3. **Probe.** Using the esptool API ([§6.10](#610-esptool-integration-hub-pytools)), read chip, revision, features (embedded flash and PSRAM), flash size, MAC and security info. Refuse (`INCOMPATIBLE_PROFILE`) if secure boot or flash encryption is enabled.
+4. **Select** (before the registry, so a missing artifact costs no address).
+   - Choose the profile: requested, then registry, then board detection (M1: the profiles with a `debug` node artifact built for the probed chip).
    - Choose the artifact:
      - `--build B` if given, else the newest `debug` artifact for `(node, profile)`.
-     - If the profile came from board detection, use the newest artifact whose `board` matches, and ask if artifacts exist for more than one profile.
+     - If the profile came from board detection: one candidate is used; several fail with `INVALID_ARGS` and the candidates (pick one with `--profile`).
      - If there is none, fail with `NOT_FOUND`, remediation `fr build --profile <P>`. The hub never builds implicitly.
-   - Check artifact compatibility: target, chip revision range, flash size → `part_profile`. Also check that the board manifest's PSRAM mode and voltage match what the probe reported.
-   - Check that a network record exists; if not, fail with `ENV_MISSING` and hint `fr net set`.
-6. **Render** `fr_ident.bin` (§6.3).
-7. **Flash.** One `write_flash`: `0x0` bootloader, `0x8000` partition table, `0xE000` ota_data_initial, `0x10000` app, `fr_ident` at its offset. A full erase is done only when explicitly asked.
+   - Check artifact compatibility: the target must be the probed chip (`TARGET_MISMATCH`), and the flash must hold the artifact's flash size (`INCOMPATIBLE_PROFILE`). The chip-revision range and the board manifest's PSRAM mode and voltage are not checked yet ([11 §11.4](11-roadmap.md)).
+5. **Registry.** A network record is required (`ENV_MISSING`, hint `fr net set`). Upsert by `device_id`:
+   - reuse `addr` and `alias` if known, otherwise allocate the next `addr` (never reused, §6.3) and an alias (`{profile}-{short_id}`, or the requested one). A HELLO-only row's made-up alias, and the firmware's `new-<short_id>` placeholder at `alias_rev` 0, give way to the default (§6.3);
+   - set `net` from the network record and `epoch_floor = last_epoch + 1`;
+   - enforce uniqueness.
+6. **Render** `fr_ident.bin` (§6.3), with a fresh `prov_ts`.
+7. **Flash.** One `write_flash`: `0x0` bootloader, `0x8000` partition table, `0xE000` ota_data_initial, `0x10000` app, `fr_ident` at its offset. A full erase is done only when explicitly asked. The rendered files are deleted, the row is marked provisioned with its provision record (never the password), and the hub publishes `device.provisioned`.
 8. **Boot.**
    - The pytools child finishes with `--after no-reset` (the chip waits in the ROM loader) and exits.
    - The hub reopens the port at once (DTR and RTS deasserted), re-resolving it by serial number, then resets the chip itself by pulsing RTS on its own handle. A USJ chip reset does not re-enumerate ([04 §4.4](04-boards.md)), so the hub captures the ROM and bootloader lines and the boot banner. If esptool reset the chip instead, the banner would be printed while no host had the port open, and the USJ console drops output nobody reads (seen at checkpoint C1).
-   - The hub waits for the `@fr1` HELLO on serial (≤ 10 s).
+   - The hub waits for the HELLO on serial (≤ 10 s): the router's `device.online` or `device.link {up: true}` with `link: serial`, or the HELLO frame in the log store. None is `TIMEOUT` with `details.flashed: true` and the boot log tail.
    - The node repeats HELLO on the serial link every 1 s until it receives a WELCOME there.
-9. **Join.** The node joins Wi-Fi, connects to the hub over TCP and sends HELLO. The hub replies WELCOME and marks it `online + provisioned` (`device.provisioned`). The hub ends the provisioning lease; its monitor stays attached.
+9. **Join.** The node joins Wi-Fi, connects to the hub over TCP and sends HELLO. The hub waits up to 30 s for it (the same events with `link: tcp`: a node already online over USB gets `device.link`, not a second `device.online`). The result reports `wifi: joined | not_joined`; not joining is a warning, not a failure. The hub ends the provisioning lease; its monitor stays attached.
 
 **Flash plans**
 
 | Plan | Writes | Use |
 |---|---|---|
-| `full` | bootloader, partition table, otadata, app, fr_ident | first provision; profile or layout change |
+| `full` | bootloader, partition table, otadata, app; `fr_ident` rendered from the registry for a provisioned device, erased for any other (it boots UNASSIGNED) | first provision; profile or layout change |
 | `app` | `0xE000` ota_data_initial + `0x10000` app (`--diff-with` the previous image when available) | serial dev loop. **Must include otadata**, or a device that last booted `ota_1` keeps running the old image |
-| `identity` | `fr_ident` only | rename, new Wi-Fi, new hub host, without touching firmware |
+| `identity` | `fr_ident` only, at the offset of the device's artifact or its last provision record | rename, new Wi-Fi, new hub host, without touching firmware |
 | `recover` | `full` + identity restored from the registry | after `erase-flash` or third-party flashing |
+
+- `flash_start` names the board by `device` (a selector matching one device) or `port`, exactly one ([09 §9.4](09-agent-api.md)); `profile` defaults to the registry's. `identity` and `recover` need a provisioned device (`NOT_FOUND` otherwise).
+- Whether `full` writes or erases `fr_ident` is decided again when the job holds the port and device locks, not when it is queued: a provisioning queued ahead of it may have registered the board meanwhile. The request-time decision serves only dry runs and early validation.
+- Every plan that writes `fr_ident` renders it fresh (same `addr` and alias, `net` from the network record, `epoch_floor = last_epoch + 1`, a new `prov_ts`) and stores a provision record (`device_get` `provision`). Dry runs show the plan, the `ident` region and the `identity` (addr, alias, net, hub host), never the image.
 
 **Adopting foreign devices.** A node flashed by plain `idf.py flash` has no `fr_ident`.
 - It boots as `UNASSIGNED` (`0xFFFE`, HELLO `caps.b5 provisioned = 0`).
-- It uses Kconfig dev-fallback Wi-Fi credentials if present.
-- The hub lists it as *pending adoption*. In M1 the only way to adopt it is to reprovision it over USB (`fr devices provision`, plan `full`). Adoption over the link (`device_adopt`, trust on first use, lab only), which writes `addr`, `net` and the alias into `fr_ovr`, is M2.
+- It uses the Kconfig dev-fallback Wi-Fi credentials and hub host if set (`CONFIG_FR_DEV_WIFI_SSID`, `CONFIG_FR_DEV_WIFI_PASS`, `CONFIG_FR_DEV_HUB_HOST`, in `sdkconfig.local`; empty by default). It never uses UDP ([05 §5.5](05-network.md)).
+- The hub registers it on its first HELLO as a row with `provisioned: false` and `addr: null` (§6.3) and WELCOMEs it, so it can be commanded. In M1 the only way to adopt it is to reprovision it over USB (`fr devices provision`, plan `full`). Adoption over the link (`device_adopt`, trust on first use, lab only), which writes `addr`, `net` and the alias into `fr_ovr`, is M2.
 
 ## 6.5 OTA transports
 

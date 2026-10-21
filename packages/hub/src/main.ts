@@ -8,12 +8,17 @@ import { fileURLToPath } from 'node:url';
 import { idfStatus, paths, pytoolsStatus, readIdfLock, type IdfStatus, type PytoolsStatus } from '@fractonica/host';
 import { HUB_API_PORT, HUB_VERSION, REGISTRY_HASH } from '@fractonica/protocol';
 
-import { nextHubRun, openDb } from './db.ts';
-import { FrameDecoder } from './frames.ts';
+import { nextHubEpoch, nextHubRun, openDb } from './db.ts';
+import { createEvents } from './events/index.ts';
 import { buildServer } from './http.ts';
 import { JobRunner } from './jobs.ts';
+import { NODE_LINK_PORT, SerialFrameTap, SleepGuard } from './links/index.ts';
 import { holdPort, runningHubPid, writePidfile } from './lock.ts';
 import { LogStore } from './logstore.ts';
+import { createRegistry, sweepIdentAtStart } from './registry/index.ts';
+import { RingRetention } from './ring.ts';
+import { createRouter } from './router/index.ts';
+import { CursorSeq } from './seq.ts';
 import { SerialPortManager } from './serial.ts';
 
 const HOST = '127.0.0.1';
@@ -25,6 +30,12 @@ function arg(name: string, fallback: string): string {
 
 async function main(): Promise<void> {
   const port = Number(arg('--port', String(HUB_API_PORT)));
+  // TCP and UDP for node links (spec 08 §8.10). Other values only for a second hub in a test setup (with
+  // FR_HOME elsewhere): `--node-host 127.0.0.1` keeps it to loopback FakeNodes, and `--no-serial` leaves
+  // the USB ports, which belong to the running hub, alone.
+  const nodePort = Number(arg('--node-port', String(NODE_LINK_PORT)));
+  const nodeHost = arg('--node-host', '0.0.0.0');
+  const useSerial = !process.argv.includes('--no-serial');
   mkdirSync(paths.home(), { recursive: true });
   // Single instance: hold the API address before opening hub.db or any serial port.
   const guard = await holdPort(HOST, port);
@@ -38,13 +49,39 @@ async function main(): Promise<void> {
   }
   const lock = writePidfile(paths.lock());
   process.on('exit', () => lock.release()); // also on a failed start and the stop backstop
+  // fr_ident renders (with the Wi-Fi password) a killed hub left behind: nobody's now, before any job runs.
+  const swept = sweepIdentAtStart();
+  if (swept.length) {
+    console.log(JSON.stringify({ event: 'ident_renders_removed', count: swept.length }));
+  }
 
   const hubSourceDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
   const db = openDb(paths.db());
   const run = nextHubRun(db);
-  const logs = new LogStore(db, run, { frames: new FrameDecoder(db) });
+  const hubEpoch = nextHubEpoch(db);
+  // One cursor space for logs and events (spec 08 §8.7).
+  const seq = new CursorSeq(db);
+  // Every `@fr1:` line passes the log store's frame decoder: the tap there feeds the serial node link.
+  const frames = new SerialFrameTap(db);
+  const logs = new LogStore(db, run, { frames, seq });
   const serial = new SerialPortManager(logs, db);
   const jobs = new JobRunner(db);
+  const registry = createRegistry(db);
+  const events = createEvents(db, seq, run);
+  const eventsRing = new RingRetention(db, 'events', () => seq.head());
+  const sleepGuard = new SleepGuard();
+  const router = createRouter({
+    db,
+    logs,
+    serial,
+    seq,
+    registry,
+    events,
+    hubEpoch,
+    links: { host: nodeHost, tcpPort: nodePort, udpPort: nodePort },
+    onSessions: (n) => sleepGuard.update(n),
+  });
+  frames.attach((device, line) => router.serialLine(device, line));
 
   let idf: IdfStatus | null = null;
   let pytools: PytoolsStatus | null = null;
@@ -61,13 +98,32 @@ async function main(): Promise<void> {
   const envTimer = setInterval(() => void refreshEnv().catch(() => undefined), 60_000);
 
   const app = buildServer(
-    { db, logs, serial, jobs, startedAt: Date.now(), hubSourceDir, idf: () => idf, pytools: () => pytools },
+    {
+      db,
+      logs,
+      serial,
+      jobs,
+      startedAt: Date.now(),
+      hubSourceDir,
+      idf: () => idf,
+      pytools: () => pytools,
+      seq,
+      registry,
+      router,
+      events,
+      hubEpoch,
+    },
     port,
   );
   await new Promise<void>((r) => guard.close(() => r()));
   await app.listen({ host: HOST, port });
-  serial.start(); // only once this process owns the address
-  console.log(JSON.stringify({ event: 'listening', version: HUB_VERSION, registry_hash: REGISTRY_HASH, port, run, pid: process.pid }));
+  if (useSerial) {
+    serial.start(); // only once this process owns the address
+  }
+  await events.start();
+  eventsRing.start();
+  await router.start(); // node links (TCP/UDP :7421) once the API is up
+  console.log(JSON.stringify({ event: 'listening', version: HUB_VERSION, registry_hash: REGISTRY_HASH, port, node_port: nodePort, ...(useSerial ? {} : { serial: false }), run, hub_epoch: hubEpoch, pid: process.pid }));
 
   let stopping = false;
   const stop = async (signal: string) => {
@@ -83,7 +139,12 @@ async function main(): Promise<void> {
     // kills their build groups and sidecars, and lets them record "cancelled" while the db is open.
     jobs.cancelAll();
     await app.close().catch(() => undefined);
+    await Promise.resolve(router.stop()).catch(() => undefined);
+    frames.attach(null);
+    sleepGuard.stop();
     await serial.stop().catch(() => undefined);
+    eventsRing.stop();
+    await Promise.resolve(events.stop()).catch(() => undefined);
     logs.close();
     db.close();
     process.exit(0);

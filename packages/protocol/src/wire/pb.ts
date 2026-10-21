@@ -21,6 +21,8 @@ export const DECODE_ERRORS = [
   'too_short',
   'bad_crc',
   'line_too_long',
+  'unsupported_ext',
+  'bad_ext',
 ] as const;
 
 export type DecodeError = (typeof DECODE_ERRORS)[number];

@@ -15,7 +15,7 @@
 
 namespace fr::proto {
 
-// DirectoryEntry (protocol type; array element only).
+// DirectoryEntry (protocol type).
 struct DirectoryEntry {
     uint16_t addr = 0;
     std::span<const uint8_t> mac{};
@@ -25,6 +25,35 @@ struct DirectoryEntry {
 size_t encode(const DirectoryEntry &v, fr::wire::Writer &w);
 std::expected<DirectoryEntry, fr::wire::DecodeErr> decode_directory_entry(std::span<const uint8_t> in);
 bool operator==(const DirectoryEntry &a, const DirectoryEntry &b);
+
+// DescriptorCap (protocol type).
+struct DescriptorCap {
+    uint8_t port = 0;
+    uint16_t cap_id = 0;
+    uint16_t version = 0;  // major << 8 | minor
+    std::string_view name{};
+    std::span<const uint8_t> traits{};  // the capability's encoded <Cap>Traits
+
+    static constexpr size_t kMaxSize = 62;
+};
+size_t encode(const DescriptorCap &v, fr::wire::Writer &w);
+std::expected<DescriptorCap, fr::wire::DecodeErr> decode_descriptor_cap(std::span<const uint8_t> in);
+bool operator==(const DescriptorCap &a, const DescriptorCap &b);
+
+// Descriptor (protocol type).
+struct Descriptor {
+    uint8_t frame_version = 1;
+    std::span<const uint8_t> fw_id_prefix{};
+    uint32_t catalog_hash = 0;
+    std::string_view profile{};
+    std::string_view board{};
+    fr::proto::Array<DescriptorCap, 16> caps{};
+
+    static constexpr size_t kMaxSize = 1109;
+};
+size_t encode(const Descriptor &v, fr::wire::Writer &w);
+std::expected<Descriptor, fr::wire::DecodeErr> decode_descriptor(std::span<const uint8_t> in);
+bool operator==(const Descriptor &a, const Descriptor &b);
 
 // NET.WELCOME
 struct NetWelcome {

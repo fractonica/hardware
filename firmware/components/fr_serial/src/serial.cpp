@@ -21,13 +21,17 @@ namespace {
 
 constexpr const char *TAG = "fr_serial";
 constexpr uint32_t kUsjBuffer = 4096;
-// The frame ring also carries diag responses (up to a full 2048-character line), so it holds a few.
+// The frame ring also carries diag responses and bulk ENV frames (up to a full 2048-character line), so
+// it holds a few.
 constexpr size_t kFrameRingBytes = 8192;
 constexpr size_t kLogRingBytes = 4096;
 /** Longest record: a full line plus its '\n'. */
 constexpr size_t kMaxRecord = wire::kMaxLine + 1;
 /** Longest log line kept whole; the ready banner with long alias/board/version strings is ~330. */
 constexpr size_t kLogLine = 384;
+/** Largest ENV body write_frame encodes: a bulk envelope (spec 05 §5.6 MTU), whose line still fits kMaxLine. */
+constexpr size_t kMaxFrameBody = 1470;
+static_assert(wire::kLinePrefix.size() + wire::base64url_len(kMaxFrameBody + 3) <= wire::kMaxLine);
 constexpr UBaseType_t kPrio = 9;
 // A host that stops reading must cost the writer at most this per line, and producers nothing.
 constexpr TickType_t kWriteTimeout = pdMS_TO_TICKS(20);
@@ -280,15 +284,20 @@ bool write_line(std::string_view line)
 
 bool write_frame(uint8_t type, std::span<const uint8_t> body)
 {
-    // Called on the core task for every frame, so the line lives on its stack, sized for the largest
-    // envelope the node builds (EnvelopeLink: 505 B); anything longer is dropped and counted.
-    char line[wire::kLinePrefix.size() + wire::base64url_len(512 + 3)];
+    // The core task is the only caller (fr_net's serial link), so one static line serves every frame; a
+    // bulk envelope's ~2 KB line would not belong on its stack. Anything longer is dropped and counted.
+    static char line[wire::kLinePrefix.size() + wire::base64url_len(kMaxFrameBody + 3)];
     size_t n = wire::encode_line(type, body, line);
     if (n == 0) {
         s_frames.drop();
         return false;
     }
     return write_line({line, n});
+}
+
+bool connected()
+{
+    return usb_serial_jtag_is_connected();
 }
 
 Stats stats()

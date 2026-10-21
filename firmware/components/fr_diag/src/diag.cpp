@@ -118,6 +118,56 @@ bool parse_board_port(std::string_view s, uint8_t &out)
 
 // ---- info, caps ----
 
+void add_ip(cJSON *obj, const char *key, const uint8_t (&ip)[4])
+{
+    char text[16];
+    std::snprintf(text, sizeof(text), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    cJSON_AddStringToObject(obj, key, text);
+}
+
+/** `info` (09 §9.7 planned addition): hub link states, the hub address and the Wi-Fi association. */
+void add_link_states(cJSON *res, const NetStatus &n)
+{
+    cJSON *links = cJSON_AddObjectToObject(res, "links");
+    for (size_t i = 0; i < kLinks; ++i) {
+        const LinkStatus &l = n.links[i];
+        cJSON *o = cJSON_AddObjectToObject(links, kLinkNames[i]);
+        cJSON_AddBoolToObject(o, "up", l.up);
+        if (i == 2) {
+            cJSON_AddBoolToObject(o, "ok", l.udp_ok);  // UDP rides the TCP session; udp_ok is its state
+        } else {
+            cJSON_AddBoolToObject(o, "session", l.session);
+            cJSON_AddBoolToObject(o, "synced", l.time_synced);
+        }
+    }
+    cJSON *hub = cJSON_AddObjectToObject(res, "hub");
+    cJSON_AddBoolToObject(hub, "link", n.hub_link);
+    cJSON_AddNumberToObject(hub, "epoch", n.hub_epoch);
+    cJSON_AddStringToObject(hub, "host", n.hub_host);
+    add_ip(hub, "ip", n.hub_ip);
+    cJSON *wifi = cJSON_AddObjectToObject(res, "wifi");
+    cJSON_AddBoolToObject(wifi, "up", n.wifi_up);
+    if (n.wifi_started) {
+        char bssid[18];
+        std::snprintf(bssid, sizeof(bssid), "%02x:%02x:%02x:%02x:%02x:%02x", n.bssid[0], n.bssid[1], n.bssid[2],
+                      n.bssid[3], n.bssid[4], n.bssid[5]);
+        cJSON_AddStringToObject(wifi, "ssid", n.ssid);
+        cJSON_AddNumberToObject(wifi, "ch", n.channel);
+        cJSON_AddStringToObject(wifi, "bssid", bssid);
+        cJSON_AddNumberToObject(wifi, "rssi", n.rssi);
+        add_ip(wifi, "ip", n.ip);
+        cJSON_AddBoolToObject(wifi, "override", n.net_override);
+        if (n.net_trial) {
+            cJSON_AddBoolToObject(wifi, "trial", true);
+        }
+    }
+    if (n.hub_link_dropped || n.udp_blocked) {
+        cJSON *hooks = cJSON_AddObjectToObject(res, "hooks");
+        cJSON_AddBoolToObject(hooks, "drop_hub_link", n.hub_link_dropped);
+        cJSON_AddBoolToObject(hooks, "udp_block", n.udp_blocked);
+    }
+}
+
 Fail cmd_info(std::string_view, Host &host, cJSON *res, size_t)
 {
     const fr_identity_t &id = host.identity();
@@ -144,6 +194,7 @@ Fail cmd_info(std::string_view, Host &host, cJSON *res, size_t)
     cJSON_AddStringToObject(res, "reset", reset_reason());
     cJSON_AddStringToObject(res, "slot", running != nullptr ? running->label : "?");
     cJSON_AddBoolToObject(res, "inject_enabled", FR_TEST_HOOKS != 0);
+    add_link_states(res, host.net_status());
     return ok;
 }
 
@@ -262,7 +313,7 @@ Fail run_call(Host &host, std::string_view inst, std::string_view cmd, cJSON *ar
         cJSON_Delete(args);
         return fail("unsupported", "unknown command");
     }
-    uint8_t buf[cap::Reply::kCapacity];
+    uint8_t buf[cap::Reply::kRealtimeCapacity];
     wire::Writer w(buf, sizeof(buf));
     uint8_t cmd_id = 0;
     Status enc = cap::encode_args_json(p->cap->cap_id(), cmd_name, args, &cmd_id, w);
@@ -275,7 +326,7 @@ Fail run_call(Host &host, std::string_view inst, std::string_view cmd, cJSON *ar
     }
 
     ++s_calls;
-    cap::Reply reply;
+    cap::StaticReply<> reply;
     Status st = p->ok ? p->cap->dispatch(cmd_id, w.bytes(), reply) : Status{std::unexpected(Err::failed)};
     cJSON_AddStringToObject(res, "status", status_name(st));
     cJSON *fields = st ? cap::decode_to_json(p->cap->cap_id(), wire::kClsResult, cmd_id, reply.bytes()) : nullptr;
@@ -417,6 +468,41 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t)
     cJSON_AddNumberToObject(res, "env_bad", r.env_bad);
     cJSON_AddNumberToObject(res, "rx_dropped", r.rx_dropped);
     cJSON_AddNumberToObject(res, "posts_dropped", r.posts_dropped);
+    // Hub link counters (09 §9.7: per boot, kept across hub-link drops).
+    NetStatus n = host.net_status();
+    cJSON *links = cJSON_AddObjectToObject(res, "links");
+    for (size_t i = 0; i < kLinks; ++i) {
+        const LinkStatus &l = n.links[i];
+        cJSON *o = cJSON_AddObjectToObject(links, kLinkNames[i]);
+        cJSON_AddNumberToObject(o, "tx", l.tx);
+        cJSON_AddNumberToObject(o, "tx_fail", l.tx_fail);
+        cJSON_AddNumberToObject(o, "rx", l.rx);
+        cJSON_AddNumberToObject(o, "rx_drop", l.rx_drop);
+        cJSON_AddNumberToObject(o, "retries", l.retries);
+    }
+    cJSON_AddNumberToObject(res, "events_dropped", n.events_dropped);
+    cJSON_AddNumberToObject(res, "delivery_failed", n.delivery_failed);
+    cJSON_AddNumberToObject(res, "cmds_refused", n.cmds_refused);
+    cJSON_AddNumberToObject(res, "dup", n.dup);
+    cJSON_AddNumberToObject(res, "old", n.old);
+    cJSON_AddNumberToObject(res, "cached_replies", n.cached_replies);
+    cJSON_AddNumberToObject(res, "sessions_lost", n.sessions_lost);
+    cJSON_AddNumberToObject(res, "sessions_timed_out", n.sessions_timed_out);
+    cJSON_AddNumberToObject(res, "wifi_disconnects", n.wifi_disconnects);
+    cJSON_AddNumberToObject(res, "wifi_last_reason", n.wifi_last_reason);
+    cJSON_AddNumberToObject(res, "tcp_connects", n.tcp_connects);
+    cJSON_AddNumberToObject(res, "tcp_closes", n.tcp_closes);
+    // Why each close happened (09 §9.7 diagnosis of a reconnect; the log has one line per close).
+    cJSON_AddNumberToObject(res, "tcp_close_peer", n.tcp_close_peer);
+    cJSON_AddNumberToObject(res, "tcp_close_keepalive", n.tcp_close_keepalive);
+    cJSON_AddNumberToObject(res, "tcp_close_error", n.tcp_close_error);
+    cJSON_AddNumberToObject(res, "tcp_close_session", n.tcp_close_session);
+    cJSON_AddNumberToObject(res, "tcp_close_wifi", n.tcp_close_wifi);
+    cJSON_AddNumberToObject(res, "tcp_last_errno", n.tcp_last_errno);
+    cJSON_AddNumberToObject(res, "tcp_tx_dropped", n.tcp_tx_dropped);
+    cJSON_AddNumberToObject(res, "tcp_rx_bad", n.tcp_rx_bad);
+    cJSON_AddNumberToObject(res, "udp_tx_fail", n.udp_tx_fail);
+    cJSON_AddNumberToObject(res, "hook_dropped", n.hook_dropped);
     if (opt == "reset") {
         // The response carries the counts that were cleared.
         serial::reset_stats();
@@ -440,6 +526,42 @@ Fail cmd_reboot(std::string_view args, Host &host, cJSON *, size_t)
     return ok;
 }
 
+// ---- net (debug hooks) ----
+
+Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
+{
+#if FR_TEST_HOOKS
+    constexpr uint32_t kMaxSeconds = 86400;
+    std::string_view name = next_word(args);
+    std::string_view secs = next_word(args);
+    NetHook hook;
+    if (name == "drop_hub_link") {
+        hook = NetHook::drop_hub_link;
+    } else if (name == "udp_block") {
+        hook = NetHook::udp_block;
+    } else {
+        return fail("invalid_args", "usage: net drop_hub_link|udp_block <seconds>");
+    }
+    uint32_t s = 0;
+    auto [end, ec] = std::from_chars(secs.data(), secs.data() + secs.size(), s);
+    if (secs.empty() || ec != std::errc{} || end != secs.data() + secs.size() || s > kMaxSeconds || !args.empty()) {
+        return fail("invalid_args", "usage: net drop_hub_link|udp_block <seconds> (0-86400; 0 ends it)");
+    }
+    Status st = host.net_hook(hook, s);
+    if (!st) {
+        return fail(err_name(st.error()));
+    }
+    cJSON_AddStringToObject(res, "hook", hook == NetHook::drop_hub_link ? "drop_hub_link" : "udp_block");
+    cJSON_AddNumberToObject(res, "s", s);
+    return ok;
+#else
+    (void)args;
+    (void)host;
+    (void)res;
+    return fail("unsupported", "test hooks are off in this build");
+#endif
+}
+
 struct Command {
     const char *name;
     /** `room`: characters the response JSON may take (after any `#<id> `), for commands that page. */
@@ -449,7 +571,7 @@ struct Command {
 constexpr Command kCommands[] = {
     {"info", cmd_info},         {"caps", cmd_caps}, {"call", cmd_call},   {"inject", cmd_inject},
     {"selftest", cmd_selftest}, {"mark", cmd_mark}, {"log", cmd_log},     {"stats", cmd_stats},
-    {"reboot", cmd_reboot},
+    {"reboot", cmd_reboot},     {"net", cmd_net},
 };
 
 /** `#<id> ` prefix: 1-8 decimal digits. Returns the id text (empty when absent); false if malformed. */

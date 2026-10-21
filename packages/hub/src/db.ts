@@ -17,9 +17,33 @@ const MIGRATIONS = [
      build_id TEXT PRIMARY KEY, source_dir TEXT NOT NULL, profile TEXT NOT NULL, build_type TEXT NOT NULL,
      fw_id TEXT NOT NULL, built_at TEXT NOT NULL, manifest_path TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS networks (
-     id INTEGER PRIMARY KEY CHECK (id = 1), ssid TEXT NOT NULL, bssid TEXT, country TEXT, updated_at TEXT NOT NULL)`,
+     id INTEGER PRIMARY KEY CHECK (id = 1), ssid TEXT NOT NULL, bssid TEXT, country TEXT, updated_at TEXT NOT NULL,
+     net_id INTEGER CHECK (net_id BETWEEN 1 AND 65535), hub_host TEXT)`,
   `CREATE TABLE IF NOT EXISTS ports_seen (
      usb_serial TEXT PRIMARY KEY, last_path TEXT NOT NULL, vid TEXT, pid TEXT, last_seen TEXT NOT NULL)`,
+  // The registry (spec 08 §8.8, design c3 §4): columns as context.ts Device, tags a JSON array, provision
+  // the JSON provision record (never a secret). addr is NULL until provisioned and never reused; alias
+  // and addr are unique.
+  `CREATE TABLE IF NOT EXISTS devices (
+     device_id TEXT PRIMARY KEY, addr INTEGER UNIQUE CHECK (addr BETWEEN 1 AND 61439),
+     alias TEXT NOT NULL UNIQUE COLLATE NOCASE, alias_rev INTEGER NOT NULL DEFAULT 0,
+     net INTEGER, board TEXT, profile TEXT, chip TEXT, tags TEXT NOT NULL DEFAULT '[]',
+     role TEXT NOT NULL DEFAULT 'node' CHECK (role IN ('node', 'gateway')), fw_id TEXT,
+     provisioned INTEGER NOT NULL DEFAULT 0, last_seen TEXT, last_epoch INTEGER, created_at TEXT NOT NULL,
+     provision TEXT)`,
+  // Hub events (spec 08 §8.7): a ring in the cursor space it shares with logs (seq.ts, ring.ts).
+  `CREATE TABLE IF NOT EXISTS events (
+     seq INTEGER PRIMARY KEY, run INTEGER NOT NULL, ts_us INTEGER NOT NULL, t_hub_us INTEGER NOT NULL,
+     type TEXT NOT NULL, device TEXT, json TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS events_device ON events(device, seq)`,
+  `CREATE INDEX IF NOT EXISTS events_type ON events(type, seq)`,
+];
+
+/** Columns added to tables that earlier hubs created (CREATE TABLE IF NOT EXISTS leaves those as they were). */
+const ADDED_COLUMNS: { table: string; column: string; decl: string }[] = [
+  // C3: the network id nodes are provisioned with and the hub's mDNS name (network.ts fills both).
+  { table: 'networks', column: 'net_id', decl: 'INTEGER CHECK (net_id BETWEEN 1 AND 65535)' },
+  { table: 'networks', column: 'hub_host', decl: 'TEXT' },
 ];
 
 export function openDb(file: string): Db {
@@ -28,6 +52,12 @@ export function openDb(file: string): Db {
   db.pragma('synchronous = NORMAL');
   for (const sql of MIGRATIONS) {
     db.exec(sql);
+  }
+  for (const { table, column, decl } of ADDED_COLUMNS) {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!columns.some((c) => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+    }
   }
   return db;
 }
@@ -41,20 +71,38 @@ export function kvSet(db: Db, k: string, v: string): void {
   db.prepare('INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, v);
 }
 
-/**
- * Increments and returns the hub run counter (part of every cursor). The bump is fsynced (spec 08
- * §8.7): with WAL + synchronous=NORMAL a power loss could roll it back and let a reused run number
- * silently re-base old cursors. FULL syncs the WAL on commit; fullfsync makes that F_FULLFSYNC on macOS.
- */
-export function nextHubRun(db: Db): number {
-  const run = Number(kvGet(db, 'hub_run') ?? '0') + 1;
+/** Writes a kv value and syncs it to the disk before returning: FULL syncs the WAL on commit, and
+ * fullfsync makes that F_FULLFSYNC on macOS. */
+function kvSetDurable(db: Db, k: string, v: string): void {
   db.pragma('synchronous = FULL');
   db.pragma('fullfsync = ON');
   try {
-    kvSet(db, 'hub_run', String(run));
+    kvSet(db, k, v);
   } finally {
     db.pragma('fullfsync = OFF');
     db.pragma('synchronous = NORMAL');
   }
+}
+
+/**
+ * Increments and returns the hub run counter (part of every cursor). The bump is fsynced (spec 08
+ * §8.7): with WAL + synchronous=NORMAL a power loss could roll it back and let a reused run number
+ * silently re-base old cursors.
+ */
+export function nextHubRun(db: Db): number {
+  const run = Number(kvGet(db, 'hub_run') ?? '0') + 1;
+  kvSetDurable(db, 'hub_run', String(run));
   return run;
+}
+
+/**
+ * Increments and returns the hub epoch, the `epoch` of every hub frame (05 §5.8): a u16 that skips 0
+ * when it wraps, so 0 can mean "no hub yet" on a node. Fsynced like the run counter: a rolled-back
+ * epoch would let a node's window take this run's frames for replays of the last run's.
+ */
+export function nextHubEpoch(db: Db): number {
+  const prev = Number(kvGet(db, 'hub_epoch') ?? '0');
+  const epoch = Number.isInteger(prev) && prev >= 0 && prev < 0xffff ? prev + 1 : 1;
+  kvSetDurable(db, 'hub_epoch', String(epoch));
+  return epoch;
 }

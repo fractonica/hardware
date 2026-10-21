@@ -22,12 +22,14 @@ enum class DecodeErr : uint8_t {
     bad_utf8,
     bad_magic,        // header magic_ver != 0xA1
     bad_flags,        // ACK_REQ together with LATEST
-    unsupported,      // FRAG/EXT/SEC (not in C2)
+    unsupported,      // FRAG/SEC (not implemented)
     no_prefix,        // serial line without "@fr1:"
     bad_base64,
     too_short,        // serial frame shorter than type + CRC
     bad_crc,
     line_too_long,    // serial line beyond 2048 characters
+    unsupported_ext,  // an EXT TLV of an unknown critical type (>= 0x80)
+    bad_ext,          // a known EXT TLV whose length is not its value size
 };
 
 const char *decode_err_name(DecodeErr e);
@@ -111,6 +113,8 @@ public:
     /** Inserts the minimal length varint before what was written since begin_len. */
     void end_len(LenMark m);
 
+    /** Marks the output unusable, as an overflow does: an encoder's way to refuse a malformed value. */
+    void fail() { overflow_ = true; }
     bool overflow() const { return overflow_; }
     size_t size() const { return len_; }
     size_t capacity() const { return cap_; }

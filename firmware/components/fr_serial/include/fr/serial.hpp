@@ -36,8 +36,17 @@ bool start(const Handlers &h);
 /** Queues one line (no terminator) ahead of all log output. Never blocks; false when dropped. */
 bool write_line(std::string_view line);
 
-/** Encodes `body` as an `@fr1:` line of the given type (05 §5.12.3) and queues it like write_line. */
+/**
+ * Encodes `body` as an `@fr1:` line of the given type (05 §5.12.3) and queues it like write_line. Bodies
+ * up to a bulk envelope (1470 B) fit one line. Core task only: the line is built in one static buffer.
+ */
 bool write_frame(uint8_t type, std::span<const uint8_t> body);
+
+/**
+ * Whether a USB host is attached (it sends SOFs), which is what makes the serial ENV channel a hub link
+ * (design c3 §3). True even while no program has the port open; false on a charger.
+ */
+bool connected();
 
 Stats stats();
 void reset_stats();

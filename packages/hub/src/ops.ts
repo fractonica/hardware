@@ -4,29 +4,25 @@ import { randomInt } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { checkSourceDir, paths, pytoolsSource, type IdfStatus, type PytoolsStatus } from '@fractonica/host';
+import { checkSourceDir, paths, pytoolsSource } from '@fractonica/host';
 import { formatCursor, FrError, HUB_VERSION, MAX_WAIT_S, parseCursor, REGISTRY_HASH, type LogLine, type OpName } from '@fractonica/protocol';
 
-import { listArtifacts, loadManifest, newestBuildId } from './artifacts.ts';
+import { listArtifacts } from './artifacts.ts';
 import { runBuild } from './build.ts';
-import type { Db } from './db.ts';
-import { flashPlan, runPytools } from './flash.ts';
-import type { JobCtx, JobRunner } from './jobs.ts';
-import { type LogStore, type StoredLine, toLogLine } from './logstore.ts';
-import { normalizeMac, type SerialPortManager } from './serial.ts';
+import type { Handler, HubContext } from './context.ts';
+import { mintCursor } from './events/index.ts';
+import { hardResetCapturing, runPytools } from './flash.ts';
+import { type StoredLine, toLogLine } from './logstore.ts';
+import { readNetwork, writeNetwork } from './network.ts';
+import { type FlashStartInput, startFlash } from './registry/flashing.ts';
+import { REGISTRY_HANDLERS } from './registry/ops.ts';
+import { diagLinkTarget, diagOverLink } from './router/diag.ts';
+import { routerStatus } from './router/index.ts';
+import { LINKS_HANDLERS } from './router/ops.ts';
+import { normalizeMac } from './serial.ts';
 
-export interface HubContext {
-  db: Db;
-  logs: LogStore;
-  serial: SerialPortManager;
-  jobs: JobRunner;
-  startedAt: number;
-  hubSourceDir: string;
-  idf: () => IdfStatus | null;
-  pytools: () => PytoolsStatus | null;
-}
-
-type Handler = (input: any, hub: HubContext) => Promise<unknown> | unknown;
+// Moved to context.ts (design c3 §4); re-exported for existing importers.
+export type { Handler, HubContext } from './context.ts';
 
 /** Parses `since` and rejects cursors from an earlier hub run (spec 08 §8.7). */
 function sinceSeq(since: string | undefined, hub: HubContext): number | undefined {
@@ -38,7 +34,7 @@ function sinceSeq(since: string | undefined, hub: HubContext): number | undefine
     throw new FrError('INVALID_ARGS', `bad cursor ${since}; expected c:<run>.<seq>`);
   }
   if (c.run !== hub.logs.run) {
-    throw new FrError('HUB_RESTARTED', `cursor ${since} is from an earlier hub run`, { details: { resume_cursor: hub.logs.head() } });
+    throw new FrError('HUB_RESTARTED', `cursor ${since} is from an earlier hub run`, { details: { resume_cursor: mintCursor(hub) } });
   }
   return c.seq;
 }
@@ -71,11 +67,17 @@ function writeSecrets(secrets: Record<string, unknown>): void {
 }
 
 /**
- * Device keys a log selector covers; null means all devices. A selector that matches no attached
- * port still reads a detached device by its key if the store has lines for it; anything else is
- * NOT_FOUND (or AMBIGUOUS_SELECTOR) instead of an empty page or a wait that can never match.
+ * Device keys a log selector covers; null means all devices. A port selector (path, USB serial, id:)
+ * names an attached port; otherwise a registry selector (alias, id:, tag:, chip:, online, ...; 09 §9.2)
+ * names devices, whose ids are their log keys (a USB port's key is the chip MAC, the device id). A
+ * selector that matches neither still reads a detached device by its key if the store has lines for
+ * it; anything else is NOT_FOUND (or AMBIGUOUS_SELECTOR) instead of an empty page or a wait that can
+ * never match.
  */
-export function logDevices(hub: Pick<HubContext, 'serial' | 'logs'>, selector: string | undefined): string[] | null {
+export function logDevices(
+  hub: Pick<HubContext, 'serial' | 'logs'> & Partial<Pick<HubContext, 'registry' | 'router'>>,
+  selector: string | undefined,
+): string[] | null {
   if (!selector || selector === 'all') {
     return null;
   }
@@ -85,12 +87,36 @@ export function logDevices(hub: Pick<HubContext, 'serial' | 'logs'>, selector: s
     if (!(e instanceof FrError) || e.code !== 'NOT_FOUND') {
       throw e;
     }
+    const registered = registryDevices(hub, selector);
+    if (registered?.length) {
+      return registered;
+    }
     const bare = selector.replace(/^(mac|port|id):/, '');
     const key = [normalizeMac(bare), bare.replace('/dev/tty.', '/dev/cu.')].find((k) => hub.logs.hasDevice(k));
     if (key === undefined) {
-      throw e;
+      throw new FrError('NOT_FOUND', `no attached port or registered device matches ${selector}`, {
+        remediation: [
+          { tool: 'port_list', cli: 'fr ports ls' },
+          { tool: 'device_list', cli: 'fr devices ls' },
+        ],
+      });
     }
     return [key];
+  }
+}
+
+/** The device ids a registry selector names; null when it is not one the registry takes (a port path). */
+function registryDevices(hub: Partial<Pick<HubContext, 'registry' | 'router'>>, selector: string): string[] | null {
+  if (!hub.registry) {
+    return null;
+  }
+  try {
+    return hub.registry.resolve(selector, (id) => hub.router?.presence(id) ?? 'unknown').map((d) => d.device_id);
+  } catch (e) {
+    if (e instanceof FrError && (e.code === 'NOT_FOUND' || e.code === 'INVALID_ARGS')) {
+      return null;
+    }
+    throw e;
   }
 }
 
@@ -163,13 +189,13 @@ type CapsPage = { ok?: unknown; caps?: unknown; next?: unknown };
  * fetches every page and answers with the whole list; `caps <from_port>` stays one page. A page that
  * fails is returned as it is; a `next` that does not move forward ends the walk and stays in the answer.
  */
-async function diagCapsAll(hub: HubContext, key: string, first: CapsPage, timeoutS: number): Promise<unknown> {
+async function diagCapsAll(request: (line: string) => Promise<unknown>, first: CapsPage): Promise<unknown> {
   const caps: unknown[] = Array.isArray(first.caps) ? [...first.caps] : [];
   let page = first;
   let after = 0;
   while (page.ok === true && Array.isArray(page.caps) && typeof page.next === 'number' && page.next > after && page.next < 240) {
     after = page.next;
-    page = (await diagRequest(hub, key, `caps ${after}`, timeoutS)) as CapsPage;
+    page = (await request(`caps ${after}`)) as CapsPage;
     if (page?.ok !== true || !Array.isArray(page.caps)) {
       return page;
     }
@@ -177,23 +203,6 @@ async function diagCapsAll(hub: HubContext, key: string, first: CapsPage, timeou
   }
   const { next: _next, ...rest } = first;
   return typeof page.next === 'number' ? { ...rest, caps, next: page.next } : { ...rest, caps };
-}
-
-/** Hard reset through the hub's open port (boot log captured); falls back to esptool if the hub cannot. */
-async function hardResetCapturing(hub: HubContext, key: string, ctx: JobCtx): Promise<'hub' | 'esptool'> {
-  try {
-    await hub.serial.hardReset(key);
-    return 'hub';
-  } catch (e) {
-    ctx.log(`hub reset failed (${(e as Error).message}); resetting with esptool, boot log may be incomplete`, 'event');
-    const lease = await hub.serial.lease(key, `job ${ctx.jobId}`);
-    try {
-      await runPytools({ cmd: 'reset', port: lease.path, mode: 'hard' }, ctx);
-      return 'esptool';
-    } finally {
-      lease.release();
-    }
-  }
 }
 
 export const HANDLERS: Record<OpName, Handler> = {
@@ -215,6 +224,15 @@ export const HANDLERS: Record<OpName, Handler> = {
         warnings.push(`${p.path} is held by ${p.holder ?? 'another program'}`);
       }
     }
+    // Node links (design c3 §4): devices online, sessions per link, udp_blocked and listener warnings.
+    const router = routerStatus(hub.router);
+    warnings.push(...(router?.warnings ?? []));
+    let registered = 0;
+    try {
+      registered = hub.registry?.list().length ?? 0;
+    } catch {
+      // a registry that cannot list yet: the count is unknown, not an error of hub_status
+    }
     return {
       version: HUB_VERSION,
       registry_hash: REGISTRY_HASH,
@@ -226,8 +244,10 @@ export const HANDLERS: Record<OpName, Handler> = {
       idf,
       pytools: py,
       ports: { total: ports.length, open: ports.filter((p) => p.state === 'open').length },
+      devices: { registered, online: hub.router?.online().length ?? 0 },
+      ...(router ? { links: { ...router.links, sessions: router.sessions } } : {}),
       jobs: hub.jobs.counts(),
-      head: hub.logs.head(),
+      head: mintCursor(hub),
       warnings,
     };
   },
@@ -235,24 +255,30 @@ export const HANDLERS: Record<OpName, Handler> = {
   port_list: (_input, hub) => ({ ports: hub.serial.list() }),
 
   network_set: (input: { ssid: string; password?: string; bssid?: string; country?: string }, hub) => {
-    hub.db
-      .prepare('INSERT INTO networks (id, ssid, bssid, country, updated_at) VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET ssid = excluded.ssid, bssid = excluded.bssid, country = excluded.country, updated_at = excluded.updated_at')
-      .run(input.ssid, input.bssid ?? null, input.country ?? null, new Date().toISOString());
+    // net_id is created with the record and kept by later changes; hub_host follows the Mac's name.
+    const net = writeNetwork(hub.db, { ssid: input.ssid, bssid: input.bssid ?? null, country: input.country ?? null });
     if (input.password !== undefined) {
       // Secrets never go into SQLite, results or logs (spec 08 §8.8).
       const secrets = readSecrets();
       secrets.wifi_password = input.password;
       writeSecrets(secrets);
     }
-    return { ssid: input.ssid, bssid: input.bssid ?? null, country: input.country ?? null, password_set: readSecrets().wifi_password !== undefined };
+    return {
+      ssid: net.ssid,
+      bssid: net.bssid,
+      country: net.country,
+      net_id: net.net_id,
+      hub_host: net.hub_host,
+      password_set: readSecrets().wifi_password !== undefined,
+    };
   },
 
   network_get: (_input, hub) => {
-    const row = hub.db.prepare('SELECT ssid, bssid, country, updated_at FROM networks WHERE id = 1').get();
-    if (!row) {
+    const net = readNetwork(hub.db);
+    if (!net) {
       throw new FrError('NOT_FOUND', 'no network stored', { remediation: [{ tool: 'network_set', cli: 'fr net set --ssid <ssid> --password-stdin' }] });
     }
-    return { ...(row as object), password_set: readSecrets().wifi_password !== undefined };
+    return { ...net, password_set: readSecrets().wifi_password !== undefined };
   },
 
   build_start: async (input: { source_dir: string; profile: string; build_type: 'debug' | 'release'; app: string; clean: boolean; wait_s?: number }, hub) => {
@@ -269,58 +295,8 @@ export const HANDLERS: Record<OpName, Handler> = {
     artifacts: listArtifacts(hub.db, { profile: input.profile, buildType: input.build_type, limit: input.limit }),
   }),
 
-  flash_start: async (input: { port: string; build?: string; profile?: string; plan: 'app' | 'full'; dry_run: boolean; wait_s?: number }, hub) => {
-    if (!input.build && !input.profile) {
-      throw new FrError('INVALID_ARGS', 'give --build <build_id> or --profile <profile> (its newest debug artifact is used)', {
-        remediation: [{ tool: 'artifact_list', cli: 'fr artifacts ls' }],
-      });
-    }
-    // Spec 06 §6.4: --build, else the newest debug artifact of (node, profile); a release build is
-    // flashed only by naming it.
-    const buildId = input.build ?? newestBuildId(hub.db, { app: 'node', profile: input.profile!, buildType: 'debug' });
-    if (!buildId) {
-      const release = newestBuildId(hub.db, { app: 'node', profile: input.profile!, buildType: 'release' });
-      throw new FrError('NOT_FOUND', `no debug artifact for profile ${input.profile}`, {
-        ...(release ? { hint: `a release build exists; flash it with --build ${release}` } : {}),
-        remediation: [{ tool: 'build_start', args: { profile: input.profile } }],
-      });
-    }
-    const manifest = loadManifest(hub.db, buildId);
-    const plan = flashPlan(manifest, input.plan);
-    const entry = await hub.serial.resolveWait(input.port);
-    if (input.dry_run) {
-      return { dry_run: true, port: entry.path, device_id: entry.key, build_id: buildId, target: manifest.target, ...plan };
-    }
-    const job = hub.jobs.start('flash', [entry.key], [`port:${entry.key}`, `device:${entry.key}`], async (ctx) => {
-      ctx.stage('lease');
-      const lease = await hub.serial.lease(entry.key, `job ${ctx.jobId}`);
-      try {
-        ctx.log(`flashing ${buildId} (${plan.plan}) to ${lease.path}`, 'event');
-        const t0 = Date.now();
-        // esptool leaves the chip in the stub; the hub resets it after reopening the port so the boot
-        // log (and the `fr: ready` banner) is captured.
-        const res = await runPytools(
-          {
-            cmd: 'flash',
-            port: lease.path,
-            files: plan.files.map((f) => ({ offset: f.offset, path: f.path })),
-            erase: plan.erase.map((e) => ({ offset: e.offset, size: e.size })),
-            after: 'no-reset',
-            // The sidecar refuses with TARGET_MISMATCH before writing if the connected chip differs.
-            expect_chip_id: manifest.chip_id,
-          },
-          ctx,
-        );
-        lease.release();
-        ctx.stage('reset');
-        const reset = await hardResetCapturing(hub, lease.key, ctx);
-        return { device_id: lease.key, port: lease.path, build_id: buildId, fw_id: manifest.fw_id, plan: plan.plan, duration_ms: Date.now() - t0, reset, sidecar: res };
-      } finally {
-        lease.release();
-      }
-    });
-    return startedJob(hub, job.job_id, input.wait_s);
-  },
+  // Device or port, plans app | full | identity | recover; fr_ident comes from the registry (design c3 §4).
+  flash_start: (input: FlashStartInput, hub) => startFlash(input, hub),
 
   device_reset: async (input: { port: string; mode: 'hard' | 'bootloader'; wait_s?: number }, hub) => {
     const entry = await hub.serial.resolveWait(input.port);
@@ -362,7 +338,7 @@ export const HANDLERS: Record<OpName, Handler> = {
     // seq is hub-wide and monotonic across runs, so the last line's seq is a valid resume point in this
     // run even when the line itself was logged in an earlier one (its own cursor would be HUB_RESTARTED).
     const last = rows.at(-1);
-    return { lines, next_cursor: last ? formatCursor({ run: hub.logs.run, seq: last.seq }) : hub.logs.head(), truncated };
+    return { lines, next_cursor: last ? formatCursor({ run: hub.logs.run, seq: last.seq }) : mintCursor(hub), truncated };
   },
 
   wait_for_log: async (input: { selector?: string; pattern: string; regex: boolean; since: string; count: number; timeout_s: number }, hub) => {
@@ -413,22 +389,36 @@ export const HANDLERS: Record<OpName, Handler> = {
         details: { matches: found.map(toLogLine), tail },
       });
     }
-    return { matched, matches: found.map(toLogLine), cursor: hub.logs.head() };
+    return { matched, matches: found.map(toLogLine), cursor: mintCursor(hub) };
   },
 
   diag_exec: async (input: { port: string; line: string; timeout_s: number }, hub) => {
     if (/[\r\n]/.test(input.line)) {
       throw new FrError('INVALID_ARGS', 'line must be one line (no CR or LF)');
     }
-    const { key } = await hub.serial.resolveWait(input.port);
-    const from = hub.logs.headSeq();
-    let response = await diagRequest(hub, key, input.line, input.timeout_s);
+    // A device whose USB port the hub does not hold open (on a charger, leased) but that has a hub link
+    // gets the same line as fr.diag.exec over its session (design c3 §4); otherwise the serial channel.
+    const linked = diagLinkTarget(hub, input.port);
+    let via = 'serial';
+    let request: (line: string) => Promise<unknown>;
+    if (linked) {
+      request = async (line) => {
+        const r = await diagOverLink(hub, linked, line, input.timeout_s);
+        via = r.link;
+        return r.response;
+      };
+    } else {
+      const { key } = await hub.serial.resolveWait(input.port);
+      request = (line) => diagRequest(hub, key, line, input.timeout_s);
+    }
+    const cursor = mintCursor(hub);
+    let response = await request(input.line);
     if (input.line.trim() === 'caps' && response !== null && typeof response === 'object') {
-      response = await diagCapsAll(hub, key, response as CapsPage, input.timeout_s);
+      response = await diagCapsAll(request, response as CapsPage);
     }
     // The head before the write, not the response line: the device emits the frames a command causes
     // (`inject` -> down/up/click, `mark` -> diag.mark) before it answers, so `since` must precede them.
-    return { response, cursor: formatCursor({ run: hub.logs.run, seq: from }) };
+    return { response, cursor, via };
   },
 
   job_get: (input: { job_id: string }, hub) => hub.jobs.get(input.job_id),
@@ -437,4 +427,8 @@ export const HANDLERS: Record<OpName, Handler> = {
     hub.jobs.logs(input.job_id, input.after_line, input.max_lines, input.errors_only),
   job_list: (input: { limit: number }, hub) => ({ jobs: hub.jobs.list(input.limit) }),
   job_cancel: (input: { job_id: string }, hub) => hub.jobs.cancel(input.job_id),
+
+  // Checkpoint C3 groups (design c3 §4): registry and provisioning (H1), node links, router, events (H2).
+  ...REGISTRY_HANDLERS,
+  ...LINKS_HANDLERS,
 };

@@ -199,6 +199,16 @@ describe('serial port manager', () => {
     expect(lines).toEqual(['invalid header: 0xffffffff', '(previous line repeated 399 more times)', 'ESP-ROM:esp32c6-20220919']);
   });
 
+  it('never collapses identical @fr1 frame lines: each is an envelope for the serial node link', async () => {
+    const { mgr, lines } = rig();
+    await mgr.poll();
+    const port = last();
+    port.finishOpen();
+    // A cached RESULT answering a duplicate request repeats the original byte for byte.
+    port.emit('data', Buffer.from('@fr1:AAECAw\r\n@fr1:AAECAw\r\nnoise\r\nnoise\r\n@fr1:AAECAw\r\n'));
+    expect(lines).toEqual(['@fr1:AAECAw', '@fr1:AAECAw', 'noise', '(previous line repeated 1 more time)', '@fr1:AAECAw']);
+  });
+
   it('splits a ROM banner off the line a reset cut short', async () => {
     const { mgr, lines } = rig();
     await mgr.poll();
@@ -248,7 +258,8 @@ describe('serial port manager', () => {
 });
 
 describe('hub REST envelope', () => {
-  const ctx = { logs: { head: () => 'c:7.42' } } as unknown as HubContext;
+  // Cursors are minted (events/index.ts mintCursor): the head seq of run 7.
+  const ctx = { logs: { run: 7, headSeq: () => 42 } } as unknown as HubContext;
   const app = buildServer(ctx, 7420);
   afterAll(() => app.close());
 

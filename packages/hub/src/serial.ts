@@ -5,7 +5,7 @@
 
 import { StringDecoder } from 'node:string_decoder';
 
-import { FrError, type PortInfo } from '@fractonica/protocol';
+import { FrError, type PortInfo, SERIAL_PREFIX } from '@fractonica/protocol';
 import { run } from '@fractonica/host';
 import { SerialPort } from 'serialport';
 
@@ -51,6 +51,8 @@ interface Entry {
   nextOpenAt: number;
   /** The last stored line and how many identical copies have been held back since `since`. */
   repeat?: { text: string; count: number; since: number };
+  /** onPortGone listeners were told this port is gone; cleared when a poll lists it again. */
+  goneTold?: boolean;
 }
 
 /** "1C:DB:D4:16:BA:34" -> "1cdbd416ba34"; anything else is returned unchanged. */
@@ -88,6 +90,7 @@ export class SerialPortManager {
   #timer: NodeJS.Timeout | null = null;
   #polling = false;
   #lastPoll = 0;
+  #goneListeners = new Set<(key: string) => void>();
 
   constructor(logs: LogStore, db: Db) {
     this.#logs = logs;
@@ -106,6 +109,17 @@ export class SerialPortManager {
     await Promise.all([...this.#entries.values()].map((e) => this.#close(e)));
   }
 
+  /**
+   * Calls `fn` with a port's key as soon as the port is gone (USB unplugged): the first poll that no
+   * longer lists it while the hub holds no open handle on it. An unplug errors the open handle at once,
+   * and that triggers a poll; a port the hub still reads from is not taken for gone over one missed
+   * listing. Once per absence. The router ends the device's serial session with it. Returns the unsubscribe.
+   */
+  onPortGone(fn: (key: string) => void): () => void {
+    this.#goneListeners.add(fn);
+    return () => this.#goneListeners.delete(fn);
+  }
+
   async poll(): Promise<void> {
     if (this.#polling) {
       return;
@@ -118,8 +132,10 @@ export class SerialPortManager {
       }
       this.#lastPoll = now;
       const listed = (await SerialPort.list()).filter((p) => p.vendorId?.toLowerCase() === ESPRESSIF_VID);
+      const present = new Set<string>();
       for (const p of listed) {
         const key = p.serialNumber ? normalizeMac(p.serialNumber) : cuPath(p.path);
+        present.add(key);
         let e = this.#entries.get(key);
         if (!e) {
           this.#gone.delete(key);
@@ -131,11 +147,16 @@ export class SerialPortManager {
         }
         e.path = cuPath(p.path);
         e.lastSeen = now;
+        e.goneTold = false;
         if ((e.state === 'closed' || e.state === 'busy_external' || e.state === 'error') && now >= e.nextOpenAt) {
           this.#open(e);
         }
       }
       for (const e of this.#entries.values()) {
+        if (!present.has(e.key) && !e.goneTold && !(e.state === 'open' && e.port?.isOpen)) {
+          e.goneTold = true;
+          this.#tellGone(e.key);
+        }
         if (e.repeat?.count && now - e.repeat.since >= REPEAT_FLUSH_MS) {
           this.#flushRepeats(e);
         }
@@ -188,7 +209,7 @@ export class SerialPortManager {
       }),
     );
     port.on('data', (chunk: Buffer) => this.#onData(e, chunk));
-    port.on('close', () => {
+    port.on('close', (err?: { disconnected?: boolean } | null) => {
       if (e.port !== port) {
         return; // closed by #close, which settles the entry itself
       }
@@ -198,8 +219,21 @@ export class SerialPortManager {
       }
       e.port = undefined;
       this.#flushPartial(e);
+      if (err?.disconnected) {
+        void this.poll(); // an unplug: tell onPortGone listeners now rather than at the next poll
+      }
     });
     port.on('error', () => undefined);
+  }
+
+  #tellGone(key: string): void {
+    for (const fn of this.#goneListeners) {
+      try {
+        fn(key);
+      } catch (err) {
+        console.error(JSON.stringify({ event: 'port_gone_listener_failed', key, message: (err as Error).message }));
+      }
+    }
   }
 
   #onData(e: Entry, chunk: Buffer): void {
@@ -226,6 +260,15 @@ export class SerialPortManager {
     if (rom > 0) {
       this.#emit(e, text.slice(0, rom));
       this.#emit(e, text.slice(rom));
+      return;
+    }
+    // `@fr1:` lines are envelopes of the serial node link, never collapsed: two identical ones are two
+    // frames (a cached RESULT answering a duplicate request, a resent BYE), and the router decides.
+    if (text.startsWith(SERIAL_PREFIX)) {
+      this.#flushRepeats(e);
+      e.repeat = undefined;
+      e.lines++;
+      this.#logs.append(e.key, e.path, text);
       return;
     }
     // A blank board's ROM prints `invalid header: 0xffffffff` ~400 times a second; store the first

@@ -93,15 +93,21 @@ Steps 3a and 4a, the flash-plan half of 4b, and the `build`/`flash`/`logs`/`wait
 |---|---|---|
 | **C1 flash + monitor** ✅ 2026-10-21 | `fr build`, `fr flash --port <usb-serial> --plan full\|app`, `fr logs` and `fr wait log --json` work on the C3 and C6. A board with no registry row gets no `fr_ident` and boots UNASSIGNED. The node is minimal: it logs its id and `fw_id`. Passed on both boards ([spike note](../spikes/2026-10-21-c1-c3-c6.md)) | — |
 | **C2 local capabilities** ✅ 2026-10-21 on the C6 (`c6-pad`, `c6-pad-mono`) and the C3 (`c3o-pad`) | Button and LED services on real boards, driven through the serial command channel (`call`, `inject`, `selftest`), plus host tests. `fr gen`, `fr diag`, frames decoded in `fr logs` ([spike note](../spikes/2026-10-21-c2-c6-c3.md)) | T-CODEC ✅ (identical golden-vector bytes; 10⁶ fuzz cases per decoder target in C++ and TS, no failure, equal digests) |
-| **C3 hub link** | Registry + provisioning; TCP/UDP HELLO/WELCOME/HEARTBEAT/BYE, presence, `command_send`, `wait_for_event`; the hub side of serial ENV CMDs and `fr.diag.exec`. Plus the items carried from C2 (below) | T-PRES, T-LED |
+| **C3 hub link** ✅ 2026-10-21 on the C3 (`pad-c3`) and the C6 (`pad-c6`) | Registry + provisioning; TCP/UDP HELLO/WELCOME/HEARTBEAT/BYE, presence, `command_send`, `wait_for_event`; the hub side of serial ENV CMDs and `fr.diag.exec`. Plus the items carried from C2: `fr.node.describe` with the `Descriptor` type, a bulk `Reply`, vendored cJSON. Both boards provisioned from blank and online over Wi-Fi ([spike note](../spikes/2026-10-21-c3-hub-link.md)) | T-PRES ✅ (offline 2.76 s after an unplug; immediate on BYE; `udp_blocked` with no false offline), T-LED ✅ (RESULT ok + `effect_done` on both boards; a duplicated `toggle` applied once) |
 | **C4 OTA** | HTTP pull + rollback | T-OTA, T-PROV |
 | **C5 ESP-NOW** | Unicast, bindings, flood seeding | T-NN, T-FLOOD, T-FLOOD-B |
 | **C6 apps and agents** | SDK + demo, dashboard, `fr mcp` + plugin | T-INPUT, T-PORTS, T-AGENT, T-LAT |
 
-**Carried into C3** (open items from C2; [design note §11](../design/c2-local-capabilities.md)):
-- **`fr.node.describe` and the descriptor type.** The node answers `UNSUPPORTED` until the schema gives `describe` a result; the descriptor's `caps` array of structs needs capability fields that use protocol types, or a `bytes` field holding a protobuf-wire `Descriptor` ([07 §7.4](07-capabilities-sdk.md)).
-- **`Reply` capacity for bulk diag over links.** `Reply` holds 200 B (the realtime budget), but `fr.diag.exec` results reach 1,400 B (BULK), so over an ENV link `info` and `caps` answer `FAILED`. Bulk commands need a larger, caller-provided `Reply`, or fragmentation ([09 §9.7](09-agent-api.md)).
-- **cJSON for the host suite on a fresh checkout.** A machine with neither an IDF 5.x install nor the component manager's `espressif/cjson` needs one node build (or `FR_CJSON_DIR`) before `pnpm test:host`. Vendoring cJSON, or a hash-pinned fetch, makes the suite self-contained for CI ([10 §10.4](10-testing.md)).
+The C2 items carried into C3 are resolved: `describe` returns the encoded `Descriptor` ([07 §7.4](07-capabilities-sdk.md)), bulk requests get a 1,445 B `Reply` ([07 §7.7](07-capabilities-sdk.md)), and cJSON is vendored for the host suite ([10 §10.4](10-testing.md)).
+
+**Open after C3** (for later checkpoints; [design note](../design/c3-hub-link.md), [spike note](../spikes/2026-10-21-c3-hub-link.md)):
+- **LNP self-test and the service advert** (C6). The hub's Local Network Privacy self-test and the `_fractonica._tcp` advert are not built; nodes find the hub through `hub_host` ([08 §8.10–8.11](08-hub.md), [05 §5.12.5](05-network.md)).
+- **Provisioning checks.** The probe's chip revision is not checked against the artifact's range, nor the board manifest's PSRAM mode and voltage against what esptool reports ([06 §6.4](06-identity-ota.md)); C3 checks the target and the flash size only. Needed before a PSRAM board (the S3) joins.
+- **TIME t2 on the core task** (T-LAT). `SYNC_RES` `t2` is stamped when `Net::receive` runs on the core task, so it includes the hop from the link task through the network queue ([05 §5.12.4](05-network.md)). T-LAT shows whether a receive-time stamp is needed.
+- **Image size toward OTA** (C4). Wi-Fi, lwIP and mDNS took the app image from 15 % (C2) to 53.5 % of the 1,920 KB slot on the C3 and 59.5 % on the C6; CI warns at 80 % ([06 §6.2](06-identity-ota.md)). C4 adds the HTTP client and `fr_ota`, so measure it there.
+- **FakeRegistry selector semantics.** The hub tests' `FakeRegistry` intersects every positive selector term, unlike the registry's rules (alternatives within a kind, [09 §9.2](09-agent-api.md)), and knows only some atoms. Tests that combine terms of one kind need it aligned with `SqliteRegistry`.
+- **C3 board #1** (`1cdbd416ba34`) is not provisioned yet; it is the node ↔ node partner for C5.
+- **TCP reconnects.** `pad-c3` reconnected twice in 3.5 h on older firmware, cause unknown. The node now logs and counts every TCP close by reason ([05 §5.12.1](05-network.md)); none occurred in the final runs.
 
 ## 11.5 M1 demo script (definition of done)
 

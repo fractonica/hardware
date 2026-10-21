@@ -75,7 +75,7 @@ struct Checker {
         ++count;
         current = name;
         const auto want = frt::from_hex(hex);
-        uint8_t buf[fr::wire::kHeaderSize];
+        uint8_t buf[fr::wire::kMaxHeaderSize];
         Writer w(buf, sizeof(buf));
         fr::wire::pack_header(h, w);
         ok(CHECK_BYTES(w.bytes(), want));

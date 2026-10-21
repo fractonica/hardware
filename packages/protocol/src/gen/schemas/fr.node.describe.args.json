@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:fractonica:schema:fr.node.describe.args",
   "title": "fr.node.describe arguments",
-  "description": "Returns the node descriptor (07 §7.4).",
+  "description": "Returns the node descriptor (07 §7.4), encoded; HELLO descriptor_hash is FNV-1a 32 over it. BULK: TCP or serial only.",
   "type": "object",
   "properties": {},
   "additionalProperties": false

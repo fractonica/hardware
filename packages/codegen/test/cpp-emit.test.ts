@@ -236,7 +236,7 @@ describe('vectors.inc', () => {
     expect(text).toContain('v.error("d", "fr.button.click.event", fr::cap::decode_button_click, "0800", fr::wire::DecodeErr::out_of_range);');
     expect(text).toContain('fr::proto::Empty x{};\n        v.value("e", "fr.led.toggle.args", x, enc, fr::proto::decode_empty, "", true);');
     expect(text).toContain('static constexpr uint8_t b0[] = {0xa0, 0xb1};');
-    expect(text).toContain('x.entries.push_back(e);');
+    expect(text).toContain('x.entries.push_back(e0);');
   });
 
   it('keeps the input line of serial cases and checks their bytes', () => {

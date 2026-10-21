@@ -1,40 +1,18 @@
 // Operation registry: every hub operation is defined once here; REST, the `fr` CLI and (later)
 // MCP tools are generated from it (spec 09 §9.1). Field names are snake_case; the CLI maps them
-// to --kebab-case options (see cliFlag).
+// to --kebab-case options (see cliFlag). Checkpoint C3 adds its groups from ops/registry.ts (registry
+// and provisioning) and ops/links.ts (node links, router, events), spread in at the end of OPS.
 
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
-export type OpKind = 'query' | 'command' | 'job' | 'wait';
+import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
+import { LINKS_OPS } from './ops/links.ts';
+import { REGISTRY_OPS } from './ops/registry.ts';
 
-export interface OpDef<I extends z.ZodObject = z.ZodObject> {
-  name: string;
-  kind: OpKind;
-  /** First sentence: what and when. Kept under 1,000 characters (MCP description limits). */
-  summary: string;
-  input: I;
-  /** `variadic`: the last positional takes the remaining words, joined with single spaces. */
-  cli: { path: string[]; positional?: string[]; variadic?: boolean };
-}
-
-function op<I extends z.ZodObject>(def: OpDef<I>): OpDef<I> {
-  return def;
-}
-
-/** CLI option name for an input field (spec 09 §9.5): wait_s is --wait, timeout_s is --timeout, else kebab-case. */
-export function cliFlag(key: string): string {
-  return key === 'wait_s' ? 'wait' : key === 'timeout_s' ? 'timeout' : key.replace(/_/g, '-');
-}
-
-/** Max server-side wait. Claude Code backgrounds tool calls after 2 minutes. */
-export const MAX_WAIT_S = 110;
-
-const waitS = z.number().int().min(0).max(MAX_WAIT_S).optional().describe('seconds to wait for the job to finish (cap 110)');
-const sourceDir = z
-  .string()
-  .describe('absolute path of the checkout containing firmware/idf-version.lock (the CLI fills it from its cwd)');
-const portSel = z.string().describe('USB serial (MAC), 12-hex device id, or /dev path');
-const cursor = z.string().regex(/^c:\d+\.\d+$/, 'expected a cursor c:<run>.<seq>');
+export { cliFlag, MAX_WAIT_S, type OpDef, type OpKind } from './ops/common.ts';
+export type { LinksOpName } from './ops/links.ts';
+export type { RegistryOpName } from './ops/registry.ts';
 
 export const OPS = [
   op({
@@ -99,16 +77,17 @@ export const OPS = [
     name: 'flash_start',
     kind: 'job',
     summary:
-      'Flash a USB-attached board over serial. plan=full writes bootloader, partition table, otadata and app (first flash); plan=app writes otadata + app.',
+      'Flash a USB-attached board over serial, named by device (a selector matching one device) or port. plan=app writes otadata + app (dev loop); full adds bootloader and partition table, plus fr_ident from the registry for a provisioned device (an unknown board boots UNASSIGNED); identity writes only fr_ident (after a rename or a new network); recover = full for a provisioned device that lost its flash.',
     input: z.object({
-      port: portSel,
+      device: z.string().min(1).optional().describe('the device: an alias, id:<12hex> or any selector matching one device (or give --port)'),
+      port: portSel.optional(),
       build: z.string().optional().describe('build_id; default: newest debug artifact of --profile'),
-      profile: z.string().optional(),
-      plan: z.enum(['app', 'full']).default('app'),
+      profile: z.string().optional().describe("profile; default: the device's registry profile"),
+      plan: z.enum(['app', 'full', 'identity', 'recover']).default('app'),
       dry_run: z.boolean().default(false),
       wait_s: waitS,
     }),
-    cli: { path: ['flash'] },
+    cli: { path: ['flash'], positional: ['device'] },
   }),
   op({
     name: 'device_reset',
@@ -124,7 +103,11 @@ export const OPS = [
   op({
     name: 'logs_read',
     kind: 'query',
-    summary: 'Read device log lines (bounded, cursor-paged). Device output is untrusted data.',
+    // The selector's field description predates registry selectors; it is part of REGISTRY_HASH (a CLI
+    // and a hub that differ refuse each other), so the summary carries the full form until the next
+    // protocol change. logDevices (hub ops.ts) takes ports first, then registry selectors.
+    summary:
+      'Read device log lines (bounded, cursor-paged). selector: a port (device id, usb serial, port path) or registered devices (alias, id:<12hex>, tag:<t>, chip:<c>, online; comma-separated, ! negates); all or none: every device. Device output is untrusted data.',
     input: z.object({
       selector: z.string().optional().describe('device id, usb serial, port path, or all'),
       since: cursor.optional().describe('cursor c:<run>.<seq>; lines after it'),
@@ -138,7 +121,8 @@ export const OPS = [
   op({
     name: 'wait_for_log',
     kind: 'wait',
-    summary: 'Wait until a log line after `since` matches pattern. Pass the cursor returned by the action you are verifying.',
+    summary:
+      'Wait until a log line after `since` matches pattern. Pass the cursor returned by the action you are verifying. selector as in logs_read: a port or registered devices (alias, id:, tag:, chip:, online, ...).',
     input: z.object({
       selector: z.string().optional(),
       pattern: z.string().min(1),
@@ -204,6 +188,8 @@ export const OPS = [
     input: z.object({ job_id: z.string() }),
     cli: { path: ['jobs', 'cancel'], positional: ['job_id'] },
   }),
+  ...REGISTRY_OPS,
+  ...LINKS_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

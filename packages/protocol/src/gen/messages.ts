@@ -11,7 +11,7 @@ const OtaStateNames = $.enumNames(OtaState);
 
 const DIRECTORY_ENTRY_JSON: readonly $.JsonField[] = [{ name: 'addr' }, { name: 'mac', json: 'bytes' }];
 
-/** DirectoryEntry (protocol type; repeated in messages). */
+/** DirectoryEntry (protocol type). */
 export interface DirectoryEntry {
   addr: number;
   /** (<= 6 bytes) */
@@ -52,6 +52,149 @@ export function encodeDirectoryEntry(v: Partial<DirectoryEntry> = {}): Uint8Arra
 export function decodeDirectoryEntry(bytes: Uint8Array): Decoded<DirectoryEntry> {
   const r = new Reader(bytes);
   return $.done(r, readDirectoryEntry(r));
+}
+
+const DESCRIPTOR_CAP_JSON: readonly $.JsonField[] = [{ name: 'port' }, { name: 'cap_id' }, { name: 'version' }, { name: 'name' }, { name: 'traits', json: 'bytes' }];
+
+/** DescriptorCap (protocol type). */
+export interface DescriptorCap {
+  port: number;
+  cap_id: number;
+  /** major << 8 | minor */
+  version: number;
+  /** (<= 31 UTF-8 bytes) */
+  name: string;
+  /** the capability's encoded <Cap>Traits (<= 16 bytes) */
+  traits: Uint8Array;
+}
+
+function writeDescriptorCap(w: Writer, value: unknown, path: string): void {
+  const v = $.obj(value, path) as Partial<DescriptorCap>;
+  const f1 = $.int(v.port ?? 0, 0, 255, `${path}.port`);
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.cap_id ?? 0, 0, 65535, `${path}.cap_id`);
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.version ?? 0, 0, 65535, `${path}.version`);
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.str(v.name ?? '', 31, `${path}.name`);
+  if (f4.length > 0) w.fieldBytes(4, f4);
+  const f5 = $.bytes(v.traits ?? $.EMPTY, 16, `${path}.traits`);
+  if (f5.length > 0) w.fieldBytes(5, f5);
+}
+
+function readDescriptorCap(r: Reader): DescriptorCap {
+  const v: DescriptorCap = { port: 0, cap_id: 0, version: 0, name: '', traits: new Uint8Array(0) };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.port = r.readUint(255);
+        break;
+      case 2:
+        v.cap_id = r.readUint(65535);
+        break;
+      case 3:
+        v.version = r.readUint(65535);
+        break;
+      case 4:
+        v.name = r.readString(31);
+        break;
+      case 5:
+        v.traits = r.readBytes(16).slice();
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return v;
+}
+
+export function encodeDescriptorCap(v: Partial<DescriptorCap> = {}): Uint8Array {
+  const w = new Writer();
+  writeDescriptorCap(w, v, 'descriptor_cap');
+  return w.finish();
+}
+
+export function decodeDescriptorCap(bytes: Uint8Array): Decoded<DescriptorCap> {
+  const r = new Reader(bytes);
+  return $.done(r, readDescriptorCap(r));
+}
+
+const DESCRIPTOR_JSON: readonly $.JsonField[] = [{ name: 'frame_version' }, { name: 'fw_id_prefix', json: 'bytes' }, { name: 'catalog_hash' }, { name: 'profile' }, { name: 'board' }, { name: 'caps', json: DESCRIPTOR_CAP_JSON }];
+
+/** Descriptor (protocol type). */
+export interface Descriptor {
+  /** (default 1) */
+  frame_version: number;
+  /** (<= 8 bytes) */
+  fw_id_prefix: Uint8Array;
+  catalog_hash: number;
+  /** (<= 31 UTF-8 bytes) */
+  profile: string;
+  /** (<= 31 UTF-8 bytes) */
+  board: string;
+  /** (<= 16 items) */
+  caps: DescriptorCap[];
+}
+
+function writeDescriptor(w: Writer, value: unknown, path: string): void {
+  const v = $.obj(value, path) as Partial<Descriptor>;
+  w.fieldUint(1, $.int(v.frame_version ?? 1, 0, 255, `${path}.frame_version`));
+  const f2 = $.bytes(v.fw_id_prefix ?? $.EMPTY, 8, `${path}.fw_id_prefix`);
+  if (f2.length > 0) w.fieldBytes(2, f2);
+  const f3 = $.int(v.catalog_hash ?? 0, 0, 0xffffffff, `${path}.catalog_hash`);
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.str(v.profile ?? '', 31, `${path}.profile`);
+  if (f4.length > 0) w.fieldBytes(4, f4);
+  const f5 = $.str(v.board ?? '', 31, `${path}.board`);
+  if (f5.length > 0) w.fieldBytes(5, f5);
+  {
+    const f6 = $.list(v.caps ?? [], 16, `${path}.caps`);
+    for (let i = 0; i < f6.length; i++) {
+      const m = w.beginLen(6);
+      writeDescriptorCap(w, f6[i], `${path}.caps[${i}]`);
+      w.endLen(m);
+    }
+  }
+}
+
+function readDescriptor(r: Reader): Descriptor {
+  const v: Descriptor = { frame_version: 1, fw_id_prefix: new Uint8Array(0), catalog_hash: 0, profile: '', board: '', caps: [] };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.frame_version = r.readUint(255);
+        break;
+      case 2:
+        v.fw_id_prefix = r.readBytes(8).slice();
+        break;
+      case 3:
+        v.catalog_hash = r.readUint(0xffffffff);
+        break;
+      case 4:
+        v.profile = r.readString(31);
+        break;
+      case 5:
+        v.board = r.readString(31);
+        break;
+      case 6:
+        $.readRepeated(r, v.caps, 16, readDescriptorCap);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return v;
+}
+
+export function encodeDescriptor(v: Partial<Descriptor> = {}): Uint8Array {
+  const w = new Writer();
+  writeDescriptor(w, v, 'descriptor');
+  return w.finish();
+}
+
+export function decodeDescriptor(bytes: Uint8Array): Decoded<Descriptor> {
+  const r = new Reader(bytes);
+  return $.done(r, readDescriptor(r));
 }
 
 /** NET.WELCOME (class 0x00, kind 7). */
@@ -836,6 +979,8 @@ export function decodeTimeSyncRes(bytes: Uint8Array): Decoded<TimeSyncRes> {
 
 export const PROTOCOL_TYPES: readonly $.StructInfo[] = [
   { name: 'DirectoryEntry', codec: { fields: [{ name: 'addr' }, { name: 'mac', json: 'bytes' }], maxSize: 12, encode: encodeDirectoryEntry, decode: decodeDirectoryEntry } },
+  { name: 'DescriptorCap', codec: { fields: [{ name: 'port' }, { name: 'cap_id' }, { name: 'version' }, { name: 'name' }, { name: 'traits', json: 'bytes' }], maxSize: 62, encode: encodeDescriptorCap, decode: decodeDescriptorCap } },
+  { name: 'Descriptor', codec: { fields: [{ name: 'frame_version' }, { name: 'fw_id_prefix', json: 'bytes' }, { name: 'catalog_hash' }, { name: 'profile' }, { name: 'board' }, { name: 'caps', json: DESCRIPTOR_CAP_JSON }], maxSize: 1109, encode: encodeDescriptor, decode: decodeDescriptor } },
 ];
 
 export const MESSAGES: readonly $.MessageInfo[] = [

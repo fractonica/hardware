@@ -22,6 +22,8 @@ import { fuzzCases, fuzzN, fuzzTimeout, hexOf, latin1, reportDigest } from './fu
 
 const N = fuzzN();
 const PINNED_N = 10_000;
+// wire.envelope's pin; it moved when EXT TLVs became supported (design c3 §2).
+const PINNED_ENVELOPE = 0x5956f8bf;
 
 class Digest {
   h = 0x811c9dc5;
@@ -111,6 +113,14 @@ function envelope(input: Uint8Array, d: Digest): void {
   for (const v of [h.seq, h.net, h.src, h.dst, h.epoch]) {
     d.u32(v);
   }
+  // EXT: every TLV in order, unknown non-critical ones included (fr::wire::ExtView iterates the same).
+  if (h.ext) {
+    d.u32(h.ext.length);
+    for (const t of h.ext) {
+      d.u8(t.type);
+      d.u8(t.value.length);
+    }
+  }
   if (p.type === 'time') {
     d.u32(p.t_us);
   } else if (p.type === 'result') {
@@ -174,8 +184,14 @@ const TARGETS: Target[] = [
   {
     name: 'wire.envelope',
     fn: envelope,
-    corpus: [fromHex(`${HEADER} e8 03 00 00`), fromHex('a1 00 05 03 0c 00 00 00 02 01 fe ff 00 00 03 00 22 01 07 00 04 03 02 01 02 08 01'), fromHex('a1 02 04 01 01 00 00 00 00 00 00 00 fe ff 01 00 22 01 08 03')],
-    pinned: 0x460eb7aa,
+    corpus: [
+      fromHex(`${HEADER} e8 03 00 00`),
+      fromHex('a1 00 05 03 0c 00 00 00 02 01 fe ff 00 00 03 00 22 01 07 00 04 03 02 01 02 08 01'),
+      fromHex('a1 02 04 01 01 00 00 00 00 00 00 00 fe ff 01 00 22 01 08 03'),
+      // CMD with EXT: expire_at_us, trace_id and an unknown non-critical TLV.
+      fromHex('a1 82 04 03 05 00 00 00 02 01 00 00 12 00 09 00 22 02 0e 04 04 04 03 02 01 02 04 ef be ad de 10 00 08 01'),
+    ],
+    pinned: PINNED_ENVELOPE,
   },
   {
     name: 'wire.serial_line',

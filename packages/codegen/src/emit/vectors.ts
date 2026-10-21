@@ -4,7 +4,7 @@
 // codecs against these bytes, and the C++ emitter turns the same cases into host tests.
 //
 // VectorCase.value (JSON-safe):
-//   header    {flags, cls, kind, seq, net, src, dst, epoch, ttl, port}
+//   header    {flags, cls, kind, seq, net, src, dst, epoch, ttl, port, ext?: [{type, value: hex}]}
 //   envelope  {header, prefix: {type: 'none'} | {type: 'time', t_us} | {type: 'result', req_epoch, req_seq, status},
 //              body: hex, body_type?: a message or member type, body_value?: its decoded value}
 //   message   the decoded body: every non-optional field (defaults applied), optional fields only when present
@@ -22,6 +22,8 @@
 import {
   CLS,
   encodeSerialLine,
+  EXT,
+  extTlv,
   FLAG,
   packEnvelope,
   packHeader,
@@ -543,6 +545,12 @@ class Builder {
 
 // ---- header ----
 
+/** A header in its JSON form: EXT values as hex. */
+function headerJson(h: Header): Obj {
+  const { ext, ...rest } = h;
+  return ext === undefined ? { ...rest } : { ...rest, ext: ext.map((t) => ({ type: t.type, value: hexOf(t.value) })) };
+}
+
 function hdr(h: Partial<Header> & { cls: number; kind: number }): Header {
   return { flags: 0, seq: 1, net: 0x0102, src: 0x0012, dst: 0x0000, epoch: 3, ttl: 0x22, port: 0, ...h };
 }
@@ -550,9 +558,22 @@ function hdr(h: Partial<Header> & { cls: number; kind: number }): Header {
 // button.down from a fresh node, as in packages/protocol/test/wire.test.ts.
 const BUTTON_DOWN: Header = { flags: FLAG.URGENT, cls: CLS.EVENT, kind: 1, seq: 12, net: 0x0102, src: 0xfffe, dst: 0, epoch: 3, ttl: 0x22, port: 1 };
 
+// A hub CMD with expire_at_us and a trace id (05 §5.6), as the router sends them.
+const CMD_EXT: Header = hdr({
+  flags: FLAG.ACK_REQ | FLAG.EXT,
+  cls: CLS.CMD,
+  kind: 3,
+  seq: 5,
+  src: 0x0000,
+  dst: 0x0012,
+  epoch: 9,
+  port: 2,
+  ext: [extTlv(EXT.EXPIRE_AT_US, 0x01020304), extTlv(EXT.TRACE_ID, 0xdeadbeef)],
+});
+
 function headerCases(b: Builder): void {
   const c = b.header;
-  const add = (name: string, h: Header) => c.add({ name: `header.${name}`, kind: 'header', type: 'header', value: { ...h }, hex: hexOf(packHeader(h)) });
+  const add = (name: string, h: Header) => c.add({ name: `header.${name}`, kind: 'header', type: 'header', value: headerJson(h), hex: hexOf(packHeader(h)) });
   add('button_down', BUTTON_DOWN);
   add('zero', { flags: 0, cls: 0, kind: 0, seq: 0, net: 0, src: 0, dst: 0, epoch: 0, ttl: 0, port: 0 });
   add('max', {
@@ -574,8 +595,31 @@ function headerCases(b: Builder): void {
   c.error('header.error_ack_req_latest', 'header', 'header', withFlags(FLAG.ACK_REQ | FLAG.LATEST), 'bad_flags');
   c.error('header.error_sec', 'header', 'header', withFlags(FLAG.SEC), 'unsupported');
   c.error('header.error_frag', 'header', 'header', withFlags(FLAG.FRAG), 'unsupported');
-  c.error('header.error_ext', 'header', 'header', withFlags(FLAG.EXT | FLAG.URGENT), 'unsupported');
+  c.error('header.error_frag_ext', 'header', 'header', `${withFlags(FLAG.FRAG | FLAG.EXT)}00`, 'unsupported');
   c.error('header.error_truncated', 'header', 'header', base.slice(0, 34), 'truncated');
+
+  // EXT (05 §5.6): known TLVs, an empty block, unknown non-critical TLVs (skipped by len, kept, so the
+  // header packs back to the same bytes), and the refusals.
+  add('ext_expire_at_trace_id', CMD_EXT);
+  add('ext_valid_ms_broadcast', hdr({ flags: FLAG.EXT, cls: CLS.MSG, kind: 0, seq: 77, src: 0x0000, dst: 0xffff, epoch: 9, ext: [extTlv(EXT.VALID_MS, 2000)] }));
+  add('ext_exec_at', hdr({ flags: FLAG.ACK_REQ | FLAG.EXT, cls: CLS.CMD, kind: 1, seq: 6, src: 0x0000, dst: 0x0012, epoch: 9, port: 2, ext: [extTlv(EXT.EXEC_AT_US, 0xffffffff)] }));
+  add('ext_empty', { ...BUTTON_DOWN, flags: FLAG.URGENT | FLAG.EXT, ext: [] });
+  add('ext_unknown_noncritical', {
+    ...BUTTON_DOWN,
+    flags: FLAG.URGENT | FLAG.EXT,
+    ext: [{ type: 0x10, value: Uint8Array.of(0xaa, 0xbb) }, { type: 0x7f, value: new Uint8Array(0) }, extTlv(EXT.TRACE_ID, 7)],
+  });
+  const ext = (block: string) => `${withFlags(FLAG.URGENT | FLAG.EXT)}${block}`;
+  c.error('header.error_ext_no_len', 'header', 'header', withFlags(FLAG.URGENT | FLAG.EXT), 'truncated');
+  c.error('header.error_ext_block_truncated', 'header', 'header', ext('06 0404010203'), 'truncated');
+  c.error('header.error_ext_tlv_overruns_block', 'header', 'header', ext('05 0404010203 04'), 'truncated');
+  c.error('header.error_ext_tlv_header_truncated', 'header', 'header', ext('01 04'), 'truncated');
+  c.error('header.error_ext_unknown_critical', 'header', 'header', ext('03 900100'), 'unsupported_ext');
+  c.error('header.error_ext_unknown_critical_empty', 'header', 'header', ext('02 ff00'), 'unsupported_ext');
+  c.error('header.error_ext_expire_at_short', 'header', 'header', ext('04 04020102'), 'bad_ext');
+  c.error('header.error_ext_valid_ms_long', 'header', 'header', ext('06 030401020304'), 'bad_ext');
+  // TLVs are checked in order: the first refusal wins.
+  c.error('header.error_ext_first_refusal_wins', 'header', 'header', ext('06 9000 04020102'), 'unsupported_ext');
 }
 
 // ---- messages ----
@@ -671,6 +715,27 @@ function messageCases(b: Builder): void {
   }
   if (has(b.model, 'MSG.MSG')) {
     b.value(c, 'message', 'MSG.MSG', 'json', { topic: 'scene', data: hexOf(new TextEncoder().encode('{"mode":"party"}')) });
+  }
+  if (b.model.protocol.types.some((t) => t.name === 'Descriptor')) {
+    const T = 'Descriptor';
+    // A C6 pad (07 §7.4): the two board instances; traits are the capabilities' encoded traits.
+    b.value(c, 'message', T, 'c6_pad', {
+      frame_version: 1,
+      fw_id_prefix: '3f2a9c01b2d40011',
+      catalog_hash: 0x9c1e44a0,
+      profile: 'c6-pad',
+      board: 'esp32c6-supermini',
+      caps: [
+        { port: 1, cap_id: 0x0001, version: 0x0100, name: 'boot', traits: '' },
+        { port: 2, cap_id: 0x0002, version: 0x0100, name: 'status', traits: '08011001' },
+      ],
+    });
+    // frame_version has a non-zero default, so it is always written and 0 differs from absent.
+    b.value(c, 'message', T, 'frame_version_zero', { frame_version: 0 });
+    const cap = '320a 0801 1001 1880 02 2201 61';
+    c.error(`${T}.error_too_many_caps`, 'message', T, cap.repeat(17), 'too_long');
+    c.error(`${T}.error_cap_name_too_long`, 'message', T, `3222 2220 ${'61'.repeat(32)}`, 'too_long');
+    c.error(`${T}.error_cap_truncated`, 'message', T, '3205 0801 1001', 'truncated');
   }
 }
 
@@ -836,6 +901,12 @@ function envelopeSpecs(model: Model): EnvSpec[] {
     body: { type: 'fr.led.blink.args', value: { on_ms: 100, off_ms: 100, count: 3, color: 0xff0000 } },
   });
   out.push({
+    name: 'cmd.led_blink_expire_at',
+    header: CMD_EXT,
+    prefix: none,
+    body: { type: 'fr.led.blink.args', value: { on_ms: 100, off_ms: 100, count: 3, color: 0xff0000 } },
+  });
+  out.push({
     name: 'cmd.led_set_fast',
     header: hdr({ cls: CLS.CMD, kind: 1, seq: 6, src: 0x0000, dst: 0xfffe, epoch: 9, port: 2 }),
     prefix: none,
@@ -914,7 +985,7 @@ function envelopeCases(b: Builder): Map<string, Uint8Array> {
       name: `envelope.${e.name}`,
       kind: 'envelope',
       type: `envelope.${clsName(b.model, e.header.cls)}`,
-      value: { header: { ...e.header }, prefix: { ...e.prefix }, body: hexOf(body), ...extra },
+      value: { header: headerJson(e.header), prefix: { ...e.prefix }, body: hexOf(body), ...extra },
       hex: hexOf(env),
     });
   }
@@ -922,6 +993,10 @@ function envelopeCases(b: Builder): Map<string, Uint8Array> {
   const event = hexOf(packHeader(BUTTON_DOWN));
   b.envelope.error('envelope.error_result_prefix_truncated', 'envelope', 'envelope.RESULT', `${result}090005`, 'truncated');
   b.envelope.error('envelope.error_event_prefix_truncated', 'envelope', 'envelope.EVENT', `${event}e803`, 'truncated');
+  // The prefix starts after the EXT block: a RESULT whose block is fine but whose prefix is cut short.
+  const resultExt = hexOf(packHeader(hdr({ flags: FLAG.EXT, cls: CLS.RESULT, kind: 3, port: 2, ext: [extTlv(EXT.TRACE_ID, 1)] })));
+  b.envelope.error('envelope.error_result_prefix_truncated_after_ext', 'envelope', 'envelope.RESULT', `${resultExt}090005000000`, 'truncated');
+  b.envelope.error('envelope.error_ext_unknown_critical', 'envelope', 'envelope.CMD', `${hexOf(packHeader(hdr({ flags: FLAG.EXT, cls: CLS.CMD, kind: 1, port: 2 })).subarray(0, 18))}03900100`, 'unsupported_ext');
   return bytes;
 }
 

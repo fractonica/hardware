@@ -45,6 +45,151 @@ bool operator==(const DirectoryEntry &a, const DirectoryEntry &b)
     return a.addr == b.addr && fr::proto::equal_bytes(a.mac, b.mac);
 }
 
+size_t encode(const DescriptorCap &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.port != 0) {
+        w.field_uint(1, v.port);
+    }
+    if (v.cap_id != 0) {
+        w.field_uint(2, v.cap_id);
+    }
+    if (v.version != 0) {
+        w.field_uint(3, v.version);
+    }
+    if (!v.name.empty()) {
+        w.field_string(4, v.name);
+    }
+    if (!v.traits.empty()) {
+        w.field_bytes(5, v.traits);
+    }
+    return w.size() - start;
+}
+
+std::expected<DescriptorCap, fr::wire::DecodeErr> decode_descriptor_cap(std::span<const uint8_t> in)
+{
+    DescriptorCap v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.port = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.cap_id = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 3:
+            v.version = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 4:
+            v.name = r.read_string(31);
+            break;
+        case 5:
+            v.traits = r.read_bytes(16);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const DescriptorCap &a, const DescriptorCap &b)
+{
+    return a.port == b.port &&
+           a.cap_id == b.cap_id &&
+           a.version == b.version &&
+           a.name == b.name &&
+           fr::proto::equal_bytes(a.traits, b.traits);
+}
+
+size_t encode(const Descriptor &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    w.field_uint(1, v.frame_version);
+    if (!v.fw_id_prefix.empty()) {
+        w.field_bytes(2, v.fw_id_prefix);
+    }
+    if (v.catalog_hash != 0) {
+        w.field_uint(3, v.catalog_hash);
+    }
+    if (!v.profile.empty()) {
+        w.field_string(4, v.profile);
+    }
+    if (!v.board.empty()) {
+        w.field_string(5, v.board);
+    }
+    for (const auto &e : v.caps) {
+        const auto m = w.begin_len(6);
+        encode(e, w);
+        w.end_len(m);
+    }
+    return w.size() - start;
+}
+
+std::expected<Descriptor, fr::wire::DecodeErr> decode_descriptor(std::span<const uint8_t> in)
+{
+    Descriptor v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.frame_version = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.fw_id_prefix = r.read_bytes(8);
+            break;
+        case 3:
+            v.catalog_hash = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 4:
+            v.profile = r.read_string(31);
+            break;
+        case 5:
+            v.board = r.read_string(31);
+            break;
+        case 6: {
+            if (v.caps.full()) {
+                r.fail(fr::wire::DecodeErr::too_long);
+                break;
+            }
+            const auto b = r.read_bytes(SIZE_MAX);
+            if (!r.ok()) {
+                break;
+            }
+            const auto e = decode_descriptor_cap(b);
+            if (e) {
+                v.caps.push_back(*e);
+            } else {
+                r.fail(e.error());
+            }
+            break;
+        }
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const Descriptor &a, const Descriptor &b)
+{
+    return a.frame_version == b.frame_version &&
+           fr::proto::equal_bytes(a.fw_id_prefix, b.fw_id_prefix) &&
+           a.catalog_hash == b.catalog_hash &&
+           a.profile == b.profile &&
+           a.board == b.board &&
+           a.caps == b.caps;
+}
+
 size_t encode(const NetWelcome &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();

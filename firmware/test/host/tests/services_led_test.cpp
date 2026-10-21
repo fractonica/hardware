@@ -352,7 +352,7 @@ TEST(led_dispatch_blink_uses_schema_defaults)
     REQUIRE(r.init());
     // fr.led blink = command 3; only count (field 3) = 1: on_ms/off_ms default to 200.
     auto args = frt::from_hex("18 01");
-    fr::cap::Reply reply;
+    fr::cap::StaticReply<> reply;
     CHECK(r.svc.dispatch(3, args, reply));
     r.core.advance_ms(399);
     CHECK_EQ(trace(r.sink), "");

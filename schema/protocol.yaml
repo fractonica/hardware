@@ -29,7 +29,7 @@ flags:
 
 frag: [ { name: frag_id, type: u16 }, { name: idx, type: u8 }, { name: cnt, type: u8 } ]
 
-ext_tlv:   # type u8 | len u8 | value; types >= 0x80 are critical
+ext_tlv:   # type u8 | len u8 | value (LE); types >= 0x80 are critical. The wire runtimes own these (static checks)
   0x02: { name: trace_id, type: u32 }
   0x03: { name: valid_ms, type: u16 }
   0x04: { name: expire_at_us, type: u32 }
@@ -166,8 +166,26 @@ messages:
   MSG.MSG: { topic: { id: 1, type: string, max: 32 }, data: { id: 2, type: bytes, max: 168 } }
   LOG.LINE: { tag: { id: 1, type: string, max: 16 }, text: { id: 2, type: string, max: 200 } }
 
+# Protocol types: message-shaped structs used as array elements or encoded on their own. A type may hold
+# arrays of the types declared above it (no recursion).
 types:
   DirectoryEntry: { addr: { id: 1, type: u16 }, mac: { id: 2, type: bytes, max: 6 } }
+  # One capability instance of a node descriptor (07 §7.4).
+  DescriptorCap:
+    port: { id: 1, type: u8 }
+    cap_id: { id: 2, type: u16 }
+    version: { id: 3, type: u16, doc: "major << 8 | minor" }
+    name: { id: 4, type: string, max: 31 }
+    traits: { id: 5, type: bytes, max: 16, doc: "the capability's encoded <Cap>Traits" }
+  # The node descriptor (07 §7.4): fr.node.describe returns it encoded, as `bytes`; HELLO carries
+  # descriptor_hash = FNV-1a 32 over those bytes.
+  Descriptor:
+    frame_version: { id: 1, type: u8, default: 1 }
+    fw_id_prefix: { id: 2, type: bytes, max: 8 }
+    catalog_hash: { id: 3, type: u32 }
+    profile: { id: 4, type: string, max: 31 }
+    board: { id: 5, type: string, max: 31 }
+    caps: { id: 6, type: "array<DescriptorCap>", max: 16 }
 
 serial_framing:
   prefix: "@fr1:"
