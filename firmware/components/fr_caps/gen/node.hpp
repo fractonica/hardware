@@ -88,9 +88,32 @@ std::expected<NodeNetSetArgs, fr::wire::DecodeErr> decode_node_net_set_args(std:
 bool operator==(const NodeNetSetArgs &a, const NodeNetSetArgs &b);
 bool valid(const NodeNetSetArgs &v);
 
+// fr.node.bind_set arguments.
+struct NodeBindSetArgs {
+    uint8_t slot = 0;  // 0..15
+    uint8_t on_port = 0;
+    uint8_t on_cls = 0;  // 3 EVENT | 7 MSG
+    uint8_t on_kind = 0;  // the event id (EVENT)
+    std::string_view on_topic{};  // the MSG topic (MSG)
+    std::span<const uint8_t> to_mac{};
+    uint16_t to_addr = 0;  // this node, another node, or 0xFFFF (MSG broadcast)
+    uint8_t to_port = 0;
+    uint8_t to_cls = 0;  // 4 CMD | 7 MSG
+    uint8_t to_kind = 0;  // the command id (CMD)
+    std::string_view to_topic{};  // the MSG topic (MSG)
+    std::span<const uint8_t> payload{};  // pre-encoded CMD fields, or the MSG data
+    bool reliable = false;  // Q1: ACK_REQ, the target's RESULT or ACK, end-to-end retries
+
+    static constexpr size_t kMaxSize = 169;
+};
+size_t encode(const NodeBindSetArgs &v, fr::wire::Writer &w);
+std::expected<NodeBindSetArgs, fr::wire::DecodeErr> decode_node_bind_set_args(std::span<const uint8_t> in);
+bool operator==(const NodeBindSetArgs &a, const NodeBindSetArgs &b);
+bool valid(const NodeBindSetArgs &v);
+
 // fr.node.bind_clear arguments.
 struct NodeBindClearArgs {
-    uint8_t slot = 0;
+    uint8_t slot = 0;  // 0..15, or 255: every slot
 
     static constexpr size_t kMaxSize = 3;
 };
@@ -98,6 +121,17 @@ size_t encode(const NodeBindClearArgs &v, fr::wire::Writer &w);
 std::expected<NodeBindClearArgs, fr::wire::DecodeErr> decode_node_bind_clear_args(std::span<const uint8_t> in);
 bool operator==(const NodeBindClearArgs &a, const NodeBindClearArgs &b);
 bool valid(const NodeBindClearArgs &v);
+
+// fr.node.bind_list result.
+struct NodeBindListResult {
+    std::span<const uint8_t> bindings{};  // a protobuf-wire BindingList (schema/protocol.yaml types)
+
+    static constexpr size_t kMaxSize = 1403;
+};
+size_t encode(const NodeBindListResult &v, fr::wire::Writer &w);
+std::expected<NodeBindListResult, fr::wire::DecodeErr> decode_node_bind_list_result(std::span<const uint8_t> in);
+bool operator==(const NodeBindListResult &a, const NodeBindListResult &b);
+bool valid(const NodeBindListResult &v);
 
 // fr.node.boot event (normal).
 struct NodeBoot {
@@ -113,9 +147,9 @@ bool valid(const NodeBoot &v);
 // fr.node.binding_fired event (normal).
 struct NodeBindingFired {
     uint8_t slot = 0;
-    uint8_t target_status = 0;
+    uint8_t target_status = 0;  // the target's RESULT/ACK status for reliable sends; 0 for fast, MSG and broadcast; FAILED after the last attempt; BUSY with no path
     uint32_t rtt_us = 0;  // trigger -> target RESULT; 0 for fast commands
-    uint8_t path = 0;  // 0 espnow, 1 hub, 2 flood
+    uint8_t path = 0;  // 0 espnow, 1 hub, 2 flood, 3 local (the node itself)
 
     static constexpr size_t kMaxSize = 15;
 };
@@ -163,10 +197,12 @@ public:
     virtual Status net_set(const NodeNetSetArgs &args) = 0;  // reliable
     // Re-send every property with fresh LATEST seqs.
     virtual Status get_state() = 0;  // reliable, idempotent
-    // Store a binding (07 §7.11).
-    virtual Status bind_set() = 0;  // reliable, idempotent
+    // Store a binding in its slot (07 §7.11), replacing what the slot held; the hub resolves and
+    // pre-encodes it.
+    virtual Status bind_set(const NodeBindSetArgs &args) = 0;  // reliable, idempotent
     virtual Status bind_clear(const NodeBindClearArgs &args) = 0;  // reliable, idempotent
-    virtual Status bind_list() = 0;  // reliable, idempotent
+    // Returns the stored bindings, encoded (like describe). BULK: TCP or serial only.
+    virtual std::expected<NodeBindListResult, Err> bind_list() = 0;  // reliable, idempotent
 
     Status dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &reply) final;
     void report_all() final;

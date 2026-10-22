@@ -124,3 +124,56 @@ TEST(net_latest_filter)
     f.clear();
     CHECK(f.accept(1, 2, 1));
 }
+
+TEST(net_window_raise_floor_never_moves_back)
+{
+    ReplayWindow<128> w;
+    w.reset(10);
+    CHECK(w.check_and_set(12) == Verdict::fresh);  // 11 missing
+    // A floor at or below top marks the floor and below, and leaves top and the newer seqs as they were.
+    w.raise_floor(9);
+    CHECK_EQ(w.top(), 12u);
+    CHECK_EQ(w.watermark(), 10u);
+    CHECK(w.check_and_set(12) == Verdict::dup);
+    w.raise_floor(11);
+    CHECK_EQ(w.top(), 12u);
+    CHECK_EQ(w.watermark(), 12u);
+    CHECK(w.check_and_set(11) == Verdict::dup);
+    w.raise_floor(12);
+    CHECK_EQ(w.top(), 12u);
+    CHECK(w.check_and_set(13) == Verdict::fresh);
+    // A floor after top acts as reset().
+    w.raise_floor(300);
+    CHECK_EQ(w.top(), 300u);
+    CHECK_EQ(w.watermark(), 300u);
+    CHECK(w.check_and_set(250) == Verdict::dup);
+    CHECK(w.check_and_set(301) == Verdict::fresh);
+    // Across the words: top 200 with everything below missing, floor 130 (bit 70).
+    ReplayWindow<128> v;
+    v.reset(0);
+    CHECK(v.check_and_set(200) == Verdict::fresh);
+    v.raise_floor(130);
+    CHECK_EQ(v.top(), 200u);
+    CHECK(v.check_and_set(130) == Verdict::dup);
+    CHECK(v.check_and_set(73) == Verdict::dup);  // bit 127, the window's last
+    CHECK(v.check_and_set(72) == Verdict::old);
+    CHECK(v.check_and_set(131) == Verdict::fresh);
+    CHECK(v.check_and_set(199) == Verdict::fresh);
+    CHECK_EQ(v.watermark(), 131u);  // 132..198 still missing
+    // A wild floor half the space away (a corrupt base) changes nothing.
+    v.raise_floor(200 + 0x80000000u);
+    CHECK_EQ(v.top(), 200u);
+    CHECK(v.check_and_set(150) == Verdict::fresh);
+}
+
+TEST(net_window_restart_has_seen_nothing)
+{
+    // A new boot of a source: nothing below its first frame counts as received.
+    ReplayWindow<128> w;
+    w.restart(5);
+    CHECK(w.check_and_set(6) == Verdict::fresh);
+    CHECK(w.check_and_set(5) == Verdict::fresh);
+    CHECK(w.check_and_set(3) == Verdict::fresh);
+    CHECK(w.check_and_set(3) == Verdict::dup);
+    CHECK_EQ(w.top(), 6u);
+}

@@ -190,6 +190,174 @@ bool operator==(const Descriptor &a, const Descriptor &b)
            a.caps == b.caps;
 }
 
+size_t encode(const Binding &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.slot != 0) {
+        w.field_uint(1, v.slot);
+    }
+    if (v.on_port != 0) {
+        w.field_uint(2, v.on_port);
+    }
+    if (v.on_cls != 0) {
+        w.field_uint(3, v.on_cls);
+    }
+    if (v.on_kind != 0) {
+        w.field_uint(4, v.on_kind);
+    }
+    if (!v.on_topic.empty()) {
+        w.field_string(5, v.on_topic);
+    }
+    if (!v.to_mac.empty()) {
+        w.field_bytes(6, v.to_mac);
+    }
+    if (v.to_addr != 0) {
+        w.field_uint(7, v.to_addr);
+    }
+    if (v.to_port != 0) {
+        w.field_uint(8, v.to_port);
+    }
+    if (v.to_cls != 0) {
+        w.field_uint(9, v.to_cls);
+    }
+    if (v.to_kind != 0) {
+        w.field_uint(10, v.to_kind);
+    }
+    if (!v.to_topic.empty()) {
+        w.field_string(11, v.to_topic);
+    }
+    if (!v.payload.empty()) {
+        w.field_bytes(12, v.payload);
+    }
+    if (v.reliable) {
+        w.field_bool(13, v.reliable);
+    }
+    return w.size() - start;
+}
+
+std::expected<Binding, fr::wire::DecodeErr> decode_binding(std::span<const uint8_t> in)
+{
+    Binding v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.slot = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.on_port = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.on_cls = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 4:
+            v.on_kind = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 5:
+            v.on_topic = r.read_string(32);
+            break;
+        case 6:
+            v.to_mac = r.read_bytes(6);
+            break;
+        case 7:
+            v.to_addr = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 8:
+            v.to_port = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 9:
+            v.to_cls = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 10:
+            v.to_kind = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 11:
+            v.to_topic = r.read_string(32);
+            break;
+        case 12:
+            v.payload = r.read_bytes(64);
+            break;
+        case 13:
+            v.reliable = r.read_bool();
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const Binding &a, const Binding &b)
+{
+    return a.slot == b.slot &&
+           a.on_port == b.on_port &&
+           a.on_cls == b.on_cls &&
+           a.on_kind == b.on_kind &&
+           a.on_topic == b.on_topic &&
+           fr::proto::equal_bytes(a.to_mac, b.to_mac) &&
+           a.to_addr == b.to_addr &&
+           a.to_port == b.to_port &&
+           a.to_cls == b.to_cls &&
+           a.to_kind == b.to_kind &&
+           a.to_topic == b.to_topic &&
+           fr::proto::equal_bytes(a.payload, b.payload) &&
+           a.reliable == b.reliable;
+}
+
+size_t encode(const BindingList &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    for (const auto &e : v.items) {
+        const auto m = w.begin_len(1);
+        encode(e, w);
+        w.end_len(m);
+    }
+    return w.size() - start;
+}
+
+std::expected<BindingList, fr::wire::DecodeErr> decode_binding_list(std::span<const uint8_t> in)
+{
+    BindingList v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1: {
+            if (v.items.full()) {
+                r.fail(fr::wire::DecodeErr::too_long);
+                break;
+            }
+            const auto b = r.read_bytes(SIZE_MAX);
+            if (!r.ok()) {
+                break;
+            }
+            const auto e = decode_binding(b);
+            if (e) {
+                v.items.push_back(*e);
+            } else {
+                r.fail(e.error());
+            }
+            break;
+        }
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const BindingList &a, const BindingList &b)
+{
+    return a.items == b.items;
+}
+
 size_t encode(const NetWelcome &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();

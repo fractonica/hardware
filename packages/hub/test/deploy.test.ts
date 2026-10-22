@@ -286,6 +286,7 @@ function setup(opts: DeployOptions = {}): Env {
     },
     onOta: () => () => undefined,
     tcpAddress: () => null,
+    hooks: () => () => undefined,
   };
   // Ports are listed (deploy checks expect_log against them), but none resolves: log selectors fall
   // through to the registry.

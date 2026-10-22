@@ -15,9 +15,35 @@ commands:
   set_groups: { id: 5, delivery: reliable, idempotent: true, fields: { groups: { id: 1, type: "array<u16>", max: 8 } }, doc: "M2" }
   net_set:   { id: 6, delivery: reliable, fields: { ssid: { id: 1, type: string, max: 32 }, pass: { id: 2, type: string, max: 64 }, bssid: { id: 3, type: bytes, max: 6, optional: true }, hub_host: { id: 4, type: string, max: 32, optional: true } } }
   get_state: { id: 7, delivery: reliable, idempotent: true, doc: "Re-send every property with fresh LATEST seqs." }
-  bind_set:  { id: 8, delivery: reliable, idempotent: true, doc: "Store a binding (07 §7.11)." }
-  bind_clear: { id: 9, delivery: reliable, idempotent: true, fields: { slot: { id: 1, type: u8 } } }
-  bind_list: { id: 10, delivery: reliable, idempotent: true }
+  bind_set:
+    id: 8
+    delivery: reliable
+    idempotent: true
+    # The Binding fields flat, same ids and types (schema/protocol.yaml types): the args are an encoded Binding.
+    # INVALID_ARGS when the table with it (the slot's old binding excluded) would encode past bind_list's 1400 B,
+    # so bind_list always returns the whole table (fr::net::kBindListMax; the hub's binding_set checks the same).
+    fields:
+      slot: { id: 1, type: u8, range: [0, 15] }
+      on_port: { id: 2, type: u8 }
+      on_cls: { id: 3, type: u8, doc: "3 EVENT | 7 MSG" }
+      on_kind: { id: 4, type: u8, doc: "the event id (EVENT)" }
+      on_topic: { id: 5, type: string, max: 32, doc: "the MSG topic (MSG)" }
+      to_mac: { id: 6, type: bytes, max: 6 }
+      to_addr: { id: 7, type: u16, doc: "this node, another node, or 0xFFFF (MSG broadcast)" }
+      to_port: { id: 8, type: u8 }
+      to_cls: { id: 9, type: u8, doc: "4 CMD | 7 MSG" }
+      to_kind: { id: 10, type: u8, doc: "the command id (CMD)" }
+      to_topic: { id: 11, type: string, max: 32, doc: "the MSG topic (MSG)" }
+      payload: { id: 12, type: bytes, max: 64, doc: "pre-encoded CMD fields, or the MSG data" }
+      reliable: { id: 13, type: bool, doc: "Q1: ACK_REQ, the target's RESULT or ACK, end-to-end retries" }
+    doc: "Store a binding in its slot (07 §7.11), replacing what the slot held; the hub resolves and pre-encodes it."
+  bind_clear: { id: 9, delivery: reliable, idempotent: true, fields: { slot: { id: 1, type: u8, doc: "0..15, or 255: every slot" } } }
+  bind_list:
+    id: 10
+    delivery: reliable
+    idempotent: true
+    result: { bindings: { id: 1, type: bytes, max: 1400, doc: "a protobuf-wire BindingList (schema/protocol.yaml types)" } }
+    doc: "Returns the stored bindings, encoded (like describe). BULK: TCP or serial only."
 events:
   boot: { id: 1, priority: normal, fields: { reset_reason: { id: 1, type: u8 } }, doc: "Sent once per boot right after the first WELCOME; exempt from the event-age rule." }
   binding_fired:
@@ -25,6 +51,6 @@ events:
     priority: normal
     fields:
       slot: { id: 1, type: u8 }
-      target_status: { id: 2, type: u8 }
+      target_status: { id: 2, type: u8, doc: "the target's RESULT/ACK status for reliable sends; 0 for fast, MSG and broadcast; FAILED after the last attempt; BUSY with no path" }
       rtt_us: { id: 3, type: u32, doc: "trigger -> target RESULT; 0 for fast commands" }
-      path: { id: 4, type: u8, doc: "0 espnow, 1 hub, 2 flood" }
+      path: { id: 4, type: u8, doc: "0 espnow, 1 hub, 2 flood, 3 local (the node itself)" }

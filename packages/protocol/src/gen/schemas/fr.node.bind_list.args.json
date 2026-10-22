@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:fractonica:schema:fr.node.bind_list.args",
   "title": "fr.node.bind_list arguments",
+  "description": "Returns the stored bindings, encoded (like describe). BULK: TCP or serial only.",
   "type": "object",
   "properties": {},
   "additionalProperties": false

@@ -1,8 +1,13 @@
 // A transport to the hub, envelope-level (design c3 §3, spec 10 §10.3): the link adds and strips its own
 // framing (TCP `len u16 LE`, serial ENV lines, one UDP datagram per envelope) and hands Net whole
 // envelopes. Implemented in src/esp (Wi-Fi TCP/UDP, fr_serial) and by FakeLink in host tests.
+//
+// ESP-NOW (design c5 §3) is not a Link: its frames carry a radio source MAC, RSSI and a broadcast or
+// unicast destination, and its sends complete later with a MAC ACK, so it has its own interface, AirLink,
+// and Net::receive_air / Net::air_sent. LinkKind::espnow still names it, for State::links and its counters.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -12,8 +17,8 @@
 namespace fr::net {
 
 /** The links Net knows; a value indexes State::links. */
-enum class LinkKind : uint8_t { serial = 0, tcp = 1, udp = 2 };  // espnow = 3 in C5
-inline constexpr size_t kLinkKinds = 3;
+enum class LinkKind : uint8_t { serial = 0, tcp = 1, udp = 2, espnow = 3 };
+inline constexpr size_t kLinkKinds = 4;
 
 constexpr size_t index_of(LinkKind k)
 {

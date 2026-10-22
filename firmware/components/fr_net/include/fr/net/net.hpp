@@ -3,12 +3,17 @@
 // udp_ok probe, heartbeats and presence, TIME answers, event max age and BYE. IDF-free: it lives on the
 // core task and sees the node only through fr::Core (clock, timers, posting) and net::Host (dispatch and
 // identity), so the host suite tests every rule with FakeLink and FakeCore.
+//
+// C5 (design c5 §3, spec 05 §5.9-5.10, 07 §7.11) adds ESP-NOW through AirLink (air.hpp): node <-> node
+// delivery with its fallback chain, managed flooding, the neighbour table, the directory and the bindings,
+// whose persistence goes through DirectoryStore and BindingStore (stores.hpp).
 #pragma once
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <iterator>
 #include <span>
 #include <string_view>
@@ -16,7 +21,9 @@
 #include "fr/base.hpp"
 #include "fr/cap/capability.hpp"
 #include "fr/core/core.hpp"
+#include "fr/net/air.hpp"
 #include "fr/net/link.hpp"
+#include "fr/net/stores.hpp"
 #include "fr/net/window.hpp"
 #include "protocol.hpp"  // generated fr::proto enums (Role, OtaState)
 
@@ -44,6 +51,42 @@ inline constexpr uint8_t kByeReboot = 1;
 inline constexpr uint8_t kByeOta = 2;
 inline constexpr uint8_t kByeSleep = 3;
 inline constexpr uint8_t kByeMaintenance = 4;
+
+/** How a node -> node frame is delivered (07 §7.11): fast is Q0; reliable is Q1 (ACK_REQ, the target's
+ * RESULT for a CMD or ACK for an EVENT/MSG, end-to-end retries over ESP-NOW, 05 §5.8). */
+enum class Delivery : uint8_t { fast = 0, reliable = 1 };
+
+/** The path a node -> node frame took (05 §5.10); node.binding_fired `path` carries the value. `local` is
+ * a binding whose target is this node itself (07 §7.11 "to.addr = self"): dispatched here, no network. */
+enum class Path : uint8_t { espnow = 0, hub = 1, flood = 2, local = 3 };
+
+/** One neighbour (05 §5.10): learned only from frames with RELAYED = 0 and ttl_remaining == ttl_initial,
+ * keyed by the radio source MAC, and from the MAC ACKs of unicasts to it. */
+struct Neighbor {
+    Mac mac{};
+    uint16_t addr = 0;       // the frame's src (0xFFFE: an unprovisioned neighbour)
+    int8_t rssi = 0;         // dBm, of the last frame heard
+    TimeUs last_heard = 0;   // core clock
+    uint32_t ack_ok = 0;     // unicasts to it MAC-ACKed
+    uint32_t ack_fail = 0;   // unicasts to it that failed after the link retries
+};
+
+/** Neighbours a node keeps (design c5 §3), least recently heard evicted first. */
+inline constexpr size_t kNeighborsMax = 20;
+
+/** The neighbour table (diag `neighbors`): `count` entries. */
+struct Neighbors {
+    std::array<Neighbor, kNeighborsMax> items{};
+    size_t count = 0;
+};
+
+/** Managed flooding (05 §5.9, §5.17). */
+struct RelayConfig {
+    bool enabled = true;   // relay_enabled; an ota_busy node does not relay either way
+    uint8_t k = 2;         // FR_RELAY_K: ESP-NOW copies heard that cancel a pending relay (a hub link's never count)
+    uint32_t jmin_ms = 1;  // FR_RELAY_JMIN_MS / FR_RELAY_JMAX_MS: the uniform relay delay, before the RSSI bias
+    uint32_t jmax_ms = 16;
+};
 
 /** Every PRESENCE.HELLO field except alias, alias_rev, channel and bssid, which Net reads live. */
 struct HelloInfo {
@@ -152,6 +195,17 @@ public:
      * asked for in here follows the reply.
      */
     virtual void ota_frame(LinkKind from, const fr::wire::Header &h, std::span<const uint8_t> body, OtaReply &reply) = 0;
+    /**
+     * A MSG for this node (07 §7.11, design c5 §3): unicast to it or a broadcast, from the hub (src 0x0000) or
+     * a node, over any link, once per (src, epoch, seq), after the bindings it triggers ran: fr::msg::on
+     * handlers. `data` lives only for the call. The default ignores it (a host without a MSG API).
+     */
+    virtual void msg(uint16_t src, std::string_view topic, std::span<const uint8_t> data)
+    {
+        static_cast<void>(src);
+        static_cast<void>(topic);
+        static_cast<void>(data);
+    }
 
 protected:
     ~Host() = default;
@@ -171,9 +225,15 @@ struct Config {
     /** Seeds the jitter RNG (heartbeat +-10 %, retry +-25 %); 0 derives it from the MAC at the first
      * HELLO, so nodes powered up together do not heartbeat in lockstep. Tests fix it. */
     uint32_t rng_seed = 0;
+    // ESP-NOW and node <-> node (design c5 §7, spec 05 §5.17).
+    uint8_t ttl_max = 7;            // FR_TTL_MAX: a frame claiming more is dropped
+    uint32_t ack_per_hop_ms = 10;   // FR_ACK_PER_HOP_MS: Q1 over ESP-NOW waits ack_base_ms + this per expected hop
+    uint32_t espnow_hb_ms = 5000;   // FR_ESPNOW_HB_MS: the router-mode ESP-NOW heartbeat (+-20 %)
+    RelayConfig relay{};            // flooding; set_relay() changes it at run time
 };
 
-/** Per link kind (State::links is indexed by LinkKind). */
+/** Per link kind (State::links is indexed by LinkKind). espnow never has a session: its `up` is AirLink::up(),
+ * tx/tx_fail count AirLink::send accepted/refused plus unicasts that failed after the link retries. */
 struct LinkState {
     bool attached = false;
     bool up = false;           // Link::up() as of the last link_changed()
@@ -185,6 +245,56 @@ struct LinkState {
     uint32_t rx = 0;           // envelopes received
     uint32_t rx_drop = 0;      // undecodable, DUP/OLD, outside a session, or not for this node
     uint32_t retries = 0;      // Q1 re-sends
+};
+
+/** Managed flooding (diag `stats` relay; T-FLOOD counts transmissions from `seeded + relayed`). */
+struct RelayStats {
+    uint32_t seeded = 0;     // ESP-NOW broadcasts this node originated or seeded from a hub frame
+    uint32_t relayed = 0;    // relays of frames heard over ESP-NOW that went out
+    uint32_t cancelled = 0;  // pending relays cancelled after K copies
+    /** Relays a frame was due that never went out: relay off, ota_busy, the queue full, the per-source flood
+     * rate spent, or AirLink refused it. A spent TTL is the normal end of a flood, not counted. */
+    uint32_t dropped = 0;
+};
+
+/** Node <-> node traffic (design c5 §3), whichever link brought or took it. */
+struct NodeStats {
+    uint32_t delivered = 0;  // fresh node frames for this node (unicast to it or broadcast) handled
+    uint32_t dup = 0;        // node frames already seen: relays and the hub's fan-out bring copies
+    uint32_t old = 0;        // below the source's window, from an older boot, or a stale LATEST
+    uint32_t sent = 0;       // send_to_node frames (binding ones included), answers not counted
+    uint32_t via_espnow = 0;  // of the attempts: ESP-NOW unicasts MAC-ACKed
+    uint32_t via_hub = 0;     // handed to the hub for forwarding
+    uint32_t via_flood = 0;   // sent as a flooded unicast
+    uint32_t failed = 0;      // no path, or a reliable one unanswered after max_attempts
+    uint32_t resolves = 0;    // NET/RESOLVEs sent for an addr with no MAC
+};
+
+/** Hub broadcasts (05 §5.9 "Reliable broadcast"), whichever link brought them. */
+struct BcastStats {
+    uint32_t delivered = 0;  // fresh ones handed to the node (MSG to Host::msg and the bindings)
+    uint32_t dup = 0;        // copies already seen (the flood's and the hub's paths both arrive)
+    uint32_t old = 0;        // below the window
+    uint32_t watermark = 0;  // the hub BCAST window's, as HEARTBEAT reports it (state() fills it in)
+};
+
+/** Bindings (07 §7.11): what node.binding_fired reported. */
+struct BindingStats {
+    uint32_t fired = 0;       // binding_fired emitted
+    uint32_t failed = 0;      // of those, target_status != OK or no path
+    uint32_t rtt_p50_us = 0;  // over the recent reliable ones; 0 before any
+};
+
+/** MSGs received per topic (diag `stats` msgs): the first kTopics topics seen, then `other`. Kept apart from
+ * State (Net::msg_stats()), whose copies stay small. */
+struct MsgStats {
+    static constexpr size_t kTopics = 8;
+    struct Topic {
+        char name[33] = {};  // NUL-terminated (a MSG topic is <= 32 B)
+        uint32_t n = 0;
+    };
+    std::array<Topic, kTopics> topics{};
+    uint32_t other = 0;
 };
 
 struct State {
@@ -204,6 +314,11 @@ struct State {
     bool hub_link_dropped = false;  // drop_hub_link() active
     bool udp_blocked = false;       // udp_block() active
     bool ip_blocked = false;        // ip_block() active
+    // C5 (design c5 §2 diag stats; the per-topic MSG counts are Net::msg_stats()); reset_stats() zeroes them.
+    RelayStats relay;
+    BcastStats bcast;
+    BindingStats bindings;
+    NodeStats nodes;
 
     const LinkState &link(LinkKind k) const { return links[index_of(k)]; }
     bool hub_link() const { return link(LinkKind::serial).session || link(LinkKind::tcp).session; }
@@ -260,6 +375,82 @@ public:
      */
     Status send_ota(uint8_t kind, std::span<const uint8_t> body, bool ack_req = false);
 
+    // ---- ESP-NOW, node <-> node, flooding, directory, bindings (design c5 §3) ----
+
+    /** The ESP-NOW driver (at most one; a second replaces the first). State::links[espnow] shows it; call
+     * link_changed(LinkKind::espnow) when AirLink::up() changes. A Link whose kind() is espnow is refused
+     * by attach(): ESP-NOW frames need RxMeta and send completions, which only AirLink carries. It reads
+     * Host::identity() at once (ESP-NOW works without any hub session) and, while up, sends the router-mode
+     * ESP-NOW heartbeat every espnow_hb_ms +-20 % (TTL 1, LATEST, never relayed; 05 §5.10). */
+    void attach_air(AirLink &air);
+    /** Persistence of the directory and the bindings (either may be null): each loads at once, so attach
+     * them before the first event a binding could fire on, and every change is saved through them. */
+    void attach_stores(DirectoryStore *directory, BindingStore *bindings);
+    /**
+     * An envelope ESP-NOW received, copied off the driver's frame pool, with what the radio saw. A provisioned
+     * node takes frames of its net only: node frames through a window per (src, epoch) (64 sources, LRU),
+     * hub broadcasts seeded by a neighbour through the hub BCAST window of the last WELCOME's hub run. Fresh
+     * frames for this node are delivered (CMD dispatch and its RESULT, MSG to the bindings and Host::msg,
+     * RESULT/ACK to the waiting send); frames heard on the broadcast MAC are relayed per 05 §5.9.
+     */
+    void receive_air(std::span<const uint8_t> envelope, const RxMeta &meta);
+    /** The end of an AirLink::send that was accepted: `mac_acked` for a unicast that got its MAC ACK. A
+     * unicast that failed after the link retries takes the next path of the fallback chain. */
+    void air_sent(uint32_t token, bool mac_acked);
+    /**
+     * Node -> node (05 §5.10): ESP-NOW unicast to the target's MAC (directory, else the neighbour table);
+     * when the link retries fail, or no MAC is known (a RESOLVE then asks the hub), via the hub if a hub
+     * session is up (the envelope with dst = addr, the hub forwards it), else a flooded unicast (broadcast
+     * MAC, dst = addr, TTL_DEFAULT). If AirLink refuses a unicast as busy (every peer slot in recent use),
+     * the frame goes as a flooded unicast with TTL 1 instead. Delivery::reliable sets ACK_REQ and retries end
+     * to end (20 ms + 10 ms per expected hop, x2, +-25 %, 4 attempts, same seq) until the target's RESULT
+     * (CMD) or ACK (EVENT, MSG). An EVENT gets its t_us prefix now. Fails with invalid_args for a dst that is
+     * not another node's address, a RESULT/ACK class or a frame beyond the realtime MTU, not_provisioned
+     * without an addr, busy when neither ESP-NOW nor a hub session can carry it now, or when a fast frame
+     * found no path that took it (the driver's queue full, the flood rate spent, no hub session): it is dropped.
+     */
+    Status send_to_node(uint16_t addr, uint8_t cls, uint8_t kind, uint8_t port, std::span<const uint8_t> body,
+                        Delivery delivery);
+    /**
+     * A node-originated broadcast (05 §5.9): an ESP-NOW broadcast with `ttl` (0: Config::ttl_default) and,
+     * unchanged, the same bytes to the hub over its link when ttl > 1 (the hub delivers it to apps and fans
+     * it out with ttl_remaining 1). Never ACKed. Past the flood rate (10/s from this source) the ESP-NOW copy
+     * is skipped and only the hub gets it. A CMD broadcast is port 0 only (05 §5.8). Fails with busy when
+     * neither path took it, invalid_args beyond the realtime MTU, not_provisioned without an addr.
+     */
+    Status broadcast(uint8_t cls, uint8_t kind, uint8_t port, std::span<const uint8_t> body, uint8_t ttl = 0);
+    /**
+     * The fr::msg::send path (07 §7.11): a MSG {topic, data} to `dst`: kAddrBroadcast (broadcast()), the hub
+     * (Q1 with Delivery::reliable, like an EVENT), this node itself (delivered here: bindings, Host::msg) or
+     * another node (send_to_node). invalid_args for a topic over 32 B or data over 168 B.
+     */
+    Status send_msg(uint16_t dst, std::string_view topic, std::span<const uint8_t> data,
+                    Delivery delivery = Delivery::reliable);
+
+    /** fr.node.bind_set: stores an encoded Binding (its args as they came) in its slot, replacing it, and
+     * saves the table; invalid_args unless it decodes with slot 0..15, on_cls EVENT|MSG, to_cls CMD|MSG and
+     * a to_mac of 0 or 6 bytes, and the table with it still fits bind_list (kBindListMax encoded). */
+    Status set_binding(std::span<const uint8_t> binding);
+    /** fr.node.bind_clear: `slot` 0..15, or kBindSlotAll; invalid_args for any other. Clearing an empty slot is OK. */
+    Status clear_binding(uint8_t slot);
+    /** fr.node.bind_list: the stored bindings as an encoded BindingList, written into `out`; failed when it
+     * does not fit (set_binding keeps the table within kBindListMax; a table loaded from an older firmware's
+     * store may exceed it). */
+    std::expected<std::span<const uint8_t>, Err> encode_bindings(std::span<uint8_t> out) const;
+    const BindingTable &bindings() const { return bindings_; }
+    /** The directory: NET/DIRECTORY pages from the hub, kept through DirectoryStore across reboots. */
+    const Directory &directory() const { return directory_; }
+    /** The neighbour table (diag `neighbors`). */
+    Neighbors neighbors() const { return neighbors_; }
+    /** When an ESP-NOW heartbeat from a neighbour with Wi-Fi up (kStateWifiUp) was last heard, on the core
+     * clock; 0 for never. Such a neighbour is associated on this channel, so the AP is there: the Wi-Fi side
+     * keeps from sweeping the other channels while one was heard recently (05 §5.4). */
+    TimeUs wifi_up_neighbor_heard_at() const { return wifi_up_heard_at_; }
+    /** MSGs received per topic (diag `stats` msgs); reset_stats() zeroes it. */
+    const MsgStats &msg_stats() const { return msgs_; }
+    /** relay_enabled and the flood timing (05 §5.9); Config::relay until changed. */
+    void set_relay(const RelayConfig &relay);
+
     // Debug hooks (09 §9.7) for fr_diag's `net` commands, which only FR_TEST_HOOKS builds expose. They
     // start after the RESULT of the request that asked for them; 0 seconds ends the hook at once.
     /** `net drop_hub_link <s>`: no envelopes on any link, either way, for `s` seconds, and no session
@@ -274,7 +465,8 @@ public:
      * node stays online at the hub through the heartbeats on its serial session. */
     void ip_block(uint32_t seconds);
 
-    // cap::Sink: capability emissions become EVENT/STATE envelopes to the hub.
+    // cap::Sink: capability emissions become EVENT/STATE envelopes to the hub. An EVENT first runs the
+    // bindings on it (07 §7.11: right after the local emission, before and independent of the hub send).
     void event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields,
                TimeUs at) override;
     void property(uint8_t port, uint8_t prop_id, std::span<const uint8_t> value, TimeUs at) override;
@@ -371,8 +563,12 @@ private:
     /** Session timeouts resume after a hook: a session in `which` (kVia* bits) silent too long ends now. */
     void lose_stale_sessions(uint8_t which);
     bool dropping() const { return state_.hub_link_dropped; }
-    /** A hook freezes link `k`: nothing in or out, and on a session link no timeout, HELLO or reconnect. */
-    bool frozen(LinkKind k) const { return dropping() || (state_.ip_blocked && k != LinkKind::serial); }
+    /** A hook freezes link `k`: nothing in or out, and on a session link no timeout, HELLO or reconnect. The
+     * hooks cut hub links only: ESP-NOW carries on (T-FLOOD drops a node's hub link to test the flood). */
+    bool frozen(LinkKind k) const
+    {
+        return k != LinkKind::espnow && (dropping() || (state_.ip_blocked && k != LinkKind::serial));
+    }
 
     // Send side.
     /** kVia* bits a frame to the hub takes (05 §5.10): TCP/UDP with a TCP session, unless it is silent and
@@ -384,8 +580,9 @@ private:
     uint8_t wifi_route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const;
     /** Nothing from the hub over the TCP session for more than kWifiSilentX10 / 10 intervals. */
     bool wifi_silent() const;
+    /** The envelope in tx_buf_ (valid until the next build); `ttl` 0 is this node's (ttl_default both halves). */
     std::span<const uint8_t> build(uint8_t flags, uint8_t cls, uint8_t kind, uint32_t seq, uint16_t dst, uint8_t port,
-                                   std::span<const uint8_t> prefix, std::span<const uint8_t> body);
+                                   std::span<const uint8_t> prefix, std::span<const uint8_t> body, uint8_t ttl = 0);
     /** Sends over every link in `via` (kVia* bits); returns the links it took, a TCP fallback included. */
     uint8_t transmit(uint8_t via, std::span<const uint8_t> envelope);
     bool transmit_on(LinkKind k, std::span<const uint8_t> envelope);
@@ -399,10 +596,187 @@ private:
     size_t pending_count() const;
 
     // Jitter: xorshift32 (deterministic per seed).
+    /** Seeds the jitter from the factory MAC, once, unless Config::rng_seed did; an all-zero MAC (not known
+     * yet) leaves it for a later call. */
+    void seed_rng(const std::array<uint8_t, 6> &mac);
     uint32_t next_random();
     /** `ms` +- `pct` percent, uniformly, in microseconds. */
     uint32_t jittered_us(uint32_t ms, uint32_t pct);
     uint32_t backoff_us(uint8_t attempt);
+
+    // ---- ESP-NOW and node <-> node (design c5 §3): air.cpp, peer.cpp, bindings.cpp ----
+
+    /** FR_WINDOW_SOURCES_NODE: node sources with a window (05 §5.17), least recently heard evicted first. */
+    static constexpr size_t kSourcesMax = 64;
+    /** Relays waiting for their delay at once; a frame beyond that is not relayed (relay.dropped). */
+    static constexpr size_t kRelayEntries = 8;
+    /** Node -> node frames in flight (requests awaiting a path or an answer, answers awaiting a path). */
+    static constexpr size_t kNodeOutEntries = 8;
+    /** Sources whose flood rate is metered; the least recently metered one is forgotten first. */
+    static constexpr size_t kRateSources = 8;
+    /** 05 §5.9: floods per source and second at the robust rate; a full bucket allows one second's burst. */
+    static constexpr uint32_t kFloodRatePerS = 10;
+    /** An accepted unicast whose air_sent never came (driver reset) counts as failed after this long. */
+    static constexpr uint32_t kAirDoneMs = 250;
+    /** A RESOLVE for the same addr goes again only after this long. */
+    static constexpr uint32_t kResolveRetryMs = 1000;
+    /** Addrs whose last RESOLVE is remembered for that throttle; the one asked longest ago is forgotten first. */
+    static constexpr size_t kResolvesMax = 4;
+    /** Recent reliable binding RTTs kept for BindingStats::rtt_p50_us. */
+    static constexpr size_t kRttSamples = 16;
+    /** A binding's local reaction may fire bindings in turn up to this depth, so a loop (MSG ping to self
+     * -> ping) ends. */
+    static constexpr uint8_t kBindingChainMax = 2;
+    /** node.binding_fired reports queued until the entry point ends (every binding, plus evictions). */
+    static constexpr size_t kFiredMax = kBindingsMax + kNodeOutEntries;
+
+    /** One node source's duplicate state (05 §5.8): its ordinary window and LATEST last_seq, for one boot. */
+    struct Source {
+        bool used = false;
+        bool primed = false;    // the ordinary window has its floor (one below the first seq heard)
+        bool new_boot = false;  // primed next for a newer epoch of a known source: nothing below counts as seen
+        uint16_t src = 0;
+        uint16_t epoch = 0;
+        uint32_t stamp = 0;  // LRU
+        uint32_t floor = 0;  // seqs at or below it are only presumed received (OLD, never DUP)
+        ReplayWindow<kWindowBits> win;
+        LatestFilter<1> latest;  // nodes put only the ESP-NOW heartbeat on the air as LATEST
+    };
+
+    /** A relay waiting for its delay (05 §5.9): the frame as received, RELAYED set, ttl_remaining - 1. */
+    struct Relay {
+        bool used = false;
+        bool seed = false;      // from a hub link (relay.seeded), else heard over ESP-NOW (relay.relayed)
+        bool latest = false;    // the frame's sequence space, part of its key
+        uint8_t copies = 0;     // copies heard over ESP-NOW since; K of them cancel it
+        uint16_t src = 0;
+        uint16_t epoch = 0;
+        uint32_t seq = 0;
+        TimeUs due = 0;
+        uint8_t len = 0;
+        uint8_t bytes[kRtSize];
+    };
+
+    /** A node -> node frame until it took a path (fast frames, answers) or got its RESULT/ACK (reliable). */
+    struct NodeOut {
+        bool used = false;
+        bool reliable = false;  // ACK_REQ: retried end to end until the target answers
+        bool answer = false;    // a RESULT or ACK this node owes another node
+        bool in_air = false;    // an ESP-NOW unicast awaiting air_sent
+        bool has_mac = false;
+        int8_t slot = -1;          // the binding that sent it (node.binding_fired), -1 for none
+        Path path = Path::espnow;  // the path of the latest attempt
+        uint8_t attempts = 0;
+        uint16_t addr = 0;
+        Mac mac{};
+        uint32_t seq = 0;
+        uint32_t token = 0;
+        TimeUs trigger = 0;  // when its binding fired (rtt_us), or when it was sent
+        TimeUs retry_at = kNever;
+        TimeUs air_deadline = kNever;
+        uint8_t len = 0;
+        uint8_t bytes[kRtSize];
+    };
+
+    /** Token bucket of one flood source, in thousandths of a flood. */
+    struct FloodRate {
+        bool used = false;
+        uint16_t src = 0;
+        uint32_t milli = 0;
+        TimeUs last = 0;
+    };
+
+    /** A RESOLVE sent (addr 0: a free entry). */
+    struct Resolving {
+        uint16_t addr = 0;
+        TimeUs at = 0;
+    };
+
+    /** A node.binding_fired waiting to go out. */
+    struct Fired {
+        uint8_t slot = 0;
+        uint8_t status = 0;
+        Path path = Path::espnow;
+        uint32_t rtt_us = 0;
+    };
+
+    using Verdict = ReplayWindow<kWindowBits>::Verdict;
+
+    /** net_, addr_, epoch_ and the gateway role from the host, and the RNG seed if none yet. */
+    void refresh_identity();
+    void ensure_timer();
+    bool air_up() const { return air_ != nullptr && ls(LinkKind::espnow).up; }
+    bool provisioned() const { return addr_ != fr::proto::kAddrUnassigned; }
+    uint32_t next_token();
+    /** AirLink::send, counted in State::links[espnow]. */
+    Status air_send(const Mac &dst, std::span<const uint8_t> envelope, AirPrio prio, uint32_t token);
+
+    // Receive side (air.cpp).
+    void handle_air(std::span<const uint8_t> envelope, const RxMeta &meta);
+    /** A hub broadcast a neighbour seeded or relayed (src 0x0000 over ESP-NOW). */
+    void on_hub_air(const fr::wire::EnvelopeView &e, std::span<const uint8_t> envelope, const RxMeta &meta);
+    /** A node-originated frame, over ESP-NOW (`meta`) or forwarded / fanned out by the hub (`meta` null). */
+    void on_node_frame(LinkKind from, const fr::wire::EnvelopeView &e, std::span<const uint8_t> envelope,
+                       const RxMeta *meta);
+    Verdict node_window(const fr::wire::Header &h);
+    void learn_neighbor(const RxMeta &meta, uint16_t addr);
+    Neighbor *neighbor_of(const Mac &mac);
+    /** The MAC of node `addr`: the directory, else the neighbour table. */
+    bool mac_of(uint16_t addr, Mac &out) const;
+    void on_directory(std::span<const uint8_t> body);
+    /** A RESOLVE answer's entry joins the directory (and its store). */
+    void merge_resolved(const fr::proto::DirectoryEntry &x);
+    /** NET/RESOLVE {addr} to the hub, at most once per kResolveRetryMs for one addr. */
+    void resolve(uint16_t addr);
+
+    // Flooding (air.cpp, 05 §5.9).
+    /** A DUP heard over ESP-NOW: one more copy of a pending relay, which K copies cancel. A hub link's copies
+     * (the seed's own, repairs, the other session's) never count: they say nothing about the neighbours. */
+    void flood_copy(uint16_t src, uint16_t epoch, uint32_t seq, bool latest);
+    /** A fresh frame: queues its relay when 05 §5.9 says so (`from_hub`: a hub link's copy, else ESP-NOW). */
+    void flood_relay(std::span<const uint8_t> envelope, const fr::wire::Header &h, bool from_hub, const RxMeta *meta);
+    void service_relays(TimeUs now);
+    /** One flood of `src` within its rate (kFloodRatePerS); false when spent. */
+    bool flood_rate_take(uint16_t src, TimeUs now);
+    void send_air_heartbeat();
+    /** The HEARTBEAT this node reports now (to the hub, and as the ESP-NOW heartbeat). */
+    fr::proto::PresenceHeartbeat heartbeat_msg(const LinkInfo &li, const Vitals &vit) const;
+
+    // Node <-> node sends (peer.cpp, 05 §5.8, §5.10).
+    std::expected<Path, Err> broadcast_frame(uint8_t cls, uint8_t kind, uint8_t port, std::span<const uint8_t> body,
+                                             uint8_t ttl);
+    /** Builds a frame to `addr` and starts its first attempt; `mac` overrides the lookup (a binding's). */
+    Status node_send(uint16_t addr, const Mac *mac, uint8_t flags, uint8_t cls, uint8_t kind, uint8_t port,
+                     std::span<const uint8_t> prefix, std::span<const uint8_t> body, int8_t slot, TimeUs trigger);
+    NodeOut &take_out();
+    /** The next attempt along the chain; false when no path took the frame (a fast one is then finished). */
+    bool out_attempt(NodeOut &o);
+    /** The chain past ESP-NOW unicast: via the hub, else a flooded unicast; false as for out_attempt. */
+    bool out_fallback(NodeOut &o);
+    /** The frame to the broadcast MAC with ttl `ttl` (initial and remaining): a flooded unicast. */
+    bool out_flood(NodeOut &o, uint8_t ttl);
+    void out_sent(NodeOut &o, Path path, uint8_t hops);
+    void out_finish(NodeOut &o, uint8_t status, uint32_t rtt_us);
+    void service_out(NodeOut &o, TimeUs now);
+    /** 05 §5.8 Q1 timeout of `attempt` over a path of `hops` relays: (base + per hop) x2 per attempt, +-25 %. */
+    uint32_t node_timeout_us(uint8_t attempt, uint8_t hops);
+    void on_node_cmd(LinkKind from, const fr::wire::EnvelopeView &e, bool unicast, const Mac *src_mac);
+    void on_node_answer(const fr::wire::EnvelopeView &e);
+    void send_node_ack(const fr::wire::Header &h, const Mac *src_mac);
+    /** A RESULT or ACK to node `dst`: ESP-NOW unicast to `src_mac` (or the directory's), else the chain. */
+    void send_answer(uint16_t dst, const Mac *src_mac, std::span<const uint8_t> envelope);
+    bool resend_cached_node(uint16_t src, uint16_t epoch, uint32_t req_seq, const Mac *src_mac);
+    /** A fresh MSG for this node: the bindings on its topic, then Host::msg. False if it does not decode. */
+    bool deliver_msg(uint16_t src, std::span<const uint8_t> body);
+    void count_topic(std::string_view topic);
+
+    // Bindings (bindings.cpp, 07 §7.11).
+    void run_bindings(bool on_event, uint8_t port, uint8_t kind, std::string_view topic);
+    void fire(const fr::proto::Binding &b);
+    void fired(uint8_t slot, uint8_t status, uint32_t rtt_us, Path path);
+    void emit_fired(const Fired &f);
+    void flush_fired();
+    uint32_t rtt_p50() const;
 
     Core &core_;
     Host &host_;
@@ -466,6 +840,39 @@ private:
     // fields go to reply_buf_ (bulk capacity: requests arrive on TCP or serial).
     uint8_t tx_buf_[kBulkSize];
     uint8_t reply_buf_[cap::Reply::kBulkCapacity];
+
+    // ESP-NOW and node <-> node (design c5 §3).
+    AirLink *air_ = nullptr;
+    DirectoryStore *directory_store_ = nullptr;
+    BindingStore *binding_store_ = nullptr;
+    Directory directory_;
+    BindingTable bindings_{};
+    Neighbors neighbors_;
+    RelayConfig relay_;
+    MsgStats msgs_;
+    bool gateway_ = false;  // HELLO role gateway: never relays (05 §5.9)
+    TimeUs wifi_up_heard_at_ = 0;  // wifi_up_neighbor_heard_at()
+    uint32_t air_token_ = 0;
+    TimeUs air_hb_due_ = kNever;
+    std::array<Source, kSourcesMax> sources_{};
+    uint32_t source_clock_ = 0;
+    std::array<Relay, kRelayEntries> relays_{};
+    std::array<NodeOut, kNodeOutEntries> node_out_{};
+    std::array<FloodRate, kRateSources> rates_{};
+    // NET/DIRECTORY pages of one set are staged until the last arrives, then replace directory_.
+    Directory dir_staging_;
+    uint8_t dir_pages_ = 0;  // pages of the set being staged; 0: none
+    uint32_t dir_seen_ = 0;  // a bit per page received (sets of up to 32 pages; FR_DIRECTORY_MAX needs 5)
+    bool dir_self_ = false;  // the set being staged holds this node (every set of the hub's does)
+    std::array<Resolving, kResolvesMax> resolving_{};
+    // Bindings.
+    uint8_t binding_depth_ = 0;
+    uint8_t fired_hold_ = 0;  // > 0 while Net::event runs the bindings of the EVENT it is about to send
+    std::array<Fired, kFiredMax> fired_q_{};
+    size_t fired_n_ = 0;
+    std::array<uint32_t, kRttSamples> rtts_{};
+    size_t rtt_n_ = 0;
+    size_t rtt_next_ = 0;
 };
 
 }  // namespace fr::net

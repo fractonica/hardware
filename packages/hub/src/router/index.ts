@@ -2,15 +2,19 @@
 // (src/links), duplicate windows per (device, epoch) and LATEST last_seq, the hub's sequence spaces, the
 // HELLO handshake (WELCOME -> DIRECTORY -> TIME burst -> get_state -> device.online), heartbeat echoes and
 // hub keepalives, presence (suspect + PING, offline, BYE), clock offsets, command delivery correlated by
-// (device, req_seq), EVENT/STATE publication as <instance>.<member> on the event bus, and OTA-class frames
-// both ways for the OTA orchestrator (design c4 §3-4: sendOta, onOta).
+// (device, req_seq), EVENT/STATE publication as <instance>.<member> on the event bus, OTA-class frames
+// both ways for the OTA orchestrator (design c4 §3-4: sendOta, onOta), and for C5 (design c5 §4) the node
+// <-> node side: hub broadcasts (one BCAST seq, EXT valid_ms, the same bytes to every session) and their
+// repair from HEARTBEAT watermarks, node broadcasts fanned out to the other sessions with ttl_remaining 1,
+// node -> node frames forwarded over the target's session, DIRECTORY to every session whenever the registry
+// changes, unicast MSGs, the latency samples latency_stats reads, and the RouterHooks the bindings register.
 //
 // Everything on the receive path runs synchronously in the tick the envelope arrived in (spec 08 §8.2
 // rule 2); only the handshake and commands await answers.
 
 import { performance } from 'node:perf_hooks';
 
-import { CLS, EXT, type Envelope, extTlv, type ExtTlv, FLAG, FrError, fnv1a32, type Header } from '@fractonica/protocol';
+import { CLS, EXT, type Envelope, extTlv, type ExtTlv, FLAG, FrError, fnv1a32, type Header, packEnvelope } from '@fractonica/protocol';
 import {
   ADDR,
   decodeEnvelope,
@@ -23,8 +27,10 @@ import {
   decodePresenceHeartbeat,
   decodePresenceHello,
   decodePresencePing,
+  decodePresencePong,
   decodeTimeSyncRes,
   encodeEnvelope,
+  encodeMsgMsg,
   encodeNetDirectory,
   encodeNetWelcome,
   encodeNodeSetAliasArgs,
@@ -42,7 +48,24 @@ import {
   statusName,
 } from '@fractonica/protocol/gen';
 
-import type { Device, Events, HelloSeen, Lifecycle, LinkName, OtaFrame, Presence, Registry, Router, Seq } from '../context.ts';
+import {
+  type BroadcastSent,
+  type Device,
+  type Events,
+  type HelloSeen,
+  type HubBroadcast,
+  type Lifecycle,
+  type LinkName,
+  MSG_EVENT,
+  type MsgEventFields,
+  type NodeFrame,
+  type OtaFrame,
+  type Presence,
+  type Registry,
+  type Router,
+  type RouterHooks,
+  type Seq,
+} from '../context.ts';
 import type { Db } from '../db.ts';
 import type { Endpoint, LinkSink, NodeLinksStatus, Source } from '../links/index.ts';
 import { NodeLinks } from '../links/index.ts';
@@ -51,7 +74,8 @@ import { readNetwork } from '../network.ts';
 import { nowUs } from '../ring.ts';
 import type { SerialPortManager } from '../serial.ts';
 import { CapDirectory, descriptorCaps, instanceAt, type PortCap } from './caps.ts';
-import { type ClockInfo, NodeClock, type SyncSample } from './clock.ts';
+import { type ClockInfo, NodeClock, rttOf, type SyncSample } from './clock.ts';
+import { BINDING_PATHS, type DeviceLatency, LatencyRecorder, type LoopDelay, LoopMonitor } from './latency.ts';
 import { cmp16, cmp32, ReplayWindow } from './window.ts';
 
 /** Timing rules (spec 05 §5.11, §5.17; design c3 §6); tests shorten them. */
@@ -90,6 +114,31 @@ export interface RouterConfig {
   replayedAfterMs: number;
   /** Presence, keepalive and udp_blocked checks run this often. */
   tickMs: number;
+  /** FR_BCAST_VALID_MS: a hub broadcast's EXT valid_ms, and how long it is repaired (05 §5.9). */
+  bcastValidMs: number;
+  /**
+   * The flood rate (design c5 §7): at most this many hub broadcasts a second seed the ESP-NOW flood (ttl 2/2);
+   * the excess goes TCP-only (ttl 2/1, delivered but never re-seeded). 0: no limit.
+   */
+  floodPerS: number;
+  /**
+   * Seeded broadcasts that may go back to back before the rate applies: as many as a node's relay queue holds
+   * (fr_net Net::kRelayEntries, 8). A node with a hub link takes a back-to-back run in one read and seeds a
+   * relay for each; beyond its queue it drops the rest (relay.dropped), which a node with no hub link then
+   * never hears. Within the nodes' own meter (10/s, burst 10), so whatever the hub seeds the nodes relay.
+   */
+  floodBurst: number;
+  /**
+   * A broadcast younger than this is not repaired yet: the HEARTBEAT that reports the watermark may have
+   * left the node before the broadcast arrived there.
+   */
+  repairGraceMs: number;
+  /** Repairs of one broadcast to one device, at most (a node that reports no watermark costs no more). */
+  repairMax: number;
+  /** The registry is compared with the DIRECTORY last sent this often (provisioning publishes at once). */
+  directoryCheckMs: number;
+  /** A DUP of a forwarded request is forwarded again (its target re-sends the cached answer) at most this often. */
+  forwardDupMs: number;
 }
 
 export const ROUTER_DEFAULTS: RouterConfig = {
@@ -108,6 +157,13 @@ export const ROUTER_DEFAULTS: RouterConfig = {
   helloTimeoutMs: 30_000,
   replayedAfterMs: 2000,
   tickMs: 25,
+  bcastValidMs: 2000,
+  floodPerS: 10,
+  floodBurst: 8,
+  repairGraceMs: 250,
+  repairMax: 2,
+  directoryCheckMs: 1000,
+  forwardDupMs: 20,
 };
 
 /** Time sources: `now` (ms, monotonic) drives presence and timeouts, `nowUs` (µs since the Unix epoch) stamps events and TIME. */
@@ -229,6 +285,29 @@ interface Peer {
   mirror: Map<string, { value: unknown; epoch: number; t_us: number; t_hub_us: number }>;
   lastEvent: Map<number, { epoch: number; t_us: number }>;
   heartbeat: PresenceHeartbeat | null;
+  /**
+   * The bcast_base of the last WELCOME it got: its BCAST window's floor (05 §5.8), so nothing at or below
+   * it is repaired, whatever watermark the node reports (firmware before C5 reports none).
+   */
+  bcastBase: number;
+}
+
+/** A hub broadcast while it is valid (05 §5.9): what repair re-sends. */
+interface BroadcastRecord {
+  seq: number;
+  /** Clock ms it went out. */
+  at: number;
+  validMs: number;
+  /** The ttl byte it went out with: 0x22 seeded, 0x21 TCP-only (over the flood rate). */
+  ttl: number;
+  cls: number;
+  kind: number;
+  port: number;
+  body: Uint8Array;
+  /** The envelope per net (hub frames carry the node's net): the bytes every session of that net got. */
+  bytes: Map<number, Uint8Array>;
+  /** Repairs per device: how many, and the clock ms of the last. */
+  repairs: Map<string, { n: number; at: number }>;
 }
 
 interface Pending {
@@ -243,7 +322,21 @@ interface Pending {
 }
 
 const HUB_TTL = 0x11; // initial 1, remaining 1: a direct link; nothing re-seeds it (05 §5.9)
+/** FR_TTL_DEFAULT 2, both nibbles: a hub broadcast the receiving nodes seed into one ESP-NOW layer. */
+const BCAST_TTL = 0x22;
+/** The ttl byte's offset in the envelope (05 §5.6): repair, fan-out and forwarding change only its low nibble. */
+const TTL_OFFSET = 16;
 const EMPTY = new Uint8Array(0);
+
+/** The envelope bytes with ttl_remaining (the ttl byte's low nibble) set to `remaining`; a copy. */
+function withRemaining(bytes: Uint8Array, remaining: number): Uint8Array {
+  const out = bytes.slice();
+  out[TTL_OFFSET] = (out[TTL_OFFSET] & 0xf0) | (remaining & 0x0f);
+  return out;
+}
+
+/** 0x0001-0xEFFF: a node (05 §5.5); what the hub forwards. */
+const isNodeAddr = (addr: number) => addr >= ADDR.NODE_FIRST && addr <= ADDR.NODE_LAST;
 const BYE_REASONS = ['shutdown', 'reboot', 'ota', 'sleep', 'maintenance'];
 
 function commandId(cap: string, name: string): number {
@@ -262,7 +355,7 @@ const hex = (b: Uint8Array) => Buffer.from(b.buffer, b.byteOffset, b.byteLength)
 const low32 = (n: number) => ((Math.round(n) % 2 ** 32) + 2 ** 32) % 2 ** 32;
 const isUp = (p: Presence) => p === 'online' || p === 'suspect';
 
-export class HubRouter implements Router, Lifecycle, LinkSink {
+export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   readonly hubEpoch: number;
   #deps: RouterDeps;
   #cfg: RouterConfig;
@@ -283,6 +376,19 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
   #descriptors = new Map<number, PortCap[] | null>();
   /** The BCAST counter: also the broadcast id; WELCOME's bcast_base is its last value (05 §5.8-5.9). */
   #bcast = 0;
+  /** Broadcasts not expired yet, oldest first: repair re-sends from these. */
+  #bcastLog: BroadcastRecord[] = [];
+  /** The flood-rate token bucket: tokens, and the clock ms they were counted at. */
+  #floodTokens = 0;
+  #floodAt = 0;
+  /** The DIRECTORY pages last sent (hex), so a registry change sends them to every session again. */
+  #dirSig: string | null = null;
+  #dirCheckAt = 0;
+  /** `<src>/<epoch>/<seq>` of forwarded requests -> clock ms of the last forward (DUP throttle), oldest first. */
+  #forwarded = new Map<string, number>();
+  #latency = new LatencyRecorder();
+  #loop = new LoopMonitor();
+  #unsubscribeEvents: (() => void) | null = null;
   /** networks.net_id, once a network record exists (#currentNetId). */
   #netId: number | null = null;
   #ticker: NodeJS.Timeout | null = null;
@@ -290,6 +396,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
   #stopped = false;
   #listenError: string | null = null;
   #otaListeners = new Set<(f: OtaFrame) => void>();
+  #hooks = new Set<RouterHooks>();
   #counters = {
     rx_bad: 0,
     not_for_hub: 0,
@@ -303,6 +410,20 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     registry_errors: 0,
     /** OTA-class frames off port 240 or over UDP (design c4 §3: OTA frames never ride UDP). */
     ota_dropped: 0,
+    // Node <-> node (design c5 §4).
+    /** Hub broadcasts sent, and of those the ones over the flood rate that went TCP-only. */
+    bcast_sent: 0,
+    bcast_tcp_only: 0,
+    /** Broadcasts re-sent from a HEARTBEAT watermark. */
+    bcast_repaired: 0,
+    /** Node broadcasts fanned out, counted per receiving session. */
+    fanned_out: 0,
+    /** Node -> node frames forwarded; dropped for want of a session to the target, or of TTL. */
+    forwarded: 0,
+    forward_no_route: 0,
+    forward_ttl: 0,
+    /** DIRECTORY rounds sent to every session after a registry change. */
+    directory_pushes: 0,
   };
 
   constructor(deps: RouterDeps) {
@@ -335,6 +456,18 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     // An unplugged USB cable ends that port's session now, not 3.5 intervals later (a node that is still
     // on Wi-Fi keeps its TCP session; one on USB alone goes offline, link_lost).
     this.#unsubscribePorts = this.#deps.serial?.onPortGone?.((key) => this.#links.serial.gone(key, 'usb port gone')) ?? null;
+    // DIRECTORY on every registry change (design c5 §4): at once when provisioning gives a device its addr,
+    // and by comparison every directoryCheckMs for changes that publish nothing (a flash writing fr_ident).
+    this.#dirSig = null;
+    this.syncDirectory();
+    this.#unsubscribeEvents = this.#deps.events.subscribe((e) => {
+      if (e.type === 'device.provisioned') {
+        this.syncDirectory();
+      }
+    });
+    this.#floodTokens = this.#cfg.floodBurst;
+    this.#floodAt = this.#clock.now();
+    this.#loop.start();
     this.#ticker = setInterval(() => this.tick(), this.#cfg.tickMs);
     this.#ticker.unref();
   }
@@ -345,6 +478,9 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
       clearInterval(this.#ticker);
       this.#ticker = null;
     }
+    this.#loop.stop();
+    this.#unsubscribeEvents?.();
+    this.#unsubscribeEvents = null;
     this.#unsubscribePorts?.();
     this.#unsubscribePorts = null;
     for (const peer of this.#peers.values()) {
@@ -435,6 +571,253 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     return () => this.#otaListeners.delete(fn);
   }
 
+  hooks(h: RouterHooks): () => void {
+    this.#hooks.add(h);
+    return () => this.#hooks.delete(h);
+  }
+
+  // ---- HubBroadcast (design c5 §4) ----
+
+  /**
+   * One hub broadcast (05 §5.8-5.9): the next BCAST seq (the broadcast id), dst 0xFFFF, EXT valid_ms, ttl 2/2
+   * so the receiving nodes seed the ESP-NOW flood (ttl 2/1 over the flood rate: TCP-only), as the same bytes
+   * to every node session that has its WELCOME: TCP and serial both for a node on both (#sendEvery). Kept for
+   * repair while valid. `seeded` says which ttl it took; `sessions` counts the nodes it went to (one on two
+   * links once), 0 when no node has a session and nothing went out.
+   */
+  broadcast(frame: { cls: number; kind: number; port: number; body: Uint8Array }, opts: { validMs?: number } = {}): BroadcastSent {
+    const now = this.#clock.now();
+    const validMs = Math.max(0, Math.min(0xffff, Math.round(opts.validMs ?? this.#cfg.bcastValidMs)));
+    const rec: BroadcastRecord = {
+      seq: this.#bcast >= 0xffffffff ? 1 : this.#bcast + 1,
+      at: now,
+      validMs,
+      ttl: BCAST_TTL,
+      cls: frame.cls,
+      kind: frame.kind,
+      port: frame.port,
+      body: frame.body.slice(),
+      bytes: new Map(),
+      repairs: new Map(),
+    };
+    // Encoded before the counter moves: a frame the codec refuses throws with nothing sent and no gap in
+    // the BCAST seqs, since a missing seq holds every node's watermark below it.
+    this.#bcastBytes(rec, this.#currentNetId() ?? 0);
+    const seeded = this.#floodToken(now);
+    if (!seeded) {
+      rec.ttl = (BCAST_TTL & 0xf0) | 1;
+      rec.bytes.clear();
+    }
+    this.#bcast = rec.seq;
+    let sessions = 0;
+    for (const peer of this.#peers.values()) {
+      if (this.#sendEvery(peer, this.#bcastBytes(rec, peer.net))) {
+        sessions++;
+      }
+    }
+    this.#pruneBroadcasts(now);
+    this.#bcastLog.push(rec);
+    this.#counters.bcast_sent++;
+    if (!seeded) {
+      this.#counters.bcast_tcp_only++;
+    }
+    return { seq: rec.seq, sessions, seeded };
+  }
+
+  /**
+   * One reliable unicast MSG (05 §5.8 Q1: ACK_REQ) on the device's best link; resolves with the node's ACK.
+   * Throws DEVICE_OFFLINE without a session, INVALID_ARGS for a topic or data the codec refuses (data ≤ 168 B),
+   * and rejects TIMEOUT when no ACK comes within timeoutMs.
+   */
+  sendMsg(deviceId: string, topic: string, data: Uint8Array, opts: { timeoutMs: number }): Promise<{ status: number; rtt_ms: number; link: LinkName }> {
+    const peer = this.#peers.get(deviceId);
+    const session = peer && this.#best(peer);
+    if (!peer || !session || !isUp(peer.presence)) {
+      return Promise.reject(
+        new FrError('DEVICE_OFFLINE', `${peer?.alias ?? deviceId} has no hub link (${peer?.presence ?? 'unknown'})`, {
+          remediation: [{ tool: 'wait_for_device', args: { selector: peer?.alias ?? `id:${deviceId}`, state: 'online' } }],
+        }),
+      );
+    }
+    let bytes: Uint8Array;
+    const seq = this.#nextSeq(peer);
+    try {
+      bytes = this.#encode(peer, seq, CLS.MSG, KIND.MSG.MSG, PORT.NODE, encodeMsgMsg({ topic, data }), { ackReq: true });
+    } catch (e) {
+      return Promise.reject(new FrError('INVALID_ARGS', `cannot encode the MSG: ${(e as Error).message}`));
+    }
+    const link = session.ep.kind;
+    if (!this.#send(session, bytes)) {
+      return Promise.reject(new FrError('DEVICE_OFFLINE', `${peer.alias}: the ${link} link refused the MSG (closed or backed up)`));
+    }
+    return this.#awaitAnswer(peer, session, seq, opts.timeoutMs, 'ACK', { topic }).then((r) => ({ status: r.status, rtt_ms: r.rtt_ms, link }));
+  }
+
+  /** A flood-rate token (design c5 §7): true while seeded broadcasts stay within floodPerS. */
+  #floodToken(now: number): boolean {
+    const rate = this.#cfg.floodPerS;
+    if (rate <= 0) {
+      return true;
+    }
+    this.#floodTokens = Math.min(this.#cfg.floodBurst, this.#floodTokens + ((now - this.#floodAt) * rate) / 1000);
+    this.#floodAt = now;
+    if (this.#floodTokens >= 1) {
+      this.#floodTokens -= 1;
+      return true;
+    }
+    return false;
+  }
+
+  /** A broadcast's envelope for a net (encoded once per net): src HUB, dst BROADCAST, its BCAST seq. */
+  #bcastBytes(rec: BroadcastRecord, net: number): Uint8Array {
+    let bytes = rec.bytes.get(net);
+    if (!bytes) {
+      const header: Header = {
+        flags: FLAG.EXT,
+        cls: rec.cls,
+        kind: rec.kind,
+        seq: rec.seq,
+        net,
+        src: ADDR.HUB,
+        dst: ADDR.BROADCAST,
+        epoch: this.hubEpoch,
+        ttl: rec.ttl,
+        port: rec.port,
+        ext: [extTlv(EXT.VALID_MS, rec.validMs)],
+      };
+      bytes = encodeEnvelope({ header, body: rec.body });
+      rec.bytes.set(net, bytes);
+    }
+    return bytes;
+  }
+
+  /**
+   * A hub broadcast (or its repair) to every session of the device that has its WELCOME, TCP and serial
+   * alike (05 N4: over every node link), not only #best: TCP whose Wi-Fi died without a FIN still takes
+   * writes until wifiSilentX10 passes, and a broadcast lost there is one the node never seeds, which a
+   * repair (ttl_remaining 1) cannot make up for at the nodes that only hear it over the air. The node's BCAST
+   * window takes the first copy and drops the other as DUP; fr_net counts a second hub copy neither as a
+   * seed nor toward K. True when any session took it.
+   */
+  #sendEvery(peer: Peer, bytes: Uint8Array): boolean {
+    let sent = false;
+    for (const s of this.#sessionsOf(peer)) {
+      if (s.welcomed && this.#send(s, bytes)) {
+        sent = true;
+      }
+    }
+    return sent;
+  }
+
+  #pruneBroadcasts(now: number): void {
+    while (this.#bcastLog.length && now - this.#bcastLog[0].at >= this.#bcastLog[0].validMs) {
+      this.#bcastLog.shift();
+    }
+  }
+
+  /**
+   * Watermark repair (05 §5.9, design c5 §4), on every HEARTBEAT: each unexpired broadcast above the node's
+   * bcast_watermark (and its WELCOME's bcast_base) goes again over the node's sessions, as the broadcast
+   * did, as the original bytes with ttl_remaining 1, so the node takes it (or drops it as DUP) and never
+   * seeds it again. One younger than repairGraceMs may still be on its way; one is repaired at most repairMax
+   * times, half an interval apart.
+   */
+  #repair(peer: Peer, watermark: number): void {
+    if (!this.#bcastLog.length || !this.#sessionsOf(peer).some((s) => s.welcomed)) {
+      return;
+    }
+    const now = this.#clock.now();
+    this.#pruneBroadcasts(now);
+    const floor = cmp32(watermark, peer.bcastBase) > 0 ? watermark : peer.bcastBase;
+    for (const rec of this.#bcastLog) {
+      if (cmp32(rec.seq, floor) <= 0 || now - rec.at < this.#cfg.repairGraceMs) {
+        continue;
+      }
+      const done = rec.repairs.get(peer.id);
+      if (done && (done.n >= this.#cfg.repairMax || now - done.at < peer.hbMs / 2)) {
+        continue;
+      }
+      if (this.#sendEvery(peer, withRemaining(this.#bcastBytes(rec, peer.net), 1))) {
+        rec.repairs.set(peer.id, { n: (done?.n ?? 0) + 1, at: now });
+        this.#counters.bcast_repaired++;
+      }
+    }
+  }
+
+  /**
+   * A node's broadcast it also flooded (05 §5.9: ttl_initial > 1): the same bytes to every other node's
+   * session with ttl_remaining 1, so a node whose radio missed it still gets it and none re-seeds it.
+   */
+  #fanOut(from: Peer, bytes: Uint8Array): void {
+    const out = withRemaining(bytes, 1);
+    for (const peer of this.#peers.values()) {
+      if (peer === from) {
+        continue;
+      }
+      const s = this.#best(peer);
+      if (s?.welcomed && this.#send(s, out)) {
+        this.#counters.fanned_out++;
+      }
+    }
+  }
+
+  /**
+   * A node -> node frame that reached the hub (05 §5.10 "via hub"): forwarded unchanged over the target's
+   * session but for ttl_remaining - 1, so a frame that has used its hops is dropped. The target answers the
+   * source the same way (its RESULT or ACK has dst = the source), so the hub keeps no state for it.
+   */
+  #forward(from: Peer, env: Envelope, bytes: Uint8Array): boolean {
+    const h = env.header;
+    const remaining = h.ttl & 0x0f;
+    if (remaining === 0) {
+      this.#counters.forward_ttl++;
+      return false;
+    }
+    const target = this.#byAddr.get(h.dst);
+    const s = target && target !== from ? this.#best(target) : undefined;
+    if (!s?.welcomed || !this.#send(s, withRemaining(bytes, remaining - 1))) {
+      this.#counters.forward_no_route++;
+      return false;
+    }
+    this.#counters.forwarded++;
+    return true;
+  }
+
+  /**
+   * Sends the DIRECTORY pages to every session that has its WELCOME when they differ from the last ones sent
+   * (05 §5.10: on every registry change, not only after WELCOME). Provisioning calls it through its event,
+   * the tick every directoryCheckMs, and a HELLO (which can retire another device's addr).
+   */
+  syncDirectory(): void {
+    this.#dirCheckAt = this.#clock.now();
+    const devices = this.#directoryDevices();
+    if (!devices) {
+      return; // an unreadable registry (the hub stopping) is no change: nobody gets an empty directory
+    }
+    const pages = [...this.#directoryPages(devices)];
+    const sig = pages.map(hex).join('/');
+    if (this.#dirSig === sig) {
+      return;
+    }
+    const first = this.#dirSig === null;
+    this.#dirSig = sig;
+    if (first) {
+      return; // the router's start: sessions get the pages after their WELCOME
+    }
+    let sent = 0;
+    for (const s of this.#sessions.values()) {
+      if (s.welcomed && !s.closed) {
+        for (const page of pages) {
+          this.#sendFrame(s, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, page);
+        }
+        sent++;
+      }
+    }
+    if (sent) {
+      this.#counters.directory_pushes++;
+    }
+  }
+
   tcpAddress(deviceId: string): string | null {
     const s = this.#peers.get(deviceId)?.sessions.tcp;
     return s && !s.closed && !s.ep.closed ? s.ep.remote : null;
@@ -493,6 +876,16 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
   instances(deviceId: string): PortCap[] | null {
     const peer = this.#peers.get(deviceId);
     return peer ? this.#capsOf(peer) : null;
+  }
+
+  /** A device's latency samples of the last `windowMs` (latency_stats). */
+  latency(deviceId: string, windowMs: number): DeviceLatency {
+    return this.#latency.stats(deviceId, this.#clock.now() - windowMs);
+  }
+
+  /** The hub's event-loop delay over the last `windowMs` (latency_stats). */
+  loopDelay(windowMs: number): LoopDelay {
+    return this.#loop.stats(windowMs);
   }
 
   status(): RouterStatus {
@@ -567,8 +960,10 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     }
     const env = d.value;
     const h = env.header;
-    if (h.dst !== ADDR.HUB && h.dst !== ADDR.BROADCAST) {
-      this.#counters.not_for_hub++; // node -> node forwarding comes with C5
+    if (h.dst !== ADDR.HUB && h.dst !== ADDR.BROADCAST && !isNodeAddr(h.dst)) {
+      // Groups (M2) and UNASSIGNED: nothing the hub delivers or forwards. A node addr goes on to #frame,
+      // which windows it by its sender like any frame and forwards it (design c5 §4).
+      this.#counters.not_for_hub++;
       return;
     }
     if (from.kind === 'udp') {
@@ -729,6 +1124,8 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
       console.error(JSON.stringify({ event: 'registry_touch_failed', device: id, message: (e as Error).message }));
     }
     peer.alias = peer.device?.alias || hello.alias || id;
+    // A HELLO can retire another device's addr (a re-provisioned board): the others' directories follow.
+    this.syncDirectory();
     peer.window.check(h.seq);
     // One session per link kind: a new HELLO supersedes the older connection of its kind (05 §5.11).
     const session: Session = { ep, peer, startedAt: now, lastTx: now, lastRx: now, welcomed: false, ready: false, closed: false };
@@ -773,48 +1170,69 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
       peer.presence = 'online';
       this.#publishPresence(peer, 'device.online', { link, recovered: true });
     }
+    // A frame for another node (05 §5.10 via hub): the target dedups it, so a LATEST one is not checked
+    // against this node's hub-bound LATEST spaces (or the state_seq they keep).
+    const toNode = isNodeAddr(h.dst);
     if (h.flags & FLAG.LATEST) {
       const key = `${h.port}/${h.kind}`;
       const last = peer.latest.get(key);
-      if (last !== undefined && cmp32(h.seq, last) <= 0) {
+      if (!toNode && last !== undefined && cmp32(h.seq, last) <= 0) {
         this.#counters.stale++;
         return;
       }
-      peer.latest.set(key, h.seq);
-      if (cmp32(h.seq, peer.latestMax) > 0) {
-        peer.latestMax = h.seq;
+      if (!toNode) {
+        peer.latest.set(key, h.seq);
+        if (cmp32(h.seq, peer.latestMax) > 0) {
+          peer.latestMax = h.seq;
+        }
       }
     } else {
       const verdict = peer.window.check(h.seq);
       if (verdict !== 'new') {
         this.#counters[verdict]++;
-        if (verdict === 'dup' && h.flags & FLAG.ACK_REQ) {
+        if (verdict === 'dup' && toNode) {
+          this.#forwardDup(peer, env);
+        } else if (verdict === 'dup' && h.flags & FLAG.ACK_REQ) {
           this.#answerDup(peer, env);
         }
         return;
       }
     }
+    if (toNode) {
+      const bytes = packEnvelope(env);
+      if (this.#forward(peer, env, bytes)) {
+        this.#noteForwarded(peer, h);
+      }
+      if (this.#hooks.size) {
+        const frame = this.#nodeFrame(peer, link, env, bytes);
+        this.#runHooks('forward', (x) => x.forward?.(frame));
+      }
+      return;
+    }
     switch (h.cls) {
       case CLS.PRESENCE:
-        this.#presenceFrame(peer, env);
+        this.#presenceFrame(peer, link, env);
         break;
       case CLS.EVENT:
         if (h.flags & FLAG.ACK_REQ) {
           this.#ack(peer, h, STATUS.OK);
         }
-        this.#publishCap(peer, env, 'event');
+        this.#publishCap(peer, link, env, 'event');
         break;
       case CLS.STATE:
-        this.#publishCap(peer, env, 'state');
+        this.#publishCap(peer, link, env, 'state');
         break;
       case CLS.RESULT:
+      case CLS.ACK:
+        // A RESULT answers a hub CMD; an ACK a hub Q1 frame (a unicast MSG). Both carry req_epoch and
+        // req_seq, matched to what waits on (device, req_seq).
         this.#result(peer, env);
         break;
       case CLS.MSG:
         if (h.flags & FLAG.ACK_REQ) {
           this.#ack(peer, h, STATUS.OK);
         }
-        this.#msg(peer, env);
+        this.#msg(peer, link, env);
         break;
       case CLS.TIME:
         if (h.kind === KIND.TIME.SYNC_RES) {
@@ -827,7 +1245,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
         }
         break;
       case CLS.CMD:
-        // The hub serves no capability; node -> node through the hub is C5.
+        // The hub serves no capability (a CMD for another node was forwarded above).
         if (h.flags & FLAG.ACK_REQ) {
           this.#reply(peer, h, CLS.RESULT, STATUS.NOT_FOUND);
         }
@@ -836,7 +1254,63 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
         this.#ota(peer, link, env);
         break;
       default:
-      // ACK (the hub sends no Q1 frame that wants one), LOG (serial logs suffice in C3).
+      // LOG (serial logs suffice in C3).
+    }
+    // A node-originated broadcast the node also flooded (05 §5.9): fanned out to every other session with
+    // ttl_remaining 1, so its receivers do not seed it again. A link-local one (ttl_remaining 1) stays.
+    if (h.dst === ADDR.BROADCAST && (h.ttl & 0x0f) > 1) {
+      const bytes = packEnvelope(env);
+      this.#fanOut(peer, bytes);
+      if (this.#hooks.size) {
+        const frame = this.#nodeFrame(peer, link, env, bytes);
+        this.#runHooks('nodeBroadcast', (x) => x.nodeBroadcast?.(frame));
+      }
+    }
+  }
+
+  /** A forwarded frame's key, for the DUP throttle (the newest 256). */
+  #noteForwarded(peer: Peer, h: Header): void {
+    const key = `${peer.id}/${h.epoch}/${h.seq}`;
+    this.#forwarded.delete(key);
+    this.#forwarded.set(key, this.#clock.now());
+    if (this.#forwarded.size > 256) {
+      this.#forwarded.delete(this.#forwarded.keys().next().value!);
+    }
+  }
+
+  /**
+   * A DUP of a frame for another node: a request the source retried (its answer, or the request, was lost
+   * on the way: forwarded again, the target re-sends its cached answer, 05 §5.8), or that cached answer on
+   * its way back. A copy within forwardDupMs of the last forward is the other path's twin (UDP and TCP while
+   * udp_ok is false): dropped.
+   */
+  #forwardDup(peer: Peer, env: Envelope): void {
+    const h = env.header;
+    const last = this.#forwarded.get(`${peer.id}/${h.epoch}/${h.seq}`);
+    if (last !== undefined && this.#clock.now() - last < this.#cfg.forwardDupMs) {
+      return;
+    }
+    if (this.#forward(peer, env, packEnvelope(env))) {
+      this.#noteForwarded(peer, h);
+    }
+  }
+
+  /** A frame as RouterHooks see it; the envelope packs back to the bytes received (the decoder keeps EXT TLVs). */
+  #nodeFrame(peer: Peer, link: LinkName, env: Envelope, bytes = packEnvelope(env)): NodeFrame {
+    return { device: peer.id, alias: peer.alias, link, header: env.header, bytes, body: env.body.slice() };
+  }
+
+  /** Runs one hook of every registered set; one that throws costs neither the receive path nor the others. */
+  #runHooks(name: keyof RouterHooks, call: (h: RouterHooks) => void): void {
+    for (const h of this.#hooks) {
+      if (h[name] === undefined) {
+        continue;
+      }
+      try {
+        call(h);
+      } catch (err) {
+        console.error(JSON.stringify({ event: 'router_hook_failed', hook: name, message: (err as Error).message }));
+      }
     }
   }
 
@@ -872,7 +1346,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     }
   }
 
-  #presenceFrame(peer: Peer, env: Envelope): void {
+  #presenceFrame(peer: Peer, link: LinkName, env: Envelope): void {
     const h = env.header;
     switch (h.kind) {
       case KIND.PRESENCE.HEARTBEAT: {
@@ -882,6 +1356,10 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
           return;
         }
         peer.heartbeat = hb.value;
+        this.#repair(peer, hb.value.bcast_watermark);
+        if (this.#hooks.size) {
+          this.#runHooks('heartbeat', (x) => x.heartbeat?.(peer.id, hb.value));
+        }
         // Resync (05 §5.8): the node sent a STATE the hub has not seen. One get_state per interval at most,
         // so a STATE still in flight behind the heartbeat costs at most one spare round trip.
         const now = this.#clock.now();
@@ -908,8 +1386,19 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
       case KIND.PRESENCE.HELLO:
         // Over UDP (the session links handle HELLO before this): not a session link.
         break;
+      case KIND.PRESENCE.PONG: {
+        // It refreshed last_rx above, which is all a presence PING asks for; its round trip is a
+        // latency_stats sample (t0 is the hub's own µs clock, low 32 bits).
+        const pong = decodePresencePong(env.body);
+        if (pong.ok) {
+          const rtt = (low32(this.#clock.nowUs()) - pong.value.t0) >>> 0;
+          if (rtt < 10_000_000) {
+            this.#latency.add(peer.id, 'ping', link, rtt, this.#clock.now());
+          }
+        }
+        break;
+      }
       default:
-      // PONG: it refreshed last_rx above, which is all a presence PING asks for.
     }
   }
 
@@ -951,7 +1440,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     done?.({ t2: Number(d.value.t2), t3: Number(d.value.t3), t4 });
   }
 
-  #msg(peer: Peer, env: Envelope): void {
+  #msg(peer: Peer, link: LinkName, env: Envelope): void {
     const d = decodeMsgMsg(env.body);
     if (!d.ok) {
       this.#counters.rx_bad++;
@@ -963,16 +1452,26 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     } catch {
       // not UTF-8 JSON: keep the hex
     }
+    const fields: MsgEventFields = { topic: d.value.topic, data, dst: env.header.dst };
     this.#deps.events.publish({
-      type: 'msg',
+      type: MSG_EVENT,
       device: peer.id,
       alias: peer.alias,
       t_hub_us: Math.round(this.#clock.nowUs()),
       epoch: env.header.epoch,
-      fields: { topic: d.value.topic, data, dst: env.header.dst },
+      fields: { ...fields },
     });
+    if (this.#hooks.size) {
+      const frame = this.#nodeFrame(peer, link, env);
+      this.#runHooks('msg', (x) => x.msg?.(frame));
+    }
   }
 
+  /**
+   * NET/RESOLVE {addr} (05 §5.7): a one-entry DIRECTORY (page 0 of 1) to the asker. An addr the registry does
+   * not hold gets no answer: an empty page 0 of 1 would read as a whole (empty) directory set, and the node
+   * keeps sending that addr's frames via the hub or a flood meanwhile.
+   */
   #resolve(peer: Peer, env: Envelope): void {
     const d = decodeNetResolve(env.body);
     if (!d.ok) {
@@ -984,16 +1483,16 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     } catch {
       this.#counters.registry_errors++;
     }
-    const entries = dev && dev.addr !== null ? [{ addr: dev.addr, mac: Buffer.from(dev.device_id, 'hex') }] : [];
     const s = this.#best(peer);
-    if (s) {
+    if (s && dev?.provisioned && dev.addr === d.value.addr) {
+      const entries = [{ addr: dev.addr, mac: Buffer.from(dev.device_id, 'hex') }];
       this.#sendFrame(s, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, encodeNetDirectory({ page: 0, pages: 1, entries }));
     }
   }
 
   // ---- events from frames ----
 
-  #publishCap(peer: Peer, env: Envelope, part: 'event' | 'state'): void {
+  #publishCap(peer: Peer, link: LinkName, env: Envelope, part: 'event' | 'state'): void {
     const h = env.header;
     const tUs = env.prefix.type === 'time' ? env.prefix.t_us : 0;
     const inst = instanceAt(this.#capsOf(peer), h.port);
@@ -1030,6 +1529,11 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
       peer.mirror.set(type, { value: member ? fields[member.name] : fields, epoch: h.epoch, t_us: tUs, t_hub_us: tHub });
     }
     const replayed = synced && now - tHub > this.#cfg.replayedAfterMs * 1000;
+    if (part === 'event') {
+      // Input -> hub is about capability input (ports 1..239), not node.boot or node.binding_fired.
+      const input = synced && !replayed && h.port >= PORT.CAP_FIRST && h.port <= PORT.CAP_LAST;
+      this.#sampleEvent(peer, link, type, fields, input ? now - tHub : null);
+    }
     this.#deps.events.publish({
       type,
       device: peer.id,
@@ -1041,6 +1545,23 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
       ...(late ? { late: true } : {}),
       ...(replayed ? { replayed: true } : {}),
     });
+  }
+
+  /**
+   * latency_stats samples from an EVENT: input -> hub (`inputUs`, from the device time through the TIME
+   * offset; null before the clock is known, for a replayed event and on system ports), and
+   * node.binding_fired's rtt_us per path.
+   */
+  #sampleEvent(peer: Peer, link: LinkName, type: string, fields: Record<string, unknown>, inputUs: number | null): void {
+    const at = this.#clock.now();
+    if (inputUs !== null) {
+      // The offset is good to about half a round trip: an event can map a little after its arrival.
+      this.#latency.add(peer.id, 'input', link, Math.max(0, inputUs), at);
+    }
+    if (type === 'node.binding_fired' && typeof fields.rtt_us === 'number' && typeof fields.path === 'number') {
+      const path = BINDING_PATHS[fields.path] ?? `path${fields.path}`;
+      this.#latency.add(peer.id, 'binding', path, fields.rtt_us, at, typeof fields.target_status === 'number' ? fields.target_status : undefined);
+    }
   }
 
   #publishPresence(peer: Peer, type: string, fields: Record<string, unknown>): void {
@@ -1083,6 +1604,8 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     });
     this.#send(session, this.#encode(peer, seq, CLS.NET, KIND.NET.WELCOME, PORT.NODE, welcome));
     session.welcomed = true;
+    // The node's BCAST window restarts here (05 §5.9: a late joiner never gets older broadcasts).
+    peer.bcastBase = this.#bcast;
     // 2. DIRECTORY (paged; 05 §5.10).
     for (const page of this.#directoryPages()) {
       this.#sendFrame(session, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, page);
@@ -1126,15 +1649,29 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     if (dev && (dev.alias !== hello.alias || dev.alias_rev !== hello.alias_rev) && dev.alias_rev >= hello.alias_rev) {
       this.#setAlias(peer);
     }
+    // Bindings compare the node's table with the registry's (design c5 §4: re-push on a HELLO that differs).
+    if (this.#hooks.size) {
+      this.#runHooks('ready', (x) => x.ready?.(peer.id, hello));
+    }
   }
 
-  *#directoryPages(): Generator<Uint8Array> {
-    let devices: Device[] = [];
+  /**
+   * The provisioned devices (addr -> MAC) by addr, so a rename (the registry lists by alias) is no change;
+   * null when the registry cannot be read.
+   */
+  #directoryDevices(): Device[] | null {
     try {
-      devices = this.#deps.registry.list().filter((d) => d.provisioned && d.addr !== null);
+      return this.#deps.registry
+        .list()
+        .filter((d) => d.provisioned && d.addr !== null)
+        .sort((a, b) => a.addr! - b.addr!);
     } catch {
       this.#counters.registry_errors++;
+      return null;
     }
+  }
+
+  *#directoryPages(devices: Device[] = this.#directoryDevices() ?? []): Generator<Uint8Array> {
     const per = 14;
     const pages = Math.max(1, Math.ceil(devices.length / per));
     for (let page = 0; page < pages; page++) {
@@ -1166,6 +1703,8 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
         this.#syncWait.delete(key);
         if (r) {
           samples.push({ t1, ...r });
+          // Each round trip less the node's own hold time is a PING RTT sample of this link (latency_stats).
+          this.#latency.add(peer.id, 'ping', session.ep.kind, rttOf({ t1, ...r }), this.#clock.now());
         }
       }
       const info = peer.clock.addBurst(samples);
@@ -1213,6 +1752,9 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
   /** Presence, keepalives, udp_blocked and TIME resync; runs every tickMs (tests call it with a fake clock). */
   tick(): void {
     const now = this.#clock.now();
+    if (now - this.#dirCheckAt >= this.#cfg.directoryCheckMs) {
+      this.syncDirectory();
+    }
     for (const peer of this.#peers.values()) {
       const sessions = this.#sessionsOf(peer);
       if (!sessions.length || peer.lastRx === null) {
@@ -1436,6 +1978,7 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
         mirror: new Map(),
         lastEvent: new Map(),
         heartbeat: null,
+        bcastBase: 0,
       };
       try {
         const dev = this.#deps.registry.get(id);
@@ -1575,16 +2118,22 @@ export class HubRouter implements Router, Lifecycle, LinkSink {
     if (opts.ack === 'none') {
       return Promise.resolve({ status: STATUS.OK, fields: EMPTY, rtt_ms: 0, link });
     }
+    return this.#awaitAnswer(peer, session, seq, opts.timeoutMs, 'RESULT', { port, cmd: cmdId });
+  }
+
+  /** Waits for the RESULT or ACK answering the hub frame `seq` to `peer` (05 §5.8), as #result matches it. */
+  #awaitAnswer(peer: Peer, session: Session, seq: number, timeoutMs: number, what: 'RESULT' | 'ACK', details: Record<string, unknown>): Promise<CommandResult> {
+    const link = session.ep.kind;
     return new Promise<CommandResult>((resolve, reject) => {
       const key = `${peer.id}/${seq}`;
       const timer = setTimeout(() => {
         this.#pending.delete(key);
         reject(
-          new FrError('TIMEOUT', `no RESULT from ${peer.alias} within ${opts.timeoutMs} ms`, {
-            details: { device: peer.id, port, cmd: cmdId, seq, link },
+          new FrError('TIMEOUT', `no ${what} from ${peer.alias} within ${timeoutMs} ms`, {
+            details: { device: peer.id, ...details, seq, link },
           }),
         );
-      }, opts.timeoutMs);
+      }, timeoutMs);
       this.#pending.set(key, { peer, session, sentAt: this.#clock.now(), link, timer, resolve, reject });
     });
   }
@@ -1619,3 +2168,15 @@ export function routerInfo(router: Router | undefined, deviceId: string): Device
 export function routerInstances(router: Router | undefined, deviceId: string): PortCap[] | null {
   return router instanceof HubRouter ? router.instances(deviceId) : null;
 }
+
+/** A device's latency samples over the last `windowMs` when `router` is the hub's own, else null. */
+export function routerLatency(router: Router | undefined, deviceId: string, windowMs: number): DeviceLatency | null {
+  return router instanceof HubRouter ? router.latency(deviceId, windowMs) : null;
+}
+
+/** The hub's event-loop delay over the last `windowMs` when `router` is the hub's own, else null. */
+export function routerLoopDelay(router: Router | undefined, windowMs: number): LoopDelay | null {
+  return router instanceof HubRouter ? router.loopDelay(windowMs) : null;
+}
+
+export type { DeviceLatency, LoopDelay } from './latency.ts';

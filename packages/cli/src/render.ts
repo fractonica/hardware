@@ -144,6 +144,124 @@ function renderArtifacts(rows: Row[]): string {
   ].join('\n');
 }
 
+// ---- node <-> node (design c5 §4) ----
+// message_send, binding_set|list|clear and latency_stats: one line for a single outcome, aligned tables for
+// rows (devices, bindings, latency metrics), so a human sees at a glance what an agent reads from --json.
+
+const num = (v: unknown) => (typeof v === 'number' ? v : null);
+const msCell = (v: unknown) => (typeof v === 'number' ? `${v} ms` : '-');
+
+/** A binding's trigger and reaction from its protocol fields (bind ls --live, which has no from/to text). */
+function bindingEnds(b: Row): { on: string; to: string } {
+  const on = b.on_cls === 7 ? `msg:${String(b.on_topic)}` : `event port ${String(b.on_port)} id ${String(b.on_kind)}`;
+  const addr = num(b.to_addr);
+  const where = addr === 0xffff ? 'broadcast' : `0x${(addr ?? 0).toString(16).padStart(4, '0')}${b.to_mac ? ` (${String(b.to_mac)})` : ''}`;
+  const what = b.to_cls === 7 ? `msg:${String(b.to_topic)}` : `cmd port ${String(b.to_port)} id ${String(b.to_kind)}`;
+  return { on, to: `${where} ${what}` };
+}
+
+function renderMessage(data: Row): string {
+  if (Array.isArray(data.results)) {
+    const rows = data.results as Row[];
+    if (rows.some((r) => 'acked' in r)) {
+      // A repeated unicast (the job's result): per device.
+      const cells = rows.map((r) => [String(r.alias ?? r.device), String(r.sent), String(r.acked), msCell(r.rtt_p50_ms), msCell(r.rtt_p99_ms)]);
+      return aligned(['DEVICE', 'SENT', 'ACKED', 'RTT P50', 'RTT P99'], cells).join('\n');
+    }
+    const cells = rows.map((r) => [String(r.alias ?? r.device), String(r.status), msCell(r.rtt_ms), String(r.link ?? '-')]);
+    const notes = rows.filter((r) => typeof r.error === 'string').map((r) => `${String(r.alias ?? r.device)}: ${String(r.error)}`);
+    return [`msg ${String(data.topic)}`, ...aligned(['DEVICE', 'STATUS', 'RTT', 'LINK'], cells), ...notes].join('\n');
+  }
+  if (data.count !== undefined && data.sent !== undefined) {
+    // A repeated broadcast (the job's result).
+    const seqs = data.first_seq != null ? ` seq ${String(data.first_seq)}..${String(data.last_seq)}` : '';
+    const split = typeof data.tcp_only === 'number' && data.tcp_only > 0 ? `, ${String(data.seeded)} flooded, ${String(data.tcp_only)} TCP-only (over the flood rate)` : '';
+    const nobody = typeof data.no_session === 'number' && data.no_session > 0 ? `, ${String(data.no_session)} reached no session` : '';
+    return `broadcast ${String(data.topic)}: ${String(data.sent)}/${String(data.count)} sent${seqs}${split}${nobody} in ${seconds(data.duration_ms)}`;
+  }
+  const how = data.seeded === false ? 'TCP only (over the flood rate)' : 'nodes flood it over ESP-NOW';
+  return `broadcast ${String(data.topic)} seq ${String(data.seq)} to ${String(data.sessions)} node(s); ${how}`;
+}
+
+function renderBindingRow(b: Row): string {
+  const args = b.args == null ? '' : ` ${JSON.stringify(b.args)}`;
+  const state = b.pushed ? 'pushed' : `pending${typeof b.pending === 'string' ? `: ${b.pending}` : ' (pushed at its next handshake)'}`;
+  return `${String(b.alias)} slot ${String(b.slot)}: ${String(b.from)} -> ${String(b.to)}${args}${b.replaced ? ' (replaced)' : ''}  ${state}`;
+}
+
+function renderBindingList(data: Row): string {
+  if (Array.isArray(data.devices)) {
+    // --live: the nodes' own tables.
+    const lines: string[] = [];
+    const cells: string[][] = [];
+    for (const d of data.devices as Row[]) {
+      const alias = String(d.alias ?? d.device);
+      if (typeof d.error === 'string') {
+        lines.push(`${alias}: ${d.error}`);
+        continue;
+      }
+      for (const b of (d.bindings as Row[] | undefined) ?? []) {
+        const ends = bindingEnds(b.binding as Row);
+        cells.push([alias, String(b.slot), ends.on, ends.to, String((b.binding as Row).payload || '-'), String(b.registry)]);
+      }
+      const missing = Array.isArray(d.missing) ? d.missing : [];
+      if (missing.length) {
+        lines.push(`${alias}: registry slots not on the node: ${missing.join(', ')} (pushed at its next handshake)`);
+      }
+    }
+    return [...(cells.length ? aligned(['DEVICE', 'SLOT', 'ON', 'TO', 'PAYLOAD', 'REGISTRY'], cells) : ['no bindings on the nodes']), ...lines].join('\n');
+  }
+  const rows = (data.bindings as Row[] | undefined) ?? [];
+  if (!rows.length) {
+    return 'no bindings; try: fr bind <alias>.<instance>.<event> <alias>.<instance>.<command> [json]';
+  }
+  const cells = rows.map((b) => [String(b.alias ?? b.device), String(b.slot), String(b.from), String(b.to), b.args == null ? '-' : JSON.stringify(b.args), b.pushed ? 'yes' : 'pending']);
+  return [...aligned(['DEVICE', 'SLOT', 'FROM', 'TO', 'ARGS', 'PUSHED'], cells), ...(data.truncated ? [`(${String(data.count)} in all; narrow the selector)`] : [])].join('\n');
+}
+
+function renderBindingClear(data: Row): string {
+  const cleared = Array.isArray(data.cleared) && data.cleared.length ? `cleared slot${data.cleared.length > 1 ? 's' : ''} ${data.cleared.join(', ')}` : 'no registry rows there';
+  const node = data.pushed ? 'the node cleared it' : `the node: ${typeof data.pending === 'string' ? data.pending : 'at its next handshake'}`;
+  return `${String(data.alias ?? data.device)} slot ${String(data.slot)}: ${cleared}; ${node}`;
+}
+
+function renderLatency(data: Row): string {
+  const lines: string[] = [];
+  const loop = data.event_loop as Row | null | undefined;
+  if (loop && typeof loop.seconds === 'number' && loop.seconds > 0) {
+    lines.push(`hub event-loop delay over ${String(loop.seconds)} s: p50 ${msCell(loop.p50_ms)}, p99 ${msCell(loop.p99_ms)}, max ${msCell(loop.max_ms)}`);
+  }
+  const cells: string[][] = [];
+  const quiet: string[] = [];
+  for (const d of (data.devices as Row[] | undefined) ?? []) {
+    const alias = String(d.alias ?? d.device);
+    const before = cells.length;
+    const row = (metric: string, p: Row, extra = '') => cells.push([alias, metric, String(p.n), msCell(p.p50_ms), msCell(p.p99_ms), msCell(p.max_ms), extra]);
+    for (const [link, p] of Object.entries((d.ping as Record<string, Row> | undefined) ?? {})) {
+      row(`ping ${link}`, p);
+    }
+    const input = d.input as Row | undefined;
+    if (input && num(input.n)) {
+      row('input -> hub', input);
+    }
+    for (const [path, p] of Object.entries((d.bindings as Record<string, Row> | undefined) ?? {})) {
+      if (num(p.n) || num(p.fast) || num(p.failed)) {
+        row(`binding ${path}`, p, [num(p.fast) ? `fast ${String(p.fast)}` : '', num(p.failed) ? `failed ${String(p.failed)}` : ''].filter(Boolean).join(', '));
+      }
+    }
+    if (cells.length === before) {
+      quiet.push(alias);
+    }
+  }
+  if (cells.length) {
+    lines.push(...aligned(['DEVICE', 'METRIC', 'N', 'P50', 'P99', 'MAX', ''], cells).map((l) => l.trimEnd()));
+  }
+  if (quiet.length) {
+    lines.push(`no samples in the last ${String(data.window_s)} s: ${quiet.join(', ')}`);
+  }
+  return lines.join('\n') || 'no devices';
+}
+
 function errorLines(e: ToolError): string[] {
   return [`error ${e.code}: ${e.message}`, ...(e.hint ? [`hint: ${e.hint}`] : []), ...(e.remediation ?? []).map((rem) => `try: ${remediationCli(rem)}`)];
 }
@@ -158,6 +276,9 @@ function renderJob(job: Job): string {
     if (table !== null) {
       return [head, ...(err ? errorLines(err) : []), table].join('\n');
     }
+  }
+  if (job.kind === 'msg' && job.result && typeof job.result === 'object') {
+    return [head, renderMessage(job.result as Row)].join('\n');
   }
   if (job.result) {
     parts.push(yamlish(job.result, '  ').replace(/^\n/, ''));
@@ -260,6 +381,21 @@ export function renderResult(op: string, r: Result): { out: string; err: string 
     if (table !== null) {
       return { out: table, err: '' };
     }
+  }
+  if (op === 'message_send') {
+    return { out: renderMessage(data), err: '' };
+  }
+  if (op === 'binding_set') {
+    return { out: renderBindingRow(data), err: '' };
+  }
+  if (op === 'binding_list') {
+    return { out: renderBindingList(data), err: '' };
+  }
+  if (op === 'binding_clear') {
+    return { out: renderBindingClear(data), err: '' };
+  }
+  if (op === 'latency_stats') {
+    return { out: renderLatency(data), err: '' };
   }
   if (op === 'job_logs') {
     return { out: ((data as { lines: { text: string }[] }).lines ?? []).map((l) => l.text).join('\n'), err: '' };

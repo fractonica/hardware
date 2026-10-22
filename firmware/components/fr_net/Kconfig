@@ -72,6 +72,49 @@ menu "Fractonica network"
         range 1 7
         default 2
 
+    # ESP-NOW, node <-> node and managed flooding (spec 05 §5.9-5.10, §5.17, design c5 §7).
+
+    config FR_TTL_MAX
+        int "Largest TTL accepted"
+        range 1 15
+        default 7
+        help
+            A received frame claiming a larger initial TTL is dropped.
+
+    config FR_ACK_PER_HOP_MS
+        int "Q1 retry allowance per ESP-NOW hop (ms)"
+        range 0 1000
+        default 10
+        help
+            A reliable node -> node frame waits FR_ACK_BASE_MS plus this per expected hop for its RESULT
+            or ACK before the next end-to-end attempt.
+
+    config FR_ESPNOW_HB_MS
+        int "ESP-NOW heartbeat interval (ms)"
+        range 1000 60000
+        default 5000
+        help
+            Router mode: PRESENCE/HEARTBEAT to the broadcast MAC (+-20 %, TTL 1, never relayed), from
+            which neighbours learn this node.
+
+    config FR_RELAY_JMIN_MS
+        int "Flood relay delay, minimum (ms)"
+        range 0 1000
+        default 1
+
+    config FR_RELAY_JMAX_MS
+        int "Flood relay delay, maximum (ms)"
+        range 1 1000
+        default 16
+        help
+            A relay waits uniform(FR_RELAY_JMIN_MS, FR_RELAY_JMAX_MS) plus an RSSI bias (strong signal,
+            longer wait), so the farthest neighbour tends to relay first.
+
+    config FR_RELAY_K
+        int "Copies heard that cancel a pending relay"
+        range 1 8
+        default 2
+
     config FR_HUB_PORT
         int "Hub TCP and UDP port"
         range 1 65535

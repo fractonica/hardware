@@ -1,7 +1,8 @@
 import { z } from 'zod';
 
 export const JOB_STATUSES = ['queued', 'working', 'completed', 'failed', 'cancelled'] as const;
-export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy'] as const;
+// msg: a repeated message_send (design c5 §4).
+export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg'] as const;
 
 export const JobSchema = z.object({
   job_id: z.string(),

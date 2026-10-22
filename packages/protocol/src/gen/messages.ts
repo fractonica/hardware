@@ -197,6 +197,172 @@ export function decodeDescriptor(bytes: Uint8Array): Decoded<Descriptor> {
   return $.done(r, readDescriptor(r));
 }
 
+const BINDING_JSON: readonly $.JsonField[] = [{ name: 'slot', range: [0, 15] }, { name: 'on_port' }, { name: 'on_cls' }, { name: 'on_kind' }, { name: 'on_topic' }, { name: 'to_mac', json: 'bytes' }, { name: 'to_addr' }, { name: 'to_port' }, { name: 'to_cls' }, { name: 'to_kind' }, { name: 'to_topic' }, { name: 'payload', json: 'bytes' }, { name: 'reliable' }];
+
+/** Binding (protocol type). */
+export interface Binding {
+  /** (0..15) */
+  slot: number;
+  on_port: number;
+  /** 3 EVENT | 7 MSG */
+  on_cls: number;
+  /** the event id (EVENT) */
+  on_kind: number;
+  /** the MSG topic (MSG) (<= 32 UTF-8 bytes) */
+  on_topic: string;
+  /** (<= 6 bytes) */
+  to_mac: Uint8Array;
+  /** this node, another node, or 0xFFFF (MSG broadcast) */
+  to_addr: number;
+  to_port: number;
+  /** 4 CMD | 7 MSG */
+  to_cls: number;
+  /** the command id (CMD) */
+  to_kind: number;
+  /** the MSG topic (MSG) (<= 32 UTF-8 bytes) */
+  to_topic: string;
+  /** pre-encoded CMD fields, or the MSG data (<= 64 bytes) */
+  payload: Uint8Array;
+  /** Q1: ACK_REQ, the target's RESULT or ACK, end-to-end retries */
+  reliable: boolean;
+}
+
+function writeBinding(w: Writer, value: unknown, path: string): void {
+  const v = $.obj(value, path) as Partial<Binding>;
+  const f1 = $.int(v.slot ?? 0, 0, 255, `${path}.slot`);
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.on_port ?? 0, 0, 255, `${path}.on_port`);
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.on_cls ?? 0, 0, 255, `${path}.on_cls`);
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.int(v.on_kind ?? 0, 0, 255, `${path}.on_kind`);
+  if (f4 !== 0) w.fieldUint(4, f4);
+  const f5 = $.str(v.on_topic ?? '', 32, `${path}.on_topic`);
+  if (f5.length > 0) w.fieldBytes(5, f5);
+  const f6 = $.bytes(v.to_mac ?? $.EMPTY, 6, `${path}.to_mac`);
+  if (f6.length > 0) w.fieldBytes(6, f6);
+  const f7 = $.int(v.to_addr ?? 0, 0, 65535, `${path}.to_addr`);
+  if (f7 !== 0) w.fieldUint(7, f7);
+  const f8 = $.int(v.to_port ?? 0, 0, 255, `${path}.to_port`);
+  if (f8 !== 0) w.fieldUint(8, f8);
+  const f9 = $.int(v.to_cls ?? 0, 0, 255, `${path}.to_cls`);
+  if (f9 !== 0) w.fieldUint(9, f9);
+  const f10 = $.int(v.to_kind ?? 0, 0, 255, `${path}.to_kind`);
+  if (f10 !== 0) w.fieldUint(10, f10);
+  const f11 = $.str(v.to_topic ?? '', 32, `${path}.to_topic`);
+  if (f11.length > 0) w.fieldBytes(11, f11);
+  const f12 = $.bytes(v.payload ?? $.EMPTY, 64, `${path}.payload`);
+  if (f12.length > 0) w.fieldBytes(12, f12);
+  const f13 = $.bool(v.reliable ?? false, `${path}.reliable`);
+  if (f13) w.fieldBool(13, f13);
+}
+
+function readBinding(r: Reader): Binding {
+  const v: Binding = { slot: 0, on_port: 0, on_cls: 0, on_kind: 0, on_topic: '', to_mac: new Uint8Array(0), to_addr: 0, to_port: 0, to_cls: 0, to_kind: 0, to_topic: '', payload: new Uint8Array(0), reliable: false };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.slot = r.readUint(255);
+        break;
+      case 2:
+        v.on_port = r.readUint(255);
+        break;
+      case 3:
+        v.on_cls = r.readUint(255);
+        break;
+      case 4:
+        v.on_kind = r.readUint(255);
+        break;
+      case 5:
+        v.on_topic = r.readString(32);
+        break;
+      case 6:
+        v.to_mac = r.readBytes(6).slice();
+        break;
+      case 7:
+        v.to_addr = r.readUint(65535);
+        break;
+      case 8:
+        v.to_port = r.readUint(255);
+        break;
+      case 9:
+        v.to_cls = r.readUint(255);
+        break;
+      case 10:
+        v.to_kind = r.readUint(255);
+        break;
+      case 11:
+        v.to_topic = r.readString(32);
+        break;
+      case 12:
+        v.payload = r.readBytes(64).slice();
+        break;
+      case 13:
+        v.reliable = r.readBool();
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return v;
+}
+
+export function encodeBinding(v: Partial<Binding> = {}): Uint8Array {
+  const w = new Writer();
+  writeBinding(w, v, 'binding');
+  return w.finish();
+}
+
+export function decodeBinding(bytes: Uint8Array): Decoded<Binding> {
+  const r = new Reader(bytes);
+  return $.done(r, readBinding(r));
+}
+
+const BINDING_LIST_JSON: readonly $.JsonField[] = [{ name: 'items', json: BINDING_JSON }];
+
+/** BindingList (protocol type). */
+export interface BindingList {
+  /** (<= 16 items) */
+  items: Binding[];
+}
+
+function writeBindingList(w: Writer, value: unknown, path: string): void {
+  const v = $.obj(value, path) as Partial<BindingList>;
+  {
+    const f1 = $.list(v.items ?? [], 16, `${path}.items`);
+    for (let i = 0; i < f1.length; i++) {
+      const m = w.beginLen(1);
+      writeBinding(w, f1[i], `${path}.items[${i}]`);
+      w.endLen(m);
+    }
+  }
+}
+
+function readBindingList(r: Reader): BindingList {
+  const v: BindingList = { items: [] };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        $.readRepeated(r, v.items, 16, readBinding);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return v;
+}
+
+export function encodeBindingList(v: Partial<BindingList> = {}): Uint8Array {
+  const w = new Writer();
+  writeBindingList(w, v, 'binding_list');
+  return w.finish();
+}
+
+export function decodeBindingList(bytes: Uint8Array): Decoded<BindingList> {
+  const r = new Reader(bytes);
+  return $.done(r, readBindingList(r));
+}
+
 /** NET.WELCOME (class 0x00, kind 7). */
 export interface NetWelcome {
   hub_epoch: number;
@@ -1043,6 +1209,8 @@ export const PROTOCOL_TYPES: readonly $.StructInfo[] = [
   { name: 'DirectoryEntry', codec: { fields: [{ name: 'addr' }, { name: 'mac', json: 'bytes' }], maxSize: 12, encode: encodeDirectoryEntry, decode: decodeDirectoryEntry } },
   { name: 'DescriptorCap', codec: { fields: [{ name: 'port' }, { name: 'cap_id' }, { name: 'version' }, { name: 'name' }, { name: 'traits', json: 'bytes' }], maxSize: 62, encode: encodeDescriptorCap, decode: decodeDescriptorCap } },
   { name: 'Descriptor', codec: { fields: [{ name: 'frame_version' }, { name: 'fw_id_prefix', json: 'bytes' }, { name: 'catalog_hash' }, { name: 'profile' }, { name: 'board' }, { name: 'caps', json: DESCRIPTOR_CAP_JSON }], maxSize: 1109, encode: encodeDescriptor, decode: decodeDescriptor } },
+  { name: 'Binding', codec: { fields: [{ name: 'slot', range: [0, 15] }, { name: 'on_port' }, { name: 'on_cls' }, { name: 'on_kind' }, { name: 'on_topic' }, { name: 'to_mac', json: 'bytes' }, { name: 'to_addr' }, { name: 'to_port' }, { name: 'to_cls' }, { name: 'to_kind' }, { name: 'to_topic' }, { name: 'payload', json: 'bytes' }, { name: 'reliable' }], maxSize: 169, encode: encodeBinding, decode: decodeBinding } },
+  { name: 'BindingList', codec: { fields: [{ name: 'items', json: BINDING_JSON }], maxSize: 2752, encode: encodeBindingList, decode: decodeBindingList } },
 ];
 
 export const MESSAGES: readonly $.MessageInfo[] = [

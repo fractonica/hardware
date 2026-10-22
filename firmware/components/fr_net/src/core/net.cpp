@@ -4,6 +4,11 @@
 // that tick() serves at the earliest of the deadlines it keeps (HELLO repeats, session timeouts, the
 // udp_ok expiry, the heartbeat, Q1 retries and give-ups, STATE second copies, the debug hooks). No heap:
 // envelopes are built in tx_buf_, kept frames live in fixed slots.
+//
+// C5 (design c5 §3) adds ESP-NOW as a fourth input (receive_air, air_sent; air.cpp), node <-> node sends
+// (peer.cpp) and bindings (bindings.cpp). The same timer serves their deadlines: relay delays, node -> node
+// retries, the ESP-NOW heartbeat. This file keeps the hub link; its receive path hands node frames the hub
+// forwarded to air.cpp and seeds the ESP-NOW flood with the hub's broadcasts.
 #include "fr/net/net.hpp"
 
 #include <algorithm>
@@ -13,32 +18,17 @@
 #include "fr/hash.hpp"
 #include "fr/wire.hpp"
 #include "messages.hpp"  // generated fr::proto system messages
-#include "node.hpp"      // generated fr::cap::Node: the boot event
+#include "net_util.hpp"
+#include "node.hpp"  // generated fr::cap::Node: the boot event
 
 namespace fr::net {
 
 using namespace fr::wire;
+using namespace util;
 
 namespace {
 
 constexpr std::array<LinkKind, 2> kSessionLinks{LinkKind::serial, LinkKind::tcp};
-
-constexpr TimeUs ms_us(uint32_t ms)
-{
-    return static_cast<TimeUs>(ms) * 1000;
-}
-
-/** The u32 clock of envelopes and EXT TLVs: the low 32 bits of esp_timer µs (05 §5.7). */
-constexpr uint32_t low32(TimeUs t)
-{
-    return static_cast<uint32_t>(t);
-}
-
-/** Groups and the reserved well-known groups (05 §5.5): BCAST space, delivered only to members (M2). */
-constexpr bool is_group(uint16_t dst)
-{
-    return dst >= fr::proto::kAddrGroupsFirst && dst < fr::proto::kAddrUnassigned;
-}
 
 }  // namespace
 
@@ -53,16 +43,18 @@ Net::Net(Core &core, Host &host, const Config &cfg) : core_(core), host_(host), 
     ttl_ = static_cast<uint8_t>(ttl << 4 | ttl);
     rng_ = cfg_.rng_seed;
     rng_seeded_ = cfg_.rng_seed != 0;
+    relay_ = cfg_.relay;
 }
 
 // ---- links ----
 
 void Net::attach(Link &l)
 {
-    if (timer_ == nullptr) {
-        timer_ = core_.timer([this] { tick(); });
-    }
     const LinkKind k = l.kind();
+    if (index_of(k) >= kLinkKinds || k == LinkKind::espnow) {
+        return;  // ESP-NOW is an AirLink (attach_air): its frames need RxMeta and send completions
+    }
+    ensure_timer();
     if (link(k) != &l && ls(k).session) {
         end_session(k, false);
     }
@@ -79,6 +71,23 @@ void Net::attach(Link &l)
 
 void Net::link_changed(LinkKind k)
 {
+    if (index_of(k) >= kLinkKinds) {
+        return;
+    }
+    if (k == LinkKind::espnow) {
+        // No session: ESP-NOW is node <-> node. Its heartbeat starts at a random point of one interval, so
+        // nodes powered up together do not beacon in lockstep.
+        const bool was = ls(k).up;
+        ls(k).up = air_ != nullptr && air_->up();
+        if (ls(k).up && !was) {
+            refresh_identity();
+            air_hb_due_ = core_.now() + next_random() % (ms_us(cfg_.espnow_hb_ms) + 1);
+        } else if (!ls(k).up) {
+            air_hb_due_ = kNever;
+        }
+        arm();
+        return;
+    }
     Link *l = link(k);
     LinkState &s = ls(k);
     s.up = l != nullptr && l->up();
@@ -110,6 +119,7 @@ void Net::receive(LinkKind from, std::span<const uint8_t> envelope)
     handle(from, envelope);
     in_receive_ = false;
     run_deferred();
+    flush_fired();
     arm();
 }
 
@@ -149,7 +159,10 @@ void Net::send_bye(uint8_t reason, uint8_t via)
 
 State Net::state() const
 {
-    return state_;
+    State s = state_;
+    s.bcast.watermark = bcast_.watermark();
+    s.bindings.rtt_p50_us = rtt_p50();
+    return s;
 }
 
 void Net::reset_stats()
@@ -160,6 +173,12 @@ void Net::reset_stats()
     state_.events_dropped = state_.delivery_failed = state_.cmds = state_.cmds_refused = 0;
     state_.dup = state_.old = state_.cached_replies = state_.sessions_lost = state_.hook_drops = 0;
     state_.sessions_timed_out = 0;
+    state_.relay = {};
+    state_.bcast = {};  // state() reads the watermark from the window
+    state_.bindings = {};
+    state_.nodes = {};
+    msgs_ = {};
+    rtt_n_ = rtt_next_ = 0;
 }
 
 void Net::drop_hub_link(uint32_t seconds)
@@ -222,7 +241,16 @@ void Net::event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<co
 {
     // fr.node.boot is normally Net's own (on_welcome); the age exemption holds whoever emits it.
     const bool exempt = port == fr::proto::kPortNode && event_id == cap::Node::kEventBoot;
+    // 07 §7.11: the bindings run first, so a node -> node reaction never waits for the hub path. What they
+    // report (node.binding_fired) is held until the triggering EVENT itself has gone, so the hub sees the
+    // cause before its effect.
+    ++fired_hold_;
+    run_bindings(true, port, event_id, {});
+    --fired_hold_;
     send_event(port, event_id, prio, fields, at, exempt);
+    if (fired_hold_ == 0) {
+        flush_fired();
+    }
     arm();
 }
 
@@ -273,11 +301,25 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
         return;
     }
     const Header &h = e->header;
-    // Router mode (C3): a node hears only the hub, over its own TCP or serial session. The hub never
-    // sends UDP; node-to-node frames come with bindings (C5). A provisioned node also filters on its net.
-    const bool provisioned = addr_ != fr::proto::kAddrUnassigned;
-    if (from == LinkKind::udp || h.src != fr::proto::kAddrHub || (provisioned && h.net != net_)) {
+    // Router mode: a node hears the hub over its own TCP or serial session (the hub never sends UDP). A
+    // provisioned node also filters on its net.
+    if (from == LinkKind::udp || (provisioned() && h.net != net_)) {
         ++s.rx_drop;
+        return;
+    }
+    if (h.src != fr::proto::kAddrHub) {
+        // Another node's frame the hub forwarded (dst this node, ttl_remaining - 1) or fanned out (a node
+        // broadcast, ttl_remaining 1; 05 §5.9-5.10), inside a session. Either way the hub took a hop off its
+        // TTL, so a frame still at its initial TTL was not forwarded by a hub and is dropped, as is this
+        // node's own frame coming back.
+        const uint8_t initial = ttl_initial(h.ttl);
+        if (!s.session || !provisioned() || !is_node_addr(h.src) || h.src == addr_ ||
+            ttl_remaining(h.ttl) >= initial || initial > cfg_.ttl_max) {
+            ++s.rx_drop;
+            return;
+        }
+        sess(from).last_rx = rx_at_;  // it came from the hub's end of this link: the hub is alive
+        on_node_frame(from, *e, envelope, nullptr);
         return;
     }
     if (h.cls == kClsNet && h.kind == fr::proto::kKindNetWelcome) {
@@ -308,17 +350,25 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
         ++s.rx_drop;  // another node's frame
         return;
     }
-    ReplayWindow<kWindowBits>::Verdict v = ReplayWindow<kWindowBits>::Verdict::fresh;
-    if ((h.flags & kFlagLatest) != 0) {
+    const bool latest = (h.flags & kFlagLatest) != 0;
+    // Hub broadcasts and group frames (the BCAST space) are the ones a node floods and repairs (05 §5.9).
+    const bool bcast_space = !unicast && !latest;
+    Verdict v = Verdict::fresh;
+    if (latest) {
         if (!latest_.accept(h.port, h.kind, h.seq)) {
-            v = ReplayWindow<kWindowBits>::Verdict::old;
+            v = Verdict::old;
         }
     } else {
         v = (unicast ? ucast_ : bcast_).check_and_set(h.seq);
     }
-    if (v == ReplayWindow<kWindowBits>::Verdict::dup) {
+    if (v == Verdict::dup) {
         ++state_.dup;
         ++s.rx_drop;
+        if (bcast_space) {
+            // A repair, the other session's copy, or the hub's copy of a broadcast a neighbour seeded first:
+            // none counts toward K, since none says what the neighbours heard over the air (05 §5.9).
+            ++state_.bcast.dup;
+        }
         if (unicast && (h.flags & kFlagAckReq) != 0) {
             if (h.cls == kClsCmd || h.cls == kClsOta) {
                 // A retried request (a CMD, an OFFER): its response again, byte-identical, and the request
@@ -330,14 +380,21 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
         }
         return;
     }
-    if (v == ReplayWindow<kWindowBits>::Verdict::old) {
+    if (v == Verdict::old) {
         ++state_.old;
         ++s.rx_drop;
+        if (bcast_space) {
+            ++state_.bcast.old;
+        }
         return;
     }
     if (!unicast && !broadcast) {
         ++s.rx_drop;  // a group: the seq is recorded (watermark), delivery needs membership (M2)
+        flood_relay(envelope, h, true, nullptr);  // non-members relay group floods all the same
         return;
+    }
+    if (bcast_space) {
+        ++state_.bcast.delivered;
     }
 
     switch (h.cls) {
@@ -358,17 +415,28 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
             on_sync_req(from, e->body);
         }
         break;
-    case kClsEvent:
     case kClsMsg:
-        // 05 §5.8: a Q1 EVENT or unicast MSG is acknowledged with an ACK frame. It confirms receipt;
-        // MSG delivery to bindings arrives with C5.
+        // A MSG from the hub (message_send, unicast or broadcast): its bindings, then Host::msg.
+        deliver_msg(h.src, e->body);
+        [[fallthrough]];
+    case kClsEvent:
+        // 05 §5.8: a Q1 EVENT or unicast MSG is acknowledged with an ACK frame.
         if (unicast && (h.flags & kFlagAckReq) != 0) {
             send_ack(h);
         }
         break;
-    default:
-        // NET.DIRECTORY (directory use is C5): accepted, nothing to do yet.
+    case kClsNet:
+        if (h.kind == fr::proto::kKindNetDirectory) {
+            on_directory(e->body);
+        }
         break;
+    default:
+        break;
+    }
+    // 05 §5.9 from_hub: a hub broadcast that came over TCP or serial seeds the ESP-NOW flood (after its
+    // delivery here; the relay waits its jitter anyway).
+    if (broadcast) {
+        flood_relay(envelope, h, true, nullptr);
     }
 }
 
@@ -397,10 +465,18 @@ void Net::on_welcome(LinkKind from, std::span<const uint8_t> body)
             lose_session(k, DropReason::hub_restarted);
         }
     }
-    // 05 §5.8: the node resets its hub entries on every WELCOME, with the floors the hub gives.
+    // 05 §5.8: the node resets its hub entries on every WELCOME, with the floors the hub gives. A WELCOME of
+    // the hub run the BCAST window already follows only raises its floor (design c5 §8): a broadcast
+    // above bcast_base can arrive over the air or the other session ahead of this WELCOME, and moving the
+    // window back would deliver it a second time when the hub's own copy follows.
+    const bool same_run = state_.hub_epoch != 0 && w->hub_epoch == state_.hub_epoch;
     state_.hub_epoch = w->hub_epoch;
     ucast_.reset(w->ucast_floor);
-    bcast_.reset(w->bcast_base);
+    if (same_run) {
+        bcast_.raise_floor(w->bcast_base);
+    } else {
+        bcast_.reset(w->bcast_base);
+    }
     latest_.clear();
     LinkState &s = ls(from);
     s.session = true;
@@ -696,10 +772,8 @@ void Net::send_hello(LinkKind k)
     epoch_ = id.epoch;
     const HelloInfo hi = host_.hello_info();
     const LinkInfo li = host_.link_info();
-    if (!rng_seeded_) {
-        rng_ = fnv1a32(std::span<const uint8_t>(hi.mac));
-        rng_seeded_ = true;
-    }
+    gateway_ = hi.role == fr::proto::Role::gateway;
+    seed_rng(hi.mac);
     const bool associated = li.channel != 0;
     const fr::proto::PresenceHello m{
         .mac = hi.mac,
@@ -729,11 +803,8 @@ void Net::send_hello(LinkKind k)
                          fr::proto::kPortNode, {}, w.bytes()));
 }
 
-void Net::send_heartbeat()
+fr::proto::PresenceHeartbeat Net::heartbeat_msg(const LinkInfo &li, const Vitals &vit) const
 {
-    const TimeUs now = core_.now();
-    const LinkInfo li = host_.link_info();
-    const Vitals vit = host_.vitals();
     uint32_t tx_fail = 0;
     uint32_t rx_drop = 0;
     for (const LinkState &l : state_.links) {
@@ -748,8 +819,8 @@ void Net::send_heartbeat()
     bits |= vit.low_batt ? kStateLowBatt : 0;
     // 05 §5.4 "Heartbeats report each sweep": set until a HEARTBEAT carrying it has gone out.
     bits |= li.sweeps != sweeps_reported_ ? kStateSwept : 0;
-    const fr::proto::PresenceHeartbeat m{
-        .uptime_s = static_cast<uint32_t>(now / 1'000'000),
+    return {
+        .uptime_s = static_cast<uint32_t>(core_.now() / 1'000'000),
         .state = bits,
         .rssi_ap = li.rssi,
         .tx_fail = tx_fail,
@@ -760,6 +831,12 @@ void Net::send_heartbeat()
         .bcast_watermark = bcast_.watermark(),
         .state_seq = state_.state_seq,
     };
+}
+
+void Net::send_heartbeat()
+{
+    const LinkInfo li = host_.link_info();
+    const fr::proto::PresenceHeartbeat m = heartbeat_msg(li, host_.vitals());
     // queue_hwm covers one interval: the outbox's peak since the previous HEARTBEAT.
     queue_hwm_ = static_cast<uint8_t>(pending_count());
     uint8_t body[fr::proto::PresenceHeartbeat::kMaxSize];
@@ -1013,6 +1090,18 @@ void Net::tick()
             service_pending(p, now);
         }
     }
+    // ESP-NOW (design c5 §3): relays whose delay ran out, node -> node retries and give-ups, the heartbeat.
+    service_relays(now);
+    for (NodeOut &o : node_out_) {
+        if (o.used) {
+            service_out(o, now);
+        }
+    }
+    if (air_up() && air_hb_due_ <= now) {
+        send_air_heartbeat();
+        air_hb_due_ = now + jittered_us(cfg_.espnow_hb_ms, 20);
+    }
+    flush_fired();
     arm();
 }
 
@@ -1056,6 +1145,19 @@ void Net::arm()
         if (p.used) {
             next = std::min({next, p.retry_at, p.deadline});
         }
+    }
+    for (const Relay &r : relays_) {
+        if (r.used) {
+            next = std::min(next, r.due);
+        }
+    }
+    for (const NodeOut &o : node_out_) {
+        if (o.used) {
+            next = std::min(next, o.in_air ? o.air_deadline : o.retry_at);
+        }
+    }
+    if (air_up()) {
+        next = std::min(next, air_hb_due_);
     }
     if (next == kNever) {
         timer_->stop();
@@ -1129,7 +1231,7 @@ uint8_t Net::wifi_route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) co
 }
 
 std::span<const uint8_t> Net::build(uint8_t flags, uint8_t cls, uint8_t kind, uint32_t seq, uint16_t dst, uint8_t port,
-                                    std::span<const uint8_t> prefix, std::span<const uint8_t> body)
+                                    std::span<const uint8_t> prefix, std::span<const uint8_t> body, uint8_t ttl)
 {
     Writer w(tx_buf_, sizeof(tx_buf_));
     pack_header({.flags = flags,
@@ -1140,7 +1242,7 @@ std::span<const uint8_t> Net::build(uint8_t flags, uint8_t cls, uint8_t kind, ui
                  .src = addr_,
                  .dst = dst,
                  .epoch = epoch_,
-                 .ttl = ttl_,
+                 .ttl = ttl != 0 ? ttl : ttl_,
                  .port = port},
                 w);
     w.raw(prefix);
@@ -1348,6 +1450,17 @@ void Net::service_pending(Pending &p, TimeUs now)
         ++state_.delivery_failed;
         p.used = false;
     }
+}
+
+void Net::seed_rng(const std::array<uint8_t, 6> &mac)
+{
+    // Only from a known MAC: fr_core attaches the air before its HELLO facts exist, and nodes seeded from
+    // the same all-zero MAC would draw the same heartbeat times and relay delays (05 §5.9 jitter).
+    if (rng_seeded_ || std::all_of(mac.begin(), mac.end(), [](uint8_t b) { return b == 0; })) {
+        return;
+    }
+    rng_ = fnv1a32(std::span<const uint8_t>(mac));
+    rng_seeded_ = true;
 }
 
 uint32_t Net::next_random()

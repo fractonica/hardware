@@ -19,6 +19,7 @@
 #include "esp_timer.h"
 #include "fr/envelope.hpp"
 #include "fr/serial.hpp"
+#include "fr/serial_line.hpp"
 #include "sdkconfig.h"
 
 namespace fr::diag {
@@ -133,7 +134,13 @@ void add_link_states(cJSON *res, const NetStatus &n)
         const LinkStatus &l = n.links[i];
         cJSON *o = cJSON_AddObjectToObject(links, kLinkNames[i]);
         cJSON_AddBoolToObject(o, "up", l.up);
-        if (i == 2) {
+        if (i == kLinkEspnow) {
+            // node <-> node: no hub session on it; the channel it lives on and its unicast peers instead.
+            cJSON_AddNumberToObject(o, "ch", n.espnow.channel);
+            cJSON_AddNumberToObject(o, "peers", n.espnow.peers);
+            continue;
+        }
+        if (i == kLinkUdp) {
             cJSON_AddBoolToObject(o, "ok", l.udp_ok);  // UDP rides the TCP session; udp_ok is its state
         } else {
             cJSON_AddBoolToObject(o, "session", l.session);
@@ -161,11 +168,15 @@ void add_link_states(cJSON *res, const NetStatus &n)
             cJSON_AddBoolToObject(wifi, "trial", true);
         }
     }
-    if (n.hub_link_dropped || n.udp_blocked || n.ip_blocked) {
+    if (n.hub_link_dropped || n.udp_blocked || n.ip_blocked || n.wifi_held) {
         cJSON *hooks = cJSON_AddObjectToObject(res, "hooks");
         cJSON_AddBoolToObject(hooks, "drop_hub_link", n.hub_link_dropped);
         cJSON_AddBoolToObject(hooks, "udp_block", n.udp_blocked);
         cJSON_AddBoolToObject(hooks, "ip_block", n.ip_blocked);
+        cJSON_AddBoolToObject(hooks, "wifi_down", n.wifi_held);
+        if (n.wifi_held) {
+            cJSON_AddNumberToObject(hooks, "wifi_down_s", n.wifi_held_s);  // seconds left
+        }
     }
 }
 
@@ -450,11 +461,137 @@ Fail cmd_log(std::string_view args, Host &, cJSON *res, size_t)
     return ok;
 }
 
-Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t)
+/** True when `json` prints within `room` characters (render()'s limit for the answer). Core task only. */
+bool fits(cJSON *json, size_t room)
+{
+    static char scratch[wire::kMaxLine];
+    return room + 1 <= sizeof(scratch) && cJSON_PrintPreallocated(json, scratch, static_cast<int>(room + 1), false);
+}
+
+/**
+ * `stats` sections (09 §9.7, design c5 §2): `stats <section>` answers one alone. A full answer that would not
+ * fit its channel (fr.diag.exec's 1,400 B, with every C5 counter and long topic names) first folds msgs into
+ * `{"other": <all>}` (`msgs_folded`), then drops whole sections from the end of this list, each named in
+ * `omitted`, so a Wi-Fi-only node always answers; the dropped ones are a `stats <section>` away.
+ */
+constexpr std::string_view kStatSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs"};
+constexpr size_t kStatSectionCount = sizeof(kStatSections) / sizeof(kStatSections[0]);
+
+/** The index of `name` in kStatSections, or kStatSectionCount. */
+size_t stat_section(std::string_view name)
+{
+    size_t i = 0;
+    while (i < kStatSectionCount && kStatSections[i] != name) {
+        ++i;
+    }
+    return i;
+}
+
+/** Adds section `i` of kStatSections: hub link counters (C3) or a C5 group (espnow: the driver's frames on
+ * the air; nodes: node <-> node frames by path). */
+void add_stat_section(cJSON *res, size_t i, const NetStatus &n)
+{
+    const std::string_view name = kStatSections[i];
+    cJSON *o = cJSON_AddObjectToObject(res, name.data());  // the names are literals: NUL-terminated
+    if (name == "links") {
+        // Per boot, kept across hub-link drops (09 §9.7).
+        for (size_t k = 0; k < kLinks; ++k) {
+            const LinkStatus &l = n.links[k];
+            cJSON *lo = cJSON_AddObjectToObject(o, kLinkNames[k]);
+            cJSON_AddNumberToObject(lo, "tx", l.tx);
+            cJSON_AddNumberToObject(lo, "tx_fail", l.tx_fail);
+            cJSON_AddNumberToObject(lo, "rx", l.rx);
+            cJSON_AddNumberToObject(lo, "rx_drop", l.rx_drop);
+            cJSON_AddNumberToObject(lo, "retries", l.retries);
+        }
+    } else if (name == "bcast") {
+        cJSON_AddNumberToObject(o, "delivered", n.bcast.delivered);
+        cJSON_AddNumberToObject(o, "dup", n.bcast.dup);
+        cJSON_AddNumberToObject(o, "old", n.bcast.old);
+        cJSON_AddNumberToObject(o, "watermark", n.bcast.watermark);
+    } else if (name == "relay") {
+        cJSON_AddNumberToObject(o, "seeded", n.relay.seeded);
+        cJSON_AddNumberToObject(o, "relayed", n.relay.relayed);
+        cJSON_AddNumberToObject(o, "cancelled", n.relay.cancelled);
+        cJSON_AddNumberToObject(o, "dropped", n.relay.dropped);
+    } else if (name == "espnow") {
+        const EspnowStatus &a = n.espnow;
+        cJSON_AddNumberToObject(o, "tx", a.tx);
+        cJSON_AddNumberToObject(o, "tx_fail", a.tx_fail);
+        cJSON_AddNumberToObject(o, "retries", a.retries);
+        cJSON_AddNumberToObject(o, "refused", a.refused);
+        cJSON_AddNumberToObject(o, "rx", a.rx);
+        cJSON_AddNumberToObject(o, "rx_bad", a.rx_bad);
+        cJSON_AddNumberToObject(o, "rx_lost", a.rx_lost);
+        cJSON_AddNumberToObject(o, "peers", a.peers);
+        if (a.rate_fail != 0) {
+            cJSON_AddNumberToObject(o, "rate_fail", a.rate_fail);
+        }
+        if (a.guard != 0) {  // late send callbacks (design c5 §3 driver): shown only once they happen
+            cJSON_AddNumberToObject(o, "guard", a.guard);
+            cJSON_AddNumberToObject(o, "lost", a.lost);
+        }
+    } else if (name == "bindings") {
+        cJSON_AddNumberToObject(o, "fired", n.bindings.fired);
+        cJSON_AddNumberToObject(o, "failed", n.bindings.failed);
+        cJSON_AddNumberToObject(o, "rtt_p50_us", n.bindings.rtt_p50_us);
+    } else if (name == "nodes") {
+        cJSON_AddNumberToObject(o, "delivered", n.nodes.delivered);
+        cJSON_AddNumberToObject(o, "dup", n.nodes.dup);
+        cJSON_AddNumberToObject(o, "old", n.nodes.old);
+        cJSON_AddNumberToObject(o, "sent", n.nodes.sent);
+        cJSON_AddNumberToObject(o, "via_espnow", n.nodes.via_espnow);
+        cJSON_AddNumberToObject(o, "via_hub", n.nodes.via_hub);
+        cJSON_AddNumberToObject(o, "via_flood", n.nodes.via_flood);
+        cJSON_AddNumberToObject(o, "failed", n.nodes.failed);
+        cJSON_AddNumberToObject(o, "resolves", n.nodes.resolves);
+    } else {  // msgs: per topic, the first kMsgTopics seen, then `other`
+        for (const MsgTopicCount &t : n.msgs) {
+            if (t.name[0] != '\0') {
+                cJSON_AddNumberToObject(o, t.name, t.n);
+            }
+        }
+        cJSON_AddNumberToObject(o, "other", n.msgs_other);
+    }
+}
+
+/** Shrinks a full `stats` answer until it prints within `room` (kStatSections). Core task only. */
+void fit_stats(cJSON *res, const NetStatus &n, size_t room)
+{
+    if (fits(res, room)) {
+        return;
+    }
+    uint32_t all = n.msgs_other;
+    for (const MsgTopicCount &t : n.msgs) {
+        all += t.name[0] != '\0' ? t.n : 0;
+    }
+    cJSON_DeleteItemFromObject(res, "msgs");
+    cJSON_AddNumberToObject(cJSON_AddObjectToObject(res, "msgs"), "other", all);
+    cJSON_AddBoolToObject(res, "msgs_folded", true);
+    cJSON *omitted = nullptr;
+    for (size_t i = kStatSectionCount; i-- > 0 && !fits(res, room);) {
+        if (omitted == nullptr) {
+            omitted = cJSON_AddArrayToObject(res, "omitted");
+        }
+        if (kStatSections[i] == "msgs") {
+            cJSON_DeleteItemFromObject(res, "msgs_folded");
+        }
+        cJSON_DeleteItemFromObject(res, kStatSections[i].data());
+        cJSON_AddItemToArray(omitted, cJSON_CreateString(kStatSections[i].data()));
+    }
+}
+
+Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t room)
 {
     std::string_view opt = next_word(args);
-    if (!opt.empty() && opt != "reset") {
-        return fail("invalid_args", "usage: stats [reset]");
+    const size_t section = stat_section(opt);
+    if (!args.empty() || (!opt.empty() && opt != "reset" && section == kStatSectionCount)) {
+        return fail("invalid_args", "usage: stats [reset|links|bcast|relay|espnow|bindings|nodes|msgs]");
+    }
+    NetStatus n = host.net_status();
+    if (section != kStatSectionCount) {
+        add_stat_section(res, section, n);
+        return ok;
     }
     serial::Stats s = serial::stats();
     RuntimeStats r = host.runtime_stats();
@@ -470,17 +607,7 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t)
     cJSON_AddNumberToObject(res, "rx_dropped", r.rx_dropped);
     cJSON_AddNumberToObject(res, "posts_dropped", r.posts_dropped);
     // Hub link counters (09 §9.7: per boot, kept across hub-link drops).
-    NetStatus n = host.net_status();
-    cJSON *links = cJSON_AddObjectToObject(res, "links");
-    for (size_t i = 0; i < kLinks; ++i) {
-        const LinkStatus &l = n.links[i];
-        cJSON *o = cJSON_AddObjectToObject(links, kLinkNames[i]);
-        cJSON_AddNumberToObject(o, "tx", l.tx);
-        cJSON_AddNumberToObject(o, "tx_fail", l.tx_fail);
-        cJSON_AddNumberToObject(o, "rx", l.rx);
-        cJSON_AddNumberToObject(o, "rx_drop", l.rx_drop);
-        cJSON_AddNumberToObject(o, "retries", l.retries);
-    }
+    add_stat_section(res, 0, n);
     cJSON_AddNumberToObject(res, "events_dropped", n.events_dropped);
     cJSON_AddNumberToObject(res, "delivery_failed", n.delivery_failed);
     cJSON_AddNumberToObject(res, "cmds_refused", n.cmds_refused);
@@ -504,11 +631,67 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t)
     cJSON_AddNumberToObject(res, "tcp_rx_bad", n.tcp_rx_bad);
     cJSON_AddNumberToObject(res, "udp_tx_fail", n.udp_tx_fail);
     cJSON_AddNumberToObject(res, "hook_dropped", n.hook_dropped);
+    for (size_t i = 1; i < kStatSectionCount; ++i) {
+        add_stat_section(res, i, n);
+    }
+    fit_stats(res, n, room);
     if (opt == "reset") {
-        // The response carries the counts that were cleared.
+        // The response carries the counts that were cleared (those of `omitted` sections are gone unread).
         serial::reset_stats();
         host.reset_runtime_stats();
         s_calls = 0;
+    }
+    return ok;
+}
+
+/**
+ * `neighbors [from]` (design c5 §2): the ESP-NOW neighbour table, sorted by MAC, from index `from` (default
+ * 0). Twenty entries can exceed fr.diag.exec's 1,400 B, so as `caps` does, the answer holds the entries that
+ * fit plus `next`, the index to continue from; no `next`, no more.
+ */
+Fail cmd_neighbors(std::string_view args, Host &host, cJSON *res, size_t room)
+{
+    std::string_view from_arg = next_word(args);
+    unsigned from = 0;
+    if (!args.empty()) {
+        return fail("invalid_args", "usage: neighbors [from]");
+    }
+    if (!from_arg.empty()) {
+        auto [end, ec] = std::from_chars(from_arg.data(), from_arg.data() + from_arg.size(), from);
+        if (ec != std::errc{} || end != from_arg.data() + from_arg.size() || from > kNeighborsMax) {
+            return fail("invalid_args", "usage: neighbors [from] (0-20)");
+        }
+    }
+    NeighborInfo nb[kNeighborsMax];
+    const size_t count = std::min(host.neighbors(nb), kNeighborsMax);
+    std::sort(nb, nb + count,
+              [](const NeighborInfo &a, const NeighborInfo &b) { return std::memcmp(a.mac, b.mac, sizeof(a.mac)) < 0; });
+    cJSON_AddNumberToObject(res, "count", static_cast<double>(count));
+    // The answer without entries, with the `next` it may need.
+    size_t used = sizeof(R"({"ok":true,"count":20,"neighbors":[],"next":19})") - 1;
+    cJSON *list = cJSON_AddArrayToObject(res, "neighbors");
+    bool any = false;
+    for (size_t i = from; i < count; ++i) {
+        const NeighborInfo &e = nb[i];
+        char mac[13];
+        std::snprintf(mac, sizeof(mac), "%02x%02x%02x%02x%02x%02x", e.mac[0], e.mac[1], e.mac[2], e.mac[3], e.mac[4],
+                      e.mac[5]);
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "mac", mac);
+        cJSON_AddNumberToObject(o, "addr", e.addr);
+        cJSON_AddNumberToObject(o, "rssi", e.rssi);
+        cJSON_AddNumberToObject(o, "age_ms", e.age_ms);
+        cJSON_AddNumberToObject(o, "ack_ok", e.ack_ok);
+        cJSON_AddNumberToObject(o, "ack_fail", e.ack_fail);
+        size_t len = printed_size(o);
+        if (any && (len == SIZE_MAX || used + 1 + len > room)) {
+            cJSON_Delete(o);
+            cJSON_AddNumberToObject(res, "next", static_cast<double>(i));
+            break;
+        }
+        cJSON_AddItemToArray(list, o);
+        used += (any ? 1 : 0) + (len == SIZE_MAX ? 0 : len);
+        any = true;
     }
     return ok;
 }
@@ -542,13 +725,16 @@ Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
         hook = NetHook::udp_block;
     } else if (name == "ip_block") {
         hook = NetHook::ip_block;
+    } else if (name == "wifi_down") {
+        hook = NetHook::wifi_down;
     } else {
-        return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block <seconds>");
+        return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds>");
     }
     uint32_t s = 0;
     auto [end, ec] = std::from_chars(secs.data(), secs.data() + secs.size(), s);
     if (secs.empty() || ec != std::errc{} || end != secs.data() + secs.size() || s > kMaxSeconds || !args.empty()) {
-        return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block <seconds> (0-86400; 0 ends it)");
+        return fail("invalid_args",
+                    "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds> (0-86400; 0 ends it)");
     }
     Status st = host.net_hook(hook, s);
     if (!st) {
@@ -574,7 +760,7 @@ struct Command {
 constexpr Command kCommands[] = {
     {"info", cmd_info},         {"caps", cmd_caps}, {"call", cmd_call},   {"inject", cmd_inject},
     {"selftest", cmd_selftest}, {"mark", cmd_mark}, {"log", cmd_log},     {"stats", cmd_stats},
-    {"reboot", cmd_reboot},     {"net", cmd_net},
+    {"reboot", cmd_reboot},     {"net", cmd_net},   {"neighbors", cmd_neighbors},
 };
 
 /** `#<id> ` prefix: 1-8 decimal digits. Returns the id text (empty when absent); false if malformed. */

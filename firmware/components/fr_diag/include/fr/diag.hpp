@@ -39,11 +39,13 @@ struct RuntimeStats {
     uint32_t posts_dropped;  // Core::post calls refused (queue full)
 };
 
-/** The hub links in fr_net's order (LinkKind: serial 0, tcp 1, udp 2). */
-inline constexpr size_t kLinks = 3;
-inline constexpr const char *kLinkNames[kLinks] = {"serial", "tcp", "udp"};
+/** The links in fr_net's order (LinkKind: serial 0, tcp 1, udp 2, espnow 3). */
+inline constexpr size_t kLinks = 4;
+inline constexpr const char *kLinkNames[kLinks] = {"serial", "tcp", "udp", "espnow"};
+inline constexpr size_t kLinkUdp = 2;
+inline constexpr size_t kLinkEspnow = 3;
 
-/** One hub link as fr_net sees it; counters since boot or the last `stats reset`. */
+/** One link as fr_net sees it; counters since boot or the last `stats reset`. */
 struct LinkStatus {
     bool attached = false;
     bool up = false;           // transport connected
@@ -56,6 +58,77 @@ struct LinkStatus {
     uint32_t rx_drop = 0;
     uint32_t retries = 0;
 };
+
+/** The ESP-NOW driver (design c5 §2 `stats` espnow): frames on the air, not Net's view of them. */
+struct EspnowStatus {
+    bool up = false;       // started, channel C known
+    uint8_t channel = 0;   // C (0: unknown)
+    uint8_t peers = 0;     // unicast peers in the table (<= 17)
+    uint32_t tx = 0;       // frames that went out (unicasts MAC-ACKed)
+    uint32_t tx_fail = 0;  // frames given up after the link retries
+    uint32_t retries = 0;  // link-level re-sends
+    uint32_t refused = 0;  // sends refused: queue full, no peer slot, down
+    uint32_t rx = 0;       // frames that passed the receive filter
+    uint32_t rx_bad = 0;   // frames the filter dropped: off channel C, not an envelope, another net
+    uint32_t rx_lost = 0;  // frames lost to a full receive ring
+    uint32_t rate_fail = 0;  // peers left at the driver's default rate
+    uint32_t guard = 0;      // sends whose callback missed the 100 ms guard (counted failed)
+    uint32_t lost = 0;       // ... and never came within 1 s (taken as lost)
+};
+
+/** Managed flooding (05 §5.9): T-FLOOD counts transmissions as seeded + relayed. */
+struct RelayCounters {
+    uint32_t seeded = 0;
+    uint32_t relayed = 0;
+    uint32_t cancelled = 0;  // after K copies heard
+    uint32_t dropped = 0;    // due but not sent: relay off, ota_busy, queue full, flood rate (a spent TTL is not)
+};
+
+/** Node <-> node frames (05 §5.10), whichever link brought or took them. */
+struct NodeCounters {
+    uint32_t delivered = 0;   // fresh frames for this node (unicast or broadcast)
+    uint32_t dup = 0;
+    uint32_t old = 0;
+    uint32_t sent = 0;        // node -> node sends, bindings' included
+    uint32_t via_espnow = 0;  // attempts MAC-ACKed over ESP-NOW
+    uint32_t via_hub = 0;     // attempts handed to the hub to forward
+    uint32_t via_flood = 0;   // attempts sent as a flooded unicast
+    uint32_t failed = 0;      // no path, or a reliable one never answered
+    uint32_t resolves = 0;    // NET/RESOLVEs sent
+};
+
+/** Hub broadcasts, whichever link brought them (05 §5.9 "Reliable broadcast"). */
+struct BcastCounters {
+    uint32_t delivered = 0;
+    uint32_t dup = 0;
+    uint32_t old = 0;
+    uint32_t watermark = 0;  // as HEARTBEAT reports it (not a counter)
+};
+
+/** Bindings (07 §7.11): node.binding_fired as reported. */
+struct BindingCounters {
+    uint32_t fired = 0;
+    uint32_t failed = 0;
+    uint32_t rtt_p50_us = 0;  // recent reliable ones (not a counter)
+};
+
+/** MSGs received per topic: the first kMsgTopics topics seen, then `other`. */
+inline constexpr size_t kMsgTopics = 8;
+struct MsgTopicCount {
+    char name[33] = {};  // empty: an unused slot
+    uint32_t n = 0;
+};
+
+/** One ESP-NOW neighbour (`neighbors`). */
+struct NeighborInfo {
+    uint8_t mac[6] = {};
+    uint16_t addr = 0;      // 0xFFFE: unprovisioned
+    int8_t rssi = 0;        // dBm, of the last frame heard
+    uint32_t age_ms = 0;    // since that frame
+    uint32_t ack_ok = 0;    // unicasts to it MAC-ACKed
+    uint32_t ack_fail = 0;  // unicasts to it that failed after the link retries
+};
+inline constexpr size_t kNeighborsMax = 20;
 
 /** Hub link and Wi-Fi state for `info` (states) and `stats` (counters). */
 struct NetStatus {
@@ -101,6 +174,16 @@ struct NetStatus {
     bool hub_link_dropped = false;
     bool udp_blocked = false;
     bool ip_blocked = false;
+    bool wifi_held = false;    // `net wifi_down`
+    uint32_t wifi_held_s = 0;  // ... seconds left
+    // C5 (design c5 §2): counters since boot or the last `stats reset`.
+    EspnowStatus espnow;
+    RelayCounters relay;
+    NodeCounters nodes;
+    BcastCounters bcast;
+    BindingCounters bindings;
+    MsgTopicCount msgs[kMsgTopics];
+    uint32_t msgs_other = 0;
 };
 
 /** Debug hooks of `net` (spec 09 §9.7, design c3 §3), FR_TEST_HOOKS builds only. */
@@ -108,6 +191,7 @@ enum class NetHook : uint8_t {
     drop_hub_link,  // drop every envelope on TCP, UDP and serial ENV, both ways; no reconnect
     udp_block,      // send nothing over UDP (T-PRES)
     ip_block,       // drop every envelope on TCP and UDP, both ways, serial untouched; no reconnect
+    wifi_down,      // disconnect the STA, no join or scan, the radio stays on channel C (T-FLOOD-B)
 };
 
 /** The hook as `net <name> <seconds>` names it. */
@@ -120,6 +204,8 @@ constexpr const char *hook_name(NetHook hook)
         return "udp_block";
     case NetHook::ip_block:
         return "ip_block";
+    case NetHook::wifi_down:
+        return "wifi_down";
     }
     return "?";
 }
@@ -138,6 +224,8 @@ public:
     /** Also clears the counters of net_status(). */
     virtual void reset_runtime_stats() = 0;
     virtual NetStatus net_status() const = 0;
+    /** The ESP-NOW neighbour table into `out` (at most kNeighborsMax); returns how many. */
+    virtual size_t neighbors(std::span<NeighborInfo> out) const = 0;
     /**
      * Starts `hook` for `seconds` (0 ends it) once the current request has been answered, so the RESULT of
      * the fr.diag.exec that asked for it still goes out (fr_net defers it).

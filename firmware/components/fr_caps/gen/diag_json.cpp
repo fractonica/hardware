@@ -42,7 +42,9 @@ cJSON *to_json(const NodeRebootArgs &v);
 cJSON *to_json(const NodeSetAliasArgs &v);
 cJSON *to_json(const NodeSetGroupsArgs &v);
 cJSON *to_json(const NodeNetSetArgs &v);
+cJSON *to_json(const NodeBindSetArgs &v);
 cJSON *to_json(const NodeBindClearArgs &v);
+cJSON *to_json(const NodeBindListResult &v);
 cJSON *to_json(const NodeBoot &v);
 cJSON *to_json(const NodeBindingFired &v);
 cJSON *to_json(const DiagExecArgs &v);
@@ -511,11 +513,39 @@ cJSON *to_json(const NodeNetSetArgs &v)
     return finish(o, ok);
 }
 
+cJSON *to_json(const NodeBindSetArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "slot", json_number(v.slot));
+    ok = ok && add(o, "on_port", json_number(v.on_port));
+    ok = ok && add(o, "on_cls", json_number(v.on_cls));
+    ok = ok && add(o, "on_kind", json_number(v.on_kind));
+    ok = ok && add(o, "on_topic", json_string(v.on_topic));
+    ok = ok && add(o, "to_mac", json_bytes(v.to_mac));
+    ok = ok && add(o, "to_addr", json_number(v.to_addr));
+    ok = ok && add(o, "to_port", json_number(v.to_port));
+    ok = ok && add(o, "to_cls", json_number(v.to_cls));
+    ok = ok && add(o, "to_kind", json_number(v.to_kind));
+    ok = ok && add(o, "to_topic", json_string(v.to_topic));
+    ok = ok && add(o, "payload", json_bytes(v.payload));
+    ok = ok && add(o, "reliable", json_bool(v.reliable));
+    return finish(o, ok);
+}
+
 cJSON *to_json(const NodeBindClearArgs &v)
 {
     cJSON *o = cJSON_CreateObject();
     bool ok = o != nullptr;
     ok = ok && add(o, "slot", json_number(v.slot));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const NodeBindListResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "bindings", json_bytes(v.bindings));
     return finish(o, ok);
 }
 
@@ -790,12 +820,49 @@ Status args_node_get_state(const cJSON *obj)
     return {};
 }
 
-Status args_node_bind_set(const cJSON *obj)
+Status args_node_bind_set(const cJSON *obj, fr::wire::Writer &w)
 {
-    if (obj != nullptr && obj->child != nullptr) {
+    NodeBindSetArgs v{};
+    uint8_t to_mac_buf[6];
+    uint8_t payload_buf[64];
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "slot") {
+            ok = from_json_uint(it, 0xFF, v.slot);
+        } else if (key == "on_port") {
+            ok = from_json_uint(it, 0xFF, v.on_port);
+        } else if (key == "on_cls") {
+            ok = from_json_uint(it, 0xFF, v.on_cls);
+        } else if (key == "on_kind") {
+            ok = from_json_uint(it, 0xFF, v.on_kind);
+        } else if (key == "on_topic") {
+            ok = from_json_string(it, 32, v.on_topic);
+        } else if (key == "to_mac") {
+            ok = from_json_bytes(it, to_mac_buf, v.to_mac);
+        } else if (key == "to_addr") {
+            ok = from_json_uint(it, 0xFFFF, v.to_addr);
+        } else if (key == "to_port") {
+            ok = from_json_uint(it, 0xFF, v.to_port);
+        } else if (key == "to_cls") {
+            ok = from_json_uint(it, 0xFF, v.to_cls);
+        } else if (key == "to_kind") {
+            ok = from_json_uint(it, 0xFF, v.to_kind);
+        } else if (key == "to_topic") {
+            ok = from_json_string(it, 32, v.to_topic);
+        } else if (key == "payload") {
+            ok = from_json_bytes(it, payload_buf, v.payload);
+        } else if (key == "reliable") {
+            ok = from_json_bool(it, v.reliable);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
         return std::unexpected(Err::invalid_args);
     }
-    return {};
+    encode(v, w);
+    return encoded(w);
 }
 
 Status args_node_bind_clear(const cJSON *obj, fr::wire::Writer &w)
@@ -1015,7 +1082,7 @@ cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
         case Node::kCmdGetState:
             return json_empty(body);
         case Node::kCmdBindSet:
-            return json_empty(body);
+            return json_of(decode_node_bind_set_args(body));
         case Node::kCmdBindClear:
             return json_of(decode_node_bind_clear_args(body));
         case Node::kCmdBindList:
@@ -1043,7 +1110,7 @@ cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
         case Node::kCmdBindClear:
             return json_empty(body);
         case Node::kCmdBindList:
-            return json_empty(body);
+            return json_of(decode_node_bind_list_result(body));
         }
         break;
     case fr::wire::kClsEvent:
@@ -1200,7 +1267,7 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_node_get_state(obj);
         } else if (name == "bind_set") {
             id = Node::kCmdBindSet;
-            s = args_node_bind_set(obj);
+            s = args_node_bind_set(obj, w);
         } else if (name == "bind_clear") {
             id = Node::kCmdBindClear;
             s = args_node_bind_clear(obj, w);

@@ -4,7 +4,9 @@
 #include <cstdio>
 #include <cstring>
 
+#include "air_detail.hpp"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 
 namespace fr::net::esp::detail {
@@ -35,7 +37,14 @@ void WifiSta::configure(const Settings &s, TimeUs now)
 {
     base_ = s.creds;
     prov_ts_ = s.prov_ts;
-    lost_since_ = now;  // a pin found at boot counts its 60 s from here
+    lost_since_ = now;  // a pin found at boot counts the sweep's wait (sta_rules.hpp) from here
+    fr_link_pin_t link;
+    if (fr_id_load_link(&link) == ESP_OK) {
+        Pin p{.set = true, .channel = link.channel, .ssid_hash = link.ssid_hash};
+        std::memcpy(p.bssid.data(), link.bssid, p.bssid.size());
+        pins_.load(p);
+    }
+    // C from the last boot (use_creds): ESP-NOW works on it before (and without) an association (05 §5.4).
     use_creds(base_, false, false, now);
 
     fr_net_override_t o;
@@ -57,7 +66,6 @@ void WifiSta::configure(const Settings &s, TimeUs now)
         }
         zero_creds(o.creds);
     }
-    pin_loaded_ = fr_id_load_link(&pin_) == ESP_OK;
 }
 
 void WifiSta::use_creds(const fr_net_creds_t &c, bool is_override, bool trial, TimeUs now)
@@ -71,39 +79,58 @@ void WifiSta::use_creds(const fr_net_creds_t &c, bool is_override, bool trial, T
         s.override_active = is_override;
         s.override_trial = trial;
     });
-}
-
-bool WifiSta::pin_usable() const
-{
     // A pin from another network (another SSID), a trial of a new one, or a pin that is not the BSSID the
-    // credentials name: join by SSID (or that BSSID) instead. fr_link survives a reprovision, and 05 §5.4
-    // joins fr_ident's BSSID first, so a mesh home can move every node to one AP.
-    return pin_loaded_ && !trial_ && pin_.ssid_hash == fr_id_ssid_hash(creds_.ssid) &&
-           (!creds_.has_bssid || std::memcmp(pin_.bssid, creds_.bssid, sizeof(pin_.bssid)) == 0);
+    // credentials name is not joined: by SSID (or that BSSID) instead. fr_link survives a reprovision, and
+    // 05 §5.4 joins fr_ident's BSSID first, so a mesh home can move every node to one AP.
+    pins_.use(fr_id_ssid_hash(c.ssid), c.has_bssid ? c.bssid : nullptr, trial);
+    set_home(pins_.home());
 }
 
 void WifiSta::attempt(TimeUs now)
 {
+    if (held_) {
+        phase_ = Phase::held;
+        return;
+    }
     if (!started_ || !have_creds()) {
         phase_ = Phase::idle;
         return;
     }
-    bool pinned = pin_usable();
-    bool sweep = lost_since_ != 0 && now - lost_since_ >= kSweepAfterUs && now - last_sweep_ >= kSweepAfterUs;
-    if (pinned && !sweep) {
-        // 05 §5.4: scan only channel C for the pinned BSSID and connect once it answers, so a router
-        // outage never sends the radio off channel C (ESP-NOW keeps working there from C5 on).
+    const Pin *pin = pins_.usable();
+    const uint32_t heard = air_last_heard_s();
+    const uint32_t wifi_up = air_wifi_up_heard_s();
+    const Search was = search_;
+    search_ = search({.now = now,
+                      .lost_since = lost_since_,
+                      .last_sweep = last_sweep_,
+                      .heard = heard,
+                      .wifi_up = wifi_up,
+                      .pinned = pin != nullptr,
+                      .any_bssid = !creds_.has_bssid});
+    if (search_ == Search::pinned || search_ == Search::ssid_on_c) {
+        // 05 §5.4: scan only channel C (for the pinned BSSID, or any AP of the SSID) and connect once it
+        // answers, so a router outage never sends the radio off channel C, where ESP-NOW keeps working.
+        std::memcpy(join_bssid_, pin->bssid.data(), sizeof(join_bssid_));
+        join_channel_ = pin->channel;
+        if (search_ == Search::ssid_on_c && was != Search::ssid_on_c) {
+            ESP_LOGI(TAG, "wifi: pinned AP silent while a neighbour is on Wi-Fi; any '%s' AP on channel %u will do",
+                     creds_.ssid, join_channel_);
+        }
         wifi_scan_config_t sc;
         std::memset(&sc, 0, sizeof(sc));
-        sc.bssid = pin_.bssid;
-        sc.channel = pin_.channel;
+        if (search_ == Search::pinned) {
+            sc.bssid = join_bssid_;
+        } else {
+            sc.ssid = reinterpret_cast<uint8_t *>(creds_.ssid);
+        }
+        sc.channel = join_channel_;
         sc.show_hidden = true;
         sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
         sc.scan_time.active.min = 0;
         sc.scan_time.active.max = kPinScanMs;
         esp_err_t err = esp_wifi_scan_start(&sc, false);
         if (err != ESP_OK) {
-            ESP_LOGD(TAG, "wifi: channel %u scan not started (%s)", pin_.channel, esp_err_to_name(err));
+            ESP_LOGD(TAG, "wifi: channel %u scan not started (%s)", join_channel_, esp_err_to_name(err));
             retry_later(now);
             return;
         }
@@ -111,28 +138,58 @@ void WifiSta::attempt(TimeUs now)
         phase_deadline_ = now + kScanTimeoutUs;
         return;
     }
-    if (sweep) {
+    if (search_ == Search::sweep) {
         last_sweep_ = now;
-        if (pinned) {
-            // 05 §5.4 "Heartbeats report each sweep": Net sets HEARTBEAT swept for each new one.
-            publish([](Snapshot &s) { ++s.sweeps; });
-            ESP_LOGI(TAG, "wifi: pinned AP missing for 60 s, sweeping all channels for '%s'", creds_.ssid);
-        }
+        // 05 §5.4 "Heartbeats report each sweep": Net sets HEARTBEAT swept for each new one.
+        publish([](Snapshot &s) { ++s.sweeps; });
+        ESP_LOGI(TAG, "wifi: pinned AP silent for %u s, %s; sweeping all channels for '%s'",
+                 static_cast<unsigned>((now - lost_since_) / 1'000'000),
+                 heard_within(heard, now, kHeardWindowUs) ? "no neighbour on Wi-Fi" : "no ESP-NOW heard", creds_.ssid);
     }
     connect(now, false);
 }
 
-void WifiSta::connect(TimeUs now, bool pinned)
+bool WifiSta::pick_ap()
+{
+    bool pinned = false;
+    bool other = false;
+    int8_t best = 0;
+    uint8_t strongest[6] = {};
+    wifi_ap_record_t r;
+    while (!pinned && esp_wifi_scan_get_ap_record(&r) == ESP_OK) {  // each call frees the record it returns
+        if (r.primary != join_channel_) {
+            continue;  // heard from a neighbouring channel: joining it would take the radio off C
+        }
+        if (std::memcmp(r.bssid, join_bssid_, sizeof(join_bssid_)) == 0) {
+            pinned = true;
+        } else if (!other || r.rssi > best) {
+            other = true;
+            best = r.rssi;
+            std::memcpy(strongest, r.bssid, sizeof(strongest));
+        }
+    }
+    esp_wifi_clear_ap_list();  // what the loop left
+    if (pinned || !other) {
+        return pinned;
+    }
+    std::memcpy(join_bssid_, strongest, sizeof(join_bssid_));
+    ESP_LOGI(TAG, "wifi: joining %02x:%02x:%02x:%02x:%02x:%02x of '%s' on channel %u instead of the pinned AP",
+             strongest[0], strongest[1], strongest[2], strongest[3], strongest[4], strongest[5], creds_.ssid,
+             join_channel_);
+    return true;
+}
+
+void WifiSta::connect(TimeUs now, bool to_bssid)
 {
     wifi_config_t cfg;
     std::memset(&cfg, 0, sizeof(cfg));
     copy_field(cfg.sta.ssid, creds_.ssid);
     copy_field(cfg.sta.password, creds_.pass);
-    if (pinned) {
+    if (to_bssid) {
         // bssid_set + channel: the driver's own pre-connect scan starts on C and takes only that AP.
         cfg.sta.bssid_set = true;
-        std::memcpy(cfg.sta.bssid, pin_.bssid, sizeof(cfg.sta.bssid));
-        cfg.sta.channel = pin_.channel;
+        std::memcpy(cfg.sta.bssid, join_bssid_, sizeof(cfg.sta.bssid));
+        cfg.sta.channel = join_channel_;
         cfg.sta.scan_method = WIFI_FAST_SCAN;
     } else {
         // First join (05 §5.4): fr_ident's BSSID if it names one, else the strongest AP of the SSID.
@@ -160,6 +217,31 @@ void WifiSta::retry_later(TimeUs now)
     phase_ = Phase::waiting;
     next_attempt_ = now + retry_us_;
     retry_us_ = std::min(retry_us_ * 2, kRetryMaxUs);
+    // Not associated (every caller follows a failure or a disconnect): wait on C, not where the last scan or
+    // the driver's default left the radio.
+    keep_channel();
+}
+
+void WifiSta::set_home(uint8_t channel)
+{
+    if (channel == home_channel_) {
+        return;
+    }
+    home_channel_ = channel;
+    publish([channel](Snapshot &s) { s.home_channel = channel; });
+    detail::air_set_channel(channel);
+}
+
+void WifiSta::keep_channel()
+{
+    if (home_channel_ == 0 || !started_) {
+        return;
+    }
+    // Refused while the driver is still scanning or connecting; the next idle moment sets it again.
+    esp_err_t err = esp_wifi_set_channel(home_channel_, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "wifi: channel %u not set (%s)", home_channel_, esp_err_to_name(err));
+    }
 }
 
 void WifiSta::rejoin(TimeUs now)
@@ -175,17 +257,15 @@ void WifiSta::rejoin(TimeUs now)
     next_attempt_ = now + kRetryMinUs;
 }
 
-void WifiSta::remember_pin(const uint8_t bssid[6], uint8_t channel)
+void WifiSta::store_pin()
 {
-    uint32_t h = fr_id_ssid_hash(creds_.ssid);
-    if (pin_loaded_ && pin_.channel == channel && pin_.ssid_hash == h && std::memcmp(pin_.bssid, bssid, 6) == 0) {
-        return;  // unchanged: no flash write
-    }
-    pin_.channel = channel;
-    std::memcpy(pin_.bssid, bssid, sizeof(pin_.bssid));
-    pin_.ssid_hash = h;
-    pin_loaded_ = true;
-    esp_err_t err = fr_id_save_link(&pin_);
+    const Pin &p = pins_.stored();
+    fr_link_pin_t link;
+    std::memset(&link, 0, sizeof(link));
+    link.channel = p.channel;
+    std::memcpy(link.bssid, p.bssid.data(), sizeof(link.bssid));
+    link.ssid_hash = p.ssid_hash;
+    esp_err_t err = fr_id_save_link(&link);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi: pin not stored (%s)", esp_err_to_name(err));
     }
@@ -197,6 +277,7 @@ void WifiSta::on_event(const Event &e, TimeUs now)
         switch (e.id) {
         case WIFI_EVENT_STA_START:
             started_ = true;
+            keep_channel();  // ESP-NOW on C from the start, whatever the first join does
             attempt(now);
             break;
         case WIFI_EVENT_STA_STOP:
@@ -208,10 +289,16 @@ void WifiSta::on_event(const Event &e, TimeUs now)
                 esp_wifi_clear_ap_list();
                 break;
             }
-            uint16_t found = 0;
-            esp_wifi_scan_get_ap_num(&found);
-            esp_wifi_clear_ap_list();  // frees the driver's list; only "found" matters
-            if (found > 0) {
+            bool found = false;
+            if (search_ == Search::ssid_on_c) {
+                found = pick_ap();
+            } else {
+                uint16_t n = 0;
+                esp_wifi_scan_get_ap_num(&n);
+                esp_wifi_clear_ap_list();  // frees the driver's list; only "found" matters
+                found = n > 0;
+            }
+            if (found) {
                 connect(now, true);
             } else {
                 retry_later(now);
@@ -220,11 +307,20 @@ void WifiSta::on_event(const Event &e, TimeUs now)
         }
         case WIFI_EVENT_STA_CONNECTED: {
             const wifi_event_sta_connected_t &c = e.data.connected;
+            if (held_) {
+                // A join that completed as the hold began: drop it too.
+                esp_wifi_disconnect();
+                break;
+            }
             phase_ = Phase::associated;
             retry_us_ = kRetryMinUs;
             lost_since_ = 0;
             next_rssi_ = now;
-            remember_pin(c.bssid, c.channel);
+            // fr_link's pin, or (during a trial) the trial's, written to fr_link only once it is confirmed.
+            if (pins_.associated(c.bssid, c.channel)) {
+                store_pin();
+            }
+            set_home(c.channel);
             publish([&](Snapshot &s) {
                 s.associated = true;
                 s.channel = c.channel;
@@ -255,7 +351,9 @@ void WifiSta::on_event(const Event &e, TimeUs now)
             } else {
                 ESP_LOGD(TAG, "wifi: join failed (reason %u)", e.data.disconnected.reason);
             }
-            if (phase_ != Phase::waiting) {
+            if (held_) {
+                keep_channel();  // the STA is idle now: back on C for the hold's duration
+            } else if (phase_ != Phase::waiting) {
                 retry_later(now);
             }
             break;
@@ -263,10 +361,11 @@ void WifiSta::on_event(const Event &e, TimeUs now)
         case WIFI_EVENT_HOME_CHANNEL_CHANGE: {
             // The router moved channel C (05 §5.4): associated nodes follow it; re-pin.
             const wifi_event_home_channel_change_t &c = e.data.channel;
-            if (phase_ == Phase::associated && pin_loaded_) {
-                uint8_t bssid[6];
-                std::memcpy(bssid, pin_.bssid, sizeof(bssid));
-                remember_pin(bssid, c.new_chan);
+            if (phase_ == Phase::associated) {
+                if (pins_.associated(nullptr, c.new_chan)) {
+                    store_pin();
+                }
+                set_home(c.new_chan);
                 publish([&](Snapshot &s) { s.channel = c.new_chan; });
                 ESP_LOGI(TAG, "wifi: home channel %u -> %u", c.old_chan, c.new_chan);
             }
@@ -292,6 +391,9 @@ void WifiSta::on_event(const Event &e, TimeUs now)
                 // The pushed network works: keep it for good (06 §6.3).
                 trial_ = false;
                 trial_deadline_ = 0;
+                if (pins_.confirm()) {
+                    store_pin();  // the trial's pin is fr_link's now
+                }
                 override_.confirmed = true;
                 esp_err_t err = fr_id_save_net_override(&override_);
                 if (err != ESP_OK) {
@@ -327,6 +429,71 @@ bool WifiSta::request_override(const fr_net_creds_t &creds, TimeUs now)
     return ok;
 }
 
+void WifiSta::request_down(uint32_t seconds, TimeUs now)
+{
+    portENTER_CRITICAL(&mux_);
+    down_pending_ = true;
+    down_at_ = now + kApplyDelayUs;
+    down_s_ = seconds;
+    portEXIT_CRITICAL(&mux_);
+    wake();
+}
+
+void WifiSta::apply_down(uint32_t seconds, TimeUs now)
+{
+    if (seconds == 0) {
+        if (held_) {
+            release(now);
+        }
+        return;
+    }
+    const bool was = held_;
+    held_ = true;
+    held_until_ = now + static_cast<TimeUs>(seconds) * 1'000'000;
+    const TimeUs until = held_until_;
+    publish([until](Snapshot &s) {
+        s.held = true;
+        s.held_until = until;
+    });
+    if (was) {
+        ESP_LOGW(TAG, "wifi: down (debug hook) now for %u s", static_cast<unsigned>(seconds));
+        return;
+    }
+    ESP_LOGW(TAG, "wifi: down for %u s (debug hook): no join and no scan, the radio stays on channel %u",
+             static_cast<unsigned>(seconds), home_channel_);
+    switch (phase_) {
+    case Phase::scanning:
+        esp_wifi_scan_stop();
+        break;
+    case Phase::connecting:
+    case Phase::associated:
+        esp_wifi_disconnect();  // its DISCONNECTED event drops the links and puts the radio on C again
+        break;
+    default:
+        break;
+    }
+    phase_ = Phase::held;
+    keep_channel();
+}
+
+void WifiSta::release(TimeUs now)
+{
+    held_ = false;
+    publish([](Snapshot &s) {
+        s.held = false;
+        s.held_until = 0;
+    });
+    ESP_LOGW(TAG, "wifi: down hook over, rejoining '%s'", creds_.ssid);
+    phase_ = Phase::waiting;
+    next_attempt_ = now;
+    retry_us_ = kRetryMinUs;
+    // The pinned AP first: any sweep waits its full time again from here, and a trial gets its 60 s back.
+    lost_since_ = now;
+    if (trial_) {
+        trial_deadline_ = now + kTrialUs;
+    }
+}
+
 void WifiSta::apply_override(const fr_net_creds_t &c, TimeUs now)
 {
     override_ = {};
@@ -345,6 +512,10 @@ void WifiSta::apply_override(const fr_net_creds_t &c, TimeUs now)
     use_creds(use, true, true, now);
     zero_creds(use);
     ESP_LOGI(TAG, "wifi: net_set: joining '%s' (reverted unless it joins within 60 s)", c.ssid);
+    if (held_) {
+        trial_deadline_ = held_until_ + kTrialUs;  // joined when the hold ends; its 60 s count from then
+        return;
+    }
     rejoin(now);
 }
 
@@ -357,6 +528,8 @@ void WifiSta::revert_override(TimeUs now)
         ESP_LOGW(TAG, "wifi: fr_net2 not cleared (%s)", esp_err_to_name(err));
     }
     zero_creds(override_.creds);
+    // C follows the base network's pin again (use_creds), or is unknown until it associates: a trial that
+    // associated without an address left C on its own AP's channel.
     use_creds(base_, false, false, now);
     rejoin(now);
 }
@@ -378,7 +551,20 @@ void WifiSta::poll(TimeUs now)
         zero_creds(pushed);
     }
 
-    if (trial_ && now >= trial_deadline_ && !ip_up_) {
+    bool down = false;
+    uint32_t down_s = 0;
+    portENTER_CRITICAL(&mux_);
+    if (down_pending_ && now >= down_at_) {
+        down_pending_ = false;
+        down = true;
+        down_s = down_s_;
+    }
+    portEXIT_CRITICAL(&mux_);
+    if (down) {
+        apply_down(down_s, now);
+    }
+
+    if (trial_ && !held_ && now >= trial_deadline_ && !ip_up_) {
         revert_override(now);
     }
 
@@ -410,6 +596,11 @@ void WifiSta::poll(TimeUs now)
             }
         }
         break;
+    case Phase::held:
+        if (now >= held_until_) {
+            release(now);
+        }
+        break;
     case Phase::idle:
         break;
     }
@@ -429,13 +620,18 @@ TimeUs WifiSta::next_deadline() const
         consider(phase_deadline_);
     } else if (phase_ == Phase::associated) {
         consider(next_rssi_);
+    } else if (phase_ == Phase::held) {
+        consider(held_until_);
     }
-    if (trial_) {
+    if (trial_ && !held_) {
         consider(trial_deadline_);
     }
     portENTER_CRITICAL(&mux_);
     if (pending_) {
         consider(pending_at_);
+    }
+    if (down_pending_) {
+        consider(down_at_);
     }
     portEXIT_CRITICAL(&mux_);
     return t;
@@ -457,6 +653,12 @@ void WifiSta::fill(Status &out) const
     out.override_trial = s.override_trial;
     out.wifi_disconnects = s.disconnects;
     out.wifi_last_reason = s.last_reason;
+    out.home_channel = s.home_channel;
+    out.wifi_held = s.held;
+    if (s.held) {
+        const TimeUs left = s.held_until - esp_timer_get_time();
+        out.wifi_held_s = left > 0 ? static_cast<uint32_t>((left + 999'999) / 1'000'000) : 0;
+    }
 }
 
 LinkInfo WifiSta::link_info() const

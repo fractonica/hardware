@@ -12,7 +12,8 @@
     "target_status": {
       "type": "integer",
       "minimum": 0,
-      "maximum": 255
+      "maximum": 255,
+      "description": "the target's RESULT/ACK status for reliable sends; 0 for fast, MSG and broadcast; FAILED after the last attempt; BUSY with no path"
     },
     "rtt_us": {
       "type": "integer",
@@ -24,7 +25,7 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 255,
-      "description": "0 espnow, 1 hub, 2 flood"
+      "description": "0 espnow, 1 hub, 2 flood, 3 local (the node itself)"
     }
   },
   "additionalProperties": false

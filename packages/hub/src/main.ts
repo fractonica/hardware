@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { idfStatus, paths, pytoolsStatus, readIdfLock, type IdfStatus, type PytoolsStatus } from '@fractonica/host';
 import { HUB_API_PORT, HUB_VERSION, REGISTRY_HASH } from '@fractonica/protocol';
 
+import { createBindings } from './bindings/index.ts';
 import { nextHubEpoch, nextHubRun, openDb } from './db.ts';
 import { createEvents } from './events/index.ts';
 import { buildServer } from './http.ts';
@@ -94,6 +95,8 @@ async function main(): Promise<void> {
     },
   });
   frames.attach((device, line) => router.serialLine(device, line));
+  // Node <-> node (design c5 §4): the router carries hub broadcasts; bindings resolve, push and re-push.
+  const bindings = createBindings({ db, registry, router, events });
   const ota = createOta({
     db,
     router,
@@ -137,6 +140,8 @@ async function main(): Promise<void> {
       events,
       hubEpoch,
       ota,
+      broadcast: router,
+      bindings,
     },
     port,
   );
@@ -148,6 +153,7 @@ async function main(): Promise<void> {
   await events.start();
   eventsRing.start();
   await router.start(); // node links (TCP/UDP :7421) once the API is up
+  bindings.start(); // its router hooks and event subscriptions, once the router runs
   await ota.start(); // the node HTTP listener (:7422) serves only nodes with a session, so after the router
   console.log(
     JSON.stringify({
@@ -181,6 +187,7 @@ async function main(): Promise<void> {
     jobs.cancelAll();
     await app.close().catch(() => undefined);
     await Promise.resolve(ota.stop()).catch(() => undefined);
+    bindings.stop();
     await Promise.resolve(router.stop()).catch(() => undefined);
     frames.attach(null);
     sleepGuard.stop();

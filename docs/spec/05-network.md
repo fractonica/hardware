@@ -9,7 +9,7 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 | N1 | **Node ↔ node over ESP-NOW; node ↔ hub over Wi-Fi in M1** ("router mode", your stated design). A **USB gateway** joins in M2 ("gateway mode"). It gives router-independent, more deterministic latency and supports ESP-NOW-only nodes. A router-mode go/no-go test at the end of M0 can pull the gateway into M1 ([11 §11.2](11-roadmap.md)). |
 | N2 | **One envelope** (18-byte fixed header) on every link: ESP-NOW, TCP/UDP and serial. Payloads use the generated protobuf-wire codec. Everything is generated from `schema/protocol.yaml` into C++ and TS. |
 | N3 | **ESP-NOW and the STA share one channel.** While a node is associated, ESP-NOW runs on the router's channel. The lab router's 2.4 GHz channel must be **fixed**, and nodes pin one BSSID. |
-| N4 | **Hub broadcast.** The hub fans out over every node link. Nodes that receive it over TCP **seed an ESP-NOW flood** (hop limit, random delay, suppression). Per-source duplicate windows give exactly-once delivery. |
+| N4 | **Hub broadcast.** The hub sends the same bytes on every session of every node, TCP and serial. Nodes that receive it over a hub link **seed an ESP-NOW flood** (hop limit, random delay, suppression by the copies heard over ESP-NOW). Per-source duplicate windows give exactly-once delivery. |
 | N5 | **Reliability.** Each hop gets a radio ACK. Q1 traffic adds end-to-end request/response or ACK with retries on ESP-NOW and UDP hops; TCP hops rely on TCP. Latest-wins streams are never retried; properties are resynchronised instead. |
 | N6 | **Security.** Not planned (your decision; LAN lab). The envelope keeps its SEC bit and §5.13 keeps the design notes in case it is ever needed. Native ESP-NOW encryption is never used. |
 | N7 | **Our own thin protocol on raw `esp_now`.** We borrow designs (OTA resume bitmap, security handshake) from `espressif/esp-now`, but do not use it as the transport: its duplicate cache ignores the sender, and it retransmits broadcasts blindly. |
@@ -55,42 +55,49 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 | Wi-Fi mode | `WIFI_MODE_STA`, started even when not associated. ESP-NOW peers use `ifidx = WIFI_IF_STA` | ESP-NOW needs Wi-Fi started. The STA MAC equals `device_id` ([06 §6.3](06-identity-ota.md)) |
 | Power save | `esp_wifi_set_ps(WIFI_PS_NONE)` on mains nodes and the gateway | Modem sleep delays reception by up to one DTIM (~100 ms) and drops ESP-NOW frames while asleep |
 | Peer channel | `0` for every peer (follow the current channel) | A non-zero value must equal the current channel, else `ESP_ERR_ESPNOW_CHAN` |
-| ESP-NOW version | v2 driver. Realtime frames ≤ 250 B. Frames > 250 B only for BULK, and only to peers that advertised `espnow_v2` | v1 receivers drop frames > 250 B |
-| PHY rate | per peer via `esp_now_set_peer_rate_config()`, called right after **every** `esp_now_add_peer()` (including the broadcast peer and every LRU re-add; the setting belongs to the peer entry). Robust = `{.phymode = WIFI_PHY_MODE_11B, .rate = WIFI_PHY_RATE_1M_L}`; fast = `{.phymode = WIFI_PHY_MODE_11G, .rate = WIFI_PHY_RATE_6M}`, with `.ersu = .dcm = false`. **Never leave `phymode` zero-initialised: 0 is `WIFI_PHY_MODE_LR`.** On error, keep the driver default and count it. Verify on C3/S3 and the broadcast peer (spike S2) | `esp_wifi_config_espnow_rate()` was removed in IDF 6.0; no IDF example uses the per-peer API |
+| ESP-NOW version | v2 driver; HELLO `caps` `espnow_v2` (set since C5). Realtime frames ≤ 250 B. Frames > 250 B only for BULK, and only to peers that advertised `espnow_v2` (M2+, relay OTA). In M1 no BULK frame and nothing over 250 B goes on the air, and ESP-NOW frames are not fragmented | v1 receivers drop frames > 250 B |
+| PHY rate | per peer via `esp_now_set_peer_rate_config()`, called right after **every** `esp_now_add_peer()` (including the broadcast peer and every LRU re-add; the setting belongs to the peer entry). Robust = `{.phymode = WIFI_PHY_MODE_11B, .rate = WIFI_PHY_RATE_1M_L}`; fast = `{.phymode = WIFI_PHY_MODE_11G, .rate = WIFI_PHY_RATE_6M}`, with `.ersu = .dcm = false`. **Never leave `phymode` zero-initialised: 0 is `WIFI_PHY_MODE_LR`.** On error, keep the driver default and count it (`stats espnow` `rate_fail`). Verify on C3/S3 and the broadcast peer (spike S2) | `esp_wifi_config_espnow_rate()` was removed in IDF 6.0; no IDF example uses the per-peer API |
 | Wi-Fi 6 (C6) | The C6 STA may associate in 11ax. TWT is used only if explicitly set up, which we never do. S2 A/B-tests 11ax against `esp_wifi_set_protocol(WIFI_IF_STA, 11B\|11G\|11N)` | mixed fleet |
 | TX power | per board manifest `rf.max_tx_power_qdbm` (0.25 dBm units), applied with `esp_wifi_set_max_tx_power()` right after `esp_wifi_start()`; the C3 0.42" OLED board defaults to 34 (8.5 dBm) | board quirk ([04 §4.6](04-boards.md)) |
 | BLE / 802.15.4 | deinitialised in realtime profiles | coexistence time-slicing sleeps the radio and loses ESP-NOW frames |
 | Country | set explicitly, from `fr_ident` `country` (manual policy, 802.11d off); without one, the driver default and a warning | legal channel set |
 
 **Peer table** (20 entries maximum, including the broadcast peer):
-- Node: `[broadcast, gateway(s), up to 17 unicast peers (LRU)]`.
+- Node: `[broadcast, gateway(s), up to 17 unicast peers (LRU)]`. `esp_now_init` runs after `esp_wifi_start()`, and the broadcast peer is added then; unicast peers are added on demand.
 - Gateway: `[broadcast, up to 19 nodes (LRU)]`.
-- If LRU eviction would drop a peer used within the last 1 s, the frame goes as a flooded unicast with TTL 1 (§5.9) instead of churning `add_peer`/`del_peer`.
+- If LRU eviction would drop a peer used within the last 1 s, the driver answers busy and the frame goes as a flooded unicast with TTL 1 (§5.10) instead of churning `add_peer`/`del_peer`.
 - Receivers need no peer entry for unencrypted frames.
 
-**Transmit discipline.**
+**Transmit discipline** (the IDF-free `air_sched.hpp`, host-tested).
 - At most one `esp_now_send` is in flight; the next waits for the send callback.
-- Send and receive callbacks only copy into the frame pool and post an index ([03 §3.4](03-firmware.md)).
-- There are three priority queues: URGENT (events, ACKs), NORMAL (commands, presence), BULK (OTA, logs). A BULK frame > 250 B is sent only when URGENT is empty.
-- On a send-callback failure, retry up to 2 times at link level, after 2 ms and then 4 ms. These are `esp_timer` one-shots, never FreeRTOS ticks.
+- **Late send callbacks.** A callback not in within 100 ms fails that attempt (`stats espnow` `guard`), but it stays owed: nothing else (its retry or the next frame) is sent until it arrives or 1 s after the send, when it is taken as lost (`lost`). Verdicts are matched to sends by count and send order, so the driver never holds two of its sends, and a late verdict that arrives while a send is held only releases that send. Frames held behind it can pass `Net`'s 250 ms completion and fall back (§5.10); the windows drop their later air copies.
+- Send and receive callbacks only copy and post ([03 §3.4](03-firmware.md)): received frames into a 16-slot receive ring, verdicts as counts.
+- There are three priority queues: URGENT (events, ACKs, binding CMDs), NORMAL (commands, presence), BULK (OTA, logs), 16 frames in all with 4 kept for URGENT. (M2+) A BULK frame > 250 B is sent only when URGENT is empty.
+- On a send-callback failure, retry up to 2 times at link level, after 2 ms and then 4 ms, broadcasts included. These are `esp_timer` one-shots, never FreeRTOS ticks.
 
-**Receive filter**, in order:
-1. `rx_ctrl.channel == current channel`.
-2. Magic and version.
+**Receive filter**, in order (the receive callback, then `Net`):
+1. `rx_ctrl.channel == C`.
+2. Magic and version; length 18..250.
 3. `net`.
-4. (M3) tag.
+4. `Net` drops the node's own frames, a TTL above `TTL_MAX` and BULK frames. An unprovisioned node ignores ESP-NOW.
+5. (M3) tag.
 
 ## 5.4 Channel rules
 
 - **Router mode.** The channel is the router's (C), with one pinned BSSID.
-  - **Where C and the BSSID come from.** After every successful association (including after a router channel change), the node persists the AP's channel and BSSID in RW `nvs:fr_link` (`chan`, `bssid`, and `ssid_h`, a hash of the SSID they belong to). It reports them in HELLO. The hub stores them in `networks` and raises `hub/warning bssid_mismatch` if nodes disagree. On the first boot after provisioning nothing is stored yet, so the node does one normal SSID connect, using `fr_ident` `bssid` if set, otherwise the strongest BSSID.
+  - **Where C and the BSSID come from.** After every successful association (including after a router channel change), the node persists the AP's channel and BSSID in RW `nvs:fr_link` (`chan`, `bssid`, and `ssid_h`, a hash of the SSID they belong to). It reports them in HELLO. The hub stores them in `networks` and raises `hub/warning bssid_mismatch` if nodes disagree. On the first boot after provisioning nothing is stored yet, so the node does one normal SSID connect, using `fr_ident` `bssid` if set, otherwise the strongest BSSID. One exception: a `net_set` trial's association is pinned in RAM only and written to `fr_link` once the trial is confirmed (GOT_IP), so a reverted trial leaves `fr_link` as it was.
   - **Pin rules.** The pin is used only for the SSID it was taken on (`ssid_h`), never while a `net_set` override is on trial, and never when `fr_ident` names a different BSSID: `fr_link` survives a reprovision, so a stale pin yields to `fr_ident`'s BSSID.
-  - While disconnected, a node scans **only channel C**: `esp_wifi_scan_start()` with `.channel = C`, active, ≤ 30 ms.
+  - **C follows the live pin** (`Pins` in the IDF-free `sta_rules.hpp`, host-tested): the usable pin's channel (the AP's while associated); during a trial the pre-trial network's C until the trial associates, then the trial AP's (also after a reboot during a trial); after a revert the base pin's channel, or 0 (ESP-NOW down) when that pin is unusable. `WIFI_EVENT_HOME_CHANNEL_CHANGE` moves C whenever associated and re-pins the live pin. ESP-NOW is up once started and C is known (a usable pin, else the first association).
+  - While disconnected, the STA keeps its idle radio on C (`esp_wifi_set_channel`) and scans **only channel C**: `esp_wifi_scan_start()` with `.channel = C`, active, ≤ 30 ms.
   - It calls `esp_wifi_connect()` (with `bssid_set` and `channel = C`) only after that scan has found the BSSID. Setting the channel in `wifi_sta_config_t` alone does not prevent a full sweep.
-  - An all-channel sweep runs only after ≥ 60 s with no ESP-NOW neighbour or gateway heard (until ESP-NOW arrives in C5: 60 s without the pinned AP). Heartbeats report each sweep: HEARTBEAT `swept` is set once per sweep, until a HEARTBEAT carrying it has gone out.
-  - So during a router outage, node ↔ node ESP-NOW keeps working on C.
+  - **All-channel sweeps** (`search()` in `sta_rules.hpp`). With no usable pin the node joins by SSID on every channel. Otherwise the first rule that applies decides, and a boot or the end of a `wifi_down` hold ([09 §9.7](09-agent-api.md)) restarts the wait:
+    1. A neighbour's ESP-NOW heartbeat reporting `wifi_up` heard within 60 s (an AP of the network is on C): never sweep. After 60 s without the pinned BSSID, and only when `fr_ident` names no BSSID, the scan of C takes any AP of the SSID (the pinned one first, records whose primary channel is not C ignored), joins the strongest and re-pins: a replaced router, a mesh node switched off.
+    2. Any ESP-NOW frame heard within 60 s (neighbours on C, none of them on Wi-Fi: the router is off or moved): sweep after 5 min without the AP, then every 5 min. Bounded, so nodes that all lost the AP cannot keep each other from sweeping for ever.
+    3. Alone: after 60 s, then every 60 s.
+  - Heartbeats report each sweep from a usable pin: HEARTBEAT `swept` is set once per sweep, until a HEARTBEAT carrying it has gone out.
+  - So a 120 s router outage never takes a node, and ESP-NOW with it, off C, and node ↔ node ESP-NOW keeps working; a router that comes back on another channel is found within 5 min.
 - **Mesh Wi-Fi homes.** Pinning one BSSID keeps every node on one channel. Without the pin, nodes may sit on different APs and channels and stop hearing each other.
-- **Router changes channel.** Associated nodes follow it, and ESP-NOW follows with them. In gateway mode the gateway gets `WIFI_EVENT_HOME_CHANNEL_CHANGE`, beacons at 4 Hz on the new channel for 10 s, and announces `NET/CHANNEL_SWITCH` on the old one with `esp_now_switch_channel_tx()` (IDF ≥ 5.5.2 / 6.x).
+- **Router changes channel.** Associated nodes follow it and re-pin, and ESP-NOW follows with them. In gateway mode the gateway gets `WIFI_EVENT_HOME_CHANNEL_CHANGE`, beacons at 4 Hz on the new channel for 10 s, and announces `NET/CHANNEL_SWITCH` on the old one with `esp_now_switch_channel_tx()` (IDF ≥ 5.5.2 / 6.x).
 - **Discovery for ESP-NOW-only nodes (M2).**
   1. Try the last channel (RTC memory, then NVS): broadcast `NET/DISCOVER` and listen for 30 ms.
   2. Sweep 1, 6, 11, then the rest, at about 35 ms per channel.
@@ -205,7 +212,7 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | 0x04 | CMD | capability command id | fields |
 | 0x05 | RESULT | the command id it answers | `req_epoch, req_seq, status` + result fields |
 | 0x06 | STATE | capability property id | `t_us` + value, as a message with the value in field 1 (always LATEST) |
-| 0x07 | MSG | 0 | `{topic string≤32, data bytes}`; `data` is UTF-8 JSON from the SDK and agents |
+| 0x07 | MSG | 0 | `{topic string≤32, data bytes≤168}`; `data` is UTF-8 JSON from the SDK and agents (the hub sends compact JSON), any bytes from C++ (`fr::msg`, [03 §3.2](03-firmware.md)) |
 | 0x08 | LOG | level (1 = E … 5 = V) | `{tag, text}`; ≤ 20/s |
 | 0x09 | OTA | `OFFER 1`, `ACCEPT 2`, `REJECT 3`, `CHUNK 4`, `STATUS 5`, `COMMIT 6`, `RESULT 7`, `ABORT 8` | always on port 240 |
 | 0x0A | TIME | `SYNC_REQ 1` (hub → node: t1), `SYNC_RES 2` (node → hub: t1, t2, t3; the hub records t4) | u64 µs fields |
@@ -219,7 +226,7 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 | PRESENCE/HEARTBEAT | `uptime_s u32, state u32 (b0 wifi_up, b1 hub_link, b2 ota_busy, b3 time_synced, b4 low_batt, b5 swept), rssi_ap i8, tx_fail u32, rx_drop u32, queue_hwm u8, free_heap_kb u32, vbat_mv u32, bcast_watermark u32, state_seq u32` |
 | NET/WELCOME (hub → node, the answer to HELLO) | `hub_epoch u16, ucast_floor u32, bcast_base u32, hub_time_us u64, net_mode u8, channel u8` |
 | NET/DIRECTORY (hub → node) | `page u8, pages u8, entries [{addr u16, mac bytes6}] ≤ 14`. In protobuf-wire an entry is ≤ 14 B, so a page is ≤ 200 B while `page` and `pages` stay below 128, and ≤ 202 B at worst (from 128 on, each takes 3 B: tag plus a 2-byte varint). DIRECTORY may fragment (§5.8), so the 200 B realtime check does not apply to it ([07 §7.5](07-capabilities-sdk.md)) |
-| NET/RESOLVE (node → hub) | `addr u16`; answered with a one-entry DIRECTORY |
+| NET/RESOLVE (node → hub) | `addr u16`; answered with a one-entry DIRECTORY (page 0 of 1) for a provisioned addr, and not at all for an unknown one (§5.10) |
 | NET/BEACON (gateway, M2) | `channel, flags, hub_epoch, bcast_floor u32, hub_time_us u64, hub_ipv4, hub_port, beacon_interval_ms, bcast_watermark u32` |
 | OTA/OFFER (hub → node, ACK_REQ) | `job_id string≤23, fw_id bytes32, size u32, version string≤31, flags u32 (b0 FORCE, b1 DEFER_COMMIT, b2 ALLOW_DOWNGRADE)`. The node GETs `http://<hub IP of its TCP session>:7422/ota/<lowercase hex fw_id>.bin` ([06 §6.6](06-identity-ota.md)) |
 | OTA/ACCEPT | `job_id, code u8 (0 fresh, 1 resumed)` |
@@ -230,7 +237,7 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 
 - **HELLO hashes.** `descriptor_hash` is FNV-1a 32 over the encoded `Descriptor` that `fr.node.describe` returns ([07 §7.4](07-capabilities-sdk.md)); `board_hash` is FNV-1a 32 over the board id (`esp32c6-supermini`). C++ (`fr/hash.hpp`) and TS compute both the same way.
 - **OTA frames.** OFFER (answered by ACCEPT or REJECT, §5.8) and RESULT (the hub ACKs it) carry ACK_REQ; ACCEPT, REJECT, STATUS, COMMIT and ABORT do not. `CHUNK` is for ESP-NOW relay OTA (M2+); the hub sends no COMMIT in M1. OTA frames go over TCP, else serial (§5.10), never UDP: the hub drops OTA frames that arrive over UDP or off port 240 (`ota_dropped`), and the node drops any off port 240 or not unicast. The node's rules are in [06 §6.6](06-identity-ota.md), the hub's in [06 §6.7](06-identity-ota.md).
-- **Hub framing.** Hub frames carry `src = 0x0000`, `epoch` = the hub epoch, `dst` = the node's HELLO `src` (0xFFFE while unprovisioned), `net` = its HELLO `net`, and `ttl` 0x11. WELCOME's `ucast_floor` is the WELCOME's own seq; DIRECTORY pages count from 0, and there is always at least one page.
+- **Hub framing.** Hub frames carry `src = 0x0000`, `epoch` = the hub epoch, `dst` = the node's HELLO `src` (0xFFFE while unprovisioned), `net` = its HELLO `net`, and `ttl` 0x11. Hub broadcasts carry `dst = 0xFFFF` and `ttl` 0x22; one over the flood rate, and every repair, 0x21 (§5.9). WELCOME's `ucast_floor` is the WELCOME's own seq; DIRECTORY pages count from 0, and there is always at least one page.
 
 **Status codes** (RESULT, ACK, REJECT):
 
@@ -252,7 +259,7 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 
 | Origin | Space | Used for | Receiver keeps |
 |---|---|---|---|
-| node | ordinary | everything without LATEST | replay window `{top_seq, bitmap}` per `(src, epoch)`: 256 bits at hub/gateway, 128 at nodes |
+| node | ordinary | everything without LATEST | replay window `{top_seq, bitmap}` per `(src, epoch)`: 256 bits at hub/gateway, 128 at nodes (up to 64 sources, LRU) |
 | node | LATEST | STATE and other LATEST frames | `last_seq` per `(src, port, kind)`; stale frames are dropped |
 | hub | **UNICAST** | frames to one node: **one counter per destination `addr`**, so each node sees a dense sequence | window per `(0x0000, UNICAST)` |
 | hub | **BCAST** | frames to BROADCAST or a group: one counter, which is also the broadcast id. Group frames are fanned out to every node; non-members record the seq but do not deliver | window per `(0x0000, BCAST)` |
@@ -261,8 +268,12 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 **Window rules**
 - A lower `epoch` than stored means drop; a higher one resets the window. Comparison uses RFC 1982 serial arithmetic on u16.
 - `seq > top` slides the window. Inside the window with the bit set means DUP. Below the window means OLD.
-- **Sessions reset windows.** A HELLO from a known `device_id` with a lower epoch resets that source's entries; the hub logs `epoch_regressed` (for example after an NVS wipe). A node resets its hub entries on every WELCOME and sets their floors to `ucast_floor` and `bcast_base`.
-- **What a node drops.** Hub frames from another hub epoch, before a session, over UDP, or from a source other than `0x0000`; a provisioned node also drops other nets.
+- **A node source's first frame.** For a source new to the node (first heard, or evicted by the LRU), everything below its first ordinary frame counts as received and is OLD, not DUP: never delivered, ACKed or answered from the cache. So a sender whose earlier reliable frame that first frame overtook ends FAILED, rather than getting an ACK for a frame nobody ran. A newer epoch of a known source starts with an empty window instead, so frames of the new boot that its first frame overtook are still delivered.
+- **Sessions reset windows.** A HELLO from a known `device_id` with a lower epoch resets that source's entries; the hub logs `epoch_regressed` (for example after an NVS wipe). A node resets its hub UNICAST window, its hub LATEST state and their floors on every WELCOME (floor `ucast_floor`). Its BCAST window resets to `bcast_base` only on a WELCOME of another hub run: a WELCOME of the run it already follows (same non-zero `hub_epoch`, as when a Wi-Fi node reconnects while broadcasts run) only raises the floor to `bcast_base`, never moving it back, so a broadcast above the base that arrived first over the air or the other session is not delivered again when the hub's copy follows.
+- **What a node drops.**
+  - Over a hub link: frames before a session, over UDP, hub frames from another hub epoch, and node frames (`src` ≠ `0x0000`) unless `ttl_remaining < ttl_initial` (the hub's forward takes one off, its fan-out sets 1; §5.9–5.10).
+  - Over ESP-NOW: every hub frame except a hub broadcast of the hub run of this boot's last WELCOME (also after that session ended; none before any WELCOME), which uses the same BCAST window as the hub links' copies. A hub restarted during a router outage is therefore heard over ESP-NOW only after the node's next WELCOME.
+  - A provisioned node also drops other nets.
 - The **hub epoch** increments and is persisted (fsynced) at every hub start: kv `hub_epoch`, a u16 that skips 0 when it wraps. Per-space counters start at 1 and are not persisted.
 
 ### Acknowledgement
@@ -270,10 +281,10 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 - **Q1 (reliable)** means every frame sent with ACK_REQ. That covers:
   - CMDs with `delivery: reliable`;
   - EVENTs with priority `realtime` or `normal`;
-  - unicast MSGs;
+  - unicast MSGs from the hub, and a node's unicast MSGs sent reliable (`fr::msg::send`, a binding's `reliable`);
   - the last fragment;
   - the request side of every pair in the table below.
-- **Q0 (best effort; never ACKed or retried)** means `fast` CMDs, `bulk` EVENTs, LOG, HEARTBEAT and broadcast/group frames. Broadcast and group frames are repaired through the watermark instead.
+- **Q0 (best effort; never ACKed or retried)** means `fast` CMDs, `bulk` EVENTs, a node's fast MSGs, LOG, HEARTBEAT and broadcast/group frames. Broadcast and group frames are repaired through the watermark instead.
 - **LATEST** frames are neither.
 - Only Q1 frames are retried (below), dual-pathed while `udp_ok` is false (§5.10) and aged out by `FR_EVENT_MAX_AGE_MS` (§5.11).
 
@@ -296,9 +307,10 @@ _Static_assert(sizeof(fr_hdr_t) == 18, "fr_hdr_t must be 18 bytes");
 ### Retries
 
 - **Q1 on ESP-NOW and UDP hops.** Timeout = 20 ms + 10 ms × expected hops, ×2 backoff, ±25% jitter, up to 4 attempts. That gives up after ~300 ms at 0 hops and ~450 ms at 1 hop. A retry keeps its `seq`.
+- **Node → node** (since C5). Reliable CMDs and Q1 EVENTs and MSGs carry ACK_REQ; the target answers RESULT (CMD) or ACK (EVENT, MSG). Hops count 0 for an ESP-NOW unicast or a TTL-1 broadcast and 1 via the hub or as a flooded unicast, and the timer restarts when a hop falls back (§5.10). At most 8 node → node frames are in flight; the oldest is evicted.
 - **TCP hops** get no end-to-end retransmission. TCP does it. A Q1 frame written to TCP is re-sent only on a replacement connection. Give-up (`delivery_failed`) comes after `FR_TCP_DELIVERY_MS` (2000) or on connection loss. Serial hops behave like TCP hops.
 - **Outbox.** A node holds up to 8 Q1 frames awaiting their ACK; a full outbox evicts its oldest (`delivery_failed`).
-- **No late execution.** Every hub CMD to a time-synced node carries `expire_at_us` (hub send time + `FR_CMD_EXPIRE_MS` 1000 ms, in node time), so a late TCP delivery never executes after the hub has reported failure.
+- **No late execution.** Every hub CMD to a time-synced node carries `expire_at_us` (hub send time + `FR_CMD_EXPIRE_MS` 1000 ms, in node time), so a late TCP delivery never executes after the hub has reported failure. A node → node CMD carries none and is not checked against one (another node cannot compute the target's hub-synced time); one carrying `exec_at_us` answers `UNSUPPORTED` until T-LAT (§5.6).
 
 ### Commands to many devices
 
@@ -330,18 +342,20 @@ on_rx(frame, rx):                                  // rx.link ∈ {ESPNOW, TCP, 
   r = window_check_and_set(frame)                  // NEW | DUP | OLD (space per §5.8)
   if r == OLD: return
   if r == DUP:
-      p = relay_q.find(frame); if p: p.copies++; if p.copies >= K: relay_q.cancel(p)
+      p = relay_q.find(frame)
+      if p and rx.link == ESPNOW: p.copies++; if p.copies >= K: relay_q.cancel(p)   // hub-link copies never count
       if frame.ACK_REQ and frame.dst == me: resend_cached_response()
       return
   if for_me(frame.dst): deliver(frame)             // incl. groups I belong to and BROADCAST
   from_air = rx.link == ESPNOW && rx.dst_mac == FF:FF:FF:FF:FF:FF
   from_hub = rx.link in {TCP, SERIAL} && frame.src == 0x0000 && is_flood_dst(frame.dst)
   if (from_air || from_hub) && frame.dst != me && frame.dst != 0x0000
-     && ttl_remaining > 1 && relay_enabled && !ota_busy:
+     && ttl_remaining > 1 && relay_enabled && !ota_busy && !gateway:
       d = uniform(J_MIN, J_MAX) + (from_air ? rssi_bias(rx.rssi) : 0)   // strong signal waits longer
-      relay_q.add(copy with ttl_remaining-1, RELAYED=1, delay=d, copies = from_hub ? 1 : 0)
-      // relays always go to the ESP-NOW broadcast MAC
+      relay_q.add(copy with ttl_remaining-1, RELAYED=1, delay=d, copies = 0)   // a seed too
+      // relays always go to the ESP-NOW broadcast MAC, metered per source at transmit time
 is_flood_dst(dst) = dst == 0xFFFF || 0xF000 <= dst <= 0xFFFD
+rssi_bias(rssi)   = 0 ms at ≤ −90 dBm, rising linearly to 8 ms at ≥ −30 dBm
 ```
 
 | Parameter | Default | Note |
@@ -349,18 +363,26 @@ is_flood_dst(dst) = dst == 0xFFFF || 0xF000 <= dst <= 0xFFFD
 | `TTL_DEFAULT` | **2** | Router mode gets exactly one ESP-NOW layer (node seeding). Gateway mode gets the gateway's transmission plus one relay layer |
 | `TTL_MAX` | 7 | |
 | `J_MIN` / `J_MAX` | 1 / 16 ms | A 1 Mbps broadcast takes ~1.15 ms of air, and sends cannot be cancelled. Shorter windows cannot suppress anything |
-| `K` | 2 | cancel a pending relay after hearing 2 copies (the TCP copy counts as one) |
-| Flood rate per source | ≤ 10/s at the robust rate, ≤ 50/s at the fast rate | Excess hub broadcasts go TCP-only. With 30 nodes, about 6–7 transmissions per broadcast remain *(simulated)* |
+| `K` | 2 | cancel a pending relay or seed after hearing 2 copies **over ESP-NOW**. A copy on a hub link (TCP or serial) never counts and never re-seeds: the seed's own copy, a repair, the other session's duplicate, the hub's fan-out of a node broadcast; none of them says what the neighbours heard. K = 0 relays nothing |
+| Relay queue | 8 | a seed or relay that finds it full is dropped (`relay.dropped`, which also counts relays refused for `relay_enabled`, `ota_busy`, a gateway, the flood rate or a busy driver, but not a spent TTL) |
+| Flood rate per source | ≤ 10/s at the robust rate, ≤ 50/s at the fast rate | A token bucket per source: at a node 10/s with a burst of 10, 8 sources (LRU), taken at transmit time, TTL-1 frames exempt; an own broadcast over the rate goes to the hub only. At the hub 10/s with a burst of 8, a node's relay queue: a hub-linked node takes a back-to-back run in one read and seeds each, and a longer run would drop the rest for nodes with no hub link. Excess hub broadcasts go over the hub links only (below). With 30 nodes, about 6–7 transmissions per broadcast remain *(simulated)* |
+
+With K counting air copies only, two hub-linked seeders in range of each other both transmit (≈ 2 transmissions per broadcast with three nodes), suppression acts from three seeders up, and a node with no hub link misses a broadcast only when it loses both copies (≈ PER²). On the bench, counting the hub copy as one gave 1.24 transmissions per broadcast and 994/1000 at the cut-off node (≈ 1 − PER).
 
 Rules:
 - A frame sent to a unicast MAC is single-hop and never relayed.
 - A **flooded unicast** goes to the broadcast MAC with `dst = node`. Non-targets relay it within TTL; the target delivers it and does not relay it.
-- Gateways never relay.
-- A **node-originated broadcast or group frame with `ttl_initial > 1`** goes over ESP-NOW **and**, unchanged, to the hub over its IP link. The hub delivers it to apps and fans it out over TCP with `ttl_remaining = 1`, so TCP receivers do not re-seed it. TTL-1 link-local frames, such as the router-mode ESP-NOW heartbeat, stay on ESP-NOW only.
+- Gateways never relay. A node with HEARTBEAT `ota_busy` relays nothing ([06 §6.6](06-identity-ota.md)).
+- A **node-originated broadcast or group frame with `ttl_initial > 1`** (MSG to `0xFFFF`: `ttl` 2) goes over ESP-NOW **and**, unchanged, to the hub over its hub link (TCP/UDP or serial, §5.10); it is never ACKed. The hub delivers it to apps (`msg {topic, data, dst}` for a MSG, [08 §8.7](08-hub.md)) and fans it out to every other node with `ttl_remaining = 1`, over that node's best session only, so receivers do not re-seed it (a dead TCP costs at most that node's own copy). TTL-1 link-local frames, such as the router-mode ESP-NOW heartbeat, stay on ESP-NOW only.
+
+**Hub broadcasts.**
+- One BCAST seq per broadcast (no gaps), `dst = 0xFFFF`, `ttl` 2/2, EXT `valid_ms` (default 2000).
+- The same envelope bytes go to **every welcomed session of each node**, TCP and serial, a standby serial session included (the exception in §5.10). The node's BCAST window delivers it once and seeds from the first copy; the other session's copy is a DUP that neither seeds nor counts toward K. So a dual-link node whose Wi-Fi died without a FIN still gets it, and seeds it, over USB. Session counts in results count nodes (a node on two links counts once).
+- Over the flood rate it goes over the hub links only, with `ttl` 2/1, so nobody seeds it (`seeded: false`; the hub counts it `bcast_tcp_only`).
 
 **Reliable broadcast.**
-- The hub BCAST seq is the broadcast id. HEARTBEAT reports `bcast_watermark`: the highest BCAST seq such that every earlier one inside the window was received.
-- Hub broadcasts carry `valid_ms` (default 2000), and only unexpired ones are repaired. A repair re-sends the **original envelope bytes** over the node's link, with only `ttl_remaining` set to 1. It is therefore deduplicated and never re-seeded.
+- The hub BCAST seq is the broadcast id. HEARTBEAT reports `bcast_watermark`: the highest BCAST seq such that every earlier one inside the window was received. It starts at WELCOME's `bcast_base`.
+- **Watermark repair.** On every HEARTBEAT, every unexpired hub broadcast above `max(bcast_watermark, bcast_base)` that is older than 250 ms goes again as the **original envelope bytes** with only `ttl_remaining` set to 1, over every welcomed session of that node, TCP and serial. It is therefore deduplicated and never re-seeded. At most 2 repairs per broadcast and device, half a heartbeat apart; a round over both sessions counts once.
 - A late joiner's watermark starts at WELCOME's `bcast_base`, so it never receives old broadcasts.
 
 ## 5.10 Link selection
@@ -377,12 +399,12 @@ Rules:
 - **Wi-Fi silent.** Wi-Fi can stall without dropping (an AP gone without a FIN, IP traffic lost). A node with a serial session whose TCP session heard nothing from the hub for more than 2 heartbeat intervals sends everything over serial instead, and goes back to TCP/UDP with the next hub frame on TCP (its TCP session still times out at 3.5 intervals, §5.11). The hub keeps the same rule toward the node (below), so both ends move to the USB line together.
 - Without a TCP session but with a serial session, everything goes over serial.
 - With neither, events are dropped and counted (`events_dropped`); `state_seq` still advances, and `get_state` resends the properties after the next WELCOME.
-- **HEARTBEAT and PONG go on every session**: TCP/UDP as in the table (also while TCP is silent: that copy tells the hub Wi-Fi carries again) and a serial session, standby or not, as the same bytes; the hub deduplicates them by its window. So a USB node whose Wi-Fi loses frames stays online through its serial session. While TCP carries, nothing else takes a standby serial session but the answers to requests that came over it.
+- **HEARTBEAT and PONG go on every session**: TCP/UDP as in the table (also while TCP is silent: that copy tells the hub Wi-Fi carries again) and a serial session, standby or not, as the same bytes; the hub deduplicates them by its window. So a USB node whose Wi-Fi loses frames stays online through its serial session. While TCP carries, nothing else takes a standby serial session but the answers to requests that came over it and, from the hub, hub broadcasts and their repairs (§5.9).
 - A standby serial session (one alongside a TCP session) is never timed out: the hub owes it nothing, and its keepalive clock starts when the TCP session ends.
 - **A request that came over serial is answered over serial**: its RESULT, the ACCEPT or REJECT an OFFER gets at once, and a cached answer to a DUP of it (an ACCEPT or REJECT decided later, from the image's first bytes, goes as any OTA frame). A request that came over TCP is answered as in the table. The hub sends a request over USB to a node that has a TCP session only for the serial session's own handshake, or once Wi-Fi went silent at its end, which the node may not see: only its uplink may be gone while the hub's keepalives still reach it over TCP.
 - **Gap: uplink-only loss** (open after C4, [11 §11.4](11-roadmap.md)). When only the node's uplink is gone, the hub's keepalives still reach its TCP session, so the node never sees TCP silent. Requests and their answers move to serial and the heartbeats keep it online, but the STATEs and events it sends meanwhile still take TCP/UDP and are lost.
 - A RESULT whose request asked for a BYE (`fr.node.reboot`) and that BYE both leave on the link the request came on (TCP or serial), never on UDP or the other session, where the BYE could overtake the RESULT (§5.11).
-- The hub sends to a node over its TCP session, else its serial session, and over the serial session while nothing arrived over TCP or UDP from a node that has both for more than 2 intervals (commands, OTA frames, PINGs, ACKs, `get_state` and TIME resyncs; TCP again as soon as Wi-Fi carries). It never sends UDP. `device_get` lists a device's links best first.
+- The hub sends to a node over its TCP session, else its serial session, and over the serial session while nothing arrived over TCP or UDP from a node that has both for more than 2 intervals (commands, OTA frames, PINGs, ACKs, `get_state` and TIME resyncs; TCP again as soon as Wi-Fi carries). Hub broadcasts and their repairs go on every session instead, and DIRECTORY pages to every welcomed session (§5.9, below). It never sends UDP. `device_get` lists a device's links best first.
 
 **`udp_ok` is kept by a probe, not by traffic.**
 - After WELCOME, every HEARTBEAT also goes over UDP, and one follows every WELCOME at once. The hub answers **every** HEARTBEAT that arrives over UDP with an ACK over TCP echoing its seq. It does this even when its window classifies that copy as DUP because the TCP copy arrived first.
@@ -396,20 +418,28 @@ Rules:
 **To node X (node ↔ node)**
 
 - **Directory.** The hub knows every `addr → MAC`, because `device_id` is the STA MAC.
-  - It sends NET/DIRECTORY (paged) right after WELCOME and on every registry change.
-  - Nodes keep up to 64 entries in NVS (they survive a reboot while the hub is down) and use RESOLVE beyond that.
+  - **Hub.** DIRECTORY pages list every provisioned device, the receiving node included, sorted by addr (so a rename is no change). A set goes to each session in its handshake (§5.12.1) and, when it differs from the last one sent, to every welcomed session: on `device.provisioned`, on every HELLO and from a check every 1 s. Every session gets the whole set, never a filtered one. RESOLVE `{addr}` is answered to the asker with a one-entry DIRECTORY (page 0 of 1) for a provisioned addr, and not at all for an unknown one.
+  - **Node.** A page is classified by its content, whatever RESOLVE is outstanding. A lone page 0 of 1 holding one entry whose addr is not the node's own is a RESOLVE answer: it merges into the table and leaves a set being staged alone. A lone page 0 of 1 with no entries ("unknown") changes nothing. Anything else is part of a page set (page 0 starts one; ≤ 32 pages), which replaces the table only once complete, and only if one of its entries is the node's own addr (checked on the raw entries, so also past the 64 kept): a set that does not list the node is no directory.
+  - Nodes keep up to 64 entries in `nvs:fr_dir` (they survive a reboot while the hub is down; an unchanged set is not saved again) and use RESOLVE beyond that: RESOLVE `{addr}` for a missing addr, with a hub session, at most once per second per addr over the last 4 addrs asked (when all 4 are in use, the one asked longest ago is reused; an entry is freed when its answer merges).
   - Bindings also carry the target MAC ([07 §7.11](07-capabilities-sdk.md)).
-- **Neighbour quality** (RSSI, last heard or MAC-ACKed) is learned only from frames with `RELAYED = 0` and `ttl_remaining == ttl_initial`, keyed by the radio source MAC. A relayed frame carries the relay's MAC, not the origin's.
-- **Router-mode ESP-NOW heartbeat.** Every node broadcasts a PRESENCE/HEARTBEAT over ESP-NOW every 5 s ±20% (dst `0xFFFF`, TTL 1, LATEST, never relayed). For 100 nodes this is ~2.3% of the channel at 1 Mbps.
+- **Neighbour table** (≤ 20: MAC, addr, RSSI, last heard, MAC-ACK ok and fail counts; diag `neighbors`, [09 §9.7](09-agent-api.md)), learned only from frames with `RELAYED = 0` and `ttl_remaining == ttl_initial`, keyed by the radio source MAC. A relayed frame carries the relay's MAC, not the origin's.
+- **Router-mode ESP-NOW heartbeat.** Every node broadcasts a PRESENCE/HEARTBEAT (the hub heartbeat's fields) over ESP-NOW every 5 s ±20% (dst `0xFFFF`, TTL 1, LATEST, never relayed, never sent to the hub), the first at a random point within one interval after ESP-NOW comes up. Its jitter is seeded from the factory MAC once that is known, never from an all-zero one. For 100 nodes this is ~2.3% of the channel at 1 Mbps. A fresh one whose `state` has `wifi_up` tells the receiver an AP of the network is on C, which the sweep rule uses (§5.4).
 
 ```
-to node X:
-  if MAC(X) known: ESP-NOW unicast (the MAC ACK refreshes X)
+to node X (CMD, EVENT, MSG; fast or Q1):
+  MAC(X) from the binding, else the directory, else the neighbour table (no MAC: RESOLVE asks the hub)
+  if MAC known: ESP-NOW unicast (the MAC ACK confirms the hop)
+      driver busy (peer table in recent use): TTL-1 flooded unicast instead
   if no MAC, or the unicast fails after link retries:
-      via hub if the hub link is up (hub forwards over X's link)
+      via hub if a hub session is up (the hub forwards over X's session)
       else flooded unicast (broadcast MAC, dst = X, TTL_DEFAULT)
-to group/broadcast: ESP-NOW broadcast with TTL_DEFAULT, plus the IP link to the hub (§5.9)
+answers (RESULT, ACK): the same chain, starting at the request's source MAC when it came unrelayed
+to group/broadcast: ESP-NOW broadcast with TTL_DEFAULT, plus the same bytes to the hub (§5.9)
 ```
+
+- **Send completion.** An accepted ESP-NOW send with no completion within 250 ms counts as a failed hop; an answer that overtakes the completion counts the hop as ESP-NOW.
+- **No path.** A fast frame that no path took (the unicast and the TTL-1 broadcast refused, no hub session, the flooded unicast refused or over the flood rate) is dropped and counted (`nodes.failed`), and `Net::send_to_node`, `send_msg` and `fr::msg::send` answer `BUSY`. A reliable frame answers OK and is retried (§5.8). A binding's frame is reported only through `node.binding_fired` (`target_status` BUSY, [07 §7.11](07-capabilities-sdk.md)).
+- **Hub forwarding.** A node → node envelope that reaches the hub (TCP, UDP or serial) is checked against its sender's window and forwarded unchanged over the target's session with `ttl_remaining − 1`. `ttl_remaining` 0 or no session to the target drops it (`forward_ttl`, `forward_no_route`). A DUP is forwarded again, so a retried request reaches the target's response cache, except within 20 ms of the last forward (the UDP/TCP twin). The hub never ACKs or answers frames meant for another node.
 
 While a node's own hub link is down, apps and the hub cannot reach it except through floods. Proxying through a neighbour is an M2 option.
 
@@ -443,6 +473,7 @@ While a node's own hub link is down, apps and the hub cannot reach it except thr
   5. `fr.node.describe` (BULK), only when no artifact manifest names the HELLO's `fw_id_prefix`; cached per `descriptor_hash`
   6. `get_state`
   7. online: `device.online` for the node's first session, `device.link {link, up: true}` for every session
+  8. bindings: the node's `bind_list` is brought back to its registry rows (since C5, [07 §7.11](07-capabilities-sdk.md))
 - **Node TX ring.** 8 KB, a power of two so ring positions stay continuous across the 32-bit byte counters' wrap; a frame that does not fit is dropped and counted (`tcp_tx_dropped`).
 - **Close log.** Every close of an established connection logs one WARN line on the node, `hub: TCP closed after <ms> ms: <reason>` (the hub closed it; keepalive or retransmit timeout; socket error; bad frame length; session lost, with its reason; Wi-Fi lost, with the disconnect reason), and is counted by reason in diag `stats` ([09 §9.7](09-agent-api.md)).
 - **lwIP tuning** (in the framework sdkconfig): `CONFIG_LWIP_TCP_TMR_INTERVAL=50` and `CONFIG_LWIP_TCP_RTO_TIME=300`. The defaults retransmit on 500 ms ticks with a 1.5 s initial RTO. The tuned values give an effective node → hub retransmit of 200–300 ms; CPU cost is measured in S2.
@@ -551,10 +582,10 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 
 | Failure | Effect | Recovery |
 |---|---|---|
-| Router reboot | IP links drop; ESP-NOW between nodes continues on C (nodes scan only C) | The node reconnects when the BSSID returns; the hub sees HELLO, WELCOMEs it and resyncs state |
+| Router reboot or outage | IP links drop; ESP-NOW between nodes continues on C (nodes scan only C, and nodes that hear each other do not sweep for 5 min, §5.4). Hub broadcasts still reach a USB-attached node over serial, which seeds the flood (T-FLOOD-B) | The node reconnects when the BSSID returns; the hub sees HELLO, WELCOMEs it and resyncs state |
 | Router changes channel | Associated nodes follow. ESP-NOW-only nodes are stranded (M2) | The gateway announces the switch (M2); a fixed channel is recommended |
-| Hub down or Mac asleep | No app delivery | Node ↔ node ESP-NOW (bindings, floods) keeps working. Nodes detect the loss in 3.5 intervals; buffered Q1 frames expire after 1 s |
-| Hub restart | Sessions end: the stopping hub sends a hub BYE over USB and closes TCP | Nodes HELLO again; the WELCOME with the new hub epoch resets their windows |
+| Hub down or Mac asleep | No app delivery | Node ↔ node ESP-NOW (bindings, node broadcasts and their floods, the directory kept in NVS) keeps working. Nodes detect the loss in 3.5 intervals; buffered Q1 frames expire after 1 s |
+| Hub restart | Sessions end: the stopping hub sends a hub BYE over USB and closes TCP | Nodes HELLO again; the WELCOME with the new hub epoch resets their windows. Until then a node drops the new run's broadcasts heard over ESP-NOW (§5.8) |
 | Node power loss mid-OTA | Partial image | The bootloader keeps the old image; the hub retries, and the node resumes from its last 64 KB stride ([06 §6.6–6.7](06-identity-ota.md)) |
 | Wi-Fi stalls without dropping on a USB node | TCP/UDP lose frames | Heartbeats on the serial session keep it online; after 2 silent intervals both ends send over serial, and back to TCP once Wi-Fi carries (§5.10) |
 | Node in download mode (BOOT held at reset) | Gone from Wi-Fi; USB still present | Hub hint, plus `esptool --after watchdog-reset` (C3/S3) or RST |
@@ -567,12 +598,13 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | Key | Default |
 |---|---|
 | `FR_HEARTBEAT_MS` | 1000 (game: 250) |
-| `FR_ESPNOW_HB_MS` | 5000 (router mode) |
+| `FR_ESPNOW_HB_MS` | 5000 (router mode; 1000..60000) |
 | `FR_SUSPECT_X10` / `FR_OFFLINE_X10` / `FR_OFFLINE_MIN_MS` | 25 / 35 / 750 |
-| `FR_TTL_DEFAULT` / `FR_TTL_MAX` | 2 / 7 |
-| `FR_RELAY_JMIN_MS` / `FR_RELAY_JMAX_MS` / `FR_RELAY_K` | 1 / 16 / 2 |
+| `FR_TTL_DEFAULT` / `FR_TTL_MAX` | 2 / 7 (1..15) |
+| `FR_RELAY_JMIN_MS` / `FR_RELAY_JMAX_MS` / `FR_RELAY_K` | 1 / 16 / 2 (1..8; copies heard over ESP-NOW) |
 | `FR_WINDOW_BITS_NODE` / `FR_WINDOW_BITS_HUB` / `FR_WINDOW_SOURCES_NODE` | 128 / 256 / 64 |
-| `FR_ACK_BASE_MS` / `FR_ACK_PER_HOP_MS` / `FR_MAX_ATTEMPTS` | 20 / 10 / 4 |
+| `FR_ACK_BASE_MS` / `FR_ACK_PER_HOP_MS` / `FR_MAX_ATTEMPTS` | 20 / 10 (0..1000) / 4 |
+| `FR_BINDINGS_MAX` | 16 |
 | `FR_TCP_DELIVERY_MS` / `FR_CMD_EXPIRE_MS` / `FR_EVENT_MAX_AGE_MS` | 2000 / 1000 / 1000 |
 | `FR_BCAST_VALID_MS` | 2000 |
 | `FR_LINK_RETRIES` | 2 |
@@ -586,14 +618,19 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 
 `FR_SUSPECT_X10` and `FR_CMD_EXPIRE_MS` are hub rules; the node does not use them.
 
+**Fixed values (since C5, not Kconfig).**
+- Node: relay queue 8; flood rate 10/s per source, burst 10, 8 sources; node → node frames in flight 8; neighbours 20; unicast peers 17 (1 s hold); driver queue 16 (4 for URGENT); send-callback guard 100 ms, owed up to 1 s (`kSendLostUs`); send completion 250 ms; RESOLVE once per second per addr over the last 4 addrs; binding chain depth 2; the encoded binding table and `bind_list` ≤ 1400 B (`kBindListMax`); MSG handlers 8.
+- STA (`sta_rules.hpp`): heard window 60 s (`kHeardWindowUs`), sweep after 60 s alone (`kSweepAfterUs`) or after 5 min while ESP-NOW is heard (`kSweepQuietUs`), channel-C scan 30 ms.
+- Hub: flood rate 10/s with a burst of 8; repair grace 250 ms, at most 2 repairs per broadcast and device; forward DUP throttle 20 ms; directory check 1 s; unicast MSG ACK wait 2 s; binding push wait 3 s.
+
 ## 5.18 Acceptance tests (protocol gates)
 
 | Id | Test | Pass |
 |---|---|---|
 | T-CODEC | C++ and TS golden vectors for every class, every system message, every capability member and serial lines in both directions; fuzz both decoders with the same seeds ([10 §10.4](10-testing.md)) | identical bytes; no crash in 10⁶ cases per decoder; equal fuzz digests for every target both sides run |
 | T-LAT | GPIO loopback: node A's `test_pin` is wired to node B's input. The hub sends `CMD exec_at`; also PING/PONG. 10k samples per path and rate. **Primary metric:** hub-clock round trip (CMD send → B's EVENT received) minus A's RTT/2. Also report the `exec_at` one-way figure with its sync uncertainty | Router mode, with the hub attached as chosen at the M0 go/no-go: p50 ≤ 10 ms; p99 ≤ 30 ms when wired, published when on Wi-Fi. Gateway: p50 ≤ 5 ms, p99 ≤ 20 ms |
-| T-FLOOD | 1,000 hub broadcasts with relays on. One node's hub link is blocked with the debug hook `net drop_hub_link 600` ([09 §9.7](09-agent-api.md)). The hook blocks envelopes on TCP, UDP **and** the serial link, keeps the STA associated on C and suppresses reconnects. Counts come from `diag stats` | ≥ 99.9% delivery; zero duplicate deliveries. Mean ESP-NOW transmissions per broadcast (relay seeds sent, from `diag stats`) ≤ 3 on the bench; ≤ K + 3 with 10 nodes in the virtual fleet (M2) |
-| T-FLOOD-B | Router powered off for 120 s while the hub sends `message_send broadcast` at 1 Hz. During the outage it reaches only a USB-attached node (over serial), which seeds the flood. Delivery is read with `diag stats` after the router returns | node ↔ node delivery ≥ 99% during the outage; all nodes back online < 10 s after the router returns |
+| T-FLOOD | 1,000 hub broadcasts with relays on (`fr msg broadcast flood --count 1000 --interval-ms 100`). One node's hub link is blocked with the debug hook `net drop_hub_link 600` ([09 §9.7](09-agent-api.md)). The hook blocks envelopes on TCP, UDP **and** the serial link, keeps the STA associated on C and suppresses reconnects. Counts come from `diag stats` (`bcast.delivered`, `relay.seeded + relay.relayed`; `stats bcast` alone) | ≥ 99.9% delivery; zero duplicate deliveries. Mean ESP-NOW transmissions per broadcast (`relay.seeded + relay.relayed` summed over the nodes) ≤ 3 on the bench (≈ 2 with two hub-linked seeders, §5.9); ≤ K + 3 with 10 nodes in the virtual fleet (M2) |
+| T-FLOOD-B | Router powered off for 120 s (or, with the router left on, `net wifi_down 120` on the nodes, [09 §9.7](09-agent-api.md)) while the hub sends `message_send broadcast` at 1 Hz. During the outage it reaches only the USB-attached nodes (over serial), which seed the flood. Delivery is read with `diag stats` after the router returns | node ↔ node delivery ≥ 99% during the outage; all nodes back online < 10 s after the router returns |
 | T-NN | Binding `pad-c6.boot.down → pad-c3.status.blink`, tested with the hub running and with the hub stopped | the LED blinks both times. With the hub running, `node.binding_fired.rtt_us` p50 ≤ 10 ms on `path = espnow`; with the hub stopped only the blink is checked |
 | T-PRES | Unplug a node; send BYE (`fr.node.reboot`); block UDP (`diag net udp_block 30`, [09 §9.7](09-agent-api.md)) | offline 2.4–3.5 s after unplug (default); immediate on BYE; `udp_blocked` warning with no false offline (the hub falls back to its own TCP heartbeat as keepalive) |
 | T-CHAN (M2) | Change the router channel | all nodes recover in < 5 s |

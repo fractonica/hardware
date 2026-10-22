@@ -11,6 +11,11 @@
 // then confirms (RESULT success) or rolls back (old fw_id, RESULT rolled_back); an ABORT can take a while to
 // wind down (REJECT busy meanwhile) or come too late (while the boot partition is set); otaRig() puts it in
 // front of a real orchestrator, job runner and artifact store.
+// Node <-> node (design c5 §4-5, stream H1): a FakeNode keeps hub broadcasts in their own BCAST window (floor
+// WELCOME's bcast_base) and reports its bcast_watermark in HEARTBEAT, can lose chosen broadcasts (to see them
+// repaired), ACKs unicast MSGs, keeps a binding table behind fr.node bind_set / bind_clear / bind_list (or
+// answers unsupported, like firmware before C5), sends MSGs and node -> node frames, and windows the node
+// frames the hub forwards or fans out by their (src, epoch), answering a forwarded CMD or Q1 MSG to its source.
 
 import { createHash, randomBytes } from 'node:crypto';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
@@ -39,14 +44,22 @@ import {
 } from '@fractonica/protocol';
 import {
   ADDR,
+  type Binding,
+  decodeBinding,
   decodeEnvelope,
+  decodeMsgMsg,
   decodeNetWelcome,
+  decodeNodeBindClearArgs,
   decodeOtaAbort,
   decodeOtaOffer,
   decodePresencePing,
   decodeTimeSyncReq,
+  encodeBinding,
+  encodeBindingList,
   encodeDescriptor,
   encodeEnvelope,
+  encodeMsgMsg,
+  encodeNodeBindListResult,
   encodeNodeDescribeResult,
   encodeOtaAccept,
   encodeOtaReject,
@@ -66,6 +79,7 @@ import {
 } from '@fractonica/protocol/gen';
 
 import { parseAppImage, storeBlob } from '../src/artifacts.ts';
+import { type BindingService, createBindings } from '../src/bindings/index.ts';
 import type { Device, HelloSeen, HubContext, Presence, Registry, Router } from '../src/context.ts';
 import { type Db, openDb } from '../src/db.ts';
 import { EventStore } from '../src/events/index.ts';
@@ -83,6 +97,22 @@ export interface Seen {
   header: Header;
   prefix: Envelope['prefix'];
   body: Uint8Array;
+  via: 'tcp' | 'serial';
+}
+
+/** fr_core kBindListMax: the encoded BindingList fr.node.bind_list returns at most (node.cap.yaml). */
+export const BIND_LIST_MAX = 1400;
+
+/** A MSG the node took (new to its window): from the hub (src 0x0000) or a node, unicast or broadcast. */
+export interface SeenMsg {
+  src: number;
+  dst: number;
+  seq: number;
+  /** The header's ttl byte as it arrived (a fan-out or repair has ttl_remaining 1). */
+  ttl: number;
+  topic: string;
+  /** The data as text (UTF-8 JSON from the hub and the SDK). */
+  data: string;
   via: 'tcp' | 'serial';
 }
 
@@ -267,6 +297,28 @@ export class FakeNode {
   #hbTimer: NodeJS.Timeout | null = null;
   #helloTimer: NodeJS.Timeout | null = null;
   #onWelcome: (() => void) | null = null;
+  // ---- node <-> node (design c5) ----
+  /** MSGs taken (hub unicast and broadcasts, node frames the hub forwarded or fanned out), in order. */
+  msgs: SeenMsg[] = [];
+  /** Hub broadcasts taken (new to the BCAST window), dropped as DUP / OLD, and lost on purpose (loseBroadcast). */
+  broadcasts: Seen[] = [];
+  bcastDups = 0;
+  bcastOlds = 0;
+  bcastLost = 0;
+  /** Return true to lose this hub broadcast before the node's window sees it (a frame lost on the way). */
+  loseBroadcast: ((seq: number, header: Header) => boolean) | null = null;
+  /** The highest BCAST seq with every earlier one since WELCOME's bcast_base taken (05 §5.9). */
+  bcastWatermark = 0;
+  /** Frames from other nodes (src != 0x0000) the hub forwarded or fanned out, new to their window. */
+  nodeFrames: Seen[] = [];
+  nodeDups = 0;
+  /** fr.node bind_* (07 §7.11): false answers UNSUPPORTED, as firmware before C5 does. */
+  bindSupport = true;
+  /** The binding table: slot -> the encoded Binding, as fr_net keeps it (re-encoded). */
+  bindings = new Map<number, Uint8Array>();
+  #bseen = new Set<number>();
+  /** (src, epoch) -> seqs taken, for node frames (05 §5.8: a window per origin). */
+  #nodeSeen = new Map<string, Set<number>>();
 
   constructor(opts: FakeNodeOptions) {
     const addr = opts.addr ?? ADDR.UNASSIGNED;
@@ -377,6 +429,7 @@ export class FakeNode {
       uptime_s: Math.floor((performance.now() - this.#bootAt) / 1000),
       state: 0b11 | (this.timeSynced ? 0b1000 : 0), // wifi_up, hub_link, time_synced
       state_seq: this.#stateSeq,
+      bcast_watermark: this.bcastWatermark,
     });
     const seq = this.#emit(CLS.PRESENCE, KIND.PRESENCE.HEARTBEAT, PORT.NODE, body, {}, this.udpOk ? 'udp' : 'dual');
     if (this.link === 'tcp') {
@@ -419,6 +472,35 @@ export class FakeNode {
   envelope(cls: number, kind: number, port: number, body: Uint8Array, prefix?: Envelope['prefix'], flags = 0): { seq: number; bytes: Uint8Array } {
     const seq = ++this.#seq;
     return { seq, bytes: this.#encode(seq, cls, kind, port, body, flags, prefix) };
+  }
+
+  /**
+   * A frame to another node through the hub (05 §5.10 "via hub"), or a node broadcast (dst 0xFFFF), over
+   * the session link: ttl defaults to 0x22 (FR_TTL_DEFAULT both nibbles), as fr_net sends them.
+   */
+  sendTo(dst: number, cls: number, kind: number, port: number, body: Uint8Array, opts: { ackReq?: boolean; ttl?: number; prefix?: Envelope['prefix'] } = {}): { seq: number; bytes: Uint8Array } {
+    const seq = ++this.#seq;
+    const bytes = this.#encode(seq, cls, kind, port, body, opts.ackReq ? FLAG.ACK_REQ : 0, opts.prefix, dst, opts.ttl);
+    this.#write(this.link === 'serial' ? 'serial' : 'tcp', bytes);
+    return { seq, bytes };
+  }
+
+  /** A MSG (05 §5.7) to the hub, a node or 0xFFFF; data is JSON text. Unicast ones are Q1 unless ackReq is false. */
+  msg(topic: string, data: string, opts: { dst?: number; ackReq?: boolean; ttl?: number } = {}): { seq: number; bytes: Uint8Array } {
+    const dst = opts.dst ?? ADDR.HUB;
+    const body = encodeMsgMsg({ topic, data: new TextEncoder().encode(data) });
+    return this.sendTo(dst, CLS.MSG, KIND.MSG.MSG, PORT.NODE, body, { ackReq: opts.ackReq ?? dst !== ADDR.BROADCAST, ttl: opts.ttl });
+  }
+
+  /** The binding table as fr.node.bind_list returns it, decoded. */
+  bindingTable(): Binding[] {
+    return [...this.bindings.keys()].sort((a, b) => a - b).map((slot) => {
+      const d = decodeBinding(this.bindings.get(slot)!);
+      if (!d.ok) {
+        throw new Error(`slot ${slot}: ${d.error}`);
+      }
+      return d.value;
+    });
   }
 
   /** Power cut: nothing goes out, nothing is processed, the TCP connection is left as it is (no FIN). */
@@ -501,11 +583,21 @@ export class FakeNode {
       this.#floor = w.value.ucast_floor;
       this.#seen.clear();
       this.#cache.clear();
+      this.#bseen.clear();
+      this.bcastWatermark = w.value.bcast_base;
       this.#onWelcome?.();
       this.#onWelcome = null;
       if (this.opts.autoHeartbeat && !this.#hbTimer) {
         this.#hbTimer = setInterval(() => !this.silent && this.heartbeat(), this.opts.hbMs);
       }
+      return;
+    }
+    if (h.src !== ADDR.HUB) {
+      this.#fromNode(h, prefix, body, via);
+      return;
+    }
+    if (h.dst === ADDR.BROADCAST) {
+      this.#hubBroadcast(h, prefix, body, via);
       return;
     }
     if (h.seq <= this.#floor) {
@@ -553,11 +645,127 @@ export class FakeNode {
       case CLS.CMD:
         this.#command(h, body);
         break;
+      case CLS.MSG:
+        this.#takeMsg(h, body, via);
+        break;
       case CLS.OTA:
         this.#otaFrame(h, body);
         break;
       default:
     }
+  }
+
+  // ---- node <-> node (design c5) ----
+
+  /** A hub broadcast: its own window (BCAST space, floor bcast_base), the watermark, and the MSG it carries. */
+  #hubBroadcast(h: Header, prefix: Envelope['prefix'], body: Uint8Array, via: 'tcp' | 'serial'): void {
+    if (this.loseBroadcast?.(h.seq, h)) {
+      this.bcastLost++;
+      return;
+    }
+    if (((h.seq - this.bcastWatermark) | 0) <= 0) {
+      // At or below the watermark: every one there was taken (or is older than this session).
+      if (this.#bseen.has(h.seq)) {
+        this.bcastDups++;
+      } else {
+        this.bcastOlds++;
+      }
+      return;
+    }
+    if (this.#bseen.has(h.seq)) {
+      this.bcastDups++;
+      return;
+    }
+    this.#bseen.add(h.seq);
+    while (this.#bseen.has((this.bcastWatermark + 1) >>> 0)) {
+      this.bcastWatermark = (this.bcastWatermark + 1) >>> 0;
+    }
+    this.broadcasts.push({ header: h, prefix, body, via });
+    if (h.cls === CLS.MSG) {
+      this.#takeMsg(h, body, via);
+    }
+  }
+
+  /** A MSG new to its window; a Q1 one (ACK_REQ, unicast) is ACKed to its source, and the ACK cached for a DUP. */
+  #takeMsg(h: Header, body: Uint8Array, via: 'tcp' | 'serial'): void {
+    const d = decodeMsgMsg(body);
+    if (d.ok) {
+      this.msgs.push({ src: h.src, dst: h.dst, seq: h.seq, ttl: h.ttl, topic: d.value.topic, data: new TextDecoder().decode(d.value.data), via });
+    }
+    if (h.flags & FLAG.ACK_REQ) {
+      this.#answer(h, CLS.ACK, KIND.ACK.ACK, new Uint8Array(0), STATUS.OK);
+    }
+  }
+
+  /**
+   * A frame from another node that the hub forwarded (dst = this node) or fanned out (dst 0xFFFF, ttl
+   * remaining 1): windowed per (src, epoch). A DUP request gets its cached answer again (05 §5.8).
+   */
+  #fromNode(h: Header, prefix: Envelope['prefix'], body: Uint8Array, via: 'tcp' | 'serial'): void {
+    const key = `${h.src}/${h.epoch}`;
+    let seen = this.#nodeSeen.get(key);
+    if (!seen) {
+      seen = new Set();
+      this.#nodeSeen.set(key, seen);
+    }
+    if (seen.has(h.seq)) {
+      this.nodeDups++;
+      const cached = this.#cache.get(`${h.src}/${h.epoch}/${h.seq}`);
+      if (cached && h.flags & FLAG.ACK_REQ) {
+        this.#write(this.link === 'serial' ? 'serial' : 'tcp', cached);
+      }
+      return;
+    }
+    seen.add(h.seq);
+    this.nodeFrames.push({ header: h, prefix, body, via });
+    if (h.cls === CLS.CMD && (h.dst === this.opts.addr || h.dst === ADDR.BROADCAST)) {
+      this.#command(h, body);
+    } else if (h.cls === CLS.MSG) {
+      this.#takeMsg(h, body, via);
+    }
+  }
+
+  /** fr.node bind_set / bind_clear / bind_list (07 §7.11) over the binding table; null for any other command. */
+  #bindCommand(h: Header, args: Uint8Array): { status: number; fields?: Uint8Array } | null {
+    if (h.port !== PORT.NODE || h.kind < 8 || h.kind > 10) {
+      return null;
+    }
+    if (!this.bindSupport) {
+      return { status: STATUS.UNSUPPORTED };
+    }
+    if (h.kind === 8) {
+      // bind_set's args are an encoded Binding; the node stores it re-encoded, and refuses one that would put
+      // the table past what bind_list returns (fr_net Net::set_binding).
+      const b = decodeBinding(args);
+      if (!b.ok || b.value.slot > 15) {
+        return { status: STATUS.INVALID_ARGS };
+      }
+      const table = this.bindingTable().filter((x) => x.slot !== b.value.slot);
+      if (encodeBindingList({ items: [...table, b.value] }).length > BIND_LIST_MAX) {
+        return { status: STATUS.INVALID_ARGS };
+      }
+      this.bindings.set(b.value.slot, encodeBinding(b.value));
+      return { status: STATUS.OK };
+    }
+    if (h.kind === 9) {
+      const c = decodeNodeBindClearArgs(args);
+      if (!c.ok) {
+        return { status: STATUS.INVALID_ARGS };
+      }
+      if (c.value.slot === 255) {
+        this.bindings.clear();
+      } else {
+        this.bindings.delete(c.value.slot);
+      }
+      return { status: STATUS.OK };
+    }
+    // A table past BIND_LIST_MAX (written another way: tests set `bindings` directly) answers FAILED, as
+    // Net::encode_bindings does.
+    const list = encodeBindingList({ items: this.bindingTable() });
+    if (list.length > BIND_LIST_MAX) {
+      return { status: STATUS.FAILED };
+    }
+    return { status: STATUS.OK, fields: encodeNodeBindListResult({ bindings: list }) };
   }
 
   // ---- OTA (design c4 §3) ----
@@ -877,10 +1085,14 @@ export class FakeNode {
         }
       }
       const handler = this.handlers.get(key);
+      const bind = handler ? null : this.#bindCommand(h, args);
       if (handler) {
         const r = handler(args, h) ?? {};
         status = r.status ?? STATUS.OK;
         fields = r.fields ?? fields;
+      } else if (bind) {
+        status = bind.status;
+        fields = bind.fields ?? fields;
       } else if (!(h.port === PORT.NODE && (h.kind === 7 || h.kind === 4))) {
         status = STATUS.NOT_FOUND;
       }
@@ -888,21 +1100,30 @@ export class FakeNode {
     if (!(h.flags & FLAG.ACK_REQ)) {
       return; // a fast command: no RESULT
     }
+    this.#answer(h, CLS.RESULT, h.kind, fields, status);
+  }
+
+  /**
+   * The RESULT or ACK to request `h`, to its source (the hub, or the node whose frame the hub forwarded: the
+   * hub forwards it back), cached by (src, epoch, seq) for a DUP of the request.
+   */
+  #answer(h: Header, cls: number, kind: number, fields: Uint8Array, status: number): void {
     const seq = ++this.#seq;
-    const result = this.#encode(seq, CLS.RESULT, h.kind, h.port, fields, h.flags & FLAG.BULK, { type: 'result', req_epoch: h.epoch, req_seq: h.seq, status });
-    this.#cache.set(`${h.src}/${h.epoch}/${h.seq}`, result);
+    const answer = this.#encode(seq, cls, kind, h.port, fields, h.flags & FLAG.BULK, { type: 'result', req_epoch: h.epoch, req_seq: h.seq, status }, h.src);
+    this.#cache.set(`${h.src}/${h.epoch}/${h.seq}`, answer);
     if (this.#cache.size > 8) {
       this.#cache.delete(this.#cache.keys().next().value!);
     }
-    this.#write(this.link === 'serial' ? 'serial' : this.udpOk ? 'udp' : 'tcp', result);
+    // An answer for another node goes over the session link here (the hub forwards one over UDP as well).
+    this.#write(this.link === 'serial' ? 'serial' : this.udpOk && h.src === ADDR.HUB ? 'udp' : 'tcp', answer);
   }
 
   // ---- send ----
 
-  #encode(seq: number, cls: number, kind: number, port: number, body: Uint8Array, flags: number, prefix?: Envelope['prefix']): Uint8Array {
+  #encode(seq: number, cls: number, kind: number, port: number, body: Uint8Array, flags: number, prefix?: Envelope['prefix'], dst: number = ADDR.HUB, ttl = 0x22): Uint8Array {
     const o = this.opts;
     return encodeEnvelope({
-      header: { flags, cls, kind, seq, net: o.net, src: o.addr, dst: ADDR.HUB, epoch: o.epoch, ttl: 0x22, port },
+      header: { flags, cls, kind, seq, net: o.net, src: o.addr, dst, epoch: o.epoch, ttl, port },
       ...(prefix ? { prefix } : {}),
       body,
     });
@@ -1356,6 +1577,53 @@ export async function otaRig(
     async close() {
       jobs.cancelAll();
       await ota.stop();
+      await close();
+    },
+  };
+}
+
+export interface NetRig extends Rig {
+  jobs: JobRunner;
+  bindings: BindingService;
+  /**
+   * A provisioned device (a registry row with its addr and alias) and its FakeNode, whose firmware has
+   * `caps` (default: a button `boot` on port 1 and an LED `status` on port 2, through the descriptor).
+   */
+  pad(o: Omit<FakeNodeOptions, 'hub' | 'addr' | 'alias'> & { addr: number; alias: string; caps?: { port: number; cap_id: number; name: string }[] }): FakeNode;
+}
+
+/** The button + LED pad of the C5 gates (pad-c6.boot.down -> pad-c3.status.blink). */
+export const PAD_CAPS = [
+  { port: 1, cap_id: 0x0001, name: 'boot' },
+  { port: 2, cap_id: 0x0002, name: 'status' },
+];
+
+/**
+ * rig() plus a job runner and a started binding service in the HubContext the op handlers get, with the
+ * router as the HubBroadcast (design c5 §4): what message_send, binding_* and latency_stats run on.
+ */
+export async function netRig(opts: { config?: Partial<RouterConfig>; registry?: FakeRegistry; pushTimeoutMs?: number } = {}): Promise<NetRig> {
+  const r = await rig({ config: opts.config, registry: opts.registry });
+  const jobs = new JobRunner(r.db);
+  const bindings = createBindings({ db: r.db, registry: r.registry, router: r.router, events: r.events, pushTimeoutMs: opts.pushTimeoutMs ?? 1000 });
+  bindings.start();
+  const hub = { ...r.hub, jobs, broadcast: r.router, bindings } as HubContext;
+  const close = r.close;
+  return {
+    ...r,
+    hub,
+    jobs,
+    bindings,
+    pad(o) {
+      const { caps, ...rest } = o;
+      r.registry.add({ device_id: o.mac, addr: o.addr, alias: o.alias, provisioned: true, net: o.net ?? 0 });
+      const n = r.node(rest);
+      n.describeAs(caps ?? PAD_CAPS);
+      return n;
+    },
+    async close() {
+      jobs.cancelAll();
+      bindings.stop();
       await close();
     },
   };

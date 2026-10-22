@@ -1,19 +1,21 @@
 // Operation registry: every hub operation is defined once here; REST, the `fr` CLI and (later)
 // MCP tools are generated from it (spec 09 §9.1). Field names are snake_case; the CLI maps them
 // to --kebab-case options (see cliFlag). Checkpoint C3 adds its groups from ops/registry.ts (registry
-// and provisioning) and ops/links.ts (node links, router, events), C4 its OTA group from ops/ota.ts, all
-// spread in at the end of OPS.
+// and provisioning) and ops/links.ts (node links, router, events), C4 its OTA group from ops/ota.ts, C5
+// its node <-> node group from ops/net.ts (messages, bindings, latency), all spread in at the end of OPS.
 
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
 import { LINKS_OPS } from './ops/links.ts';
+import { NET_OPS } from './ops/net.ts';
 import { OTA_OPS } from './ops/ota.ts';
 import { REGISTRY_OPS } from './ops/registry.ts';
 
 export { cliFlag, MAX_WAIT_S, type OpDef, type OpKind } from './ops/common.ts';
 export type { LinksOpName } from './ops/links.ts';
+export { BROADCAST_ALIAS, type NetOpName } from './ops/net.ts';
 export type { OtaOpName } from './ops/ota.ts';
 export type { RegistryOpName } from './ops/registry.ts';
 
@@ -198,6 +200,7 @@ export const OPS = [
   ...REGISTRY_OPS,
   ...LINKS_OPS,
   ...OTA_OPS,
+  ...NET_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

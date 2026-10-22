@@ -1,5 +1,5 @@
-// The C++ fr_net_node for interop tests (design c3 §5, c4 §5): build/host-tests/fr_net_node runs the real
-// fr_net core, services and (C4) the real fr_ota core on POSIX links. CppNode is one process; CppBoard is
+// The C++ fr_net_node for interop tests (design c3 §5, c4 §5, c5 §5): build/host-tests/fr_net_node runs the real
+// fr_net core, services and (C4) the real fr_ota core on POSIX links, and (C5) ESP-NOW on a fake air medium. CppNode is one process; CppBoard is
 // one board across boots: with --ota-dir an exited process (an OTA restart, a rollback, a crash) is power
 // cycled into the next boot, which reads what the last one left in its flash and nvs.
 // `pnpm test:host` builds the binary (run it again after changing C++); without it the suites are skipped.
@@ -18,7 +18,16 @@ export type Line = { ev: string; [k: string]: unknown };
 
 /**
  * One fr_net_node process: its JSON lines, and stdin commands (state, udp_block <s>, drop_hub_link <s>, ip_block <s>,
- * tcp 0|1, usb 0|1, bye, crash, quit).
+ * tcp 0|1, usb 0|1, bye, crash, quit). With --air-dir <dir> (design c5 §5) it joins a fake ESP-NOW medium shared by
+ * every node registered there (--air-loss <pct>, --air-seed <n>, --air-rssi <dBm>, --air-channel <n>,
+ * --air-ack-ms <n>), and takes the C5 commands `wifi_down <s>` (TCP and UDP down, ESP-NOW and serial stay; 0 ends
+ * it), `air_loss <pct>`, `inject <gesture>` (the boot button: click, double_click, long_press, press, release),
+ * `msg <addr|0|broadcast> <topic> [data]`, `msg_reliable <addr|0> <topic> [data]`, `bind <hex>` (an encoded
+ * Binding), `unbind <slot|all>`, `bindings`, `neighbors` and `directory`. Its lines then add `air`, `msg` (src, topic,
+ * data or data_hex, len), `msg_sent`, `bind_set`, `bind_clear`, `bind`, `unbind`, `bindings`, `neighbors`,
+ * `directory` (items {addr, mac} by addr), `wifi` and `inject`, and `state` the C5 counters (air_*, relay_*,
+ * bcast_*, bind_*, `nodes` by path, `medium`, `msgs`).
+ * Every node of one medium needs the hub's --net, its own --mac and its own --addr.
  */
 export class CppNode {
   readonly lines: Line[] = [];

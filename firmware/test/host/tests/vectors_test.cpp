@@ -37,7 +37,8 @@ struct Checker {
         current = name;
         static_cast<void>(type);
         const auto want = frt::from_hex(hex);
-        uint8_t buf[2048];
+        // The largest `max` vector: BindingList, 16 Bindings at their max (~2.7 KB).
+        uint8_t buf[4096];
         Writer w(buf, sizeof(buf));
         const size_t n = enc(x, w);
         if (encode) {

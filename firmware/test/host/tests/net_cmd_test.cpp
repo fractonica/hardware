@@ -256,7 +256,8 @@ TEST(net_frames_not_for_this_node_are_dropped)
     const uint32_t before = r.net.state().link(LinkKind::tcp).rx_drop;
     // Another node's unicast.
     r.deliver(LinkKind::tcp, r.hub.frame(wire::kFlagAckReq, wire::kClsCmd, 1, 100, 0x0006, 2, {}, {}));
-    // Not from the hub (node-to-node frames arrive with bindings, C5).
+    // Not from the hub and still at its initial TTL: no hub forwarded it (the hub's forward takes one off
+    // ttl_remaining, its fan-out sets it to 1; C5 node frames over TCP are net_air_send_test's).
     r.hub.src = 0x0007;
     r.deliver(LinkKind::tcp, r.hub.cmd(2, 1));
     r.hub.src = proto::kAddrHub;

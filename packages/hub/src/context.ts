@@ -1,10 +1,12 @@
-// What the hub's parts share (design c3 §4, c4 §4): the op handlers' HubContext and the interfaces the
-// registry (packages/hub/src/registry), the node links and router (src/links, src/router), the event store
-// and bus (src/events) and the OTA service (src/ota) implement and use; main.ts builds them with
-// createRegistry, createRouter, createEvents and createOta.
+// What the hub's parts share (design c3 §4, c4 §4, c5 §4): the op handlers' HubContext and the interfaces
+// the registry (packages/hub/src/registry), the node links and router (src/links, src/router), the event
+// store and bus (src/events), the OTA service (src/ota) and the node <-> node services (hub broadcasts in
+// src/router, bindings in src/bindings) implement and use; main.ts builds them with createRegistry,
+// createRouter, createEvents, createOta and createBindings.
 
 import type { IdfStatus, PytoolsStatus } from '@fractonica/host';
-import type { OtaState } from '@fractonica/protocol/gen';
+import type { Header } from '@fractonica/protocol';
+import type { OtaState, PresenceHeartbeat } from '@fractonica/protocol/gen';
 
 import type { Db } from './db.ts';
 import type { JobRunner } from './jobs.ts';
@@ -158,6 +160,139 @@ export interface Router {
   onOta(fn: (frame: OtaFrame) => void): () => void;
   /** The IPv4 address a device's live TCP session comes from (the 7422 gate, spec 08 §8.10), or null. */
   tcpAddress(deviceId: string): string | null;
+  /** Adds C5 hooks (design c5 §4): the frames and moments the node <-> node services act on; returns the removal. */
+  hooks(h: RouterHooks): () => void;
+}
+
+// ---- node <-> node (design c5 §4) ----
+
+/** The event a MSG from a node becomes (spec 08 §8.7, 09 §9.2), with MsgEventFields. */
+export const MSG_EVENT = 'msg';
+
+/** `msg` event fields. */
+export interface MsgEventFields {
+  topic: string;
+  /** The data parsed as UTF-8 JSON, else its bytes as hex. */
+  data: unknown;
+  /** The envelope dst: 0x0000 (the hub), 0xFFFF (a broadcast) or a group. */
+  dst: number;
+}
+
+/** A frame from a node, as RouterHooks hand it on (design c5 §4). */
+export interface NodeFrame {
+  device: string;
+  alias: string;
+  link: LinkName;
+  header: Header;
+  /** The envelope as received: forwarding, fan-out and repair send these bytes, changing only ttl_remaining. */
+  bytes: Uint8Array;
+  /** What follows the class prefix. */
+  body: Uint8Array;
+}
+
+/**
+ * What the router tells the node <-> node services (design c5 §4). Every hook runs synchronously in the
+ * receive tick, on fresh frames only (past the device's window), and must not throw (the router logs and
+ * goes on if one does). The router itself does the work that needs its sessions (fan-out, forwarding,
+ * repair); these hooks observe it afterwards.
+ */
+export interface RouterHooks {
+  /** A MSG from a node, to the hub or a broadcast, after the router published its `msg` event. */
+  msg?(frame: NodeFrame): void;
+  /** A broadcast from a node with ttl_remaining > 1, after the router fanned it out to every other node session with ttl_remaining 1. */
+  nodeBroadcast?(frame: NodeFrame): void;
+  /** A frame for another node (dst a node addr) that reached the hub, after the router forwarded it over that node's session with ttl_remaining - 1 (or counted why not). */
+  forward?(frame: NodeFrame): void;
+  /** A HEARTBEAT, decoded (its bcast_watermark drives broadcast repair). */
+  heartbeat?(device: string, hb: PresenceHeartbeat): void;
+  /** A device finished a handshake on a link (after device.online or device.link up): bindings re-push. */
+  ready?(device: string, hello: HelloSeen): void;
+}
+
+/** What a hub broadcast became (05 §5.9): its BCAST seq (the broadcast id) and the nodes it went to. */
+export interface BroadcastSent {
+  seq: number;
+  /** Nodes with a session that took it; a node on TCP and serial got it on both and counts once. */
+  sessions: number;
+  /** ttl 2/2, so the nodes seed the ESP-NOW flood; false: over the flood rate (≤ 10/s, design c5 §7), ttl 2/1, TCP-only. */
+  seeded: boolean;
+}
+
+/**
+ * Hub-originated MSGs and broadcasts (design c5 §4; stream H1, the router implements it): message_send's
+ * transport. A broadcast takes the next BCAST seq, dst 0xFFFF, ttl initial 2 / remaining 2 and EXT
+ * valid_ms, and goes as the same bytes over every node session (TCP and serial); nodes seed the ESP-NOW
+ * flood from it, and the router repairs it from HEARTBEAT watermarks while valid_ms lasts.
+ */
+export interface HubBroadcast {
+  broadcast(frame: { cls: number; kind: number; port: number; body: Uint8Array }, opts?: { validMs?: number }): BroadcastSent;
+  /** One reliable unicast MSG (ACK_REQ) to an online device on its best link; resolves with its ACK. Throws DEVICE_OFFLINE. */
+  sendMsg(deviceId: string, topic: string, data: Uint8Array, opts: { timeoutMs: number }): Promise<{ status: number; rtt_ms: number; link: LinkName }>;
+}
+
+/** A binding as the registry keeps it (table `bindings`, design c5 §4). */
+export interface BindingRow {
+  /** The source device: it stores the binding and fires it. */
+  device_id: string;
+  /** Its slot on the source device, 0..15. */
+  slot: number;
+  /** As given: "<alias>.<instance>.<event>" or "<alias>.msg:<topic>". */
+  from: string;
+  /** As given: "<alias>.<instance>.<command>", "<alias>.msg:<topic>" or "broadcast.msg:<topic>". */
+  to: string;
+  /** The target device (the source itself for a local reaction); null for broadcast. */
+  target_id: string | null;
+  /** The command args or MSG data as validated; null without (and for the MSG data null, whose payload is "null"). */
+  args: unknown;
+  /** Hex of the encoded Binding last resolved: what fr.node.bind_set carries. */
+  binding: string;
+  /** ISO time the source device confirmed it (bind_set RESULT OK); null while a push is due. */
+  pushed_at: string | null;
+}
+
+/** binding_set's outcome: the row, and whether the source device has it now. */
+export interface BindingSetOutcome {
+  row: BindingRow;
+  /** The binding as pushed (protocol fields). */
+  binding: Record<string, unknown>;
+  /** The same trigger and reaction already had this slot: its args or delivery were replaced. */
+  replaced: boolean;
+  /** Why it is not on the node yet (it is pushed at the device's next handshake), when it is not. */
+  pending?: string;
+}
+
+/** binding_clear's outcome. */
+export interface BindingClearOutcome {
+  /** Registry rows removed. */
+  cleared: number[];
+  /** fr.node.bind_clear went through now. */
+  pushed: boolean;
+  /** Why not (offline: at its next handshake), when it did not. */
+  pending?: string;
+}
+
+/** One slot of a node's own table (fr.node.bind_list), against the registry's row for it. */
+export interface LiveBinding {
+  slot: number;
+  binding: Record<string, unknown>;
+  /** same: the registry's row is this binding; differs: it holds another; absent: no row (cleared at the next handshake). */
+  registry: 'same' | 'differs' | 'absent';
+}
+
+/**
+ * Bindings (design c5 §4; stream H1): resolve both ends, validate and pre-encode, store and push, re-push
+ * when either end's descriptor_hash or addr changes and at every handshake whose node table differs (the
+ * registry wins); a rename rewrites the stored from/to text only (the bytes carry no alias).
+ */
+export interface Bindings {
+  /** Throws (nothing stored) for a binding that does not resolve or validate, or that the node refuses for good. */
+  set(input: { from: string; to: string; args?: unknown }): Promise<BindingSetOutcome>;
+  /** Registry rows of the selected source devices (all without a selector). */
+  list(selector?: string): BindingRow[];
+  /** fr.node.bind_list of an online device, decoded: its own table, each slot against the registry. */
+  live(deviceId: string): Promise<LiveBinding[]>;
+  /** Removes the rows and pushes fr.node.bind_clear (now if online, else at its next handshake). */
+  clear(deviceId: string, slot: number | 'all'): Promise<BindingClearOutcome>;
 }
 
 /**
@@ -197,6 +332,10 @@ export interface HubContext {
   hubEpoch: number;
   /** OTA jobs and the node HTTP listener (design c4 §4). */
   ota: OtaService;
+  /** Hub broadcasts and unicast MSGs (design c5 §4): the router. */
+  broadcast: HubBroadcast;
+  /** Bindings (design c5 §4). */
+  bindings: Bindings;
 }
 
 /** An op handler (packages/protocol/src/ops.ts): the parsed input (typed per handler) and the hub. */

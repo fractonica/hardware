@@ -211,8 +211,120 @@ export function decodeNodeNetSetArgs(bytes: Uint8Array): Decoded<NodeNetSetArgs>
   return $.done(r, v);
 }
 
+/** fr.node.bind_set arguments (command 8, reliable). Store a binding in its slot (07 §7.11), replacing what the slot held; the hub resolves and pre-encodes it. */
+export interface NodeBindSetArgs {
+  /** (0..15) */
+  slot: number;
+  on_port: number;
+  /** 3 EVENT | 7 MSG */
+  on_cls: number;
+  /** the event id (EVENT) */
+  on_kind: number;
+  /** the MSG topic (MSG) (<= 32 UTF-8 bytes) */
+  on_topic: string;
+  /** (<= 6 bytes) */
+  to_mac: Uint8Array;
+  /** this node, another node, or 0xFFFF (MSG broadcast) */
+  to_addr: number;
+  to_port: number;
+  /** 4 CMD | 7 MSG */
+  to_cls: number;
+  /** the command id (CMD) */
+  to_kind: number;
+  /** the MSG topic (MSG) (<= 32 UTF-8 bytes) */
+  to_topic: string;
+  /** pre-encoded CMD fields, or the MSG data (<= 64 bytes) */
+  payload: Uint8Array;
+  /** Q1: ACK_REQ, the target's RESULT or ACK, end-to-end retries */
+  reliable: boolean;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNodeBindSetArgs(v: Partial<NodeBindSetArgs> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.slot ?? 0, 0, 255, 'slot');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.on_port ?? 0, 0, 255, 'on_port');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.on_cls ?? 0, 0, 255, 'on_cls');
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.int(v.on_kind ?? 0, 0, 255, 'on_kind');
+  if (f4 !== 0) w.fieldUint(4, f4);
+  const f5 = $.str(v.on_topic ?? '', 32, 'on_topic');
+  if (f5.length > 0) w.fieldBytes(5, f5);
+  const f6 = $.bytes(v.to_mac ?? $.EMPTY, 6, 'to_mac');
+  if (f6.length > 0) w.fieldBytes(6, f6);
+  const f7 = $.int(v.to_addr ?? 0, 0, 65535, 'to_addr');
+  if (f7 !== 0) w.fieldUint(7, f7);
+  const f8 = $.int(v.to_port ?? 0, 0, 255, 'to_port');
+  if (f8 !== 0) w.fieldUint(8, f8);
+  const f9 = $.int(v.to_cls ?? 0, 0, 255, 'to_cls');
+  if (f9 !== 0) w.fieldUint(9, f9);
+  const f10 = $.int(v.to_kind ?? 0, 0, 255, 'to_kind');
+  if (f10 !== 0) w.fieldUint(10, f10);
+  const f11 = $.str(v.to_topic ?? '', 32, 'to_topic');
+  if (f11.length > 0) w.fieldBytes(11, f11);
+  const f12 = $.bytes(v.payload ?? $.EMPTY, 64, 'payload');
+  if (f12.length > 0) w.fieldBytes(12, f12);
+  const f13 = $.bool(v.reliable ?? false, 'reliable');
+  if (f13) w.fieldBool(13, f13);
+  return w.finish();
+}
+
+export function decodeNodeBindSetArgs(bytes: Uint8Array): Decoded<NodeBindSetArgs> {
+  const r = new Reader(bytes);
+  const v: NodeBindSetArgs = { slot: 0, on_port: 0, on_cls: 0, on_kind: 0, on_topic: '', to_mac: new Uint8Array(0), to_addr: 0, to_port: 0, to_cls: 0, to_kind: 0, to_topic: '', payload: new Uint8Array(0), reliable: false };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.slot = r.readUint(255);
+        break;
+      case 2:
+        v.on_port = r.readUint(255);
+        break;
+      case 3:
+        v.on_cls = r.readUint(255);
+        break;
+      case 4:
+        v.on_kind = r.readUint(255);
+        break;
+      case 5:
+        v.on_topic = r.readString(32);
+        break;
+      case 6:
+        v.to_mac = r.readBytes(6).slice();
+        break;
+      case 7:
+        v.to_addr = r.readUint(65535);
+        break;
+      case 8:
+        v.to_port = r.readUint(255);
+        break;
+      case 9:
+        v.to_cls = r.readUint(255);
+        break;
+      case 10:
+        v.to_kind = r.readUint(255);
+        break;
+      case 11:
+        v.to_topic = r.readString(32);
+        break;
+      case 12:
+        v.payload = r.readBytes(64).slice();
+        break;
+      case 13:
+        v.reliable = r.readBool();
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
 /** fr.node.bind_clear arguments (command 9, reliable). */
 export interface NodeBindClearArgs {
+  /** 0..15, or 255: every slot */
   slot: number;
 }
 
@@ -231,6 +343,35 @@ export function decodeNodeBindClearArgs(bytes: Uint8Array): Decoded<NodeBindClea
     switch (r.field) {
       case 1:
         v.slot = r.readUint(255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** fr.node.bind_list RESULT fields. */
+export interface NodeBindListResult {
+  /** a protobuf-wire BindingList (schema/protocol.yaml types) (<= 1400 bytes) */
+  bindings: Uint8Array;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNodeBindListResult(v: Partial<NodeBindListResult> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.bytes(v.bindings ?? $.EMPTY, 1400, 'bindings');
+  if (f1.length > 0) w.fieldBytes(1, f1);
+  return w.finish();
+}
+
+export function decodeNodeBindListResult(bytes: Uint8Array): Decoded<NodeBindListResult> {
+  const r = new Reader(bytes);
+  const v: NodeBindListResult = { bindings: new Uint8Array(0) };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.bindings = r.readBytes(1400).slice();
         break;
       default:
         r.skip();
@@ -270,10 +411,11 @@ export function decodeNodeBoot(bytes: Uint8Array): Decoded<NodeBoot> {
 /** fr.node.binding_fired event (id 2, normal). */
 export interface NodeBindingFired {
   slot: number;
+  /** the target's RESULT/ACK status for reliable sends; 0 for fast, MSG and broadcast; FAILED after the last attempt; BUSY with no path */
   target_status: number;
   /** trigger -> target RESULT; 0 for fast commands */
   rtt_us: number;
-  /** 0 espnow, 1 hub, 2 flood */
+  /** 0 espnow, 1 hub, 2 flood, 3 local (the node itself) */
   path: number;
 }
 
@@ -330,9 +472,9 @@ export const NODE_CAP: $.CapInfo = {
     { id: 5, name: 'set_groups', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'groups' }], maxSize: 26, encode: encodeNodeSetGroupsArgs, decode: decodeNodeSetGroupsArgs }, result: null },
     { id: 6, name: 'net_set', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'ssid' }, { name: 'pass' }, { name: 'bssid', json: 'bytes' }, { name: 'hub_host' }], maxSize: 142, encode: encodeNodeNetSetArgs, decode: decodeNodeNetSetArgs }, result: null },
     { id: 7, name: 'get_state', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: null },
-    { id: 8, name: 'bind_set', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: null },
+    { id: 8, name: 'bind_set', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'slot', range: [0, 15] }, { name: 'on_port' }, { name: 'on_cls' }, { name: 'on_kind' }, { name: 'on_topic' }, { name: 'to_mac', json: 'bytes' }, { name: 'to_addr' }, { name: 'to_port' }, { name: 'to_cls' }, { name: 'to_kind' }, { name: 'to_topic' }, { name: 'payload', json: 'bytes' }, { name: 'reliable' }], maxSize: 169, encode: encodeNodeBindSetArgs, decode: decodeNodeBindSetArgs }, result: null },
     { id: 9, name: 'bind_clear', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'slot' }], maxSize: 3, encode: encodeNodeBindClearArgs, decode: decodeNodeBindClearArgs }, result: null },
-    { id: 10, name: 'bind_list', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: null },
+    { id: 10, name: 'bind_list', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: { fields: [{ name: 'bindings', json: 'bytes' }], maxSize: 1403, encode: encodeNodeBindListResult, decode: decodeNodeBindListResult } },
   ],
   events: [
     { id: 1, name: 'boot', priority: 'normal', codec: { fields: [{ name: 'reset_reason' }], maxSize: 3, encode: encodeNodeBoot, decode: decodeNodeBoot } },

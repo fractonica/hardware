@@ -171,9 +171,9 @@ public:
         ++get_states;
         return {};
     }
-    Status bind_set() override { return std::unexpected(Err::unsupported); }
+    Status bind_set(const fr::cap::NodeBindSetArgs &) override { return std::unexpected(Err::unsupported); }
     Status bind_clear(const fr::cap::NodeBindClearArgs &) override { return std::unexpected(Err::unsupported); }
-    Status bind_list() override { return std::unexpected(Err::unsupported); }
+    std::expected<fr::cap::NodeBindListResult, Err> bind_list() override { return std::unexpected(Err::unsupported); }
 
     uint16_t identify_ms = 0;
     bool reboot_bootloader = true;

@@ -1,9 +1,12 @@
-// Wi-Fi STA policy (spec 05 §5.3-5.4, design c3 §3): the first join is by SSID (or fr_ident's BSSID) and
-// takes the strongest AP; every association pins its channel C and BSSID in nvs:fr_link; a lost link is
-// rejoined by scanning only channel C for the pinned BSSID (active, 30 ms) and connecting to it once
-// found, with an all-channel sweep only after 60 s without it. fr.node.net_set pushes an override
-// (nvs:fr_net2) that is reverted unless it joins within 60 s. Private to fr_net/src/esp; everything but
-// request_override() and the snapshot readers runs on the fr_net task.
+// Wi-Fi STA policy (spec 05 §5.3-5.4, design c3 §3, c5 §3): the first join is by SSID (or fr_ident's BSSID)
+// and takes the strongest AP; every association pins its channel C and BSSID in nvs:fr_link (a net_set
+// trial's only once it is confirmed); a lost link is rejoined by scanning only channel C for the pinned BSSID
+// (active, 30 ms) and connecting to it once found. Whether, and when, a lost AP is looked for elsewhere
+// (another AP of the SSID on C, an all-channel sweep) depends on what ESP-NOW hears: sta_rules.hpp. While
+// disconnected the radio is kept on C, where ESP-NOW lives. fr.node.net_set pushes an override (nvs:fr_net2)
+// that is reverted unless it joins within 60 s; `net wifi_down` holds the STA off for a while. Private to
+// fr_net/src/esp; everything but request_override(), request_down() and the snapshot readers runs on the
+// fr_net task.
 #pragma once
 
 #include <cstdint>
@@ -15,6 +18,7 @@
 #include "fr/id.h"
 #include "fr/net/esp.hpp"
 #include "freertos/FreeRTOS.h"
+#include "sta_rules.hpp"
 
 namespace fr::net::esp::detail {
 
@@ -39,9 +43,8 @@ public:
     static constexpr TimeUs kRetryMinUs = 250'000;
     static constexpr TimeUs kRetryMaxUs = 2'000'000;
     static constexpr uint32_t kPinScanMs = 30;           // 05 §5.4: active, <= 30 ms on channel C
-    static constexpr TimeUs kSweepAfterUs = 60'000'000;  // 05 §5.4: no ESP-NOW yet, so 60 s without the AP
     static constexpr TimeUs kTrialUs = 60'000'000;       // 06 §6.3: fr_net2 reverted after 60 s
-    static constexpr TimeUs kApplyDelayUs = 300'000;     // net_set: let its RESULT leave first
+    static constexpr TimeUs kApplyDelayUs = 300'000;     // net_set, wifi_down: let its RESULT leave first
     static constexpr TimeUs kScanTimeoutUs = 1'000'000;  // no SCAN_DONE: give up on that scan
     static constexpr TimeUs kConnectTimeoutUs = 20'000'000;  // no CONNECTED/DISCONNECTED: start over
     static constexpr TimeUs kRssiEveryUs = 1'000'000;
@@ -56,6 +59,8 @@ public:
 
     /** Core task: queues a net_set. False while another one waits to apply. */
     bool request_override(const fr_net_creds_t &creds, TimeUs now);
+    /** Core task: queues `net wifi_down <seconds>` (0 ends a hold); a newer request replaces a waiting one. */
+    void request_down(uint32_t seconds, TimeUs now);
 
     bool ip_up() const { return ip_up_; }
     /** wifi_err_reason_t of the last disconnect; 0 after an address came (an address lost on its own). */
@@ -68,7 +73,8 @@ public:
     LinkInfo link_info() const;
 
 private:
-    enum class Phase : uint8_t { idle, waiting, scanning, connecting, associated };
+    // held: `net wifi_down`; nothing is joined or scanned until it ends.
+    enum class Phase : uint8_t { idle, waiting, scanning, connecting, associated, held };
 
     /** The Wi-Fi state other tasks read (link_info, diag), under a spinlock. */
     struct Snapshot {
@@ -84,19 +90,33 @@ private:
         uint32_t disconnects = 0;
         uint16_t last_reason = 0;  // wifi_err_reason_t of the last disconnect
         uint32_t sweeps = 0;       // all-channel sweeps started (05 §5.4: HEARTBEAT swept)
+        uint8_t home_channel = 0;  // C
+        bool held = false;         // `net wifi_down`
+        TimeUs held_until = 0;
     };
 
     bool have_creds() const { return creds_.ssid[0] != '\0'; }
-    bool pin_usable() const;
     void attempt(TimeUs now);
-    void connect(TimeUs now, bool pinned);
+    /** The channel C scan for any AP of the SSID answered: the pinned BSSID if it is among them, else the
+     * strongest on C, into join_bssid_. False when none is on C. Frees the driver's list. */
+    bool pick_ap();
+    /** Joins join_bssid_ on join_channel_ (C), or (to_bssid false) by SSID on every channel. */
+    void connect(TimeUs now, bool to_bssid);
     void retry_later(TimeUs now);
     /** Drops the current association (if any) and joins with creds_ again soon. */
     void rejoin(TimeUs now);
+    /** The credentials in use; C follows their usable pin (or the trial's rules, Pins::home). */
     void use_creds(const fr_net_creds_t &c, bool is_override, bool trial, TimeUs now);
     void apply_override(const fr_net_creds_t &c, TimeUs now);
     void revert_override(TimeUs now);
-    void remember_pin(const uint8_t bssid[6], uint8_t channel);
+    /** Writes fr_link's pin (Pins::stored) to nvs:fr_link. */
+    void store_pin();
+    /** Channel C is now `channel`: ESP-NOW's filter follows, and the radio waits there while disconnected. */
+    void set_home(uint8_t channel);
+    /** Puts the idle radio on C (esp_wifi_set_channel), so ESP-NOW hears its neighbours between scans. */
+    void keep_channel();
+    void apply_down(uint32_t seconds, TimeUs now);
+    void release(TimeUs now);
 
     /** Edits the snapshot under its lock; `edit` must be short (it runs with interrupts masked). */
     template <class F>
@@ -115,8 +135,10 @@ private:
     bool trial_ = false;
     TimeUs trial_deadline_ = 0;
 
-    fr_link_pin_t pin_{};
-    bool pin_loaded_ = false;
+    Pins pins_;
+    Search search_ = Search::first;  // what the last attempt looked for
+    uint8_t join_bssid_[6] = {};     // the AP a channel C scan looks for, then connect() joins
+    uint8_t join_channel_ = 0;
 
     Phase phase_ = Phase::idle;
     bool started_ = false;
@@ -128,12 +150,19 @@ private:
     TimeUs lost_since_ = 0;      // no association since (0: associated, or never tried)
     TimeUs last_sweep_ = 0;
     TimeUs next_rssi_ = 0;
+    uint8_t home_channel_ = 0;  // C: Pins::home() (the usable pin's channel), then the associated AP's
+    bool held_ = false;         // `net wifi_down` in force
+    TimeUs held_until_ = 0;
 
     // net_set handover from the core task.
     mutable portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
     bool pending_ = false;
     TimeUs pending_at_ = 0;
     fr_net_creds_t pending_creds_{};
+    // wifi_down handover from the core task (under mux_ too).
+    bool down_pending_ = false;
+    TimeUs down_at_ = 0;
+    uint32_t down_s_ = 0;
 
     Snapshot snap_;  // under mux_
 };

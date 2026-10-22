@@ -68,6 +68,7 @@ function hubWith(opts: { run?: number; db?: Db } = {}) {
     },
     onOta: () => () => undefined,
     tcpAddress: () => null,
+    hooks: () => () => undefined,
   };
   const hub = { db, logs, events, registry, router, seq } as unknown as HubContext;
   const publish = (type: string, device?: string, extra: Partial<HubEvent> = {}) =>

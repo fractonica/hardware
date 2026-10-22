@@ -41,7 +41,7 @@ function sinceSeq(since: string | undefined, hub: HubContext): number | undefine
 }
 
 /** A JSON object given as one (REST, MCP) or as JSON text (the CLI); null when absent. */
-function jsonObject(v: unknown, name: string): Record<string, unknown> | null {
+export function jsonObject(v: unknown, name: string): Record<string, unknown> | null {
   if (v === undefined) {
     return null;
   }
@@ -83,7 +83,7 @@ function flushAll(hub: HubContext): void {
 const directories = new WeakMap<Db, CapDirectory>();
 
 /** The instances of a device: what the router knows (live HELLO firmware, descriptor), else its registry firmware's manifest. */
-function instancesOf(hub: HubContext, dev: Device): PortCap[] | null {
+export function instancesOf(hub: Pick<HubContext, 'db' | 'router'>, dev: Device): PortCap[] | null {
   const live = routerInstances(hub.router, dev.device_id);
   if (live) {
     return live;
@@ -102,7 +102,7 @@ const argSchemas = new Map<string, z.ZodType | null>();
  * CMD args from their JSON form: the command's JSON Schema first (the message names the field), then the
  * generated codec, which also applies defaults and the ranges C++ dispatch checks.
  */
-function encodeArgs(cap: string, command: string, args: Record<string, unknown>): Uint8Array {
+export function encodeArgs(cap: string, command: string, args: Record<string, unknown>): Uint8Array {
   const key = `${cap}.${command}`;
   let schema = argSchemas.get(key);
   if (schema === undefined) {

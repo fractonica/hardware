@@ -91,7 +91,9 @@ target_link_libraries(fr_host_fuzz PRIVATE fr_host_lib)
 target_compile_options(fr_host_fuzz PRIVATE ${FR_CXX_WARNINGS})
 
 # fr_net_node: the fr_net core and the real services over POSIX TCP/UDP, a node for interop runs against a
-# hub on loopback (packages/hub/test/interop.test.ts and the C3 loopback check; design c3 §5).
+# hub on loopback (packages/hub/test/interop.test.ts and the C3 loopback check; design c3 §5), with the real
+# fr_ota core (interop-ota.test.ts, design c4 §5) and, with --air-dir, a fake ESP-NOW medium between
+# several such processes under the real driver's send discipline (interop-air.test.ts, design c5 §5).
 add_executable(fr_net_node ${HOST_DIR}/tools/net_node.cpp)
 target_link_libraries(fr_net_node PRIVATE fr_host_lib)
 target_compile_options(fr_net_node PRIVATE ${FR_CXX_WARNINGS})

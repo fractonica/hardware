@@ -1,10 +1,12 @@
 // The node's IP links to the hub (design c3 §3 "Links", spec 05 §5.3-5.4, §5.10-5.12): Wi-Fi STA with a
 // pinned AP, hub_host resolution (mDNS on every attempt, then the last address, then fr_ident's hub_ip),
 // a TCP link (`len u16 LE | envelope`) and a UDP link (one datagram per envelope) to hub_host:7421.
+// From C5 also the ESP-NOW link (design c5 §3): AirLink on the STA interface, on the network's channel C.
 //
 // One task (`fr_net`) owns Wi-Fi control, name resolution and the TCP socket; the core task only queues
 // TCP frames and sends UDP datagrams, so it never blocks on the network (spec 03 §3.4). Received
 // envelopes and link changes reach the core task through Hooks, which fr_core implements by posting.
+// ESP-NOW's callbacks (Wi-Fi task) and retry timers (esp_timer task) likewise only copy and post.
 #pragma once
 
 #include <cstddef>
@@ -13,6 +15,7 @@
 
 #include "fr/base.hpp"
 #include "fr/id.h"
+#include "fr/net/air.hpp"
 #include "fr/net/link.hpp"
 #include "fr/net/net.hpp"
 
@@ -67,6 +70,10 @@ struct Status {
     uint32_t tcp_tx_dropped = 0;   // frames refused by a full TX queue, or queued but lost with a connection
     uint32_t tcp_rx_bad = 0;       // framing errors (length 0 or above the bulk MTU): connection closed
     uint32_t udp_tx_fail = 0;      // sendto() refused (no buffers, no route)
+    // ESP-NOW's channel and `net wifi_down` (design c5 §2).
+    uint8_t home_channel = 0;      // C: the pinned or associated AP's channel; 0 while unknown
+    bool wifi_held = false;        // `net wifi_down` holds the STA off (no join, no scan)
+    uint32_t wifi_held_s = 0;      // ... for this many more seconds
 };
 
 /**
@@ -93,5 +100,72 @@ Status status();
  * rejoined. BUSY while a previous request is waiting to apply; FAILED before start().
  */
 fr::Status net_set(const fr_net_creds_t &creds);
+
+/**
+ * `net wifi_down <s>` (design c5 §2, debug builds; core task): about 300 ms later, so the RESULT leaves on
+ * the current link first, disconnects the STA and holds it off for `s` seconds: no join and no scan, the
+ * radio stays on channel C, so ESP-NOW keeps working while the TCP/UDP links go down (T-FLOOD-B without
+ * powering the router off). 0 ends a hold at once; a new request replaces the running one. FAILED before
+ * start().
+ */
+fr::Status wifi_down(uint32_t seconds);
+
+// ---- ESP-NOW (design c5 §3, spec 05 §5.3) ----
+
+/** What the driver needs to know of the node. */
+struct AirSettings {
+    uint16_t net = 0;  // fr_ident `net`: the receive filter drops frames of other networks
+};
+
+/**
+ * How the driver reaches Net. `post` may be called from any task (the Wi-Fi task's callbacks, esp_timer);
+ * the others run on the core task, inside what `post` queued.
+ */
+struct AirHooks {
+    /** Queues `fn` for the core task (fr_core: its network queue). False when the queue is full. */
+    bool (*post)(Callback<void(), 32> fn);
+    /** Net::receive_air: one received envelope that passed the filter, valid only during the call. */
+    void (*received)(std::span<const uint8_t> envelope, const RxMeta &meta);
+    /** Net::air_sent: the end of a send AirLink::send accepted. */
+    void (*sent)(uint32_t token, bool mac_acked);
+    /** Net::link_changed(espnow): AirLink::up() changed. */
+    void (*changed)();
+    /** Net::wifi_up_neighbor_heard_at (core clock = esp_timer; 0: never): when a neighbour's ESP-NOW heartbeat
+     * last reported Wi-Fi up. Read after each batch of received frames; the STA keeps its radio on channel C
+     * while that is recent (05 §5.4). Null: never. */
+    TimeUs (*wifi_up_heard_at)();
+};
+
+/** For diag `stats` espnow and `info`. Counters only grow. Core task (the peer count lives there). */
+struct AirStatus {
+    bool started = false;    // esp_now_init done, broadcast peer added
+    bool up = false;         // AirLink::up(): started and channel C known
+    uint8_t channel = 0;     // C, which the receive filter wants (0: unknown, no channel filter)
+    uint8_t peers = 0;       // unicast peers in the table (<= 17)
+    uint32_t tx = 0;         // frames that went out (unicasts MAC-ACKed)
+    uint32_t tx_fail = 0;    // frames given up after the link retries
+    uint32_t retries = 0;    // link-level re-sends (2 ms, then 4 ms)
+    uint32_t refused = 0;    // AirLink::send refused: queue full, no peer slot, too long, down
+    uint32_t rx = 0;         // frames that passed the receive filter
+    uint32_t rx_bad = 0;     // frames the filter dropped: off channel C, not an envelope, another net, too long
+    uint32_t rx_lost = 0;    // frames lost to a full receive ring
+    uint32_t rate_fail = 0;  // esp_now_set_peer_rate_config failed: that peer kept the driver's default rate
+    uint32_t guard = 0;      // sends with no callback within 100 ms (failed; the next send waits for it)
+    uint32_t lost = 0;       // ... nor within 1 s: taken as lost, the next send went anyway
+};
+
+/** The ESP-NOW link fr_core attaches to Net (a static object: valid before start_air(), down until then). */
+AirLink &air_link();
+
+/**
+ * esp_now_init (Wi-Fi must be started: call after start() succeeded), the receive and send callbacks, the
+ * broadcast peer at the robust rate (11b, 1 Mbps long preamble). AirLink::up() follows once channel C is
+ * known (pinned, or the first association). Call once, from the boot task; false when ESP-NOW could not
+ * start (the link then stays down).
+ */
+bool start_air(const AirSettings &settings, const AirHooks &hooks);
+
+/** Core task. */
+AirStatus air_status();
 
 }  // namespace fr::net::esp

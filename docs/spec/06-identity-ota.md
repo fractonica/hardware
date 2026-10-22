@@ -89,7 +89,7 @@ On-device rules:
 1. `device_update {alias}` updates the registry (`alias_rev += 1`).
 2. If the node is online, the hub sends `fr.node.set_alias {alias, rev}`, which the node stores in `fr_ovr`.
 3. On every HELLO the hub compares alias and rev and re-sends if they differ. The registry wins: its `alias_rev` moves past any rev a HELLO reports.
-4. Bindings that name the alias are re-resolved, and SDK clients get `registry.drift`.
+4. Bindings that name the alias are re-resolved (their text only: the bytes a node holds carry no alias, [07 §7.11](07-capabilities-sdk.md)), and SDK clients get `registry.drift`.
 
 **Devices seen only through HELLO.** A device that says HELLO without a registry row (foreign firmware, a board flashed by port) gets a row with `provisioned: false` and `addr: null`, and is WELCOMEd. Its alias is its HELLO alias when valid and free, else `<chip>-<short_id>`. Provisioning replaces that made-up alias, and the firmware's UNASSIGNED placeholder `new-<short_id>` while its `alias_rev` is 0, never one a person chose.
 
@@ -123,9 +123,10 @@ hub_ip,data,string,192.168.0.17
 - **Where the network record comes from.** `network_set` ([09 §9.4](09-agent-api.md)). The Wi-Fi password lives in `~/.fractonica/secrets.json` (mode 0600) and is never in SQLite.
 - **RW namespaces in `nvs`:**
   - `fr_ovr`: alias + rev, groups (M2), and `addr`/`net` written by adoption (M2);
-  - `fr_link`: the last channel C, the pinned BSSID and `ssid_h`, the hash of the SSID they belong to ([05 §5.4](05-network.md));
-  - `fr_bind`: bindings, ≤ 16 ([07 §7.11](07-capabilities-sdk.md));
-  - `fr_dir`: directory cache;
+  - `fr_link`: the last channel C, the pinned BSSID and `ssid_h`, the hash of the SSID they belong to ([05 §5.4](05-network.md)); a `net_set` trial's pin is written only once the trial is confirmed;
+  - `fr_bind`: bindings, ≤ 16, whose encoded `BindingList` stays ≤ 1400 B ([07 §7.11](07-capabilities-sdk.md));
+  - `fr_dir`: directory cache, ≤ 64 entries ([05 §5.10](05-network.md));
+  - `fr_bind` and `fr_dir` (since C5) each hold one blob, key `table`: `ver=1 | count | entries`, decoded in place and written on `fr_worker` ([03 §3.4](03-firmware.md));
   - `fr_net2`: the Wi-Fi override `fr.node.net_set` pushes, with `base` (the `prov_ts` it was pushed under) and `ok`. It is applied 300 ms after the RESULT and reverted after 60 s if it fails to connect; once it joins it stays. A reprovision (a new `prov_ts`) drops it;
   - `fr_ota`: the OTA job record (§6.6): `job`, `fw` (the target `fw_id`), `size`, `off` (resume offset), `hub_seen`, `slot` (the address of the slot it downloads into) and `state` (0 download, 1 installed, 2 health_timeout);
   - `fr_boot`: epoch;
@@ -220,7 +221,7 @@ Only `busy` is worth retrying (§6.7).
 - **URL.** `http://<hub IP of the TCP session>:7422/ota/<lowercase hex fw_id>.bin`: the address the node's TCP link is connected to, not a fresh lookup of `hub_host`.
 - **`HttpGet`** (`fr::ota::HttpGet`, one source for lwIP on the target and POSIX in the host tools) is an HTTP/1.1 GET to a dotted IPv4 with `Connection: close` and `Range: bytes=N-`. A 206 must carry a Content-Range that starts at the offset asked for; a 200 to a Range request is skipped up to it; the body is Content-Length long or runs to the close; chunked encoding is refused. `kHttpTimeoutMs` (10 s, below the hub's 15 s stall limit) bounds the non-blocking connect and every send and receive. A GET allocates no heap; the response head must fit a 512 B buffer.
 - **Why not `esp_http_client`.** It pulled about 110 KB into the image (esp-tls, `tcp_transport`, `http_parser` and TLS code, HTTPS off or not). `HttpGet` is about 5 KB of flash, and each debug image shrank by about 111 KB. Of the 1,966,080 B slot: `c6-pad` 61.3 % (was 67.0 %), `c6-pad-mono` 60.1 % (65.8 %), `c3o-pad` 55.1 % (60.9 %), about 32–35 KB more than at C3.
-- **Writes.** Whole 4 KB chunks, sequentially: `OTA_WITH_SEQUENTIAL_WRITES` erases one sector at a time instead of pre-erasing the slot, which would stall the radio for seconds, and is never mixed with `esp_ota_write_with_offset`. While a job runs, the node sets HEARTBEAT `ota_busy` (and, from C5, stops relaying floods).
+- **Writes.** Whole 4 KB chunks, sequentially: `OTA_WITH_SEQUENTIAL_WRITES` erases one sector at a time instead of pre-erasing the slot, which would stall the radio for seconds, and is never mixed with `esp_ota_write_with_offset`. While a job runs, the node sets HEARTBEAT `ota_busy` and relays no floods ([05 §5.9](05-network.md)).
 - **Within a boot**, a failed connect or read re-issues `Range: bytes=<received>-`, at most 5 times per job (`FR_OTA_RANGE_RETRIES`); after that, RESULT failed `download`.
 - **Resume.** `off`, a whole number of 4 KB sectors, is saved every 64 KB (`FR_OTA_RESUME_STRIDE`), only after those bytes are in flash. An OFFER of the same `fw_id`, size and slot, while the record is still in the download state with `off` ≥ 400, resumes through `esp_ota_resume` (after a reboot, or a hub retry within the boot) and continues with `Range: bytes=off-`; its ACCEPT says `resumed`. `esp_ota_resume` skips the checks `esp_ota_begin` makes, so CHECK runs again on the descriptors read back from the slot. A slot that will not reopen starts over.
 - **STATUS** `downloading` with `bytes` at least every 5 % or 1 s.

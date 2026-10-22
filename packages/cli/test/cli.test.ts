@@ -220,6 +220,25 @@ describe('fr (subprocess)', { timeout: 20_000 }, () => {
     expect(requests.at(-1)).toMatchObject({ op: 'deploy', body: { selector: 'all', fault: 'health', expect_event: 'node.boot', source_dir: expect.any(String) } });
   });
 
+  it('generates the C5 commands: msg, bind, bind ls, bind rm, latency (design c5 §4, spec 09 §9.5)', async () => {
+    const run = async (args: string[], want: { op: string; body: Record<string, unknown> }) => {
+      const r = await fr([...args, '--json']);
+      expect(r.code, args.join(' ')).toBe(0);
+      expect(requests.at(-1)).toEqual(want);
+    };
+    await run(['msg', 'broadcast', 'flood', '{"n":1}', '--count', '1000', '--interval-ms', '100'], {
+      op: 'message_send',
+      body: { to: 'broadcast', topic: 'flood', data: '{"n":1}', count: 1000, interval_ms: 100, wait_s: 110 },
+    });
+    await run(['bind', 'pad-c6.boot.down', 'pad-c3.status.blink', '{"count":1}'], {
+      op: 'binding_set',
+      body: { from: 'pad-c6.boot.down', to: 'pad-c3.status.blink', args: '{"count":1}' },
+    });
+    await run(['bind', 'ls', 'tag:poc', '--live'], { op: 'binding_list', body: { selector: 'tag:poc', live: true } });
+    await run(['bind', 'rm', 'pad-c6', 'all'], { op: 'binding_clear', body: { device: 'pad-c6', slot: 'all' } });
+    await run(['latency', 'tag:poc', '--window', '60'], { op: 'latency_stats', body: { selector: 'tag:poc', window_s: 60 } });
+  });
+
   it('exits 8 for OTA_FAILED and OTA_ROLLED_BACK (spec 09 §9.3)', () => {
     for (const code of ['OTA_FAILED', 'OTA_ROLLED_BACK'] as const) {
       expect(exitCodeForResult({ ok: false, cursor: '', error: { code, message: 'x', retryable: false } })).toBe(8);

@@ -44,6 +44,16 @@ const MIGRATIONS = [
      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, json TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS ota_jobs_device ON ota_jobs(device, created_at)`,
   `CREATE INDEX IF NOT EXISTS ota_jobs_parent ON ota_jobs(parent)`,
+  // Bindings (design c5 §4, bindings/): one row per source device and slot, as context.ts BindingRow.
+  // from_spec/to_spec are binding_set's from/to as given (FROM and TO are SQL keywords); target_id the
+  // target device (NULL: broadcast), so a change at the target end finds the rows to re-resolve; args the
+  // JSON, binding the hex of the encoded Binding pushed with fr.node.bind_set; pushed_at NULL while a push
+  // is due.
+  `CREATE TABLE IF NOT EXISTS bindings (
+     device_id TEXT NOT NULL, slot INTEGER NOT NULL CHECK (slot BETWEEN 0 AND 15),
+     from_spec TEXT NOT NULL, to_spec TEXT NOT NULL, target_id TEXT, args TEXT, binding TEXT NOT NULL,
+     pushed_at TEXT, PRIMARY KEY (device_id, slot))`,
+  `CREATE INDEX IF NOT EXISTS bindings_target ON bindings(target_id)`,
 ];
 
 /** Columns added to tables that earlier hubs created (CREATE TABLE IF NOT EXISTS leaves those as they were). */

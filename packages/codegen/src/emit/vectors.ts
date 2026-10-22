@@ -641,8 +641,39 @@ const HELLO: Obj = {
   channel: 6,
 };
 
+// T-NN's binding (design c5 §5): pad-c6 boot.down (port 1, EVENT 1) -> pad-c3 (addr 0x0034) status.blink
+// (port 2, CMD 3) {count: 1}, reliable. payload is the pre-encoded LedBlinkArgs: field 3 (count) = 1.
+const BINDING_NN: Obj = {
+  slot: 0,
+  on_port: 1,
+  on_cls: CLS.EVENT,
+  on_kind: 1,
+  to_mac: 'a0b1c2d3e4f5',
+  to_addr: 0x0034,
+  to_port: 2,
+  to_cls: CLS.CMD,
+  to_kind: 3,
+  payload: '1801',
+  reliable: true,
+};
+
+// A MSG trigger that broadcasts a MSG (07 §7.11 "Local and broadcast reactions"): `ping` -> broadcast `pong`.
+const BINDING_MSG: Obj = {
+  slot: 15,
+  on_cls: CLS.MSG,
+  on_topic: 'ping',
+  to_addr: 0xffff,
+  to_cls: CLS.MSG,
+  to_topic: 'pong',
+  payload: hexOf(new TextEncoder().encode('{}')),
+};
+
 function has(model: Model, key: string): boolean {
   return model.protocol.messages.some((m) => m.key === key);
+}
+
+function hasType(model: Model, name: string): boolean {
+  return model.protocol.types.some((t) => t.name === name);
 }
 
 function messageCases(b: Builder): void {
@@ -745,6 +776,24 @@ function messageCases(b: Builder): void {
     c.error(`${T}.error_cap_name_too_long`, 'message', T, `3222 2220 ${'61'.repeat(32)}`, 'too_long');
     c.error(`${T}.error_cap_truncated`, 'message', T, '3205 0801 1001', 'truncated');
   }
+  if (hasType(b.model, 'Binding')) {
+    const T = 'Binding';
+    b.value(c, 'message', T, 'nn_boot_down_blink', BINDING_NN);
+    b.value(c, 'message', T, 'msg_ping_broadcast_pong', BINDING_MSG);
+    // The codec carries any u8 slot; valid() and the JSON accessors keep it to 0..15 (bind_clear's 255 = all).
+    b.lenient(c, 'message', T, 'slot_16', { slot: 16 });
+    c.error(`${T}.error_mac_too_long`, 'message', T, '3207 01020304050607', 'too_long');
+    c.error(`${T}.error_payload_too_long`, 'message', T, `6241 ${'00'.repeat(65)}`, 'too_long');
+  }
+  if (hasType(b.model, 'BindingList')) {
+    const T = 'BindingList';
+    b.value(c, 'message', T, 'two', { items: [BINDING_NN, BINDING_MSG] });
+    // Repeated messages append: a 17th binding is too_long; nested errors propagate.
+    const item = '0a02 0801';
+    c.error(`${T}.error_too_many_items`, 'message', T, item.repeat(17), 'too_long');
+    c.error(`${T}.error_item_slot_truncated`, 'message', T, '0a01 08', 'truncated');
+    c.error(`${T}.error_item_mac_too_long`, 'message', T, '0a09 3207 01020304050607', 'too_long');
+  }
 }
 
 // ---- capabilities ----
@@ -831,6 +880,27 @@ function capEdgeCases(b: Builder, c: Cases): void {
     // Placeholder credentials: vectors never carry real secrets.
     b.value(c, 'cap', 'fr.node.net_set.args', 'without_optional', { ssid: 'example-ssid', pass: 'not-a-secret' });
     b.value(c, 'cap', 'fr.node.net_set.args', 'with_optional', { ssid: 'example-ssid', pass: 'not-a-secret', bssid: '020000000001', hub_host: '192.168.1.10' });
+  }
+  if (hasMember(m, 'fr.node', 'commands', 'bind_set') && hasType(m, 'Binding')) {
+    const T = 'fr.node.bind_set.args';
+    // The flat args are an encoded Binding (design c5 §2): the node stores them as they come.
+    for (const [suffix, value] of [
+      ['nn_boot_down_blink', BINDING_NN],
+      ['msg_ping_broadcast_pong', BINDING_MSG],
+    ] as const) {
+      b.value(c, 'cap', T, suffix, value);
+      if (b.encode(T, value)[0] !== b.encode('Binding', value)[0]) {
+        throw new Error(`${T} no longer encodes like Binding: keep its fields the Binding fields`);
+      }
+    }
+    b.lenient(c, 'cap', T, 'slot_16', { slot: 16 });
+  }
+  if (hasMember(m, 'fr.node', 'commands', 'bind_clear')) {
+    b.value(c, 'cap', 'fr.node.bind_clear.args', 'all', { slot: 255 });
+  }
+  if (hasMember(m, 'fr.node', 'commands', 'bind_list') && hasType(m, 'BindingList')) {
+    const [list] = b.encode('BindingList', { items: [BINDING_NN, BINDING_MSG] });
+    b.value(c, 'cap', 'fr.node.bind_list.result', 'two', { bindings: list });
   }
   if (hasMember(m, 'fr.diag', 'commands', 'exec')) {
     const T = 'fr.diag.exec.args';
@@ -948,6 +1018,31 @@ function envelopeSpecs(model: Model): EnvSpec[] {
       header: hdr({ flags: FLAG.RELAYED, cls: CLS.MSG, kind: kind('MSG', 'MSG'), seq: 77, src: 0x0000, dst: 0xffff, epoch: 9, ttl: 0x21 }),
       prefix: none,
       body: { type: 'MSG.MSG', value: { topic: 'scene', data: hexOf(new TextEncoder().encode('{"mode":"party"}')) } },
+    });
+    // Managed flooding (05 §5.9, design c5 §3-4). ttl is [7:4] initial, [3:0] remaining; a relay changes only
+    // the remaining nibble and sets RELAYED, so every copy keeps (src, epoch, seq) and dedups by the window.
+    const flood = { topic: 'flood', data: hexOf(new TextEncoder().encode('{"n":1}')) };
+    // A hub broadcast (BCAST seq 501) as it goes to every node session; nodes seed the ESP-NOW flood from it.
+    const seed = hdr({ flags: FLAG.EXT, cls: CLS.MSG, kind: kind('MSG', 'MSG'), seq: 501, src: 0x0000, dst: 0xffff, epoch: 9, ttl: 0x22, ext: [extTlv(EXT.VALID_MS, 2000)] });
+    out.push({ name: 'msg.flood_hub_seed', header: seed, prefix: none, body: { type: 'MSG.MSG', value: flood } });
+    // A node's relay of it to the ESP-NOW broadcast MAC: remaining 2 -> 1, RELAYED.
+    out.push({ name: 'msg.flood_relayed', header: { ...seed, flags: FLAG.EXT | FLAG.RELAYED, ttl: 0x21 }, prefix: none, body: { type: 'MSG.MSG', value: flood } });
+    // The hub's watermark repair: the original bytes with only ttl_remaining = 1 (not RELAYED, never re-seeded).
+    out.push({ name: 'msg.flood_repair', header: { ...seed, ttl: 0x21 }, prefix: none, body: { type: 'MSG.MSG', value: flood } });
+    // A node-originated broadcast (fr::msg::send to 0xFFFF, or a binding): over ESP-NOW and, unchanged, to the hub.
+    out.push({
+      name: 'msg.flood_node_origin',
+      header: hdr({ cls: CLS.MSG, kind: kind('MSG', 'MSG'), seq: 40, src: 0x0012, dst: 0xffff, epoch: 3, ttl: 0x22 }),
+      prefix: none,
+      body: { type: 'MSG.MSG', value: { topic: 'pong', data: hexOf(new TextEncoder().encode('{}')) } },
+    });
+  }
+  if (hasMember(model, 'fr.node', 'commands', 'bind_set') && hasType(model, 'Binding')) {
+    out.push({
+      name: 'cmd.node_bind_set',
+      header: hdr({ flags: FLAG.ACK_REQ, cls: CLS.CMD, kind: capOf(model, 'fr.node')!.commands.find((x) => x.name === 'bind_set')!.id, seq: 7, src: 0x0000, dst: 0x0012, epoch: 9, port: model.protocol.ports.node }),
+      prefix: none,
+      body: { type: 'fr.node.bind_set.args', value: BINDING_NN },
     });
   }
   if (has(model, 'LOG.LINE')) {

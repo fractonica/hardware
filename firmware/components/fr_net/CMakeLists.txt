@@ -1,6 +1,8 @@
-# Hub link (design c3 §3, spec 05 §5.8-5.12). src/core is IDF-free (sessions, windows, retries, presence;
-# the host suite in firmware/test/host builds it); src/esp holds the links (Wi-Fi STA, TCP and UDP sockets,
-# mDNS resolution of hub_host) and is built only by IDF.
+# Hub link (design c3 §3, spec 05 §5.8-5.12) and ESP-NOW (design c5 §3). src/core is IDF-free (sessions,
+# windows, retries, presence, flooding, bindings; the host suite in firmware/test/host builds it); src/esp
+# holds the links (Wi-Fi STA, TCP and UDP sockets, mDNS resolution of hub_host, the ESP-NOW driver) and is
+# built only by IDF, except two IDF-free headers the host suite includes too: air_sched.hpp, the driver's send
+# discipline (fr_net_node's fake air medium runs it as well), and sta_rules.hpp, the STA's rejoin and pin rules.
 # CONFIGURE_DEPENDS is an error in the script-mode requirements scan (early expansion).
 set(glob_flags "")
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)

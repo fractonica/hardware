@@ -20,12 +20,16 @@ export function op<I extends z.ZodObject>(def: OpDef<I>): OpDef<I> {
 }
 
 /**
- * CLI option name for an input field (spec 09 §9.5): wait_s is --wait, timeout_s is --timeout and any
- * `<x>_timeout_s` --<x>-timeout (seconds are the CLI's unit for every timeout), else kebab-case.
+ * CLI option name for an input field (spec 09 §9.5): wait_s is --wait, window_s is --window, timeout_s is
+ * --timeout and any `<x>_timeout_s` --<x>-timeout (seconds are the CLI's unit for every timeout and
+ * window), else kebab-case.
  */
 export function cliFlag(key: string): string {
   if (key === 'wait_s') {
     return 'wait';
+  }
+  if (key === 'window_s') {
+    return 'window'; // latency_stats: `fr latency <sel> --window 60` (09 §9.5)
   }
   return (key.endsWith('timeout_s') ? key.slice(0, -2) : key).replace(/_/g, '-');
 }

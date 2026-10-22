@@ -8,6 +8,7 @@ import { checkSourceDir, paths, pytoolsSource } from '@fractonica/host';
 import { type FaultKind, formatCursor, FrError, HUB_VERSION, MAX_WAIT_S, parseCursor, REGISTRY_HASH, type LogLine, type OpName } from '@fractonica/protocol';
 
 import { buildVariant, listArtifacts } from './artifacts.ts';
+import { NET_HANDLERS } from './bindings/ops.ts';
 import { runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
 import { mintCursor } from './events/index.ts';
@@ -455,4 +456,6 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...LINKS_HANDLERS,
   // Checkpoint C4 (design c4 §4): ota_deploy, ota_status (H1), deploy (H2).
   ...OTA_HANDLERS,
+  // Checkpoint C5 (design c5 §4): message_send, binding_set|list|clear, latency_stats (H1).
+  ...NET_HANDLERS,
 };

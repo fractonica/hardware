@@ -55,6 +55,38 @@ size_t encode(const Descriptor &v, fr::wire::Writer &w);
 std::expected<Descriptor, fr::wire::DecodeErr> decode_descriptor(std::span<const uint8_t> in);
 bool operator==(const Descriptor &a, const Descriptor &b);
 
+// Binding (protocol type).
+struct Binding {
+    uint8_t slot = 0;  // 0..15
+    uint8_t on_port = 0;
+    uint8_t on_cls = 0;  // 3 EVENT | 7 MSG
+    uint8_t on_kind = 0;  // the event id (EVENT)
+    std::string_view on_topic{};  // the MSG topic (MSG)
+    std::span<const uint8_t> to_mac{};
+    uint16_t to_addr = 0;  // this node, another node, or 0xFFFF (MSG broadcast)
+    uint8_t to_port = 0;
+    uint8_t to_cls = 0;  // 4 CMD | 7 MSG
+    uint8_t to_kind = 0;  // the command id (CMD)
+    std::string_view to_topic{};  // the MSG topic (MSG)
+    std::span<const uint8_t> payload{};  // pre-encoded CMD fields, or the MSG data
+    bool reliable = false;  // Q1: ACK_REQ, the target's RESULT or ACK, end-to-end retries
+
+    static constexpr size_t kMaxSize = 169;
+};
+size_t encode(const Binding &v, fr::wire::Writer &w);
+std::expected<Binding, fr::wire::DecodeErr> decode_binding(std::span<const uint8_t> in);
+bool operator==(const Binding &a, const Binding &b);
+
+// BindingList (protocol type).
+struct BindingList {
+    fr::proto::Array<Binding, 16> items{};
+
+    static constexpr size_t kMaxSize = 2752;
+};
+size_t encode(const BindingList &v, fr::wire::Writer &w);
+std::expected<BindingList, fr::wire::DecodeErr> decode_binding_list(std::span<const uint8_t> in);
+bool operator==(const BindingList &a, const BindingList &b);
+
 // NET.WELCOME
 struct NetWelcome {
     uint16_t hub_epoch = 0;

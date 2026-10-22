@@ -711,8 +711,91 @@ export const CATALOG: Catalog = {
           "delivery": "reliable",
           "idempotent": true,
           "visibility": "public",
-          "doc": "Store a binding (07 §7.11).",
-          "fields": []
+          "doc": "Store a binding in its slot (07 §7.11), replacing what the slot held; the hub resolves and pre-encodes it.",
+          "fields": [
+            {
+              "name": "slot",
+              "id": 1,
+              "type": "u8",
+              "range": [
+                0,
+                15
+              ]
+            },
+            {
+              "name": "on_port",
+              "id": 2,
+              "type": "u8"
+            },
+            {
+              "name": "on_cls",
+              "id": 3,
+              "type": "u8",
+              "doc": "3 EVENT | 7 MSG"
+            },
+            {
+              "name": "on_kind",
+              "id": 4,
+              "type": "u8",
+              "doc": "the event id (EVENT)"
+            },
+            {
+              "name": "on_topic",
+              "id": 5,
+              "type": "string",
+              "max": 32,
+              "doc": "the MSG topic (MSG)"
+            },
+            {
+              "name": "to_mac",
+              "id": 6,
+              "type": "bytes",
+              "max": 6
+            },
+            {
+              "name": "to_addr",
+              "id": 7,
+              "type": "u16",
+              "doc": "this node, another node, or 0xFFFF (MSG broadcast)"
+            },
+            {
+              "name": "to_port",
+              "id": 8,
+              "type": "u8"
+            },
+            {
+              "name": "to_cls",
+              "id": 9,
+              "type": "u8",
+              "doc": "4 CMD | 7 MSG"
+            },
+            {
+              "name": "to_kind",
+              "id": 10,
+              "type": "u8",
+              "doc": "the command id (CMD)"
+            },
+            {
+              "name": "to_topic",
+              "id": 11,
+              "type": "string",
+              "max": 32,
+              "doc": "the MSG topic (MSG)"
+            },
+            {
+              "name": "payload",
+              "id": 12,
+              "type": "bytes",
+              "max": 64,
+              "doc": "pre-encoded CMD fields, or the MSG data"
+            },
+            {
+              "name": "reliable",
+              "id": 13,
+              "type": "bool",
+              "doc": "Q1: ACK_REQ, the target's RESULT or ACK, end-to-end retries"
+            }
+          ]
         },
         {
           "name": "bind_clear",
@@ -724,7 +807,8 @@ export const CATALOG: Catalog = {
             {
               "name": "slot",
               "id": 1,
-              "type": "u8"
+              "type": "u8",
+              "doc": "0..15, or 255: every slot"
             }
           ]
         },
@@ -734,7 +818,17 @@ export const CATALOG: Catalog = {
           "delivery": "reliable",
           "idempotent": true,
           "visibility": "public",
-          "fields": []
+          "doc": "Returns the stored bindings, encoded (like describe). BULK: TCP or serial only.",
+          "fields": [],
+          "result": [
+            {
+              "name": "bindings",
+              "id": 1,
+              "type": "bytes",
+              "max": 1400,
+              "doc": "a protobuf-wire BindingList (schema/protocol.yaml types)"
+            }
+          ]
         }
       ],
       "events": [
@@ -764,7 +858,8 @@ export const CATALOG: Catalog = {
             {
               "name": "target_status",
               "id": 2,
-              "type": "u8"
+              "type": "u8",
+              "doc": "the target's RESULT/ACK status for reliable sends; 0 for fast, MSG and broadcast; FAILED after the last attempt; BUSY with no path"
             },
             {
               "name": "rtt_us",
@@ -776,7 +871,7 @@ export const CATALOG: Catalog = {
               "name": "path",
               "id": 4,
               "type": "u8",
-              "doc": "0 espnow, 1 hub, 2 flood"
+              "doc": "0 espnow, 1 hub, 2 flood, 3 local (the node itself)"
             }
           ]
         }
@@ -850,4 +945,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0xc7bde94d;
+export const CATALOG_HASH = 0xdc34c43b;

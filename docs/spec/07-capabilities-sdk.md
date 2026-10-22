@@ -134,11 +134,11 @@ events:
 
 | Capability | Commands | Events |
 |---|---|---|
-| `fr.node` (port 0, instance `node`) | `identify=1 {ms}`, `describe=2` → `{descriptor bytes≤1200}` (the encoded `Descriptor`, §7.4; BULK), `reboot=3 {bootloader bool}` (answers, then BYE `reboot`, or `maintenance` for the bootloader, then restarts; [05 §5.11](05-network.md)), `set_alias=4 {alias string≤31, rev u32}`, `set_groups=5 {groups array<u16>≤8}` (M2), `net_set=6 {ssid, pass, bssid?, hub_host?}`, `get_state=7` (re-send every property), `bind_set=8`, `bind_clear=9 {slot}`, `bind_list=10` (§7.11) | `boot=1 {reset_reason}`, sent once per boot right after the first WELCOME and exempt from the event-age rule. `binding_fired=2 {slot, target_status, rtt_us u32 (trigger → target RESULT; 0 for fast), path u8 (0 espnow, 1 hub, 2 flood)}` |
+| `fr.node` (port 0, instance `node`) | `identify=1 {ms}`, `describe=2` → `{descriptor bytes≤1200}` (the encoded `Descriptor`, §7.4; BULK), `reboot=3 {bootloader bool}` (answers, then BYE `reboot`, or `maintenance` for the bootloader, then restarts; [05 §5.11](05-network.md)), `set_alias=4 {alias string≤31, rev u32}`, `set_groups=5 {groups array<u16>≤8}` (M2), `net_set=6 {ssid, pass, bssid?, hub_host?}`, `get_state=7` (re-send every property), `bind_set=8` (the `Binding` fields flat), `bind_clear=9 {slot}` (255 = all), `bind_list=10` → `{bindings bytes≤1400}` (an encoded `BindingList`; BULK) (§7.11) | `boot=1 {reset_reason}`, sent once per boot right after the first WELCOME and exempt from the event-age rule. `binding_fired=2 {slot, target_status u8, rtt_us u32 (trigger → target RESULT; 0 for fast), path u8 (0 espnow, 1 hub, 2 flood, 3 local)}` (§7.11). Neither triggers a binding |
 | `fr.ota` (port 240, instance `ota`) | none. OTA control uses `cls=OTA` frames ([05 §5.7](05-network.md)), handled by `fr_ota` since C4 ([06 §6.6](06-identity-ota.md)) | — |
 | `fr.diag` (port 241, instance `diag`) | `exec=1 {line string≤200}` → RESULT `{json string≤1400}` (BULK). Same command set as the serial channel ([09 §9.7](09-agent-api.md)) | `mark=1 {token string≤32}` |
 
-System capabilities are generated like the others. Since C3 the node implements `fr.node` `identify` (blinks the first `fr.led` instance, or logs when there is none), `describe`, `reboot`, `set_alias` (writes `fr_ovr`), `net_set` (the `fr_net2` override, [06 §6.3](06-identity-ota.md)) and `get_state`, and `fr.diag.exec`; the hub reaches them over every link. `set_groups` (M2) and `bind_*` (C5) answer `UNSUPPORTED`.
+System capabilities are generated like the others. Since C3 the node implements `fr.node` `identify` (blinks the first `fr.led` instance, or logs when there is none), `describe`, `reboot`, `set_alias` (writes `fr_ovr`), `net_set` (the `fr_net2` override, [06 §6.3](06-identity-ota.md)) and `get_state`, and `fr.diag.exec`; the hub reaches them over every link. Since C5 it implements `bind_set`, `bind_clear` and `bind_list` (§7.11). `set_groups` (M2) answers `UNSUPPORTED`.
 
 `fr.display` (`text`, `clear`, `fill_rect`, `set_brightness`) is M2. Its first driver is the SSD1306 0.42" OLED on your C3 boards. `fr.audio_out` (`tone`, `play`, `stop`, `set_volume`) comes later. Both are drafted in [research/hal-capabilities-sdk.md](../research/hal-capabilities-sdk.md).
 
@@ -395,7 +395,7 @@ hub.devices.on('added', (d) => { if (d.has('fr.button')) d.on('*.down', () => sp
 | hub → app | `device.added / device.removed / registry.drift / catalog {hash, json}` |
 | app → hub | `cmd {req, dev, inst, cmd, args, ack: none\|result}`. Validated against the generated JSON Schema before encoding |
 | hub → app | `result {req, ok, status, t_hub_us, fields?}` |
-| app → hub | `msg {req, to: "broadcast" \| <dev>, topic, data}` (`data` is JSON, ≤ 200 B minus the topic; groups come in M2) |
+| app → hub | `msg {req, to: "broadcast" \| <dev>, topic, data}` (`topic` ≤ 32 B, `data` JSON of ≤ 168 B as UTF-8 text, as `message_send`, [09 §9.4](09-agent-api.md); groups come in M2) |
 | hub → app | `msg {dev, topic, data}` |
 | both | `ping {id}` / `pong {id}` every 2 s; feeds `hub.stats().rttMs` |
 
@@ -433,17 +433,31 @@ hub.devices.on('added', (d) => { if (d.has('fr.button')) d.on('*.down', () => sp
 A **binding** makes a node react to its own event, or to a received MSG, by sending a command or MSG directly to another node (or to itself) over ESP-NOW. No hub is involved at runtime.
 
 ```
-Binding { slot u8,
-          on:   { port u8, cls EVENT|MSG, kind u8 | topic string≤32 },
-          to:   { mac bytes6, addr u16, port u8, cls CMD|MSG, kind u8 | topic string≤32 },
-          payload bytes≤64,           // pre-encoded by the hub (CMD fields or MSG data)
-          delivery fast|reliable }
+Binding     { slot u8 (0..15), on_port u8, on_cls u8 (3 EVENT | 7 MSG), on_kind u8 (event id), on_topic string≤32,
+              to_mac bytes≤6 (empty for a broadcast target), to_addr u16 (the node itself, another node, or 0xFFFF),
+              to_port u8, to_cls u8 (4 CMD | 7 MSG), to_kind u8 (command id), to_topic string≤32,
+              payload bytes≤64 (pre-encoded CMD fields, generated defaults included, or MSG data), reliable bool }
+BindingList { items array<Binding>≤16 }
 ```
 
-- **Commands.** `fr.node.bind_set`, `bind_clear` and `bind_list`. At most 16 bindings per node, stored in `nvs:fr_bind`.
-- **Execution.** Bindings run in the core task right after the triggering event is emitted locally, before (and independent of) the event's send to the hub. The node then emits `node.binding_fired {slot, target_status, rtt_us, path}` to the hub, so agents can observe the binding and its latency (`latency_stats`).
-- **Hub resolution.** `binding_set {from: "pad-c6.boot.down", to: "pad-c3.status.blink", args: {count: 1}}` ([09 §9.4](09-agent-api.md)) resolves alias → `device_id` (= MAC), `addr`, port and command id. It validates `args` against the command's JSON Schema and pre-encodes the payload, so the binding path on the node needs no schema, JSON parser or name lookup.
+- **Wire types.** Both are protocol `types:` in `schema/protocol.yaml` (field ids 1–13 in the order above), generated like `Descriptor` (§7.4); `Binding` is ≤ 169 B, `BindingList` ≤ 2,752 B. Golden vectors cover them, `fr.node.bind_*` and the flooded envelopes.
+- **Commands** (`fr.node`, port 0). `bind_set` takes the `Binding` fields flat as its args (same ids, so its args are an encoded `Binding`) and replaces what the slot held. `bind_clear {slot}` (255 = every slot). `bind_list` → `{bindings bytes≤1400}`, an encoded `BindingList` (BULK, so TCP or serial; 1,400 B is what a bulk RESULT carries).
+- **Storage and the 1,400 B cap.** At most 16 bindings per node, in `nvs:fr_bind` ([06 §6.3](06-identity-ota.md)). A legal `BindingList` reaches 2,752 B, so `bind_set` answers `INVALID_ARGS` when the table with the new binding (its slot's old bytes excluded) would encode past 1,400 B, and `bind_list` always returns the whole table (`FAILED` only for a table an older firmware stored). With 32 B topics and 64 B payloads 9 MSG → MSG bindings fit; typical ones of 30–60 B, all 16.
+- **Triggers.** A local EVENT emission, in `Net::event` (the `Sink` call, [03 §3.3](03-firmware.md)) before and independent of the event's send to the hub, or a received MSG topic. fr.node's own events (port 0: `boot`, `binding_fired`) are sent outside `Net::event` and trigger nothing, so "reacts to its own event" means a capability event; the hub refuses fr.node triggers.
+- **Execution.** In the core task, each matching binding sends its pre-encoded CMD or MSG to `to_addr`: the node itself → local dispatch with its own reply buffer; `0xFFFF` → a MSG broadcast ([05 §5.9](05-network.md)); another node → the node ↔ node path ([05 §5.10](05-network.md)) starting at the binding's MAC. Binding CMDs carry URGENT. A reaction may fire bindings again, up to depth 2. Bindings work with no hub session.
+- **Reporting.** The node then emits `node.binding_fired {slot, target_status, rtt_us, path}` to the hub, held until the triggering EVENT has gone, so agents can observe the binding and its latency (`latency_stats`).
+  - `rtt_us`: from the fire to the target's RESULT (reliable); 0 for fast.
+  - `target_status`: the RESULT or ACK status; 0 for fast, MSG and broadcast; `FAILED` after the last attempt; `BUSY` with no path ([05 §5.10](05-network.md)) or when evicted from the node → node frames in flight; `INVALID_ARGS` for a group target or a CMD broadcast off port 0. A binding's frame is reported only here, never as a second failure.
+  - `path`: 0 espnow, 1 hub, 2 flood, 3 local (the target is the node itself).
 - **Routing.** The target MAC travels inside the binding, so the direct ESP-NOW unicast works with the hub stopped and with no neighbour learning. If the unicast fails, the fallback is via the hub, or a flooded unicast ([05 §5.10](05-network.md)).
-- **Local and broadcast reactions.** `to.addr = self` gives local reactions, for example MSG `ping` → `status.blink{count:1}`. `to.addr = 0xFFFF` with `cls MSG` broadcasts.
-- **Re-push.** The hub re-resolves and re-pushes a device's bindings whenever either end's descriptor hash, `addr` or alias changes.
-- **L4 code** can do the same in C++: `fr::net::send_cmd(...)`, `fr::msg::send(...)`, `fr::msg::on(...)`.
+- **Local and broadcast reactions.** `to_addr` = self gives local reactions, for example MSG `ping` → `status.blink{count:1}`. `to_addr = 0xFFFF` with `to_cls` MSG broadcasts.
+- **L4 code** can do the same in C++: `fr::net::send_cmd(...)` (not built yet), `fr::msg::send(...)`, `fr::msg::on(...)` ([03 §3.2](03-firmware.md)).
+
+**On the hub** (`binding_set`, `binding_list`, `binding_clear`, [09 §9.4](09-agent-api.md); table `bindings`, [08 §8.8](08-hub.md)):
+- **Resolution.** `binding_set {from: "pad-c6.boot.down", to: "pad-c3.status.blink", args: {count: 1}}` resolves aliases (`broadcast` is reserved) → `device_id` (= MAC), `addr`, port and event or command id, or a MSG topic (`<alias>.msg:<topic>`). Both ends need an addr. A trigger on the `node` instance is `INVALID_ARGS` (`<alias>.node: fr.node events (boot, binding_fired) cannot trigger a binding; bind a capability event or a MSG topic`). It validates `args` against the command's JSON Schema and pre-encodes the payload with the generated defaults (≤ 64 B; MSG data as compact JSON), so the binding path on the node needs no schema, JSON parser or name lookup. `reliable` is set for a reliable command and for a unicast MSG.
+- **Args as JSON text.** The registry keeps `args` (or the MSG data) as the JSON text it was given, and re-resolution parses that text, so a JSON string stays a string however often a row is re-resolved. A string given for `args` or data (CLI or REST) is JSON text. MSG data `null` is stored as the text `null` (payload `null`), distinct from no data (empty payload); `binding_list` shows `args: null` for both, and the payload tells them apart.
+- **Slots and limits.** The slot is the one already holding the same trigger and reaction (`replaced: true`), else the lowest free; a 17th is `INVALID_ARGS`. So is a binding that would take the source's encoded `BindingList` past `bind_list`'s 1,400 B (read from the generated catalog), measured on the registry rows with the new binding in its slot, whether the source is online or not.
+- **Push.** `fr.node.bind_set` to the source (3 s): `UNSUPPORTED` or `NOT_FOUND` → `CAPABILITY_UNSUPPORTED`, and `INVALID_ARGS` → `INVALID_ARGS`, with nothing stored; offline, a timeout, `BUSY` or `FAILED` → the row is stored with `pushed_at` NULL and a `pending` reason.
+- **Reconcile at every handshake.** The hub compares the node's `bind_list` with the registry rows (re-resolved at both ends), first clears the slots the registry lacks, then re-sets the missing or different ones, so the rows always fit the node's 1,400 B check. The registry wins, also over bindings another hub's db put there. When `bind_list` cannot be read for any reason but `CAPABILITY_UNSUPPORTED` or `DEVICE_OFFLINE` (a table over 1,400 B, a timeout, a table that does not decode), the registry wins blindly: `bind_clear` every slot without a row (255 when there are none), then `bind_set` every row, pushed or not, stopping at the first push that does not go through (a dead link costs one timeout; the next handshake starts over). That also carries out a `fr bind rm` made while the device was offline.
+- **Re-push on change.** A new `addr` or descriptor at either end re-pushes when the encoded bytes change; a rename rewrites the rows' from/to text only (the bytes carry no alias). A row that no longer resolves (a stored fr.node trigger included) stays as the node has it, with one `hub.warning {code: binding_unresolved}`.
+- `binding_clear` removes the rows at once and clears the node now, or at its next handshake.

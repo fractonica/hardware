@@ -44,6 +44,38 @@ public:
         words_.fill(~uint64_t{0});
     }
 
+    /**
+     * Everything up to and including `floor` counts as received, and the window never moves back: a floor
+     * after top acts as reset(), one at or below it only marks the seqs from the floor down, leaving top and
+     * the newer seqs as they were (a WELCOME of the hub run the window already follows, which may come
+     * after broadcasts above its bcast_base arrived over another path).
+     */
+    constexpr void raise_floor(uint32_t floor)
+    {
+        const int32_t d = static_cast<int32_t>(floor - top_);
+        if (d > 0) {
+            reset(floor);
+            return;
+        }
+        // Bit k stands for seq top - k: the floor and below are bits from -d up (none beyond the window).
+        const uint64_t from = static_cast<uint64_t>(-static_cast<int64_t>(d));
+        for (size_t i = 0; i < kWords; ++i) {
+            const uint64_t first = static_cast<uint64_t>(i) * 64;
+            if (from <= first) {
+                words_[i] = ~uint64_t{0};
+            } else if (from < first + 64) {
+                words_[i] |= ~uint64_t{0} << (from - first);
+            }
+        }
+    }
+
+    /** Nothing received yet; `top` is the seq just below the first one expected (a new boot of a source). */
+    constexpr void restart(uint32_t top)
+    {
+        top_ = top;
+        words_.fill(0);
+    }
+
     /** Classifies `seq` and records it when fresh. */
     constexpr Verdict check_and_set(uint32_t seq)
     {

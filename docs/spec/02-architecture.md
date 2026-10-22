@@ -119,9 +119,9 @@ Target: p50 ≤ 10 ms in router mode and ≤ 5 ms in gateway mode, measured, not
 ### Flow B — hub broadcast with re-flood
 
 1. The dashboard button calls `POST /api/v1/messages {to:"broadcast", topic:"start"}`.
-2. The hub builds one MSG envelope (`src=0x0000`, `dst=0xFFFF`, `ttl=2`, `seq` from the hub BCAST space) and fans it out over every connected node link (TCP).
-3. Each node that received it over TCP delivers it once and **seeds** an ESP-NOW broadcast after a random 1–16 ms delay. It cancels the seed if it has already heard 2 copies; the TCP copy counts as one.
-4. Nodes whose IP link is slow or down get the ESP-NOW copy. The BCAST duplicate window makes delivery exactly once ([05 §5.9](05-network.md)).
+2. The hub builds one MSG envelope (`src=0x0000`, `dst=0xFFFF`, `ttl=2`, `seq` from the hub BCAST space) and sends the same bytes on every session of every node (TCP and serial).
+3. Each node that received it over a hub link delivers it once and **seeds** an ESP-NOW broadcast after a random 1–16 ms delay. It cancels the seed once it has heard 2 copies over ESP-NOW; copies on hub links never count.
+4. Nodes whose IP link is slow or down get the ESP-NOW copy. The BCAST duplicate window makes delivery exactly once, and HEARTBEAT watermarks drive repairs ([05 §5.9](05-network.md)).
 5. Nodes react through bindings (for example `msg:start → status.blink`); apps see it as `msg`.
 
 ### Flow C — agent edit → build → OTA → verify

@@ -282,6 +282,129 @@ bool valid(const NodeNetSetArgs &)
     return true;
 }
 
+size_t encode(const NodeBindSetArgs &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.slot != 0) {
+        w.field_uint(1, v.slot);
+    }
+    if (v.on_port != 0) {
+        w.field_uint(2, v.on_port);
+    }
+    if (v.on_cls != 0) {
+        w.field_uint(3, v.on_cls);
+    }
+    if (v.on_kind != 0) {
+        w.field_uint(4, v.on_kind);
+    }
+    if (!v.on_topic.empty()) {
+        w.field_string(5, v.on_topic);
+    }
+    if (!v.to_mac.empty()) {
+        w.field_bytes(6, v.to_mac);
+    }
+    if (v.to_addr != 0) {
+        w.field_uint(7, v.to_addr);
+    }
+    if (v.to_port != 0) {
+        w.field_uint(8, v.to_port);
+    }
+    if (v.to_cls != 0) {
+        w.field_uint(9, v.to_cls);
+    }
+    if (v.to_kind != 0) {
+        w.field_uint(10, v.to_kind);
+    }
+    if (!v.to_topic.empty()) {
+        w.field_string(11, v.to_topic);
+    }
+    if (!v.payload.empty()) {
+        w.field_bytes(12, v.payload);
+    }
+    if (v.reliable) {
+        w.field_bool(13, v.reliable);
+    }
+    return w.size() - start;
+}
+
+std::expected<NodeBindSetArgs, fr::wire::DecodeErr> decode_node_bind_set_args(std::span<const uint8_t> in)
+{
+    NodeBindSetArgs v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.slot = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.on_port = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.on_cls = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 4:
+            v.on_kind = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 5:
+            v.on_topic = r.read_string(32);
+            break;
+        case 6:
+            v.to_mac = r.read_bytes(6);
+            break;
+        case 7:
+            v.to_addr = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 8:
+            v.to_port = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 9:
+            v.to_cls = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 10:
+            v.to_kind = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 11:
+            v.to_topic = r.read_string(32);
+            break;
+        case 12:
+            v.payload = r.read_bytes(64);
+            break;
+        case 13:
+            v.reliable = r.read_bool();
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NodeBindSetArgs &a, const NodeBindSetArgs &b)
+{
+    return a.slot == b.slot &&
+           a.on_port == b.on_port &&
+           a.on_cls == b.on_cls &&
+           a.on_kind == b.on_kind &&
+           a.on_topic == b.on_topic &&
+           fr::proto::equal_bytes(a.to_mac, b.to_mac) &&
+           a.to_addr == b.to_addr &&
+           a.to_port == b.to_port &&
+           a.to_cls == b.to_cls &&
+           a.to_kind == b.to_kind &&
+           a.to_topic == b.to_topic &&
+           fr::proto::equal_bytes(a.payload, b.payload) &&
+           a.reliable == b.reliable;
+}
+
+bool valid(const NodeBindSetArgs &v)
+{
+    return v.slot <= 15;
+}
+
 size_t encode(const NodeBindClearArgs &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -317,6 +440,45 @@ bool operator==(const NodeBindClearArgs &a, const NodeBindClearArgs &b)
 }
 
 bool valid(const NodeBindClearArgs &)
+{
+    return true;
+}
+
+size_t encode(const NodeBindListResult &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (!v.bindings.empty()) {
+        w.field_bytes(1, v.bindings);
+    }
+    return w.size() - start;
+}
+
+std::expected<NodeBindListResult, fr::wire::DecodeErr> decode_node_bind_list_result(std::span<const uint8_t> in)
+{
+    NodeBindListResult v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.bindings = r.read_bytes(1400);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NodeBindListResult &a, const NodeBindListResult &b)
+{
+    return fr::proto::equal_bytes(a.bindings, b.bindings);
+}
+
+bool valid(const NodeBindListResult &)
 {
     return true;
 }
@@ -481,10 +643,11 @@ Status Node::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &repl
         return get_state();
     }
     case kCmdBindSet: {
-        if (!fr::proto::decode_empty(args)) {
+        const auto a = decode_node_bind_set_args(args);
+        if (!a || !valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
-        return bind_set();
+        return bind_set(*a);
     }
     case kCmdBindClear: {
         const auto a = decode_node_bind_clear_args(args);
@@ -497,7 +660,17 @@ Status Node::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &repl
         if (!fr::proto::decode_empty(args)) {
             return std::unexpected(Err::invalid_args);
         }
-        return bind_list();
+        const auto r = bind_list();
+        if (!r) {
+            return std::unexpected(r.error());
+        }
+        encode(*r, reply.fields());
+        // Fields beyond the caller's buffer (realtime or bulk): FAILED with no fields, never truncated ones.
+        if (reply.fields().overflow()) {
+            reply.clear();
+            return std::unexpected(Err::failed);
+        }
+        return {};
     }
     default:
         return std::unexpected(Err::unsupported);

@@ -907,4 +907,13 @@ fr::Status net_set(const fr_net_creds_t &creds)
     return {};
 }
 
+fr::Status wifi_down(uint32_t seconds)
+{
+    if (!s_started) {
+        return std::unexpected(Err::failed);
+    }
+    s_wifi.request_down(seconds, now_us());
+    return {};
+}
+
 }  // namespace fr::net::esp

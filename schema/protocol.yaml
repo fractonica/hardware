@@ -197,6 +197,27 @@ types:
     profile: { id: 4, type: string, max: 31 }
     board: { id: 5, type: string, max: 31 }
     caps: { id: 6, type: "array<DescriptorCap>", max: 16 }
+  # A binding (07 §7.11, design c5 §2): on a local EVENT (on_port, on_kind) or a received MSG (on_topic), send
+  # the pre-encoded CMD fields or MSG data in `payload` to `to_addr`: this node, another node (by `to_mac`,
+  # which keeps ESP-NOW working with the hub stopped), or 0xFFFF (a MSG broadcast). fr.node.bind_set takes
+  # these fields flat with the same ids and types, so its args are an encoded Binding, stored as they come.
+  Binding:
+    slot: { id: 1, type: u8, range: [0, 15] }
+    on_port: { id: 2, type: u8 }
+    on_cls: { id: 3, type: u8, doc: "3 EVENT | 7 MSG" }
+    on_kind: { id: 4, type: u8, doc: "the event id (EVENT)" }
+    on_topic: { id: 5, type: string, max: 32, doc: "the MSG topic (MSG)" }
+    to_mac: { id: 6, type: bytes, max: 6 }
+    to_addr: { id: 7, type: u16, doc: "this node, another node, or 0xFFFF (MSG broadcast)" }
+    to_port: { id: 8, type: u8 }
+    to_cls: { id: 9, type: u8, doc: "4 CMD | 7 MSG" }
+    to_kind: { id: 10, type: u8, doc: "the command id (CMD)" }
+    to_topic: { id: 11, type: string, max: 32, doc: "the MSG topic (MSG)" }
+    payload: { id: 12, type: bytes, max: 64, doc: "pre-encoded CMD fields, or the MSG data" }
+    reliable: { id: 13, type: bool, doc: "Q1: ACK_REQ, the target's RESULT or ACK, end-to-end retries" }
+  # fr.node.bind_list returns it encoded, as `bytes` (like describe's Descriptor).
+  BindingList:
+    items: { id: 1, type: "array<Binding>", max: 16 }
 
 serial_framing:
   prefix: "@fr1:"

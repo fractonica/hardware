@@ -1,5 +1,6 @@
-// Boot and runtime wiring (spec 03 §3.4-3.5, design c2 §5, c3 §3, c4 §3): identity and epoch, the hub link
-// (fr_net's Net over the serial, TCP and UDP links), the OTA job and its health gate (fr_ota's Ota),
+// Boot and runtime wiring (spec 03 §3.4-3.5, design c2 §5, c3 §3, c4 §3, c5 §3): identity and epoch, the hub
+// link (fr_net's Net over the serial, TCP and UDP links) and ESP-NOW (its AirLink, the directory and bindings
+// in nvs:fr_dir and nvs:fr_bind, fr.node bind_*, fr::msg), the OTA job and its health gate (fr_ota's Ota),
 // fr_serial and the diag channel, the port table with the system capabilities, HELLO's facts, the C1 banner
 // and the liveness log.
 #include "fr/core.hpp"
@@ -23,9 +24,11 @@
 #include "esp_timer.h"
 #include "esp_worker.hpp"
 #include "fr/core/descriptor.hpp"
+#include "fr/core/node_net.hpp"
 #include "fr/diag.hpp"
 #include "fr/envelope.hpp"
 #include "fr/hash.hpp"
+#include "fr/msg.hpp"
 #include "fr/net/esp.hpp"
 #include "fr/net/net.hpp"
 #include "fr/ota/esp.hpp"
@@ -35,6 +38,7 @@
 #include "led.hpp"       // generated fr::cap::Led (identify blinks the first LED)
 #include "messages.hpp"  // generated fr::proto::Descriptor
 #include "node.hpp"      // generated fr::cap::Node
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
@@ -75,6 +79,59 @@ std::optional<net::Net> s_net;
 // The OTA job and the health gate (design c4 §3); bound in start(), driven on the core task.
 ota::Ota s_ota;
 
+/**
+ * One NVS blob, key `table` in its own namespace (design c5 §3: nvs:fr_dir, nvs:fr_bind). read() runs at
+ * boot, before the core task; write() on fr_worker (NetStores), so flash never stalls the core task.
+ */
+class NvsBlob final : public Blob
+{
+public:
+    explicit NvsBlob(const char *ns) : ns_(ns) {}
+
+    size_t read(std::span<uint8_t> out) override
+    {
+        nvs_handle_t h;
+        if (nvs_open(ns_, NVS_READONLY, &h) != ESP_OK) {
+            return 0;  // never written
+        }
+        size_t len = out.size();
+        esp_err_t err = nvs_get_blob(h, kKey, out.data(), &len);
+        nvs_close(h);
+        if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "nvs:%s not read (%s)", ns_, esp_err_to_name(err));
+        }
+        return err == ESP_OK ? len : 0;
+    }
+
+    bool write(std::span<const uint8_t> bytes) override
+    {
+        nvs_handle_t h;
+        esp_err_t err = nvs_open(ns_, NVS_READWRITE, &h);
+        if (err == ESP_OK) {
+            err = nvs_set_blob(h, kKey, bytes.data(), bytes.size());
+            if (err == ESP_OK) {
+                err = nvs_commit(h);
+            }
+            nvs_close(h);
+        }
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "nvs:%s not written (%s)", ns_, esp_err_to_name(err));
+        }
+        return err == ESP_OK;
+    }
+
+private:
+    static constexpr const char *kKey = "table";
+    const char *ns_;
+};
+
+NvsBlob s_dir_blob{"fr_dir"};
+NvsBlob s_bind_blob{"fr_bind"};
+// Net's DirectoryStore and BindingStore; built in start() with fr_worker (design c5 §3).
+std::optional<NetStores> s_stores;
+// fr::msg::on handlers, which Host::msg runs (core task).
+MsgHandlers s_msgs;
+
 PortEntry s_ports[kMaxPorts];
 diag::PortInfo s_diag_ports[kMaxPorts];
 size_t s_nports = 0;
@@ -107,6 +164,13 @@ net::Config net_config()
     c.tcp_delivery_ms = CONFIG_FR_TCP_DELIVERY_MS;
     c.hello_retry_ms = CONFIG_FR_HELLO_RETRY_MS;
     c.ttl_default = CONFIG_FR_TTL_DEFAULT;
+    // C5 (design c5 §7, spec 05 §5.17).
+    c.ttl_max = CONFIG_FR_TTL_MAX;
+    c.ack_per_hop_ms = CONFIG_FR_ACK_PER_HOP_MS;
+    c.espnow_hb_ms = CONFIG_FR_ESPNOW_HB_MS;
+    c.relay.k = CONFIG_FR_RELAY_K;
+    c.relay.jmin_ms = CONFIG_FR_RELAY_JMIN_MS;
+    c.relay.jmax_ms = CONFIG_FR_RELAY_JMAX_MS;
     return c;
 }
 
@@ -466,9 +530,38 @@ public:
         report_all_ports();
         return {};
     }
-    Status bind_set() override { return std::unexpected(Err::unsupported); }
-    Status bind_clear(const cap::NodeBindClearArgs &) override { return std::unexpected(Err::unsupported); }
-    Status bind_list() override { return std::unexpected(Err::unsupported); }
+    // Bindings (07 §7.11): Net keeps the table and saves it to nvs:fr_bind through s_stores.
+    Status bind_set(const cap::NodeBindSetArgs &args) override
+    {
+        Status st = fr::core::bind_set(*s_net, args);
+        if (st) {
+            ESP_LOGI(TAG, "binding %u set: %s %u/%u -> %04x port %u", static_cast<unsigned>(args.slot),
+                     args.on_cls == wire::kClsMsg ? "msg" : "event", static_cast<unsigned>(args.on_port),
+                     static_cast<unsigned>(args.on_kind), static_cast<unsigned>(args.to_addr),
+                     static_cast<unsigned>(args.to_port));
+        }
+        return st;
+    }
+
+    Status bind_clear(const cap::NodeBindClearArgs &args) override
+    {
+        Status st = fr::core::bind_clear(*s_net, args);
+        if (st && args.slot == net::kBindSlotAll) {
+            ESP_LOGI(TAG, "bindings cleared");
+        } else if (st) {
+            ESP_LOGI(TAG, "binding %u cleared", static_cast<unsigned>(args.slot));
+        }
+        return st;
+    }
+
+    std::expected<cap::NodeBindListResult, Err> bind_list() override
+    {
+        // BULK like describe: over UDP the realtime Reply cannot hold it and dispatch says FAILED.
+        return fr::core::bind_list(*s_net, bind_list_buf_);
+    }
+
+private:
+    uint8_t bind_list_buf_[kBindListMax];
 };
 
 /** fr.diag on port 241: the serial command channel's commands as a capability, over any hub link. */
@@ -539,6 +632,11 @@ public:
     void ota_frame(LinkKind, const wire::Header &h, std::span<const uint8_t> body, net::OtaReply &reply) override
     {
         s_ota.on_frame(h.kind, body, reply);  // OFFER, COMMIT, ABORT (design c4 §3)
+    }
+
+    void msg(uint16_t src, std::string_view topic, std::span<const uint8_t> data) override
+    {
+        s_msgs.dispatch(src, topic, data);  // fr::msg::on handlers
     }
 };
 
@@ -663,13 +761,24 @@ enum Ctr : size_t {
     kUdpTxFail,
     kEnvBad,
     kRxDropped,
+    // The ESP-NOW driver's (design c5 §2 stats espnow).
+    kAirTx,
+    kAirTxFail,
+    kAirRetries,
+    kAirRefused,
+    kAirRx,
+    kAirRxBad,
+    kAirRxLost,
+    kAirRateFail,
+    kAirGuard,
+    kAirLost,
     kCounters,
 };
 using Counters = std::array<uint32_t, kCounters>;
 
 Counters s_base{};
 
-Counters counters_now(const net::esp::Status &es)
+Counters counters_now(const net::esp::Status &es, const net::esp::AirStatus &air)
 {
     Counters c{};
     c[kWifiDisconnects] = es.wifi_disconnects;
@@ -686,13 +795,23 @@ Counters counters_now(const net::esp::Status &es)
     c[kEnvBad] = s_env_bad;
     // deliver() counts every envelope the core could not take, whichever link brought it.
     c[kRxDropped] = s_rx_dropped.load(std::memory_order_relaxed);
+    c[kAirTx] = air.tx;
+    c[kAirTxFail] = air.tx_fail;
+    c[kAirRetries] = air.retries;
+    c[kAirRefused] = air.refused;
+    c[kAirRx] = air.rx;
+    c[kAirRxBad] = air.rx_bad;
+    c[kAirRxLost] = air.rx_lost;
+    c[kAirRateFail] = air.rate_fail;
+    c[kAirGuard] = air.guard;
+    c[kAirLost] = air.lost;
     return c;
 }
 
 /** Counts since the last `stats reset` (unsigned wrap-around keeps the difference right). */
-Counters counters_since_reset(const net::esp::Status &es)
+Counters counters_since_reset(const net::esp::Status &es, const net::esp::AirStatus &air)
 {
-    Counters c = counters_now(es);
+    Counters c = counters_now(es, air);
     for (size_t i = 0; i < c.size(); ++i) {
         c[i] -= s_base[i];
     }
@@ -726,7 +845,7 @@ public:
     diag::RuntimeStats runtime_stats() const override
     {
         net::State st = s_net->state();
-        Counters c = counters_since_reset(net::esp::status());
+        Counters c = counters_since_reset(net::esp::status(), net::esp::air_status());
         uint32_t ignored = 0;
         for (const net::LinkState &l : st.links) {
             ignored += l.rx_drop;
@@ -744,7 +863,7 @@ public:
     void reset_runtime_stats() override
     {
         s_net->reset_stats();
-        s_base = counters_now(net::esp::status());
+        s_base = counters_now(net::esp::status(), net::esp::air_status());
         s_core.reset_posts_dropped();
     }
 
@@ -752,7 +871,8 @@ public:
     {
         net::State st = s_net->state();
         net::esp::Status es = net::esp::status();
-        Counters c = counters_since_reset(es);
+        net::esp::AirStatus air = net::esp::air_status();
+        Counters c = counters_since_reset(es, air);
         diag::NetStatus n;
         static_assert(diag::kLinks == net::kLinkKinds);
         for (size_t i = 0; i < net::kLinkKinds; ++i) {
@@ -806,6 +926,63 @@ public:
         n.hub_link_dropped = st.hub_link_dropped;
         n.udp_blocked = st.udp_blocked;
         n.ip_blocked = st.ip_blocked;
+        n.wifi_held = es.wifi_held;
+        n.wifi_held_s = es.wifi_held_s;
+        n.espnow = {.up = air.up,
+                    .channel = air.channel,
+                    .peers = air.peers,
+                    .tx = c[kAirTx],
+                    .tx_fail = c[kAirTxFail],
+                    .retries = c[kAirRetries],
+                    .refused = c[kAirRefused],
+                    .rx = c[kAirRx],
+                    .rx_bad = c[kAirRxBad],
+                    .rx_lost = c[kAirRxLost],
+                    .rate_fail = c[kAirRateFail],
+                    .guard = c[kAirGuard],
+                    .lost = c[kAirLost]};
+        n.relay = {.seeded = st.relay.seeded,
+                   .relayed = st.relay.relayed,
+                   .cancelled = st.relay.cancelled,
+                   .dropped = st.relay.dropped};
+        n.nodes = {.delivered = st.nodes.delivered,
+                   .dup = st.nodes.dup,
+                   .old = st.nodes.old,
+                   .sent = st.nodes.sent,
+                   .via_espnow = st.nodes.via_espnow,
+                   .via_hub = st.nodes.via_hub,
+                   .via_flood = st.nodes.via_flood,
+                   .failed = st.nodes.failed,
+                   .resolves = st.nodes.resolves};
+        n.bcast = {.delivered = st.bcast.delivered, .dup = st.bcast.dup, .old = st.bcast.old, .watermark = st.bcast.watermark};
+        n.bindings = {.fired = st.bindings.fired, .failed = st.bindings.failed, .rtt_p50_us = st.bindings.rtt_p50_us};
+        const net::MsgStats &ms = s_net->msg_stats();
+        static_assert(diag::kMsgTopics == net::MsgStats::kTopics);
+        for (size_t i = 0; i < diag::kMsgTopics; ++i) {
+            std::memcpy(n.msgs[i].name, ms.topics[i].name, sizeof(n.msgs[i].name));
+            n.msgs[i].name[sizeof(n.msgs[i].name) - 1] = '\0';
+            n.msgs[i].n = ms.topics[i].n;
+        }
+        n.msgs_other = ms.other;
+        return n;
+    }
+
+    size_t neighbors(std::span<diag::NeighborInfo> out) const override
+    {
+        const net::Neighbors nb = s_net->neighbors();
+        const TimeUs now = s_core.now();
+        const size_t n = std::min(std::min(nb.count, nb.items.size()), out.size());
+        for (size_t i = 0; i < n; ++i) {
+            const net::Neighbor &e = nb.items[i];
+            diag::NeighborInfo &o = out[i];
+            std::memcpy(o.mac, e.mac.data(), sizeof(o.mac));
+            o.addr = e.addr;
+            o.rssi = e.rssi;
+            const TimeUs age = now - e.last_heard;
+            o.age_ms = age <= 0 ? 0 : static_cast<uint32_t>(std::min<TimeUs>(age / 1000, UINT32_MAX));
+            o.ack_ok = e.ack_ok;
+            o.ack_fail = e.ack_fail;
+        }
         return n;
     }
 
@@ -821,6 +998,12 @@ public:
             break;
         case diag::NetHook::ip_block:
             s_net->ip_block(seconds);
+            break;
+        case diag::NetHook::wifi_down:
+            // fr_net applies it ~300 ms later, so this request's RESULT leaves over TCP first.
+            if (Status st = net::esp::wifi_down(seconds); !st) {
+                return st;
+            }
             break;
         }
         ESP_LOGW(TAG, "debug hook %s %" PRIu32 " s", diag::hook_name(hook), seconds);
@@ -968,6 +1151,25 @@ net::esp::Settings wifi_settings()
     return ws;
 }
 
+/** ESP-NOW on the started STA (design c5 §3): its callbacks post to the core task's network queue. */
+void start_espnow()
+{
+    net::esp::AirSettings as;
+    as.net = s_identity.state == FR_ID_PROVISIONED ? s_identity.net : 0;
+    const net::esp::AirHooks hooks{
+        .post = [](Callback<void(), 32> fn) { return s_core.post_net(std::move(fn)); },
+        .received = [](std::span<const uint8_t> env, const net::RxMeta &meta) { s_net->receive_air(env, meta); },
+        .sent = [](uint32_t token, bool mac_acked) { s_net->air_sent(token, mac_acked); },
+        .changed = [] { s_net->link_changed(LinkKind::espnow); },
+        .wifi_up_heard_at = [] { return s_net->wifi_up_neighbor_heard_at(); },  // the STA's sweep rule
+    };
+    if (net::esp::start_air(as, hooks)) {
+        s_hello_caps.fetch_or(net::kCapEspnowV2, std::memory_order_relaxed);  // the IDF 6 driver is v2
+    } else {
+        ESP_LOGE(TAG, "ESP-NOW did not start: no node <-> node links this boot");
+    }
+}
+
 void start_wifi()
 {
     net::esp::Settings ws = wifi_settings();
@@ -975,8 +1177,9 @@ void start_wifi()
     std::memset(&ws.creds, 0, sizeof(ws.creds));
     if (ok) {
         s_hello_caps.fetch_or(net::kCapWifi, std::memory_order_relaxed);
+        start_espnow();  // esp_now_init needs esp_wifi_start (05 §5.3)
     } else {
-        ESP_LOGE(TAG, "Wi-Fi did not start: the hub is reachable over serial only");
+        ESP_LOGE(TAG, "Wi-Fi did not start: the hub is reachable over serial only (no ESP-NOW either)");
     }
 }
 
@@ -1008,6 +1211,8 @@ Core &start()
     fr_id_load(&s_identity);
     // Before anything can transmit (05 §5.5): frames only start once the core task runs.
     fr_id_commit_boot_epoch(&s_identity);
+    // The MAC ahead of build_hello(): Net seeds its jitter from hello_info() once the air is attached.
+    std::memcpy(s_hello.mac.data(), s_identity.mac, s_hello.mac.size());
     // Slow work (OTA download, flash and NVS writes) runs there from now on (03 §3.4).
     if (!worker::start()) {
         ESP_LOGE(TAG, "no fr_worker: OTA and other slow work cannot run this boot");
@@ -1020,6 +1225,9 @@ Core &start()
         s_reboot_timer = s_core.timer([] { diag::restart(s_reboot_bootloader); });
         s_serial_timer = s_core.timer([] {
             s_serial.poll();
+            if (s_stores) {
+                s_stores->retry();  // a store write a full fr_worker queue refused
+            }
             // NET for an image on probation even when the hub's address never resolves (no link comes up).
             if ((s_ota.required() & ~s_ota.health() & ota::kHealthNet) != 0 && net::esp::link_info().wifi_up) {
                 s_ota.health_set(ota::kHealthNet);
@@ -1034,6 +1242,19 @@ Core &start()
     s_net->attach(s_serial);
     s_net->attach(net::esp::tcp_link());
     s_net->attach(net::esp::udp_link());
+    // C5 (design c5 §3): ESP-NOW (down until run() starts Wi-Fi and channel C is known), and the directory
+    // and bindings from NVS, loaded now: before any capability can emit an event a binding fires on.
+    s_net->attach_air(net::esp::air_link());
+    s_stores.emplace(s_core, worker::get(), s_dir_blob, s_bind_blob);
+    s_net->attach_stores(s_stores->directory(), s_stores->bindings());
+    size_t bindings = 0;
+    for (const net::BindingSlot &b : s_net->bindings()) {
+        bindings += b.used ? 1 : 0;
+    }
+    if (bindings > 0 || s_net->directory().count > 0) {
+        ESP_LOGI(TAG, "%u bindings, %u directory entries from nvs", static_cast<unsigned>(bindings),
+                 static_cast<unsigned>(s_net->directory().count));
+    }
     // 03 §3.5 step 2, with its timer taken before the board's: a PENDING_VERIFY image's health deadline
     // runs from here, and the running image's fw_id is read once for HELLO, the banner and CHECK.
     start_ota();
@@ -1046,6 +1267,8 @@ Core &start()
 
 cap::Sink &sink()
 {
+    // Every emission goes through Net::event, which runs the bindings it triggers right there, before the
+    // event's send to the hub (07 §7.11): that is the local event hook, with nothing in between.
     return *s_net;
 }
 
@@ -1126,3 +1349,20 @@ const char *fw_id()
 }
 
 }  // namespace fr::core
+
+namespace fr::msg {
+
+Status send(uint16_t dst, std::string_view topic, std::span<const uint8_t> data, bool reliable)
+{
+    if (!core::s_net) {
+        return std::unexpected(Err::failed);  // before fr::core::start()
+    }
+    return core::msg_send(*core::s_net, dst, topic, data, reliable);
+}
+
+Status on(std::string_view topic, Handler handler)
+{
+    return core::s_msgs.add(topic, handler);
+}
+
+}  // namespace fr::msg

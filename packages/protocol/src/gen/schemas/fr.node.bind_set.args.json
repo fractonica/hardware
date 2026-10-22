@@ -2,8 +2,81 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:fractonica:schema:fr.node.bind_set.args",
   "title": "fr.node.bind_set arguments",
-  "description": "Store a binding (07 §7.11).",
+  "description": "Store a binding in its slot (07 §7.11), replacing what the slot held; the hub resolves and pre-encodes it.",
   "type": "object",
-  "properties": {},
+  "properties": {
+    "slot": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 15,
+      "description": "(0..15)"
+    },
+    "on_port": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "on_cls": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "3 EVENT | 7 MSG"
+    },
+    "on_kind": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "the event id (EVENT)"
+    },
+    "on_topic": {
+      "type": "string",
+      "maxLength": 32,
+      "description": "the MSG topic (MSG) (<= 32 UTF-8 bytes)"
+    },
+    "to_mac": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{2}){0,6}$",
+      "contentEncoding": "base16",
+      "description": "(<= 6 bytes)"
+    },
+    "to_addr": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "this node, another node, or 0xFFFF (MSG broadcast)"
+    },
+    "to_port": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "to_cls": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "4 CMD | 7 MSG"
+    },
+    "to_kind": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "the command id (CMD)"
+    },
+    "to_topic": {
+      "type": "string",
+      "maxLength": 32,
+      "description": "the MSG topic (MSG) (<= 32 UTF-8 bytes)"
+    },
+    "payload": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{2}){0,64}$",
+      "contentEncoding": "base16",
+      "description": "pre-encoded CMD fields, or the MSG data (<= 64 bytes)"
+    },
+    "reliable": {
+      "type": "boolean",
+      "description": "Q1: ACK_REQ, the target's RESULT or ACK, end-to-end retries"
+    }
+  },
   "additionalProperties": false
 }

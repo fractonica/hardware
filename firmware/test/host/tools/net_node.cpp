@@ -6,12 +6,17 @@
 // cache, expire_at and BYE before any board runs them. The real fr_ota core (fr::ota::Ota) runs on the OTA
 // fake of tools/ota_fake.hpp (design c4 §5): OFFERs download from the hub's node port with the board's own
 // HTTP GET (fr::ota::HttpGet), and with --ota-dir a restarted process boots what the OTA installed
-// (PENDING_VERIFY, health gate, rollback).
+// (PENDING_VERIFY, health gate, rollback). With --air-dir it also joins a fake air medium (design c5 §5):
+// ESP-NOW as UDP datagrams on loopback between the fr_net_node processes registered in that directory, under
+// the real driver's send discipline (fr_net/src/esp/air_sched.hpp), so several C++ nodes run node <-> node
+// delivery, flooding and bindings with or without the hub. The directory and the bindings persist in
+// --ota-dir (fr_dir.bin, fr_bind.bin, as nvs:fr_dir and nvs:fr_bind), written through the fr_worker fake.
 //
 //   fr_net_node --hub-tcp <port> --hub-udp <port> --mac <12 hex> [--host 127.0.0.1] [--addr <n>] [--net <n>]
 //               [--epoch <n>] [--hb-ms <n>] [--alias <a>] [--alias-rev <n>] [--fw <16 hex> | --fw-id <64 hex>]
 //               [--serial 1] [--hub-http <port>] [--ota-dir <dir>] [--version <label>] [--health-ms <n>]
-//               [--fault health]
+//               [--fault health] [--air-dir <dir> [--air-loss <pct>] [--air-seed <n>] [--air-rssi <dBm>]
+//               [--air-channel <n>] [--air-ack-ms <n>]]
 //   fr_net_node --make-image <path> [--version <label>] [--size <n>] [--board <b>] [--profile <p>]
 //               [--part <pp>] [--chip <n>] [--min-rev <n>] [--max-rev <n>] [--fault 0|1] [--seed <n>]
 //
@@ -24,23 +29,41 @@
 // --make-image writes an app image that passes this node's CHECK (06 §6.8 layout, the SHA-256 of the
 // rest appended) and prints `{"ev":"image","fw_id":"<64 hex>","size":<n>}`.
 //
+// --air-dir names the medium: each node registers `<mac>.port` there. --air-loss drops that percentage of the
+// datagrams this node receives (data and MAC ACKs), from --air-seed's generator; --air-rssi is the RSSI its
+// received frames report (default -50), --air-channel its channel C (default 6: a frame from another
+// channel is not heard), --air-ack-ms how long a unicast waits for its MAC ACK (default 3).
+//
 // Stdin takes one command per line: `state`, `udp_block <s>`, `drop_hub_link <s>`, `ip_block <s>` (TCP and
 // UDP lose every envelope, serial does not), `bye`, `tcp 0|1` (close TCP and stay off / reconnect), `usb 0|1`
 // (the serial link's USB host), `crash` (end like a panic: no BYE,
-// the next start sees the reset reason), `quit`, and with --serial the hub's `@fr1:` lines. Stdout gets
+// the next start sees the reset reason), `quit`, and with --serial the hub's `@fr1:` lines. C5 adds
+// `wifi_down <s>` (TCP and UDP down for s seconds, ESP-NOW and serial carry on; 0 ends it), `air_loss <pct>`,
+// `inject <gesture>` (the boot button, as input_simulate: click, double_click, long_press, press, release),
+// `msg <dst|broadcast> <topic> [data…]` and `msg_reliable <dst> <topic> [data…]` (fr::msg::send to a node
+// addr, 0 for the hub, this node's own addr or every node; the data is the rest of the line), `bind <hex>` (an encoded Binding, as fr.node.bind_set stores it), `unbind <slot|all>`,
+// `bindings`, `neighbors` and `directory`. Stdout gets
 // one JSON object per line (`{"ev":"..."}`): link changes, udp_ok changes, dispatched commands, LED levels,
 // `state` answers and `reboot` (`"reason":"ota"` after an install, `"rollback"` after a missed health
 // deadline: the process exits, and a restart with the same --ota-dir is the next boot); the OTA side adds
 // `ota_frame` (from the hub), `ota_tx` (to it), `ota_get` (each HTTP GET), `ota_boot`, `ota_valid` and
-// `ota_rollback`; with --serial also the node's `@fr1:` lines. Test code: it may allocate.
+// `ota_rollback`; with --serial also the node's `@fr1:` lines. C5 adds `air` (the medium joined), `msg` (a MSG
+// for this node: src, topic, data as text when UTF-8, len), `msg_sent`, `bind_set`, `bind_clear`, `bind`,
+// `unbind`, `bindings` (hex of the encoded BindingList), `neighbors`, `directory` (addr and MAC by addr), `wifi`,
+// `inject` and C5 counters in `state` (air_*, relay_*, bcast_*, bind_*, `nodes` by path, `medium` the fake air's
+// own, `msgs` per topic).
+// Test code: it may allocate.
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdarg>
@@ -50,6 +73,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -58,6 +82,7 @@
 #include "catalog.hpp"
 #include "fr/core/core.hpp"
 #include "fr/core/descriptor.hpp"
+#include "fr/core/node_net.hpp"
 #include "fr/core/port.hpp"
 #include "fr/hash.hpp"
 #include "fr/net/net.hpp"
@@ -67,6 +92,8 @@
 #include "messages.hpp"  // generated fr::proto::Descriptor
 #include "node.hpp"
 #include "tools/ota_fake.hpp"
+// The ESP-NOW driver's IDF-free send discipline; not on the include path, as it is private to fr_net/src/esp.
+#include "../../../components/fr_net/src/esp/air_sched.hpp"
 
 void ota_fake::emit(const char *fmt, ...)
 {
@@ -449,9 +476,12 @@ public:
     }
     ~UdpLink() { ::close(fd_); }
     LinkKind kind() const override { return LinkKind::udp; }
-    bool up() const override { return fd_ >= 0; }
+    bool up() const override { return fd_ >= 0 && enabled_; }
     fr::Status send(std::span<const uint8_t> envelope) override
     {
+        if (!enabled_) {
+            return std::unexpected(fr::Err::busy);
+        }
         const ssize_t n = ::sendto(fd_, envelope.data(), envelope.size(), 0, reinterpret_cast<const sockaddr *>(&to_), sizeof(to_));
         if (n != static_cast<ssize_t>(envelope.size())) {
             return std::unexpected(fr::Err::busy);
@@ -459,8 +489,12 @@ public:
         return {};
     }
 
+    /** `wifi_down`: no route to the hub while Wi-Fi is away. */
+    void enable(bool on) { enabled_ = on; }
+
 private:
     int fd_ = -1;
+    bool enabled_ = true;
     sockaddr_in to_{};
 };
 
@@ -484,6 +518,355 @@ struct Options {
     std::string version = "0.1.0";
     uint32_t health_ms = fr::ota::kHealthDeadlineMs;
     bool fault_health = false;
+    // The fake air medium (design c5 §5).
+    std::string air_dir;
+    uint32_t air_loss = 0;  // percent of received datagrams dropped
+    uint32_t air_seed = 1;
+    int8_t air_rssi = -50;
+    uint8_t air_channel = 6;
+    /** A unicast without its ACK this long failed: 250 B at 1 Mbps is about 2 ms, plus the ACK. Interop tests
+     * on a loaded host give the receiving process more time to answer. */
+    uint32_t air_ack_ms = 3;
+};
+
+/** A JSON string body: quotes, backslashes and control characters escaped. */
+std::string json_text(std::string_view s)
+{
+    std::string out;
+    for (const char ch : s) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += ch;
+        } else if (c < 0x20) {
+            char esc[8];
+            std::snprintf(esc, sizeof(esc), "\\u%04x", c);
+            out += esc;
+        } else {
+            out += ch;
+        }
+    }
+    return out;
+}
+
+/**
+ * The fake air medium (design c5 §5 interop): ESP-NOW as UDP datagrams on loopback. Each node binds a port
+ * and registers it as `<air-dir>/<mac>.port`; a broadcast is one datagram to every registered port but its
+ * own, a unicast one to the destination MAC's port, whose node answers with an ACK datagram: the MAC ACK. Loss
+ * drops received datagrams, data and ACKs alike (a lost ACK makes the sender retry, so the receiver sees the
+ * duplicate a real link would give it). On top runs the target driver's send discipline (air_sched.hpp) and
+ * receive filter (channel C, magic, net), so Net meets the air as on target.
+ *
+ * A datagram: `type ('D' data, 'A' ack) | src mac 6 | dst mac 6 | channel | id u32 LE | envelope`.
+ */
+class FakeAir final : public fr::net::AirLink, public fr::net::air::Radio
+{
+public:
+    /** The registry is read again at most this often (and when a unicast's MAC is not in it). */
+    static constexpr TimeUs kRefreshUs = 250'000;
+    static constexpr size_t kHead = 1 + 6 + 6 + 1 + 4;
+
+    struct Counters {
+        uint32_t tx = 0;      // datagrams sent (a broadcast counts once per receiver)
+        uint32_t rx = 0;      // frames handed to Net
+        uint32_t rx_bad = 0;  // dropped by the receive filter (channel C, magic, net, size)
+        uint32_t lost = 0;    // dropped by --air-loss
+        uint32_t acks = 0;    // MAC ACKs sent
+    };
+
+    FakeAir(HostCore &core, const Options &o) : core_(core), o_(o), loss_(o.air_loss), rng_(o.air_seed != 0 ? o.air_seed : 1)
+    {
+        std::copy(o.mac.begin(), o.mac.end(), mac_.begin());
+    }
+    FakeAir(const FakeAir &) = delete;
+    FakeAir &operator=(const FakeAir &) = delete;
+    ~FakeAir()
+    {
+        if (fd_ >= 0) {
+            ::close(fd_);
+            std::remove(registration().c_str());
+        }
+    }
+
+    /** Binds a loopback port and registers it (creating --air-dir, so the first node of a medium can). */
+    bool open()
+    {
+        if (::mkdir(o_.air_dir.c_str(), 0700) != 0 && errno != EEXIST) {
+            return false;
+        }
+        fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len = sizeof(a);
+        if (fd_ < 0 || ::bind(fd_, reinterpret_cast<sockaddr *>(&a), sizeof(a)) != 0 ||
+            ::getsockname(fd_, reinterpret_cast<sockaddr *>(&a), &len) != 0) {
+            return false;
+        }
+        ::fcntl(fd_, F_SETFL, ::fcntl(fd_, F_GETFL, 0) | O_NONBLOCK);
+        port_ = ntohs(a.sin_port);
+        ota_fake::write_file(registration(), std::to_string(port_));
+        if (!ota_fake::read_file(registration())) {
+            return false;  // unregistered, it would hear nothing and reach no one
+        }
+        emit(R"({"ev":"air","up":true,"port":%u,"channel":%u})", unsigned{port_}, unsigned{o_.air_channel});
+        return true;
+    }
+
+    void bind(fr::net::Net &net) { net_ = &net; }
+    int fd() const { return fd_; }
+    void set_loss(uint32_t pct) { loss_ = std::min<uint32_t>(pct, 100); }
+    const Counters &counters() const { return n_; }
+    const fr::net::air::Scheduler &scheduler() const { return sched_; }
+
+    // fr::net::AirLink
+    bool up() const override { return fd_ >= 0; }
+    fr::Status send(const fr::net::Mac &dst, std::span<const uint8_t> envelope, fr::net::AirPrio prio,
+                    uint32_t token) override
+    {
+        return sched_.send(dst, envelope, prio, token, core_.now());
+    }
+
+    // fr::net::air::Radio: peers need no setup here; the verdict comes from poll(), never from inside transmit().
+    bool add_peer(const fr::net::Mac &) override { return true; }
+    void del_peer(const fr::net::Mac &) override {}
+    bool transmit(const fr::net::Mac &dst, std::span<const uint8_t> frame) override
+    {
+        const uint32_t id = ++tx_id_;
+        const TimeUs now = core_.now();
+        if (fr::net::air::is_broadcast(dst)) {
+            refresh(now, false);
+            for (const auto &[mac, port] : peers_) {
+                if (mac != mac_) {
+                    datagram('D', dst, id, frame, port);
+                }
+            }
+            verdict(now, true);  // a broadcast is never ACKed: out is all it can say
+            return true;
+        }
+        uint16_t port = lookup(dst, now);
+        if (port != 0) {
+            datagram('D', dst, id, frame, port);
+        }
+        awaiting_ = id;
+        verdict(now + static_cast<TimeUs>(o_.air_ack_ms) * 1000, false);  // unless the ACK comes first
+        return true;
+    }
+    void arm(uint32_t delay_us) override { timer_at_ = core_.now() + delay_us; }
+    void disarm() override { timer_at_ = kNever; }
+    void done(uint32_t token, bool ok) override { net_->air_sent(token, ok); }
+
+    /** The socket is readable: frames to Net (after the filter, ACKing unicasts), ACKs to the verdict. */
+    void on_readable()
+    {
+        uint8_t buf[kHead + fr::net::air::kMtu + 64];
+        for (;;) {
+            const ssize_t got = ::recv(fd_, buf, sizeof(buf), 0);
+            if (got <= 0) {
+                return;
+            }
+            const size_t len = static_cast<size_t>(got);
+            if (len < kHead || lose()) {
+                n_.lost += len >= kHead ? 1 : 0;
+                continue;
+            }
+            fr::net::Mac src{};
+            fr::net::Mac dst{};
+            std::copy_n(buf + 1, 6, src.begin());
+            std::copy_n(buf + 7, 6, dst.begin());
+            const uint8_t channel = buf[13];
+            const uint32_t id = buf[14] | buf[15] << 8 | buf[16] << 16 | static_cast<uint32_t>(buf[17]) << 24;
+            const bool to_broadcast = fr::net::air::is_broadcast(dst);
+            if ((dst != mac_ && !to_broadcast) || channel != o_.air_channel) {
+                continue;  // not heard: another node's unicast, or another channel
+            }
+            if (buf[0] == 'A') {
+                if (!to_broadcast && awaiting_ != 0 && id == awaiting_) {
+                    awaiting_ = 0;
+                    verdict(core_.now(), true);
+                }
+                continue;
+            }
+            if (!to_broadcast) {
+                // The MAC ACK comes from the radio, before (and whatever) the driver's filter decides.
+                ++n_.acks;
+                datagram('A', src, id, {}, lookup(src, core_.now()));
+            }
+            const std::span<const uint8_t> env(buf + kHead, len - kHead);
+            if (env.size() < fr::wire::kHeaderSize || env.size() > fr::net::air::kMtu || env[0] != fr::wire::kMagicVer ||
+                static_cast<uint16_t>(env[8] | env[9] << 8) != o_.net) {
+                ++n_.rx_bad;
+                continue;
+            }
+            ++n_.rx;
+            const fr::net::RxMeta meta{.src_mac = src, .to_broadcast = to_broadcast, .rssi = o_.air_rssi, .channel = channel};
+            net_->receive_air(env, meta);
+            if (fd_ < 0) {
+                return;
+            }
+        }
+    }
+
+    /** The send callback's verdict and the driver timer, when due. */
+    void poll()
+    {
+        const TimeUs now = core_.now();
+        if (awaiting_ != 0 && now >= verdict_at_) {
+            // A process the host did not schedule for a while finds its ACK waiting in the socket: the radio
+            // would have taken it in time, so it counts before the wait is called lost.
+            on_readable();
+        }
+        if (verdict_at_ != kNever && now >= verdict_at_) {
+            verdict_at_ = kNever;
+            awaiting_ = 0;
+            sched_.sent(verdict_ok_, now);
+        }
+        if (timer_at_ != kNever && now >= timer_at_) {
+            timer_at_ = kNever;
+            sched_.timer(now);
+        }
+    }
+
+    TimeUs next_deadline() const { return std::min(verdict_at_, timer_at_); }
+
+private:
+    std::string registration() const { return o_.air_dir + "/" + ota_fake::hex(mac_) + ".port"; }
+
+    bool lose()
+    {
+        if (loss_ == 0) {
+            return false;
+        }
+        rng_ ^= rng_ << 13;
+        rng_ ^= rng_ >> 17;
+        rng_ ^= rng_ << 5;
+        if (rng_ % 100 < loss_) {
+            return true;
+        }
+        return false;
+    }
+
+    void verdict(TimeUs at, bool ok)
+    {
+        verdict_at_ = at;
+        verdict_ok_ = ok;
+    }
+
+    void datagram(char type, const fr::net::Mac &dst, uint32_t id, std::span<const uint8_t> envelope, uint16_t port)
+    {
+        if (port == 0) {
+            return;
+        }
+        uint8_t buf[kHead + fr::net::air::kMtu];
+        buf[0] = static_cast<uint8_t>(type);
+        std::copy(mac_.begin(), mac_.end(), buf + 1);
+        std::copy(dst.begin(), dst.end(), buf + 7);
+        buf[13] = o_.air_channel;
+        for (int i = 0; i < 4; ++i) {
+            buf[14 + i] = static_cast<uint8_t>(id >> (8 * i));
+        }
+        std::copy(envelope.begin(), envelope.end(), buf + kHead);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = htons(port);
+        ::sendto(fd_, buf, kHead + envelope.size(), 0, reinterpret_cast<const sockaddr *>(&a), sizeof(a));
+        ++n_.tx;
+    }
+
+    uint16_t lookup(const fr::net::Mac &mac, TimeUs now)
+    {
+        for (int pass = 0; pass < 2; ++pass) {
+            for (const auto &[m, port] : peers_) {
+                if (m == mac) {
+                    return port;
+                }
+            }
+            if (pass == 0) {
+                refresh(now, true);
+            }
+        }
+        return 0;
+    }
+
+    /** Reads `<mac>.port` registrations (at most every kRefreshUs unless `force`). */
+    void refresh(TimeUs now, bool force)
+    {
+        if (!force && now - refreshed_ < kRefreshUs && refreshed_ != 0) {
+            return;
+        }
+        refreshed_ = now;
+        peers_.clear();
+        DIR *d = ::opendir(o_.air_dir.c_str());
+        if (d == nullptr) {
+            return;
+        }
+        while (const dirent *e = ::readdir(d)) {
+            const std::string_view name = e->d_name;
+            fr::net::Mac m{};
+            if (name.size() != 17 || !name.ends_with(".port") || !parse_hex(name.substr(0, 12), m)) {
+                continue;
+            }
+            if (auto text = ota_fake::read_file(o_.air_dir + "/" + std::string(name))) {
+                const unsigned long port = std::strtoul(text->c_str(), nullptr, 10);
+                if (port > 0 && port <= 65535) {
+                    peers_.emplace_back(m, static_cast<uint16_t>(port));
+                }
+            }
+        }
+        ::closedir(d);
+    }
+
+    static bool parse_hex(std::string_view s, std::span<uint8_t> out) { return ota_fake::unhex(s, out); }
+
+    HostCore &core_;
+    const Options &o_;
+    fr::net::Mac mac_{};
+    fr::net::Net *net_ = nullptr;
+    fr::net::air::Scheduler sched_{*this};
+    int fd_ = -1;
+    uint16_t port_ = 0;
+    uint32_t loss_ = 0;
+    uint32_t rng_ = 1;
+    uint32_t tx_id_ = 0;
+    uint32_t awaiting_ = 0;  // the unicast whose ACK is awaited (its datagram id)
+    TimeUs verdict_at_ = kNever;
+    bool verdict_ok_ = false;
+    TimeUs timer_at_ = kNever;
+    TimeUs refreshed_ = 0;
+    std::vector<std::pair<fr::net::Mac, uint16_t>> peers_;
+    Counters n_;
+};
+
+/** nvs:fr_dir / nvs:fr_bind: a file in --ota-dir (written whole, like an NVS commit), else memory. */
+class FileBlob final : public fr::core::Blob
+{
+public:
+    explicit FileBlob(std::string path) : path_(std::move(path)) {}
+
+    size_t read(std::span<uint8_t> out) override
+    {
+        const std::optional<std::string> data = path_.empty() ? mem_ : ota_fake::read_file(path_);
+        if (!data || data->size() > out.size()) {
+            return 0;
+        }
+        std::memcpy(out.data(), data->data(), data->size());
+        return data->size();
+    }
+    bool write(std::span<const uint8_t> bytes) override
+    {
+        const std::string data(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+        if (path_.empty()) {
+            mem_ = data;
+        } else {
+            ota_fake::write_file(path_, data);
+        }
+        return true;
+    }
+
+private:
+    std::string path_;
+    std::optional<std::string> mem_;
 };
 
 class Device;
@@ -501,9 +884,10 @@ public:
     fr::Status set_groups(const fr::cap::NodeSetGroupsArgs &) override { return std::unexpected(fr::Err::unsupported); }
     fr::Status net_set(const fr::cap::NodeNetSetArgs &) override { return std::unexpected(fr::Err::unsupported); }
     fr::Status get_state() override;
-    fr::Status bind_set() override { return std::unexpected(fr::Err::unsupported); }
-    fr::Status bind_clear(const fr::cap::NodeBindClearArgs &) override { return std::unexpected(fr::Err::unsupported); }
-    fr::Status bind_list() override { return std::unexpected(fr::Err::unsupported); }
+    // Bindings (07 §7.11), as fr_core's NodeService: Net's table, saved through the stores.
+    fr::Status bind_set(const fr::cap::NodeBindSetArgs &args) override;
+    fr::Status bind_clear(const fr::cap::NodeBindClearArgs &args) override;
+    std::expected<fr::cap::NodeBindListResult, fr::Err> bind_list() override;
 
 private:
     Device &d_;
@@ -522,6 +906,12 @@ public:
     }
 
     void set_net(fr::net::Net &net) { net_ = &net; }
+    fr::net::Net &net() { return *net_; }
+    std::span<uint8_t> bind_buf() { return bind_buf_; }
+    /** The fake air medium joined: HELLO caps espnow_v2. */
+    void set_air(bool on) { air_ = on; }
+    /** `wifi_down`: link_info() says Wi-Fi is away. */
+    void set_wifi(bool up) { wifi_up_ = up; }
     void set_ota(fr::ota::Ota &ota, const ota_fake::MemFlash &flash)
     {
         ota_ = &ota;
@@ -585,7 +975,7 @@ public:
         h.descriptor_hash = fr::wire::descriptor_hash(descriptor());
         h.board_hash = fr::wire::board_hash("esp32c6-supermini");
         h.caps = fr::net::kCapWifi | fr::net::kCapInjectEnabled |
-                 (o_.addr != fr::proto::kAddrUnassigned ? fr::net::kCapProvisioned : 0);
+                 (o_.addr != fr::proto::kAddrUnassigned ? fr::net::kCapProvisioned : 0) | (air_ ? fr::net::kCapEspnowV2 : 0);
         h.hb_interval_ms = o_.hb_ms;
         h.reset_reason = 1;
         // As fr_core: PENDING_VERIFY until the health gate marks the image valid.
@@ -605,7 +995,10 @@ public:
     }
     fr::net::LinkInfo link_info() override
     {
-        return {.wifi_up = true, .channel = 6, .bssid = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60}, .rssi = -48};
+        if (!wifi_up_) {
+            return {};
+        }
+        return {.wifi_up = true, .channel = o_.air_channel, .bssid = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60}, .rssi = -48};
     }
     fr::net::Vitals vitals() override
     {
@@ -618,6 +1011,17 @@ public:
              static_cast<unsigned>(h.seq), (h.flags & fr::wire::kFlagAckReq) != 0 ? "true" : "false", body.size());
         if (ota_ != nullptr) {
             ota_->on_frame(h.kind, body, reply);  // as fr_core's NetHost
+        }
+    }
+    void msg(uint16_t src, std::string_view topic, std::span<const uint8_t> data) override
+    {
+        const std::string_view text(reinterpret_cast<const char *>(data.data()), data.size());
+        if (fr::wire::utf8_valid(data)) {
+            emit(R"({"ev":"msg","src":%u,"topic":"%s","data":"%s","len":%zu})", unsigned{src}, json_text(topic).c_str(),
+                 json_text(text).c_str(), data.size());
+        } else {
+            emit(R"({"ev":"msg","src":%u,"topic":"%s","data_hex":"%s","len":%zu})", unsigned{src},
+                 json_text(topic).c_str(), ota_fake::hex(data).c_str(), data.size());
         }
     }
 
@@ -635,6 +1039,9 @@ private:
     size_t desc_len_ = 0;
     TimeUs reboot_at_ = kNever;
     const char *reboot_reason_ = nullptr;
+    uint8_t bind_buf_[fr::core::kBindListMax];
+    bool air_ = false;
+    bool wifi_up_ = true;
 };
 
 /** fr_core's OtaHost on this node: Net::send_ota (each frame reported), the hub's HTTP port, BYE ota. */
@@ -718,6 +1125,27 @@ fr::Status NodeCap::get_state()
     return {};
 }
 
+fr::Status NodeCap::bind_set(const fr::cap::NodeBindSetArgs &args)
+{
+    const fr::Status st = fr::core::bind_set(d_.net(), args);
+    emit(R"({"ev":"bind_set","slot":%u,"on_port":%u,"on_cls":%u,"to_addr":%u,"to_port":%u,"to_cls":%u,"ok":%s})",
+         unsigned{args.slot}, unsigned{args.on_port}, unsigned{args.on_cls}, unsigned{args.to_addr},
+         unsigned{args.to_port}, unsigned{args.to_cls}, st ? "true" : "false");
+    return st;
+}
+
+fr::Status NodeCap::bind_clear(const fr::cap::NodeBindClearArgs &args)
+{
+    const fr::Status st = fr::core::bind_clear(d_.net(), args);
+    emit(R"({"ev":"bind_clear","slot":%u,"ok":%s})", unsigned{args.slot}, st ? "true" : "false");
+    return st;
+}
+
+std::expected<fr::cap::NodeBindListResult, fr::Err> NodeCap::bind_list()
+{
+    return fr::core::bind_list(d_.net(), d_.bind_buf());
+}
+
 bool parse_hex(std::string_view s, std::span<uint8_t> out)
 {
     if (s.size() != out.size() * 2) {
@@ -738,7 +1166,8 @@ bool parse_hex(std::string_view s, std::span<uint8_t> out)
 {
     std::fprintf(stderr, "fr_net_node: %s\nusage: fr_net_node --hub-tcp P --hub-udp P --mac 12hex [--host H] [--addr N] "
                          "[--net N] [--epoch N] [--hb-ms N] [--alias A] [--alias-rev N] [--fw 16hex | --fw-id 64hex] "
-                         "[--serial 1] [--hub-http P] [--ota-dir D] [--version V] [--health-ms N] [--fault health]\n"
+                         "[--serial 1] [--hub-http P] [--ota-dir D] [--version V] [--health-ms N] [--fault health] "
+                         "[--air-dir D [--air-loss PCT] [--air-seed N] [--air-rssi DBM] [--air-channel N] [--air-ack-ms N]]\n"
                          "       fr_net_node --make-image PATH [--version V] [--size N] [--board B] [--profile P] "
                          "[--part X] [--chip N] [--min-rev N] [--max-rev N] [--fault 0|1] [--seed N]\n", why);
     std::exit(64);
@@ -800,6 +1229,18 @@ Options parse(int argc, char **argv)
                 usage("--fault takes `health`");
             }
             o.fault_health = true;
+        } else if (k == "--air-dir") {
+            o.air_dir = v;
+        } else if (k == "--air-loss") {
+            o.air_loss = static_cast<uint32_t>(std::min<unsigned long>(n, 100));
+        } else if (k == "--air-seed") {
+            o.air_seed = static_cast<uint32_t>(n);
+        } else if (k == "--air-rssi") {
+            o.air_rssi = static_cast<int8_t>(std::clamp<long>(std::strtol(v, nullptr, 10), -127, 0));
+        } else if (k == "--air-channel") {
+            o.air_channel = static_cast<uint8_t>(n);
+        } else if (k == "--air-ack-ms") {
+            o.air_ack_ms = static_cast<uint32_t>(std::clamp<unsigned long>(n, 1, 90));  // under the driver's 100 ms guard
         } else {
             usage("unknown option");
         }
@@ -810,18 +1251,121 @@ Options parse(int argc, char **argv)
     return o;
 }
 
-void print_state(const fr::net::State &s)
+/** The C5 part of `state`: Net's ESP-NOW link and counters, the medium's, the tables. */
+std::string c5_state(const fr::net::Net &net, const FakeAir *air)
 {
+    const fr::net::State s = net.state();
+    const fr::net::LinkState &l = s.link(LinkKind::espnow);
+    size_t bindings = 0;
+    for (const fr::net::BindingSlot &b : net.bindings()) {
+        bindings += b.used ? 1 : 0;
+    }
+    char head[1024];
+    std::snprintf(head, sizeof(head),
+                  R"("air_up":%s,"air_tx":%u,"air_tx_fail":%u,"air_rx":%u,"air_rx_drop":%u,"air_retries":%u,)"
+                  R"("relay_seeded":%u,"relay_relayed":%u,"relay_cancelled":%u,"relay_dropped":%u,)"
+                  R"("bcast_delivered":%u,"bcast_dup":%u,"bcast_old":%u,"bcast_watermark":%u,)"
+                  R"("bind_fired":%u,"bind_failed":%u,"bind_rtt_p50_us":%u,"bindings":%zu,"directory":%zu,"neighbors":%zu,)"
+                  R"("nodes":{"delivered":%u,"dup":%u,"old":%u,"sent":%u,"via_espnow":%u,"via_hub":%u,"via_flood":%u,"failed":%u,"resolves":%u})",
+                  l.up ? "true" : "false", l.tx, l.tx_fail, l.rx, l.rx_drop, l.retries, s.relay.seeded, s.relay.relayed,
+                  s.relay.cancelled, s.relay.dropped, s.bcast.delivered, s.bcast.dup, s.bcast.old, s.bcast.watermark,
+                  s.bindings.fired, s.bindings.failed, s.bindings.rtt_p50_us, bindings, net.directory().count,
+                  net.neighbors().count, s.nodes.delivered, s.nodes.dup, s.nodes.old, s.nodes.sent, s.nodes.via_espnow,
+                  s.nodes.via_hub, s.nodes.via_flood, s.nodes.failed, s.nodes.resolves);
+    std::string out = head;
+    if (air != nullptr) {
+        const FakeAir::Counters &c = air->counters();
+        const fr::net::air::SchedStats &d = air->scheduler().stats();
+        char medium[512];
+        std::snprintf(medium, sizeof(medium),
+                      R"(,"medium":{"tx":%u,"rx":%u,"rx_bad":%u,"lost":%u,"acks":%u,"sent":%u,"failed":%u,"link_retries":%u,"refused":%u,"peers":%zu})",
+                      c.tx, c.rx, c.rx_bad, c.lost, c.acks, d.sent, d.failed, d.retries, d.refused,
+                      air->scheduler().peers());
+        out += medium;
+    }
+    out += R"(,"msgs":{)";
+    for (const fr::net::MsgStats::Topic &t : net.msg_stats().topics) {
+        if (t.name[0] != '\0') {
+            out += "\"" + json_text(t.name) + "\":" + std::to_string(t.n) + ",";
+        }
+    }
+    out += R"("other":)" + std::to_string(net.msg_stats().other) + "}";
+    return out;
+}
+
+void print_state(const fr::net::Net &net, const FakeAir *air)
+{
+    const fr::net::State s = net.state();
     const auto &tcp = s.link(LinkKind::tcp);
     const auto &udp = s.link(LinkKind::udp);
     const auto &ser = s.link(LinkKind::serial);
     emit(R"({"ev":"state","serial_session":%s,"serial_tx":%u,"serial_rx":%u,"session":%s,"udp_ok":%s,"time_synced":%s,"hub_epoch":%u,"tcp_tx":%u,"tcp_rx":%u,"udp_tx":%u,)"
          R"("udp_retries":%u,"rx_drop":%u,"cmds":%u,"dup":%u,"old":%u,"cached_replies":%u,"sessions_lost":%u,)"
-         R"("events_dropped":%u,"delivery_failed":%u,"udp_blocked":%s,"ip_blocked":%s,"hook_drops":%u})",
+         R"("events_dropped":%u,"delivery_failed":%u,"udp_blocked":%s,"ip_blocked":%s,"hook_drops":%u,%s})",
          ser.session ? "true" : "false", ser.tx, ser.rx, tcp.session ? "true" : "false", udp.udp_ok ? "true" : "false", s.time_synced() ? "true" : "false", unsigned{s.hub_epoch},
          tcp.tx, tcp.rx, udp.tx, udp.retries, tcp.rx_drop + udp.rx_drop, s.cmds, s.dup, s.old, s.cached_replies,
          s.sessions_lost, s.events_dropped, s.delivery_failed, s.udp_blocked ? "true" : "false",
-         s.ip_blocked ? "true" : "false", s.hook_drops);
+         s.ip_blocked ? "true" : "false", s.hook_drops, c5_state(net, air).c_str());
+}
+
+/** `msg <dst|broadcast> <topic> [data…]`: fr::msg::send from stdin. */
+void stdin_msg(fr::net::Net &net, std::string_view args, bool reliable)
+{
+    auto word = [&args]() {
+        while (!args.empty() && args.front() == ' ') {
+            args.remove_prefix(1);
+        }
+        const size_t sp = std::min(args.find(' '), args.size());
+        const std::string_view w = args.substr(0, sp);
+        args.remove_prefix(sp);
+        return w;
+    };
+    const std::string_view dst_text = word();
+    const std::string_view topic = word();
+    if (!args.empty() && args.front() == ' ') {
+        args.remove_prefix(1);
+    }
+    const uint16_t dst = dst_text == "broadcast"
+                             ? fr::msg::kBroadcast
+                             : static_cast<uint16_t>(std::strtoul(std::string(dst_text).c_str(), nullptr, 0));
+    const fr::Status st = fr::core::msg_send(
+        net, dst, topic, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(args.data()), args.size()), reliable);
+    emit(R"({"ev":"msg_sent","dst":%u,"topic":"%s","ok":%s,"error":"%s"})", unsigned{dst}, json_text(topic).c_str(),
+         st ? "true" : "false", st ? "" : fr::err_name(st.error()));
+}
+
+/** `neighbors`: the neighbour table. */
+void print_neighbors(const fr::net::Net &net, TimeUs now)
+{
+    const fr::net::Neighbors nb = net.neighbors();
+    std::string items;
+    for (size_t i = 0; i < nb.count && i < nb.items.size(); ++i) {
+        const fr::net::Neighbor &e = nb.items[i];
+        char one[192];
+        std::snprintf(one, sizeof(one), R"(%s{"mac":"%s","addr":%u,"rssi":%d,"age_ms":%lld,"ack_ok":%u,"ack_fail":%u})",
+                      i == 0 ? "" : ",", ota_fake::hex(e.mac).c_str(), unsigned{e.addr}, int{e.rssi},
+                      static_cast<long long>((now - e.last_heard) / 1000), e.ack_ok, e.ack_fail);
+        items += one;
+    }
+    emit(R"({"ev":"neighbors","items":[%s]})", items.c_str());
+}
+
+/** `directory`: the directory as NET/DIRECTORY (or a RESOLVE answer) left it, by addr. */
+void print_directory(const fr::net::Net &net)
+{
+    const fr::net::Directory &d = net.directory();
+    const auto end = d.entries.begin() + static_cast<std::ptrdiff_t>(std::min(d.count, d.entries.size()));
+    std::vector<fr::net::DirEntry> sorted(d.entries.begin(), end);
+    std::sort(sorted.begin(), sorted.end(),
+              [](const fr::net::DirEntry &a, const fr::net::DirEntry &b) { return a.addr < b.addr; });
+    std::string items;
+    for (const fr::net::DirEntry &e : sorted) {
+        char one[64];
+        std::snprintf(one, sizeof(one), R"(%s{"addr":%u,"mac":"%s"})", items.empty() ? "" : ",", unsigned{e.addr},
+                      ota_fake::hex(e.mac).c_str());
+        items += one;
+    }
+    emit(R"({"ev":"directory","items":[%s]})", items.c_str());
 }
 
 /** `--make-image PATH ...`: an image this node's CHECK accepts, for the hub's interop tests. */
@@ -906,6 +1450,11 @@ int main(int argc, char **argv)
     cfg.heartbeat_ms = o.hb_ms;
     fr::net::Net net(core, node, cfg);
     node.set_net(net);
+    // nvs:fr_dir and nvs:fr_bind (design c5 §3): in --ota-dir across boots, written through the worker fake.
+    FileBlob dir_blob(o.ota_dir.empty() ? std::string() : o.ota_dir + "/fr_dir.bin");
+    FileBlob bind_blob(o.ota_dir.empty() ? std::string() : o.ota_dir + "/fr_bind.bin");
+    fr::core::NetStores stores(core, worker, dir_blob, bind_blob);
+    net.attach_stores(stores.directory(), stores.bindings());
     for (fr::PortEntry &p : ports) {
         p.cap->attach(p.port, p.name, net);
     }
@@ -923,6 +1472,18 @@ int main(int argc, char **argv)
     }
     net.attach(tcp);
     net.attach(udp);
+    std::optional<FakeAir> air;
+    if (!o.air_dir.empty()) {
+        air.emplace(core, o);
+        if (!air->open()) {
+            std::fprintf(stderr, "fr_net_node: cannot join the air medium in %s\n", o.air_dir.c_str());
+            return 1;
+        }
+        air->bind(net);
+        net.attach_air(*air);
+        node.set_air(true);
+        core.post([&net] { net.link_changed(LinkKind::espnow); });  // as the driver posts it once up
+    }
 
     // fr_core's OTA wiring (design c4 §3) on the fake sink.
     fr::ota::Ota ota;
@@ -965,9 +1526,26 @@ int main(int argc, char **argv)
     bool quit = false;
     bool udp_ok = false;
     bool net_up = false;
+    TimeUs wifi_back_at = kNever;  // `wifi_down` ends then
+    auto set_wifi = [&](bool up) {
+        tcp.enable(up);
+        udp.enable(up);
+        node.set_wifi(up);
+        core.post([&net] { net.link_changed(LinkKind::udp); });
+        emit(R"({"ev":"wifi","up":%s})", up ? "true" : "false");
+    };
     while (!quit) {
         tcp.try_connect();
         core.run_ready();
+        if (air) {
+            air->poll();
+            core.run_ready();
+        }
+        stores.retry();
+        if (wifi_back_at != kNever && core.now() >= wifi_back_at) {
+            wifi_back_at = kNever;
+            set_wifi(true);
+        }
         if (!net_up && tcp.fd() >= 0) {
             net_up = true;
             ota.health_set(fr::ota::kHealthNet);  // NET: the network is there (Wi-Fi up on target)
@@ -994,15 +1572,20 @@ int main(int argc, char **argv)
             break;
         }
         const TimeUs now = core.now();
-        const TimeUs next = worker.idle() ? std::min({core.next_deadline(), tcp.retry_at(), node.reboot_at(), now + 100'000}) : now;
+        const TimeUs next = worker.idle() ? std::min({core.next_deadline(), tcp.retry_at(), node.reboot_at(), now + 100'000,
+                                                      air ? air->next_deadline() : kNever, wifi_back_at})
+                                          : now;
+        // The driver's timers run in microseconds (link retries 2 and 4 ms): poll() rounds up to the ms.
         const int timeout_ms = static_cast<int>(std::max<TimeUs>(0, (next - now + 999) / 1000));
-        std::array<pollfd, 2> fds{{{STDIN_FILENO, POLLIN, 0}, {tcp.fd(), POLLIN, 0}}};
-        const nfds_t nfds = tcp.fd() >= 0 ? 2 : 1;
-        if (::poll(fds.data(), nfds, timeout_ms) < 0 && errno != EINTR) {
+        std::array<pollfd, 3> fds{{{STDIN_FILENO, POLLIN, 0}, {tcp.fd(), POLLIN, 0}, {air ? air->fd() : -1, POLLIN, 0}}};
+        if (::poll(fds.data(), fds.size(), timeout_ms) < 0 && errno != EINTR) {
             return 1;
         }
-        if (nfds == 2 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        if (tcp.fd() >= 0 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
             tcp.on_readable();
+        }
+        if (air && (fds[2].revents & POLLIN) != 0) {
+            air->on_readable();
         }
         if ((fds[0].revents & (POLLIN | POLLHUP)) != 0) {
             char buf[4096];
@@ -1019,7 +1602,7 @@ int main(int argc, char **argv)
                 if (cmd.starts_with(fr::wire::kLinePrefix)) {
                     serial.on_line(cmd);
                 } else if (cmd == "state") {
-                    print_state(net.state());
+                    print_state(net, air ? &*air : nullptr);
                 } else if (cmd.starts_with("udp_block")) {
                     net.udp_block(arg);
                 } else if (cmd.starts_with("drop_hub_link")) {
@@ -1030,6 +1613,52 @@ int main(int argc, char **argv)
                     tcp.enable(arg != 0);
                 } else if (cmd.starts_with("usb ")) {
                     serial.set_host(arg != 0);
+                } else if (cmd.starts_with("wifi_down")) {
+                    // As `net wifi_down` on target: TCP and UDP go, ESP-NOW and serial stay.
+                    if (arg == 0) {
+                        if (wifi_back_at != kNever) {
+                            wifi_back_at = kNever;
+                            set_wifi(true);
+                        }
+                    } else {
+                        if (wifi_back_at == kNever) {
+                            set_wifi(false);
+                        }
+                        wifi_back_at = core.now() + static_cast<TimeUs>(arg) * 1'000'000;
+                    }
+                } else if (cmd.starts_with("air_loss")) {
+                    if (air) {
+                        air->set_loss(arg);
+                    }
+                } else if (cmd.starts_with("msg_reliable ")) {
+                    stdin_msg(net, std::string_view(cmd).substr(13), true);
+                } else if (cmd.starts_with("msg ")) {
+                    stdin_msg(net, std::string_view(cmd).substr(4), false);
+                } else if (cmd.starts_with("bind ")) {
+                    std::string_view h = std::string_view(cmd).substr(5);
+                    std::vector<uint8_t> bytes(h.size() / 2);
+                    const bool hex_ok = h.size() % 2 == 0 && ota_fake::unhex(h, bytes);
+                    const fr::Status st = hex_ok ? net.set_binding(bytes) : fr::Status{std::unexpected(fr::Err::invalid_args)};
+                    emit(R"({"ev":"bind","ok":%s})", st ? "true" : "false");
+                } else if (cmd.starts_with("unbind ")) {
+                    const bool all = cmd.ends_with(" all");
+                    const fr::Status st = net.clear_binding(all ? fr::net::kBindSlotAll : static_cast<uint8_t>(arg));
+                    emit(R"({"ev":"unbind","ok":%s})", st ? "true" : "false");
+                } else if (cmd == "bindings") {
+                    const auto list = net.encode_bindings(node.bind_buf());
+                    emit(R"({"ev":"bindings","ok":%s,"hex":"%s"})", list ? "true" : "false",
+                         list ? ota_fake::hex(*list).c_str() : "");
+                } else if (cmd == "neighbors") {
+                    print_neighbors(net, core.now());
+                } else if (cmd == "directory") {
+                    print_directory(net);
+                } else if (cmd.starts_with("inject ")) {
+                    // A gesture on the boot button, as the hub's input_simulate: its events, and the bindings
+                    // they fire, go through Net like a real press (T-NN without a hub).
+                    fr::cap::ButtonGesture g{};
+                    const bool known = fr::cap::from_name(std::string_view(cmd).substr(7), g);
+                    const fr::Status st = known ? button.inject({.gesture = g}) : fr::Status{std::unexpected(fr::Err::invalid_args)};
+                    emit(R"({"ev":"inject","ok":%s})", st ? "true" : "false");
                 } else if (cmd == "bye") {
                     net.bye(fr::net::kByeShutdown);
                 } else if (cmd == "crash") {
@@ -1044,6 +1673,6 @@ int main(int argc, char **argv)
             }
         }
     }
-    print_state(net.state());
+    print_state(net, air ? &*air : nullptr);
     return 0;
 }
