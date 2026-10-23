@@ -1,0 +1,192 @@
+M1 demo (§11.5) step 8 transcript, 2026-10-23, against the fresh demo hub (FR_HOME=~/fr-demo-home).
+A fresh Claude Code session with only the Fractonica plugin (`claude --plugin-dir …/plugin`, Haiku 5.5);
+pasted by the user. Tool-call details are collapsed as Claude Code shows them.
+
+▗ ▗   ▖ ▖  Claude Code v2.1.308
+           Haiku 5.5 · Claude Max
+ ▘▘   ▝▝   ~/projects/fractonica-hardware
+
+❯ make pad-c3's LED blink when pad-c6's BOOT is pressed, prove it, and report
+  the latency
+
+  Called plugin:fractonica:fractonica, ran 3 shell commands (ctrl+o to expand)
+
+⏺ The firmware is generic: each pad exposes capabilities (fr.button on c6,
+  fr.led on c3), so this should be a hub binding rather than a firmware change.
+  Let me check the capabilities and the verify workflow.
+
+⏺ Skill(fractonica:e2e-verify)
+  ⎿  Successfully loaded skill
+
+  Called plugin:fractonica:fractonica 2 times (ctrl+o to expand)
+
+⏺ The skill's plan matches what I found: bind pad-c6.boot.down to
+  pad-c3.status.blink as a node-to-node binding, then prove it. The existing
+  bindings are ping → blink on both pads, so I'll check slot assignment before
+  writing anything. Loading the schemas first.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ Binding is pushed to pad-c6 slot 1 (slot 0 is the existing ping binding, left
+  alone). Now the proof: simulate a click on pad-c6's BOOT, then wait for
+  pad-c3's LED effect after that cursor.
+
+  Called plugin:fractonica:fractonica 2 times (ctrl+o to expand)
+
+⏺ The binding fired and pad-c3's LED effect completed. Now I'll repeat the press
+  so there are enough samples for the latency report.
+
+  Called plugin:fractonica:fractonica 18 times (ctrl+o to expand)
+
+⏺ That's 10 presses, each confirmed on pad-c3. Pulling latency now, while the
+  samples are still in the hub's memory.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ The LED on pad-c3 now blinks each time pad-c6's BOOT is pressed. The link runs
+  node to node over ESP-NOW, so the hub is not in the path. No firmware or repo
+  files changed.
+
+  What I did
+  - Bound pad-c6.boot.down → pad-c3.status.blink with count: 1. The hub wrote it
+    to pad-c6's slot 1, and the existing ping binding in slot 0 is untouched.
+  - Proof: I simulated 10 BOOT clicks on pad-c6. Each one produced a
+    node.binding_fired on pad-c6 (path 0, espnow, target status 0) and a
+    status.effect_done (effect blink) on pad-c3, after that press's cursor.
+
+  Latency (10 presses, 300 s window, from latency_stats)
+
+  | Leg                                           | p50     | p99     |
+  | Binding trigger → pad-c3 RESULT (ESP-NOW)     | 4.8 ms  | 9.6 ms  |
+  | pad-c6 input → hub (3 events per click, n=30) | 11.3 ms | 56.8 ms |
+
+  The hub's event loop p99 was 59.8 ms over the same window. That delay only
+  affects the hub-side input-to-hub figure. The binding leg bypasses the hub, so
+  the 4.8 ms number is not affected by it.
+
+  Not verified
+  - I cannot see the LED. The proof is the firmware's effect_done event, which
+    means the blink ran. Please confirm by eye.
+  - I did not test a real finger press; these were simulated inject gestures. A
+    real press is the next check, if you want it.
+
+  To undo: binding_clear on pad-c6, slot 1. The binding lives on the node's
+  flash, so it persists across hub restarts.
+
+✻ Cooked for 1m 21s · done 4:18 PM
+
+❯ change a log line and roll it out to all nodes over Wi-Fi
+
+  Searched for 1 pattern, ran 2 shell commands (ctrl+o to expand)
+
+⏺ The fr: ready banner is a hub contract (fr wait log "fr: ready id=<id>"), so
+  I'll leave it alone. Checking whether any test asserts the identify line
+  before I change it.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ No test asserts that line, so I'll change it. The skill for the build and
+  rollout comes next.
+
+⏺ Update(firmware/components/fr_core/src/core.cpp)
+  ⎿  Added 1 line, removed 1 line
+      -        ESP_LOGI(TAG, "identify %u ms", static_cast<unsigned>(args.ms));
+      +        ESP_LOGI(TAG, "identify: blinking for %u ms", static_cast<unsigned>(args.ms));
+
+⏺ Skill(fractonica:build-deploy)
+  ⎿  Successfully loaded skill
+
+⏺ The skill's rule for expect_log is that the new line must show up in the logs
+  on its own. My edit is only emitted by identify, so it won't appear at boot.
+  I'll use expect_event: "node.boot" for the rollout, then trigger identify to
+  check the new text directly. Checking the working tree and ports first.
+
+  Ran 1 shell command (ctrl+o to expand)
+  ⎿  Found 10 new diagnostic issues in 1 file (ctrl+o to expand)
+
+⏺ Those clang diagnostics come from the editor's language server, which has no
+  ESP-IDF include paths. The change is one string literal, so the hub build is
+  the real check. Starting the Wi-Fi rollout to both online nodes.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ Both nodes updated over Wi-Fi and their node.boot events matched. Now the
+  proof that the new text is what's running: trigger identify on each node and
+  assert the new log line in its USB log.
+
+  Called plugin:fractonica:fractonica 3 times (ctrl+o to expand)
+
+⏺ I changed the identify log line and rolled it out to both nodes over Wi-Fi.
+  Both are running the new build and the new text shows in their logs.
+
+  - Change: firmware/components/fr_core/src/core.cpp. identify %u ms is now
+    identify: blinking for %u ms. No test asserts that line.
+  - Rollout: deploy to both online nodes, via Wi-Fi. Both came back as updated
+    and expect: matched on node.boot.
+    - pad-c3: fw_id 18a91e60…f0f5
+    - pad-c6: fw_id a5bf6c1f…75fa5
+  - Proof: I sent node.identify {ms: 1000} to both nodes. Each USB log then
+    contained I (…) fr: identify: blinking for 1000 ms.
+
+  I used expect_event: node.boot instead of expect_log, because the new line
+  only prints when identify runs, not at boot. The editor flagged clang errors
+  in core.cpp (missing fr/core.hpp, undeclared identifiers). They come from the
+  editor running without the ESP-IDF include paths. The hub's build succeeded
+  for both profiles, so I treated them as false positives.
+
+  Nothing is committed. The change is only in the working tree.
+
+✻ Worked for 1m 14s · done 4:19 PM
+
+❯ switch pad-c6 to the c6-pad-mono profile
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Profile is c6-pad-mono: a mono GPIO LED instead of the WS2812 on c6-pad.
+  Building it first.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ The build passed. The two strapping-pin warnings are informational: the BOOT
+  button is on GPIO9 and the LED on GPIO15, which is the existing wiring.
+  Flashing pad-c6 over USB with the full plan, which keeps its identity.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ Flashed with erased: [], so the NVS identity survived. Now I'm waiting for
+  pad-c6 to come back online on the new firmware, then checking its profile, LED
+  and bindings.
+
+  Called plugin:fractonica:fractonica 3 times (ctrl+o to expand)
+
+⏺ The node is up on the new fw_id with profile c6-pad-mono. Now I'm checking
+  that the blink actually ran, and that the BOOT→pad-c3 binding survived the
+  flash.
+
+  Called plugin:fractonica:fractonica 3 times (ctrl+o to expand)
+
+⏺ pad-c6 is now running the c6-pad-mono profile.
+
+  - Build: node/c6-pad-mono/debug/f5a3dc42c0bc, no diagnostics. Two
+    strapping-pin warnings, both expected for this wiring: BOOT is GPIO9 and the
+    LED is GPIO15.
+  - Flash: full plan over USB. Identity was kept (addr 2, alias pad-c6, same
+    net) and no flash regions were erased.
+  - Verified:
+    - pad-c6 is online on fw_id f5a3dc42…, with the profile now c6-pad-mono and
+      ota_state valid.
+    - status.blink {count: 3} ran and emitted status.effect_done (blink).
+    - selftest passes both pins: the BOOT idle level is released and the LED
+      drive/readback is ok.
+    - The live binding table has both slots: the ping binding in slot 0 and the
+      BOOT→pad-c3 blink binding in slot 1. Both match the registry.
+  - Not re-tested: I did not press BOOT again after the flash, so the end-to-end
+    BOOT→pad-c3 path is only confirmed by the binding table, not a fresh press.
+  - Minor: device_get still lists the old status.brightness and status.color
+    properties from the WS2812 profile. The mono LED has no colour, so these are
+    probably stale mirrors. The blink ran fine.
+
+  The core.cpp identify-log edit from earlier is included in this build (the
+  build reports the tree as dirty). Nothing is committed.
+
+✻ Worked for 50s · done 4:20 PM

@@ -1,6 +1,6 @@
 # Fractonica — framework spec (v0.3)
 
-**Status:** 2026-10-23: M1's (the PoC's) gates are met; its §11.5 definition-of-done run from a fresh hub is still open. All twelve gates have passed on the C3s and the C6: ten re-run at step 7, T-LAT and T-AGENT carried forward from C6. The S3 joined five of them (11 §11.4 "M1 final re-run"). The §11.5 demo ran on the lab hub; its run from a fresh hub is still open. M2 is next. Earlier, on 2026-10-20: your answers to the v0.2 questions were folded in (see [Decisions you made](#decisions-you-made)), and the toolchain was installed (01 §1.6).
+**Status:** 2026-10-23: M1 (the PoC) is complete: its §11.5 definition-of-done demo ran end to end from a fresh hub and blank boards (11 §11.5). All twelve gates have passed on the C3s and the C6: ten re-run at step 7, T-LAT and T-AGENT carried forward from C6. The S3 joined five of them (11 §11.4 "M1 final re-run"). M2 is next. Earlier, on 2026-10-20: your answers to the v0.2 questions were folded in (see [Decisions you made](#decisions-you-made)), and the toolchain was installed (01 §1.6).
 
 **What it is:** an agent-first framework for prototyping ESP32 device networks. It has four parts:
 - reusable capability modules on the nodes;

@@ -95,7 +95,7 @@ Figures per board are in the [spike note](../spikes/2026-10-23-m1-step7.md); the
 - **Step 6:** T-NN.
 - **Step 7:** T-OTA wifi and fault.
 - **Step 8:** T-AGENT (C6).
-- **Not done:** step 1 from a fresh hub with an empty `FR_HOME` (setting the network once in the dashboard).
+- **Not done at step 7:** step 1 from a fresh hub with an empty `FR_HOME` (setting the network once in the dashboard). Done later that day: the whole §11.5 demo from a fresh hub ([spike note](../spikes/2026-10-23-m1-demo-fresh-hub.md)).
 
 ## 5. The S3 (pad-s3) as built
 

@@ -133,12 +133,11 @@ Steps 3a and 4a, the flash-plan half of 4b, and the `build`/`flash`/`logs`/`wait
 2. **T-FLOOD-B isolates only a USB node** ([10 §10.5](10-testing.md); test in `e2e-gates-c`). A Wi-Fi-only node is ESP-NOW only under its own `wifi_down`. Isolating it first left the hub no way to arm that hook.
 3. **T-NN's counter rule skips gauges** ([10 §10.5](10-testing.md)). `stats bindings` `rtt_p50_us` fell from 4,473 to 4,406 µs and was read as a reboot.
 
-**M1: gates met (2026-10-23); the §11.5 run from a fresh hub is still open.** Every gate of §11.1 has passed on the C3s and the C6:
+**M1: complete (2026-10-23).** Every gate of §11.1 has passed on the C3s and the C6, and the §11.5 demo ran end to end from a fresh hub and blank boards ([spike note](../spikes/2026-10-23-m1-demo-fresh-hub.md)):
 - **Re-run at step 7** (with the fixes): T-CODEC, T-LED, T-PRES, T-FLOOD, T-FLOOD-B, T-INPUT, T-PORTS, T-NN, T-OTA, T-PROV. T-CODEC ran before fix 1, which touches no codec.
 - **Carried forward from C6** (the person's choice): T-LAT and T-AGENT. Both passed at C6 earlier the same day and were not re-run after step 7's `fr_serial`, hub and CLI changes.
 - **The S3** joined T-LED, T-PRES bye and udp, T-FLOOD, T-FLOOD-B and T-INPUT sim, and was provisioned once from its factory image.
 - **Not done:**
-  - The §11.5 demo from a fresh hub (an empty `FR_HOME`, the network set once in the dashboard). Steps 1–2 ran on the lab hub (§11.5).
   - pad-c3 in the USB phases, and pad-s3 in T-PRES unplug, T-INPUT loss and human, T-PORTS, T-NN, T-OTA and T-PROV's erase cycle.
   - T-FLOOD-B with a node isolated, or with the router off.
 
@@ -187,7 +186,8 @@ The C2 items carried into C3 are resolved: `describe` returns the encoded `Descr
 - **A reorder buffer for `fr.button`** (M2). The 50 ms buffer for `ordered` ports is not built, and no M1 port is `ordered` ([05 §5.8](05-network.md)). With no injected loss, T-INPUT `sim` still reordered one event on two boards in two of five runs: a lost UDP frame's retry arrived after the next event. Each such event was flagged `late` and none was lost. Build the buffer, then decide whether `fr.button` is `ordered`.
 - **Client origin for non-job ops** (`op.called`). The hub records `X-Fr-Client` for jobs only, so T-AGENT's (a) is proven by its effects, and a simulated press reads like a real one. The fix is a new event in the [09 §9.2](09-agent-api.md) catalog, emitted on every `command_send` and `input_simulate`, so the gate can tell the agent's calls from the harness's.
 - **USB data on the bench.** Only two Mac ports carried data. The USB hub's port gave power only after a while (the C6 dropped off it), and boards were moved between ports by hand. A powered hub that carries data would put all four boards on USB, so the USB phases could run on every board: pad-c3 and pad-s3 in T-PRES unplug, T-INPUT loss, T-OTA cut and T-PROV, and pad-s3 in T-PORTS. It would also let the gates end hooks early on every node: T-FLOOD's pad-c3 came back only when its 200 s hook ran out.
-- **The demo from a fresh hub** (§11.5 steps 1–2): an empty `FR_HOME`, the Wi-Fi network set once in the dashboard wizard, and the C6 through the wizard too. At step 7 the C6 went from blank through T-PROV's `device_provision`.
+- **Stale properties after a profile change.** When a device's instances change (pad-c6 from `c6-pad` to `c6-pad-mono` in demo step 8), the hub keeps the old members in its property mirror: `device_get` still listed `status.brightness` and `status.color` ([05 §5.8](05-network.md) "Mirror updates"). Drop the members the new firmware does not have when its manifest or descriptor changes.
+- **Ports page on its first visit.** In the fresh-hub demo the dashboard's Ports page showed no table after a hash navigation until a reload, though the ports were there (`fr ports ls`); probably the first `port_list`'s lsof probe arriving after the render. Watch it.
 - **Wizard progress.** In demo step 2 the stage markers stayed `pending` through the flash and all turned done at the end, although all 9 stages ran ok. The wizard follows the job's `stage` ([08 §8.9](08-hub.md)), and it showed no progress during the flash.
 - **T-FLOOD-B with the router powered off** (from C5), and with a node isolated. Step 7 kept the router on and isolated none, since pad-c3 had no data port.
 - **`flash_erase`** (M2, destructive, [09 §9.4](09-agent-api.md)). Demo step 1 and T-PROV erase by hand under a serial lease (`fr serial lease <dev> -- … esptool … erase-flash`).
@@ -224,7 +224,7 @@ The C2 items carried into C3 are resolved: `describe` returns the encoded `Descr
 | 7 | T-OTA wifi and fault |
 | 8 | T-AGENT at C6, carried forward |
 
-Not done: the demo from a fresh hub, meaning an empty `FR_HOME` with the network set once in the dashboard. The C6 has not gone through the wizard; it went from blank through T-PROV's `device_provision` (§11.4, Open after M1).
+**Run end to end from a fresh hub (2026-10-23)** ([spike note](../spikes/2026-10-23-m1-demo-fresh-hub.md)): the lab hub stopped, `FR_HOME=~/fr-demo-home` empty, the C3 (`1cdbd4175cc4`) and the C6 erased. (1) The person set Wi-Fi once on the dashboard's Network page, and both profiles built. (2) The wizard provisioned both boards from blank ("the registry has not seen it") as pad-c3 and pad-c6. (3) The tile flashed and the demo page showed `boot.down`, `boot.up`, `boot.click`. (4) The relay blinked pad-c3 (33 ms press → RESULT). (5) Broadcast "ping" blinked both, and pad-c3 again through the flood with its hub link dropped. (6) With the hub stopped, 3 presses gave 3 blinks (via_espnow +3). (7) The deploy over Wi-Fi matched `expect_log`, and `--fault health` rolled both back with `health_timeout`. (8) A fresh plugin-only session (Haiku 5.5) passed the T-AGENT check against the fresh hub.
 
 1. Start from blank C3 and C6 boards. `fr hub start`; open the dashboard; set the Wi-Fi network once. Run `fr build --profile c3o-pad` and `fr build --profile c6-pad`.
 2. Plug each board in, click **Provision**, pick an alias. Both appear online.
