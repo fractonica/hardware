@@ -253,6 +253,7 @@ Commands run from the checkout root (`/Users/dimas/projects/fractonica-hardware`
 3. **User** pastes, one at a time, verbatim: (a) "make pad-c3's LED blink when pad-c6's BOOT is pressed, prove it, and report the latency"; (b) "change a log line and roll it out to all nodes over Wi-Fi"; (c) "switch pad-c6 to the `c6-pad-mono` profile". Approve the tool and edit prompts (or pre-allow `mcp__plugin_fractonica_fractonica__*`). If the agent asks for a real press (`prompt_human`), the dashboard toast and the agent say so: press BOOT on pad-c6.
 4. **Pass:** (a) `binding_set`, proven with `input_simulate` + `wait_for_event status.effect_done --since`, latency from `latency_stats`; (b) `deploy` over Wi-Fi with `--expect-log <line>` (or `--expect-event node.boot`) and per-device results; (c) `build_start c6-pad-mono`, `flash_start --plan full`, and `status.blink` driving the GPIO15 LED (the user may watch it; `diag selftest` is the hands-free proof). The Agents page lists the `mcp` jobs. Export the transcript (`/export`) for the spike note.
 5. **After:** revert the agent's log-line edit (`git checkout -- <file>`) and redeploy (`fr deploy pad-c3,pad-c3b,pad-c6 --via wifi --expect-event node.boot`); restore pad-c6 with `fr build --profile c6-pad` and `fr flash pad-c6 --profile c6-pad --plan full` (USB); `fr bind ls pad-c6` to check that the agent's binding did not duplicate slot 0.
+6. **From M1 step 7** the harness `tests/e2e/t-agent.ts` brackets the session: `--prepare` checks the bench and prints the cursor, the launch command and the prompts; `--since <cursor>` judges (a), (b) and (c) from the hub and prints the restoration, which flashes pad-c6 back to `c6-pad` before redeploying the others, so the redeploy does not rebuild `c6-pad-mono` for it ([m1-step7](m1-step7.md) §4).
 
 ### 7.9 M1 demo steps 1–5 (11 §11.5)
 
@@ -303,6 +304,10 @@ Observations (open in [11 §11.4](../spec/11-roadmap.md)):
 - **Hub load.** While iOS simulators loaded the Mac, the hub's event-loop p99 reached 93 ms to 1.1 s (15–36 ms quiet); in the failed T-LAT run it was 1,133 ms, and stalls longer than the 1 s match window count as unmatched. The `loop_delay` warning (D29) showed it every time.
 - **Binary SDK mode** (§7.3): the hub → SDK hop was p50 0.87–0.92 ms, p99 5.4–6.4 ms; the spike judged binary mode not needed (D25's automatic verdict, p99 ≤ 1 ms and p50 ≤ the primary p50 / 10, reads `review` on these figures).
 - **Not run:** demo steps 1–2 from blank boards through the wizard, T-LAT p99 with a wired hub, T-FLOOD-B with the router off (from C5).
+
+### 7.12 Final gate re-run (M1 step 7)
+
+Every M1 gate now has a module in `tests/e2e/`; the order of the final re-run, each bench command, what the person does and the figures to compare are in [m1-step7](m1-step7.md).
 
 ## 8. Fold into the spec once the gates pass
 

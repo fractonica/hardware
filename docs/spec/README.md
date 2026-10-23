@@ -1,6 +1,6 @@
 # Fractonica — framework spec (v0.3)
 
-**Status:** 2026-10-20. Your answers to the v0.2 questions are folded in (see [Decisions you made](#decisions-you-made)). The toolchain is installed (01 §1.6). Implementation starts with M0.
+**Status:** 2026-10-23: M1's (the PoC's) gates are met; its §11.5 definition-of-done run from a fresh hub is still open. All twelve gates have passed on the C3s and the C6: ten re-run at step 7, T-LAT and T-AGENT carried forward from C6. The S3 joined five of them (11 §11.4 "M1 final re-run"). The §11.5 demo ran on the lab hub; its run from a fresh hub is still open. M2 is next. Earlier, on 2026-10-20: your answers to the v0.2 questions were folded in (see [Decisions you made](#decisions-you-made)), and the toolchain was installed (01 §1.6).
 
 **What it is:** an agent-first framework for prototyping ESP32 device networks. It has four parts:
 - reusable capability modules on the nodes;
@@ -49,7 +49,7 @@
 | D13 | **Agent surfaces: CLI `--json` + REST + WS events + MCP stdio**; jobs, pre-action cursors, PID-checked leases; destructive ops (M2) need a human on the Mac | Works for every agent; race-free waits; safe against accidents | proposed |
 | D14 | **Security off in the PoC** (LAN lab); AES-CCM envelope security in M3; never secure boot or flash encryption on lab boards | You don't need security; eFuses are irreversible | **decided: no security work planned**; the envelope keeps its SEC bit reserved |
 | D15 | **SDK speaks JSON over WS in M1**; binary pass-through only if latency tests show it matters | Tens of µs vs milliseconds on the radio; readable by agents | **kept at C6**: T-LAT's hub → SDK hop is p50 0.9 ms against 3.7–4.6 ms to the hub; binary mode judged not needed (11 §11.4) |
-| D16 | **M1 boards: your two ESP32-C3 boards with the 0.42" OLED** (plus the C6 Super Mini); S3 later | You have two identical C3 OLED boards, which is ideal for node ↔ node tests | **decided** |
+| D16 | **M1 boards: your two ESP32-C3 boards with the 0.42" OLED** (plus the C6 Super Mini); S3 later | You have two identical C3 OLED boards, which is ideal for node ↔ node tests | **decided**; the S3 (a Waveshare ESP32-S3-LCD-1.9, `s3l-pad`) joined at M1 step 7 (04 §4.2) |
 | D17 | **HIL fixture is required** (a spare ESP32 that presses BOOT pins and reads LEDs electronically) | Agents must be able to test real buttons without you | **decided: M2, first item** |
 | D18 | **Analog inputs** become a capability (`fr.analog_in`); scale target 20–30 nodes | Your use cases need analog inputs and dozens of nodes | **decided: M2** |
 
@@ -74,4 +74,4 @@
 
 - Router channel: **1** (measured by hwprobe; BSSID `74:9d:79:03:69:6e`).
 - First latency result: with the Mac on Wi-Fi the round-trip tail is ~100 ms (p99), so the router-mode go/no-go needs the follow-up runs in the spike note.
-- The S3 variant (no rush; it joins after M1).
+- The S3 variant: identified at M1 step 7 as a Waveshare ESP32-S3-LCD-1.9 (`pad-s3`, 04 §4.2). Its PSRAM, LCD and IMU wait for M2.

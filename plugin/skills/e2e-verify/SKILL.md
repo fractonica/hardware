@@ -50,3 +50,11 @@ Every claim about a board is proven by an event or log line the hub recorded **a
 ## A real press
 
 Say in the chat what the person should do, then wait with the request attached: `wait_for_event {types: "boot.down", selector: "pad-c6", since: <cursor>, prompt_human: "Press BOOT on pad-c6", timeout_s: 110}`. The hub shows it as a dashboard toast; if it times out, ask again rather than assuming.
+
+## Acceptance gates (tests/e2e)
+
+- Each M1 gate is a module in `tests/e2e/`: `t-codec`, `t-led`, `t-pres`, `t-flood`, `t-flood-b`, `t-nn`, `t-input`, `t-ports`, `t-lat`, `t-ota`, `t-prov`, `t-agent` (`node --conditions=@fractonica/source tests/e2e/run.ts --list` shows each with what it needs).
+- Run one with `test_run {source_dir, tier: "target", suite: "t-led"}`: a job of kind `test`; follow it with `job_wait`. Its result (or, when a gate failed, `error.details` with `ASSERTION_FAILED`) has per gate `status` (`pass | fail | skipped | error`), `measured` and `evidence`. One target run at a time per hub; `job_cancel` stops it and the gate cleans up what it armed.
+- Without `allow_human`, the gates that need a person or wiring report `skipped`: T-INPUT, T-PORTS, T-PRES, T-NN, T-OTA, T-AGENT (a person), T-LAT (wiring). Set `allow_human: true` only when a person is at the bench and agreed; say in the chat what they will be asked (each request also shows as a dashboard toast).
+- Unattended under `test_run`: T-CODEC (host only, about 8 min), T-LED, T-FLOOD, T-FLOOD-B (the router stays on; Wi-Fi is held down by a hook) and T-PROV's reflash, OTA and rename (`test_run` never erases a board, so T-PROV's verdict fails there). `test_run` takes no gate flags: they come only from `FR_T_<GATE>_ARGS` in the hub's environment.
+- Erasing boards (T-PROV `--allow-erase`), stopping the hub (T-NN `--allow-hub-stop`) and power cuts (T-OTA `cut`) run only from a terminal, when the person asks for them; the order and commands are in `docs/design/m1-step7.md`.

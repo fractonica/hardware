@@ -218,6 +218,15 @@ describe('serial port manager', () => {
     expect(lines).toEqual(['invalid header: 0x', 'ESP-ROM:esp32c6-20220919', 'Build:Sep 19 2022']);
   });
 
+  it('splits a frame off the end of a log line still open when it was written (dual-core S3)', async () => {
+    const { mgr, lines } = rig();
+    await mgr.poll();
+    const port = last();
+    port.finishOpen();
+    port.emit('data', Buffer.from('I (437) wifi:wifi certification version: v7.0@fr1:AaEABQMO\r\n'));
+    expect(lines).toEqual(['I (437) wifi:wifi certification version: v7.0', '@fr1:AaEABQMO']);
+  });
+
   it('reopens open ports when a poll comes much later than due (the Mac slept)', async () => {
     const { mgr, lines } = rig();
     const t0 = Date.now();

@@ -16,7 +16,7 @@
 
 The bootloader is at `0x0` and the partition table at `0x8000` on all three chips. All three CSVs validate with `gen_esp32part.py` (checked with v5.5.1; v6.1 applies the same rules).
 
-`firmware/partitions/fr-4mb-v1.csv` (C3/C6 Super Mini, S3FH4R2 boards) is **frozen once the first device is provisioned**:
+`firmware/partitions/fr-4mb-v1.csv` (C3/C6 Super Mini, S3FH4R2 boards; since M1 step 7 also the Waveshare ESP32-S3-LCD-1.9, which has 16 MB of flash and uses the first 4 MB, [04 §4.2](04-boards.md)) is **frozen once the first device is provisioned**:
 ```csv
 # Name,   Type, SubType,  Offset,   Size,     Flags
 nvs,      data, nvs,      0x9000,   0x5000,
@@ -145,7 +145,7 @@ hub_ip,data,string,192.168.0.17
      - `--build B` if given, else the newest `debug` artifact for `(node, profile)` (never a fault build, §6.8).
      - If the profile came from board detection: one candidate is used; several fail with `INVALID_ARGS` and the candidates (pick one with `--profile`).
      - If there is none, fail with `NOT_FOUND`, remediation `fr build --profile <P>`. The hub never builds implicitly.
-   - Check artifact compatibility: the target must be the probed chip (`TARGET_MISMATCH`), and the flash must hold the artifact's flash size (`INCOMPATIBLE_PROFILE`). The chip-revision range and the board manifest's PSRAM mode and voltage are not checked yet ([11 §11.4](11-roadmap.md)).
+   - Check artifact compatibility: the target must be the probed chip (`TARGET_MISMATCH`), and the flash must hold the artifact's flash size (`INCOMPATIBLE_PROFILE`). The chip-revision range and the board manifest's PSRAM mode and voltage are not checked yet ([11 §11.4](11-roadmap.md)). The one PSRAM board, the S3's `s3l-pad`, runs with SPIRAM off in M1 ([04 §4.2](04-boards.md)).
 5. **Registry.** A network record is required (`ENV_MISSING`, hint `fr net set`). Upsert by `device_id`:
    - reuse `addr` and `alias` if known, otherwise allocate the next `addr` (never reused, §6.3) and an alias (`{profile}-{short_id}`, or the requested one). A HELLO-only row's made-up alias, and the firmware's `new-<short_id>` placeholder at `alias_rev` 0, give way to the default (§6.3);
    - set `net` from the network record and `epoch_floor = last_epoch + 1`;
@@ -306,6 +306,7 @@ Terminal: `SUCCEEDED`, `FAILED(code)`, `ROLLED_BACK {reason}`, `TIMED_OUT {code,
 - **Retries.** An attempt that fails retryably (`accept_timeout`, `stalled`, `device_offline`, `no_tcp_session`, REJECT `busy`, RESULT failed `download`, `digest` or `flash`) publishes `QUEUED {code, message, attempt}`, and the next attempt starts after 5, 15 or 45 s (3 retries). `FAILED` is published only when final. Any other REJECT is final (`FAILED` with its name), and so is `no_http_listener`.
 - **ABORT.** After an ACCEPT timeout, a stall or a cancel the hub sends ABORT. The REJECT `busy` that answers the next OFFER, the first after that ABORT, is free: the node is still ending the aborted attempt (§6.6), so the same attempt goes again after the same wait (`QUEUED {code: busy}` says so in `message`), once per ABORT.
 - **Stall.** The deadline restarts whenever the node's STATUS `bytes` grow (DOWNLOADING or STAGED) and on every chunk 7422 serves it, bytes served again after a Range re-issue included (the socket's flow control paces the stream to the node). `bytes` keeps the most, for display and events. A stream left from an earlier attempt feeds nothing into the next.
+- **Where an attempt's download starts.** The child job's log names each attempt's first GET to 7422: `first GET of this attempt from byte <n> of <size>`, with `(Range: resuming)` when n > 0 (the node's stored offset, a whole 64 KB stride). It is the hub's own record of a resume for a board whose USB log is not there (T-OTA's power cut, [10 §10.5](10-testing.md)); from M1 step 7.
 - **Installed?** Only the node's word counts: STATUS `rebooting` or BYE `ota`, or every byte in its STATUS (a device that then goes away is taken as rebooting). STATUS `rebooting` enters REBOOTING without waiting for the BYE. What 7422 served says nothing: it runs ahead of the node by the socket buffers between them (100 KB and more), so a power cut late in a download would look like a reboot. A device that goes away before it installed the image is `FAILED device_offline` (retried; the next OFFER resumes).
 - **Already installed.** A retry that finds the device already on the target `fw_id` (its last STATUS and BYE lost) goes straight to VERIFYING instead of offering the image again, but only when an earlier attempt reached DOWNLOADING, STAGED or REBOOTING, or the device was not on the target when planned: a forced reinstall of the running image is offered again.
 - **VERIFYING.** `device.online` carries HELLO `ota_state`: `pending_verify` waits for RESULT success (one that arrived before `device.online` is kept), `valid` is confirmed at once.

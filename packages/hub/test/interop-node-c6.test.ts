@@ -1,8 +1,9 @@
 // fr_net_node's C6 hooks against the TS router on loopback (design c6 §6 S6), which the T-LAT and T-INPUT interop
 // suites build on: fr.diag.exec on port 241 over the hub link, the T-LAT wire between two nodes (A's `pin_pulse`
 // presses B's boot button through the real debounce, so B's boot.down/up/click reach the hub), and the `net loss`
-// hook (from diag_exec and from stdin) with sessions that behave as under real loss. `pnpm test:host` builds the
-// binary; without it the suite is skipped.
+// hook (from diag_exec and from stdin) with sessions that behave as under real loss; `stats` with fr_diag's sections
+// and `net wifi_down`, which the M1 gate dry runs (e2e-gates-a, e2e-gates-c) read and arm over the link. `pnpm
+// test:host` builds the binary; without it the suite is skipped.
 
 import { existsSync } from 'node:fs';
 
@@ -85,6 +86,48 @@ describe.skipIf(!existsSync(BIN))('fr_net_node C6 hooks against the router', () 
     const stats = (await diag(r, mac, 'stats')).response;
     expect(stats).toMatchObject({ ok: true, loss_rx: 0 });
     expect(Number(stats.loss_tx)).toBeGreaterThan(0);
+  }, 30_000);
+
+  it("answers stats as fr_diag does (the counters, every section, or one alone) and takes net wifi_down after its RESULT", async () => {
+    const r = await rig();
+    rigs.push(r);
+    const mac = '58e6c5d55e65';
+    const node = await start(r, mac, 65);
+    const full = (await diag(r, mac, 'stats')).response;
+    // The C3/C6 counters T-LED and T-PRES read (dup, cached_replies, delivery_failed), then the C5 sections.
+    expect(full).toMatchObject({ ok: true, dup: 0, cached_replies: 0, delivery_failed: 0, events_dropped: 0, loss_tx: 0 });
+    expect(Object.keys(full).filter((k) => typeof full[k] === 'object')).toEqual(['links', 'bcast', 'relay', 'espnow', 'bindings', 'nodes', 'msgs']);
+    expect(Number((full.links as { tcp: { tx: number } }).tcp.tx)).toBeGreaterThan(0);
+    // One section alone, as T-FLOOD and T-NN read them.
+    expect((await diag(r, mac, 'stats bcast')).response).toEqual({ ok: true, bcast: { delivered: 0, dup: 0, old: 0, watermark: expect.any(Number) } });
+    expect((await diag(r, mac, 'stats relay')).response).toEqual({ ok: true, relay: { seeded: 0, relayed: 0, cancelled: 0, dropped: 0 } });
+    expect((await diag(r, mac, 'stats bindings')).response).toEqual({ ok: true, bindings: { fired: 0, failed: 0, rtt_p50_us: 0 } });
+    expect((await diag(r, mac, 'stats nodes')).response).toMatchObject({ ok: true, nodes: { delivered: 0, via_espnow: 0, via_hub: 0, via_flood: 0 } });
+    expect((await diag(r, mac, 'stats msgs')).response).toEqual({ ok: true, msgs: { other: 0 } });
+    expect((await diag(r, mac, 'stats espnow')).response).toMatchObject({ ok: true, espnow: { tx: 0, peers: 0 } });
+    expect((await diag(r, mac, 'stats bogus')).response).toMatchObject({ ok: false, error: 'invalid_args' });
+    expect((await diag(r, mac, 'net wifi_down x')).response).toMatchObject({ ok: false, error: 'invalid_args' });
+    // net wifi_down 2 (T-FLOOD-B's hook): its RESULT comes back over TCP, then TCP and UDP go, ESP-NOW and
+    // serial would stay; Wi-Fi comes back by itself 2 s later and the node answers over the link again.
+    expect((await diag(r, mac, 'net wifi_down 2')).response).toEqual({ ok: true, hook: 'wifi_down', s: 2 });
+    await until(() => node.of('wifi').length === 1, 2000, 'Wi-Fi going down');
+    expect(node.of('wifi')[0]).toMatchObject({ up: false });
+    await until(() => node.of('wifi').length === 2, 4000, 'Wi-Fi coming back');
+    expect(node.of('wifi')[1]).toMatchObject({ up: true });
+    let back: Record<string, unknown> | null = null;
+    for (const end = Date.now() + 8000; back === null && Date.now() < end; ) {
+      back = await diag(r, mac, 'stats').then(
+        (x) => x.response,
+        () => new Promise<null>((res) => setTimeout(() => res(null), 100)),
+      );
+    }
+    expect(back).toMatchObject({ ok: true });
+    // 0 ends it at once (from stdin, as a board's USB carries it while its Wi-Fi is down).
+    node.send('wifi_down 30');
+    await until(() => node.of('wifi').length === 3, 2000, 'Wi-Fi down from stdin');
+    node.send('wifi_down 0');
+    await until(() => node.of('wifi').length === 4, 2000, 'Wi-Fi back from stdin');
+    expect(node.of('wifi').map((w) => w.up)).toEqual([false, true, false, true]);
   }, 30_000);
 
   it('takes loss from stdin, and ends it at 0', async () => {

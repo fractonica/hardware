@@ -375,6 +375,15 @@ function checkLogSource(input: DeployInput, hub: HubContext, devices: Device[]):
 
 const NO_PROFILE = 'the registry knows no profile for it (provision it, or flash it once with --profile)';
 
+/** The expectation asked for, as the dry run and the result echo it: which kind, what, and how long. */
+function expectation(input: DeployInput): { log: string; timeout_s: number } | { event: string; timeout_s: number } | null {
+  return input.expect_log
+    ? { log: input.expect_log, timeout_s: input.expect_timeout_s }
+    : input.expect_event
+      ? { event: input.expect_event, timeout_s: input.expect_timeout_s }
+      : null;
+}
+
 function dryRun(input: DeployInput, hub: HubContext, p: Plan) {
   return {
     dry_run: true,
@@ -395,11 +404,7 @@ function dryRun(input: DeployInput, hub: HubContext, p: Plan) {
       fw_id: runningFw(hub, d),
       ...(d.profile ? {} : { error: NO_PROFILE }),
     })),
-    expect: input.expect_log
-      ? { log: input.expect_log, timeout_s: input.expect_timeout_s }
-      : input.expect_event
-        ? { event: input.expect_event, timeout_s: input.expect_timeout_s }
-        : null,
+    expect: expectation(input),
     expected_outcome: input.fault ? 'rolled_back' : 'updated',
   };
 }
@@ -771,6 +776,8 @@ class DeployRun {
       build_type: this.#input.build_type,
       ...(this.#input.fault ? { fault: this.#input.fault } : {}),
       via: this.#plan.via,
+      // What each row's `expect` (matched | timeout | skipped) was asked: expect_log or expect_event, as in the dry run.
+      expect: expectation(this.#input),
       builds,
       results,
       summary: { updated: count('updated'), already_current: count('already_current'), rolled_back: count('rolled_back'), failed: count('failed') },

@@ -96,6 +96,10 @@ L4 code reaches other nodes only through `fr::net::send_cmd(dst_addr, port, cmd_
 - The core task never writes the TCP socket: it appends the frame to the `fr_net` task's TX ring (8 KB, a power of two; a full ring drops the frame and counts it, `tcp_tx_dropped`). A UDP datagram is one non-blocking `sendto()` from the core task, so each socket has one writer.
 - Console and log output goes through the `fr_serial` rings: two bounded multi-producer rings, frames before logs, drop and count on overflow.
 - An `esp_log_set_vprintf` hook feeds the log ring. No lock is shared with the Wi-Fi task or `fr_core`, so a host that stops reading (USJ stalls of up to 50 ms) can only drop lines.
+- **A frame never lands on an open log line** (since M1 step 7).
+  - A library may print one log line in several `vprintf` calls, each its own log-ring record. Example: the Wi-Fi blob's `wifi certification version` line, then its `\n`.
+  - The writer task notes whether the last log record it wrote ended with `\n`. If it did not, the writer writes a `\n` before the next frame, and the rest of the log line follows on a line of its own.
+  - Why: on the dual-core S3 the writer runs alongside the Wi-Fi task, and it slipped a frame between the two calls (`I (437) wifi:wifi certification version: v7.0@fr1:AaEA…`). The hub took the line as log text, a `fr.node.reboot` RESULT was lost, and `command_send` ended `DEVICE_OFFLINE` (T-PRES). The hub also splits such a line ([08 §8.3](08-hub.md)). After the fix pad-s3 passed 5/5 reboots.
 - `fr_diag` handlers return their output; they never `printf`.
 
 **Sub-10 ms timing** (link retries, relay jitter, ACK timeouts, debounce) uses one-shot timers that fire on the core task. It never uses FreeRTOS ticks: at the default `CONFIG_FREERTOS_HZ=100` a tick is 10 ms, and `pdMS_TO_TICKS(2)` is 0.
@@ -162,7 +166,7 @@ caps:
   - `c6-pad` (button + WS2812);
   - `c6-pad-mono` (the same board with `led_gpio` on GPIO15, which shows that swapping drivers needs no code change);
   - `c3o-pad` (the C3 0.42" OLED board: button GPIO9 + active-low LED GPIO8; OLED bound once `fr.display` exists).
-  - `s3-pad` is added once your S3 is identified ([11 §11.3](11-roadmap.md)).
+  - `s3l-pad` (M1 step 7; the Waveshare ESP32-S3-LCD-1.9, `waveshare-esp32s3-lcd19`): button GPIO0 + WS2812 GPIO15 (`max_brightness` 64), `test_pin` 16. PSRAM stays off, and the LCD is bound once `fr.display` exists (M2) ([04 §4.2](04-boards.md), [11 §11.3](11-roadmap.md)).
 
 ## 3.7 sdkconfig layering
 
@@ -170,7 +174,7 @@ Layers are listed explicitly through `SDKCONFIG_DEFAULTS` (§3.8); later layers 
 
 1. `firmware/config/sdkconfig.framework`
 2. `firmware/apps/<app>/sdkconfig.defaults`
-3. `<build>/fr_gen/sdkconfig.board` (written by `fr gen firmware` from the board manifest and profile: target, flash size, partition CSV, console, `CONFIG_FR_BOARD`, `CONFIG_FR_PROFILE`, `CONFIG_FR_PART_PROFILE`, `CONFIG_FR_WIFI_MAX_TX_POWER_QDBM` when the manifest sets `rf.max_tx_power_qdbm`, and `CONFIG_FR_TEST_PIN` when it sets `test_pin` ([04 §4.3](04-boards.md)); PSRAM mode once a PSRAM board joins)
+3. `<build>/fr_gen/sdkconfig.board` (written by `fr gen firmware` from the board manifest and profile: target, flash size, partition CSV, console, `CONFIG_FR_BOARD`, `CONFIG_FR_PROFILE`, `CONFIG_FR_PART_PROFILE`, `CONFIG_FR_WIFI_MAX_TX_POWER_QDBM` when the manifest sets `rf.max_tx_power_qdbm`, and `CONFIG_FR_TEST_PIN` when it sets `test_pin` ([04 §4.3](04-boards.md)); PSRAM mode once a profile turns PSRAM on: the S3's `s3l-pad` leaves `CONFIG_SPIRAM` unset in M1)
 4. `firmware/config/sdkconfig.build.<debug|release>`. Debug sets `CONFIG_FR_TEST_HOOKS=y` and `CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y`, so diag `log <tag> D` can raise a tag at runtime (the default level stays INFO; without the higher compiled-in maximum it would do nothing). Release leaves test hooks off
    - `<build>/fr_gen/sdkconfig.fault` (fault builds only, §3.8): written by `fr gen firmware --fault health`, right after the build-type layer
 5. `firmware/config/sdkconfig.local` (git-ignored, developer-only; appended only if it exists; never in published artifacts). The dev Wi-Fi of UNASSIGNED nodes goes only here: `CONFIG_FR_DEV_WIFI_SSID`, `CONFIG_FR_DEV_WIFI_PASS`, `CONFIG_FR_DEV_HUB_HOST` ([06 §6.4](06-identity-ota.md))

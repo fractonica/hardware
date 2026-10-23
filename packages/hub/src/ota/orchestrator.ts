@@ -296,6 +296,8 @@ interface Live {
   afterAbort: boolean;
   /** Cancelled with every byte at the node: waiting abortGraceMs for its word that the ABORT came too late. */
   cancelling: boolean;
+  /** The attempt's first GET reached 7422 (its start offset is in the job log). */
+  served?: boolean;
 }
 
 interface Child {
@@ -1411,6 +1413,15 @@ export class OtaOrchestrator implements OtaService {
                 this.#stallDeadline(c);
                 this.#progress(c, end);
               }
+            },
+            // Where the attempt's download starts: 0, or the Range a node resumes from after a reboot (its
+            // nvs:fr_ota offset, a whole 64 KB stride: 06 §6.6). The node's own log says it only over USB.
+            onServe: (start: number) => {
+              if (!live || c.live !== live || live.served) {
+                return;
+              }
+              live.served = true;
+              c.ctx?.log(`first GET of this attempt from byte ${start} of ${c.image.size}${start > 0 ? ' (Range: resuming)' : ''}`, 'event');
             },
           }
         : {}),

@@ -74,6 +74,7 @@ Rules:
   - **Repeats collapse.** Consecutive identical lines from one port are stored once, then as `(previous line repeated N more times)` at most once a second or when the text changes. A blank board's ROM loop prints ~400 identical lines a second; `ESP_LOG` lines carry a timestamp and never collapse. `@fr1:` lines never collapse either: identical lines are distinct envelopes.
   - **ENV frames to the Router.** After a line is stored, its decoded ENV envelope also goes to the Router as a frame of that port's serial link (§8.4).
   - **ROM banner split.** A reset cuts the line being printed, so `ESP-ROM:` can arrive glued to its tail. The hub stores the banner as its own line, so it still classifies as `boot`.
+  - **Frame split** (since M1 step 7). A line with `@fr1:` after its start is split there: the text before it is stored as a log line, and the rest is stored and routed as a frame line. Without the split, a frame written onto an open log line never reaches the Router. Example from the dual-core S3: `I (437) wifi:wifi certification version: v7.0@fr1:AaEA…`. The node's writer now ends an open log line before a frame ([03 §3.4](03-firmware.md)); the split covers older firmware and any other writer. Test: `packages/hub/test/runtime.test.ts`.
   - Panic blocks are decoded against the ELF of the running `fw_id` (`crash.detected`).
   - Logs live in a SQLite ring (7 days by default).
 - **Download-mode detection.** "USB present and no HELLO or log for 5 s after a reset" sets `maybe_download_mode`, with a recovery hint.

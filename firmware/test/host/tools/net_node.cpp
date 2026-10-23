@@ -55,7 +55,10 @@
 // own, `msgs` per topic).
 //
 // C6 (design c6 §6 S6): fr.diag on port 241 answers fr.diag.exec lines over the hub link: `pin_pulse <us>`, `net
-// loss <pct> <s> [both|tx|rx]`, `net drop_hub_link|udp_block|ip_block <s>`, `stats` (the C6 counters) and `info`.
+// loss <pct> <s> [both|tx|rx]`, `net drop_hub_link|udp_block|ip_block|wifi_down <s>`, `stats [section]` and `info`.
+// `stats` answers as fr_diag does (design c5 §2, 09 §9.7): the C3/C6 counters (dup, cached_replies, delivery_failed,
+// ...) and the sections links, bcast, relay, espnow, bindings, nodes and msgs, or one of them alone with `stats
+// <section>`. `net wifi_down <s>` is the stdin command's, run after its RESULT went out.
 // A hub CMD with exec_at runs at its time through the real Net scheduler (D22). --pin-target is the T-LAT wire
 // out: `pin_pulse` sends one UDP datagram (the pulse length in µs, as text) to that loopback port and answers
 // {ok, pin 20, us, at_us} as the board's test pin would. --pin-listen is the wire in: a datagram on that port
@@ -970,6 +973,10 @@ public:
     NodeDiag &operator=(const NodeDiag &) = delete;
 
     void bind(fr::net::Net &net) { net_ = &net; }
+    /** The fake air medium, for `stats espnow` (the driver's counters on target). */
+    void bind_air(const FakeAir *air) { air_ = air; }
+    /** What `net wifi_down <s>` does: the main loop's Wi-Fi switch (stdin's `wifi_down`). */
+    void on_wifi_down(std::function<void(uint32_t)> fn) { wifi_down_ = std::move(fn); }
 
     std::expected<fr::cap::DiagExecResult, fr::Err> exec(const fr::cap::DiagExecArgs &args) override
     {
@@ -981,13 +988,7 @@ public:
         } else if (cmd == "net") {
             n = net_hook(line);
         } else if (cmd == "stats") {
-            const fr::net::State s = net_->state();
-            n = std::snprintf(out_, sizeof(out_),
-                              R"({"ok":true,"cmds":%u,"cmds_refused":%u,"hook_dropped":%u,"loss_tx":%u,"loss_rx":%u,)"
-                              R"("cmds_scheduled":%u,"exec_late":%u,"exec_cancelled":%u,"exec_late_us_max":%u,)"
-                              R"("rx_queue_us_max":%u})",
-                              s.cmds, s.cmds_refused, s.hook_drops, s.loss_tx, s.loss_rx, s.cmds_scheduled, s.exec_late,
-                              s.exec_cancelled, s.exec_late_us_max, s.rx_queue_us_max);
+            n = stats(line);
         } else if (cmd == "info") {
             n = std::snprintf(out_, sizeof(out_), R"({"ok":true,"id":"%s","inject_enabled":true,"test_pin":%d})",
                               ota_fake::hex(o_.mac).c_str(), o_.pin_target != 0 ? kTestPin : -1);
@@ -1081,7 +1082,7 @@ private:
         }
         uint32_t secs = 0;
         if (!number(word(args), 0, 86400, secs) || !args.empty()) {
-            return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block <seconds> | loss <pct> <seconds>");
+            return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds> | loss <pct> <seconds>");
         }
         if (name == "drop_hub_link") {
             net_->drop_hub_link(secs);
@@ -1090,17 +1091,137 @@ private:
         } else if (name == "ip_block") {
             net_->ip_block(secs);
         } else if (name == "wifi_down") {
-            return fail("unsupported", "fr_net_node takes wifi_down on stdin");
+            if (!wifi_down_) {
+                return fail("unsupported", "no Wi-Fi switch in this node");
+            }
+            // After this RESULT, which goes out over the link the CMD came on (fr_diag's hooks are deferred too).
+            if (!core_.post([this, secs] { wifi_down_(secs); })) {
+                return fail("busy", "the core's queue is full");
+            }
         } else {
-            return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block <seconds> | loss <pct> <seconds>");
+            return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds> | loss <pct> <seconds>");
         }
         return std::snprintf(out_, sizeof(out_), R"({"ok":true,"hook":"%.*s","s":%u})", static_cast<int>(name.size()),
                              name.data(), secs);
     }
 
+    /** fr_diag's `stats` sections, in its order (diag.cpp kStatSections): a full answer drops them from the end to fit. */
+    static constexpr std::string_view kSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs"};
+
+    __attribute__((format(printf, 1, 2))) static std::string format(const char *fmt, ...)
+    {
+        char b[512];
+        va_list ap;
+        va_start(ap, fmt);
+        const int n = std::vsnprintf(b, sizeof(b), fmt, ap);
+        va_end(ap);
+        return std::string(b, static_cast<size_t>(std::clamp(n, 0, static_cast<int>(sizeof(b) - 1))));
+    }
+
+    /** One section's object, as fr_diag's add_stat_section writes it, from Net's counters (espnow: the fake air's). */
+    std::string section(std::string_view name) const
+    {
+        const fr::net::State s = net_->state();
+        if (name == "links") {
+            constexpr std::pair<LinkKind, const char *> kLinks[] = {
+                {LinkKind::serial, "serial"}, {LinkKind::tcp, "tcp"}, {LinkKind::udp, "udp"}, {LinkKind::espnow, "espnow"}};
+            std::string out = "{";
+            for (const auto &[kind, link_name] : kLinks) {
+                const fr::net::LinkState &l = s.link(kind);
+                out += format(R"(%s"%s":{"tx":%u,"tx_fail":%u,"rx":%u,"rx_drop":%u,"retries":%u})", out.size() > 1 ? "," : "",
+                              link_name, l.tx, l.tx_fail, l.rx, l.rx_drop, l.retries);
+            }
+            return out + "}";
+        }
+        if (name == "bcast") {
+            return format(R"({"delivered":%u,"dup":%u,"old":%u,"watermark":%u})", s.bcast.delivered, s.bcast.dup, s.bcast.old,
+                          s.bcast.watermark);
+        }
+        if (name == "relay") {
+            return format(R"({"seeded":%u,"relayed":%u,"cancelled":%u,"dropped":%u})", s.relay.seeded, s.relay.relayed,
+                          s.relay.cancelled, s.relay.dropped);
+        }
+        if (name == "espnow") {
+            if (air_ == nullptr) {
+                return R"({"tx":0,"tx_fail":0,"retries":0,"refused":0,"rx":0,"rx_bad":0,"rx_lost":0,"peers":0})";
+            }
+            const FakeAir::Counters &c = air_->counters();
+            const fr::net::air::SchedStats &d = air_->scheduler().stats();
+            return format(R"({"tx":%u,"tx_fail":%u,"retries":%u,"refused":%u,"rx":%u,"rx_bad":%u,"rx_lost":%u,"peers":%zu})", d.sent,
+                          d.failed, d.retries, d.refused, c.rx, c.rx_bad, c.lost, air_->scheduler().peers());
+        }
+        if (name == "bindings") {
+            return format(R"({"fired":%u,"failed":%u,"rtt_p50_us":%u})", s.bindings.fired, s.bindings.failed, s.bindings.rtt_p50_us);
+        }
+        if (name == "nodes") {
+            return format(R"({"delivered":%u,"dup":%u,"old":%u,"sent":%u,"via_espnow":%u,"via_hub":%u,"via_flood":%u,"failed":%u,"resolves":%u})",
+                          s.nodes.delivered, s.nodes.dup, s.nodes.old, s.nodes.sent, s.nodes.via_espnow, s.nodes.via_hub,
+                          s.nodes.via_flood, s.nodes.failed, s.nodes.resolves);
+        }
+        std::string out = "{";  // msgs: per topic, then other
+        for (const fr::net::MsgStats::Topic &t : net_->msg_stats().topics) {
+            if (t.name[0] != '\0') {
+                out += "\"" + json_text(t.name) + "\":" + std::to_string(t.n) + ",";
+            }
+        }
+        return out + R"("other":)" + std::to_string(net_->msg_stats().other) + "}";
+    }
+
+    /**
+     * `stats [section]` as fr_diag's cmd_stats: one section alone, or the counters and every section, dropping
+     * sections from the end (named in `omitted`) until the answer fits fr.diag.exec. No `reset` here.
+     */
+    int stats(std::string_view args)
+    {
+        const std::string_view opt = word(args);
+        const auto *it = std::find(std::begin(kSections), std::end(kSections), opt);
+        if (!args.empty() || (!opt.empty() && it == std::end(kSections))) {
+            return fail("invalid_args", "usage: stats [links|bcast|relay|espnow|bindings|nodes|msgs]");
+        }
+        std::string out;
+        if (!opt.empty()) {
+            out = format(R"({"ok":true,"%.*s":)", static_cast<int>(opt.size()), opt.data()) + section(opt) + "}";
+        } else {
+            const fr::net::State s = net_->state();
+            out = format(R"({"ok":true,"cmds":%u,"cmds_refused":%u,"hook_dropped":%u,"loss_tx":%u,"loss_rx":%u,)"
+                         R"("cmds_scheduled":%u,"exec_late":%u,"exec_cancelled":%u,"exec_late_us_max":%u,"rx_queue_us_max":%u,)",
+                         s.cmds, s.cmds_refused, s.hook_drops, s.loss_tx, s.loss_rx, s.cmds_scheduled, s.exec_late,
+                         s.exec_cancelled, s.exec_late_us_max, s.rx_queue_us_max) +
+                  format(R"("dup":%u,"old":%u,"cached_replies":%u,"sessions_lost":%u,"events_dropped":%u,"delivery_failed":%u)",
+                         s.dup, s.old, s.cached_replies, s.sessions_lost, s.events_dropped, s.delivery_failed);
+            std::vector<std::string> parts;
+            for (const std::string_view name : kSections) {
+                parts.push_back(format(R"("%.*s":)", static_cast<int>(name.size()), name.data()) + section(name));
+            }
+            std::string omitted;
+            auto total = [&] {
+                size_t n = out.size() + 1 + (omitted.empty() ? 0 : omitted.size() + 14);
+                for (const std::string &p : parts) {
+                    n += p.size() + 1;
+                }
+                return n;
+            };
+            for (size_t i = parts.size(); i-- > 0 && total() >= sizeof(out_);) {
+                omitted = format(R"("%.*s")", static_cast<int>(kSections[i].size()), kSections[i].data()) +
+                          (omitted.empty() ? "" : "," + omitted);
+                parts.pop_back();
+            }
+            for (const std::string &p : parts) {
+                out += "," + p;
+            }
+            out += (omitted.empty() ? "" : R"(,"omitted":[)" + omitted + "]") + "}";
+        }
+        const size_t n = std::min(out.size(), sizeof(out_) - 1);
+        std::memcpy(out_, out.data(), n);
+        out_[n] = '\0';
+        return static_cast<int>(n);
+    }
+
     HostCore &core_;
     const Options &o_;
     fr::net::Net *net_ = nullptr;
+    const FakeAir *air_ = nullptr;
+    std::function<void(uint32_t)> wifi_down_;
     int fd_ = -1;
     fr::TimeUs low_until_ = 0;
     char out_[fr::cap::DiagExecResult::kMaxSize];
@@ -1742,6 +1863,7 @@ int main(int argc, char **argv)
         air->bind(net);
         net.attach_air(*air);
         node.set_air(true);
+        diag.bind_air(&*air);
         core.post([&net] { net.link_changed(LinkKind::espnow); });  // as the driver posts it once up
     }
 
@@ -1805,6 +1927,21 @@ int main(int argc, char **argv)
         core.post([&net] { net.link_changed(LinkKind::udp); });
         emit(R"({"ev":"wifi","up":%s})", up ? "true" : "false");
     };
+    // As `net wifi_down` on target: TCP and UDP go, ESP-NOW and serial stay; 0 ends it (stdin and fr.diag.exec).
+    auto wifi_down = [&](uint32_t secs) {
+        if (secs == 0) {
+            if (wifi_back_at != kNever) {
+                wifi_back_at = kNever;
+                set_wifi(true);
+            }
+            return;
+        }
+        if (wifi_back_at == kNever) {
+            set_wifi(false);
+        }
+        wifi_back_at = core.now() + static_cast<TimeUs>(secs) * 1'000'000;
+    };
+    diag.on_wifi_down(wifi_down);
     while (!quit) {
         tcp.try_connect();
         core.run_ready();
@@ -1900,18 +2037,7 @@ int main(int argc, char **argv)
                 } else if (cmd.starts_with("usb ")) {
                     serial.set_host(arg != 0);
                 } else if (cmd.starts_with("wifi_down")) {
-                    // As `net wifi_down` on target: TCP and UDP go, ESP-NOW and serial stay.
-                    if (arg == 0) {
-                        if (wifi_back_at != kNever) {
-                            wifi_back_at = kNever;
-                            set_wifi(true);
-                        }
-                    } else {
-                        if (wifi_back_at == kNever) {
-                            set_wifi(false);
-                        }
-                        wifi_back_at = core.now() + static_cast<TimeUs>(arg) * 1'000'000;
-                    }
+                    wifi_down(arg);
                 } else if (cmd.starts_with("loss ")) {
                     // `loss <pct> <s> [both|tx|rx]` (design c6 D21): from here at once, as from the serial channel.
                     std::string_view rest = std::string_view(cmd).substr(5);

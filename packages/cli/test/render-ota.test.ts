@@ -35,6 +35,13 @@ describe('deploy and OTA rendering', () => {
       'pad-c3  c3o-pad  already_current  -          -     c3c3c3c3c3c3  skipped  0.0s',
       '1 updated, 1 already_current',
     ]);
+    // A hub that echoes the expectation (M1 step 7) says what the EXPECT column answers.
+    const withExpect = renderResult('deploy', {
+      ok: true,
+      cursor: 'c:1.1',
+      data: job({ status: 'completed', result: { builds, results, expect: { log: 'alive fw=', timeout_s: 30 }, summary: { updated: 1, already_current: 1 } } }),
+    });
+    expect(withExpect.out.split('\n').at(-1)).toBe('expected log "alive fw=" within 30s');
   });
 
   it('prints a failed deploy with its error, the remediation and the rows from the error details (exit 8)', () => {

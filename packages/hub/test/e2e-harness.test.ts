@@ -523,35 +523,69 @@ function node(args: string[], env: Record<string, string>): Promise<{ code: numb
   });
 }
 
-describe('a gate module run on its own', { timeout: 60_000 }, () => {
+/** Every M1 gate module (spec 11 §11.1), what it needs, and one of its own flags its --help must name. */
+const GATES = [
+  ['t-agent.ts', 'T-AGENT', { human: true, usb: true }, '--since c:<run>.<seq>'],
+  ['t-codec.ts', 'T-CODEC', {}, '--cases 1000000'],
+  ['t-flood-b.ts', 'T-FLOOD-B', { usb: true }, '--router-off'],
+  ['t-flood.ts', 'T-FLOOD', {}, '--cut pad-c3'],
+  ['t-input.ts', 'T-INPUT', { human: true, usb: true }, '--phase sim|human|loss|all'],
+  ['t-lat.ts', 'T-LAT', { wiring: true, usb: true }, '--pair from:to'],
+  ['t-led.ts', 'T-LED', {}, '--no-node-stats'],
+  ['t-nn.ts', 'T-NN', { human: true }, '--allow-hub-stop'],
+  ['t-ota.ts', 'T-OTA', { human: true, usb: true }, '--cut-at-kb 256'],
+  ['t-ports.ts', 'T-PORTS', { human: true, usb: true }, '--no-reprovision'],
+  ['t-pres.ts', 'T-PRES', { human: true, usb: true }, '--udp-block-s 30'],
+  ['t-prov.ts', 'T-PROV', { usb: true }, '--allow-erase'],
+] as const;
+
+/** `fn` over `items`, at most `n` at a time (36 module loads at once would starve a loaded Mac). */
+async function pooled<I, T>(items: readonly I[], n: number, fn: (item: I) => Promise<T>): Promise<T[]> {
+  const out: T[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(n, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i]);
+      }
+    }),
+  );
+  return out;
+}
+
+describe('a gate module run on its own', { timeout: 180_000 }, () => {
   it('answers --help and --list and exits 0 without starting its gate (FR_HUB on a dead port is never reached)', async () => {
     const dead = await deadHub();
-    const env = { FR_HUB: dead.url, FR_T_LAT_ARGS: '', FR_T_INPUT_ARGS: '', FR_T_PORTS_ARGS: '' };
-    const gates = [
-      ['t-input.ts', 'T-INPUT', { human: true, usb: true }, '--phase sim|human|loss|all'],
-      ['t-ports.ts', 'T-PORTS', { human: true, usb: true }, '--no-reprovision'],
-      ['t-lat.ts', 'T-LAT', { wiring: true, usb: true }, '--pair from:to'],
-    ] as const;
-    const runs = await Promise.all(
-      gates.flatMap(([file]) => [node([join('tests', 'e2e', file), '--list'], env), node([join('tests', 'e2e', file), '--help'], env), node([join('tests', 'e2e', file), '-h', '--json'], env)]),
-    );
-    gates.forEach(([file, gate, needs, flag], i) => {
+    // No FR_T_*_ARGS from the environment running the tests (FR_T_FLOOD_B_ARGS=--router-off changes T-FLOOD-B's needs).
+    const env: Record<string, string> = { FR_HUB: dead.url, ...Object.fromEntries(GATES.map(([, gate]) => [`FR_${gate.replace(/-/g, '_')}_ARGS`, ''])) };
+    const calls = GATES.flatMap(([file]) => [
+      [join('tests', 'e2e', file), '--list'],
+      [join('tests', 'e2e', file), '--help'],
+      [join('tests', 'e2e', file), '-h', '--json'],
+    ]);
+    const runs = await pooled(calls, 6, (args) => node(args, env));
+    GATES.forEach(([file, gate, needs, flag], i) => {
       const [list, help, h] = runs.slice(i * 3, i * 3 + 3);
       expect(list, file).toMatchObject({ code: 0, out: `${file}\t${gate}\t${JSON.stringify(needs)}\n` });
       expect(help.code, file).toBe(0);
       expect(help.out, file).toBe('');
       expect(help.err, file).toContain(`usage: node --conditions=@fractonica/source tests/e2e/${file}`);
       expect(help.err, file).toContain(flag);
+      expect(help.err, file).toContain(`FR_${gate.replace(/-/g, '_')}_ARGS`);
       expect(h).toMatchObject({ code: 0, out: '' });
     });
-    // run.ts --list loads the modules and runs none.
+    // run.ts --list loads every module and runs none: the twelve M1 gates (11 §11.1), each with its needs.
     const all = await node([join('tests', 'e2e', 'run.ts'), '--list'], env);
     expect(all.code).toBe(0);
-    expect(all.out.split('\n').filter(Boolean).map((l) => l.split('\t').slice(0, 2))).toEqual([
-      ['t-input.ts', 'T-INPUT'],
-      ['t-lat.ts', 'T-LAT'],
-      ['t-ports.ts', 'T-PORTS'],
-    ]);
+    expect(all.out.split('\n').filter(Boolean).map((l) => l.split('\t'))).toEqual(GATES.map(([file, gate, needs]) => [file, gate, JSON.stringify(needs)]));
+    expect(dead.connections()).toBe(0);
+  });
+
+  it('T-FLOOD-B needs a person when FR_T_FLOOD_B_ARGS asks for the router to be powered off', async () => {
+    const dead = await deadHub();
+    const list = await node([join('tests', 'e2e', 'run.ts'), '--list'], { FR_HUB: dead.url, FR_T_FLOOD_B_ARGS: '--router-off --say' });
+    expect(list.out.split('\n').find((l) => l.startsWith('t-flood-b.ts'))).toBe('t-flood-b.ts\tT-FLOOD-B\t{"human":true,"usb":true}');
     expect(dead.connections()).toBe(0);
   });
 

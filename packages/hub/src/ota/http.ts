@@ -19,6 +19,8 @@ export interface OtaImage {
   size: number;
   /** Called as bytes go out: `end` is the image offset just past the last byte sent (progress fallback). */
   onSent?: (end: number) => void;
+  /** Called once per GET, before its body: the first byte served (a Range's start, else 0) and the last. */
+  onServe?: (start: number, end: number) => void;
 }
 
 /** `fwId` is 64 lowercase hex, `ip` the request's IPv4 source (`::ffff:` stripped); null answers 404. */
@@ -163,6 +165,9 @@ export class NodeHttpServer {
     }
     this.counters.served++;
     res.writeHead(range ? 206 : 200, headers);
+    if (req.method === 'GET') {
+      image.onServe?.(start, end);
+    }
     if (req.method === 'HEAD' || image.size === 0) {
       res.end();
       return;

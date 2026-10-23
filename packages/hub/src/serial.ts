@@ -342,6 +342,15 @@ export class SerialPortManager {
       this.#emit(e, text.slice(rom));
       return;
     }
+    // A frame written while a log line was still open (a library printing one line in two calls) lands on
+    // its end (`I (437) wifi:wifi certification version: v7.0@fr1:AaEA…`, seen on the dual-core S3):
+    // give the frame its own line, or the router never sees it.
+    const fr = text.indexOf(SERIAL_PREFIX);
+    if (fr > 0) {
+      this.#emit(e, text.slice(0, fr));
+      this.#emit(e, text.slice(fr));
+      return;
+    }
     // `@fr1:` lines are envelopes of the serial node link, never collapsed: two identical ones are two
     // frames (a cached RESULT answering a duplicate request, a resent BYE), and the router decides.
     if (text.startsWith(SERIAL_PREFIX)) {

@@ -341,6 +341,16 @@ describe('failures and retries', () => {
     expect(n.otaRanges[0]).toBeNull();
     expect(n.otaRanges.at(-1)).toBe(`bytes=${90_000 - (90_000 % 4096)}-`);
     expect(n.otaImages).toEqual([art.fw_id]);
+    // The child job's log says where each attempt's download started (T-OTA's resume evidence without USB).
+    const child = (done.result as { devices: { job: string }[] }).devices[0].job;
+    const starts = r.jobs
+      .logs(child, 0, 1000, false)
+      .lines.map((l) => l.text)
+      .filter((t) => t.startsWith('first GET of this attempt'));
+    expect(starts).toEqual([
+      `first GET of this attempt from byte 0 of ${art.image.length}`,
+      `first GET of this attempt from byte ${90_000 - (90_000 % 4096)} of ${art.image.length} (Range: resuming)`,
+    ]);
   });
 
   it('a power cut after 7422 served the whole image (into socket buffers) is still a cut download: retried, not REBOOTING', async () => {

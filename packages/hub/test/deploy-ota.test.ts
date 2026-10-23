@@ -147,6 +147,8 @@ describe('deploy through ota_deploy', () => {
       ['pad-c3', 'updated', 'SUCCEEDED', 'wifi', 'matched', c3.fw_id],
     ]);
     expect(nodes.map((n) => n.otaImages)).toEqual([[c6.fw_id], [c6.fw_id], [c3.fw_id]]);
+    // The result says which expectation each row's `matched` answers, as the dry run does.
+    expect((job.result as { expect: unknown }).expect).toEqual({ event: 'device.online', timeout_s: 5 });
     // Each child of the one ota_deploy per profile is the job that updated its device.
     expect(new Set(data.results.map((x) => x.ota_job)).size).toBe(2);
   });
@@ -167,7 +169,7 @@ describe('deploy through ota_deploy', () => {
     await env.online(C6, { reject: 3 }); // identity
     await env.online(C6B);
     const job = await ended(env, await env.deploy({ selector: 'pad-c6,pad-c6b', via: 'wifi' }));
-    expect(job).toMatchObject({ status: 'failed', error: { code: 'OTA_FAILED' } });
+    expect(job).toMatchObject({ status: 'failed', error: { code: 'OTA_FAILED', details: { expect: null } } });
     const data = (job.error as ToolError).details as unknown as Data;
     // The words come from the orchestrator's FAILED ota.job.state (`message`), the code from its `code`.
     expect(rows(data)['pad-c6']).toMatchObject({ outcome: 'failed', state: 'FAILED', code: 'identity', via: 'wifi', error: 'the node rejected the OFFER (identity)' });

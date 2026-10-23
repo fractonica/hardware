@@ -69,7 +69,8 @@ The value of the framework is ESP-NOW flooding, node ↔ node behaviour and inpu
   - `/ws` with the dashboard's LiveClient, and gap backfill.
 
   The dashboard's `hub-live` suite runs its real LiveClient on a real hub, synced again after a restart.
-- **Gate harnesses (C6).** `e2e-harness.test.ts` drives `tests/e2e`'s control flow against a scripted hub: the cleanup on failure or cancel (§10.5), T-PORTS's lend and tab-closed rule, and a standalone `--help`/`--list`.
+- **Gate harnesses (C6).** `e2e-harness.test.ts` drives `tests/e2e`'s control flow against a scripted hub: the cleanup on failure or cancel (§10.5), T-PORTS's lend and tab-closed rule, and a standalone `--help`/`--list` of all twelve M1 gate modules (`run.ts --list` lists exactly them, with their needs).
+- **Gate harnesses (M1 step 7).** `e2e-gates-a` (T-CODEC, T-LED, T-PRES), `e2e-gates-b` (T-PROV, T-OTA), `e2e-gates-c` (T-NN, T-FLOOD, T-FLOOD-B) and `e2e-gates-d` (T-AGENT) test each module's verdicts on the figures its spike note recorded, its flags, its cleanup against a scripted hub (a cancel or a failed board ends every hook, job and rename it started), and a dry run on a real hub (`real-hub.ts`) with `fr_net_node` pads. `fr_net_node`'s diag answers `stats [section]` as `fr_diag` does (dup, cached_replies, delivery_failed and the C5 sections) and takes `net wifi_down`, so the dry runs read and arm over the hub link; while a hook has a pad's hub link down, its lines go to its stdin, as a board's USB carries them.
 - **M2 (T2).** `SimEspNowLink` is a shared medium with a seeded RNG, per-pair loss and RSSI, and an airtime model. It is joined by `SimTcpLink` and `SimUdpLink` to a real hub. Scenarios are YAML (nodes, topology, loss, script, expectations) and run with `fr test run --tier sim <scenario> --json`.
 
 ## 10.4 Host suites, golden vectors, fuzzing
@@ -119,7 +120,9 @@ The protocol gates (T-CODEC, T-LAT, T-FLOOD, T-FLOOD-B, T-NN, T-PRES, T-CHAN, T-
 **Module contract.** One module per gate, `tests/e2e/t-<gate>.ts`, exporting a Scenario as its default export (or as the named exports `gate`, `needs`, `run`):
 - `{gate, title?, needs: {human?, wiring?, usb?}, usage?, run(ctx) → {pass, measured, evidence}}`. `gate` is the id as the spec names it; `usage` lists the module's own flags.
 - `ctx`: `hub` (REST, with `X-Fr-Client` from `FR_CLIENT`), `hubUrl`, `sourceDir`, `allowHuman`, `signal` (aborted on a cancel), `args` (a standalone run's own flags), `log()`, and `measure()` (a `[measured]` line, kept in the report even if the run fails half-way).
-- Loading a module runs nothing; it runs on its own under `import.meta.main`. Shared code is in `tests/e2e/lib/` (`scenario`, `runner`, `report`, `hub`, `tasks`); the Web Serial page is `tests/e2e/fixtures/web-serial.html`.
+- Loading a module runs nothing; it runs on its own under `import.meta.main`. Shared code is in `tests/e2e/lib/` (`scenario`, `runner`, `report`, `hub`, `tasks`; per gate family `led-pres-*`, `prov-ota-*`, `nn-flood-*`, `agent-evidence`); the Web Serial page is `tests/e2e/fixtures/web-serial.html`.
+- **The twelve M1 gates** (11 §11.1), `run.ts --list`: `t-agent.ts` T-AGENT `{human, usb}`, `t-codec.ts` T-CODEC `{}`, `t-flood-b.ts` T-FLOOD-B `{usb}` (`{human, usb}` when `FR_T_FLOOD_B_ARGS` holds `--router-off`), `t-flood.ts` T-FLOOD `{}`, `t-input.ts` T-INPUT `{human, usb}`, `t-lat.ts` T-LAT `{wiring, usb}`, `t-led.ts` T-LED `{}`, `t-nn.ts` T-NN `{human}`, `t-ota.ts` T-OTA `{human, usb}`, `t-ports.ts` T-PORTS `{human, usb}`, `t-pres.ts` T-PRES `{human, usb}`, `t-prov.ts` T-PROV `{usb}`.
+- **Bench conventions** every module keeps: `--devices` picks the boards (a board the hub does not know, such as an unprovisioned pad-s3, fails on its own and the others go on); each board's results carry its RSSI (`rssi_ap`, and ESP-NOW neighbours where the gate uses them), with a warning below −70 dBm (the C3s' 8.5 dBm TX cap); a physical step is asked with `prompt_human` (a dashboard toast) and on stderr as a `PLEASE:` line, and with `--say` also by `sk say`, repeated every 10 min until done; `--json` prints the report.
 
 **Runner.** `tests/e2e/run.ts [suite…] [--suite a,b] [--allow-human] [--hub URL] [--json] [--list]` runs the gates one after another against `FR_HUB`.
 - A gate that needs a person or wiring is `skipped` without `--allow-human`.
@@ -129,7 +132,8 @@ The protocol gates (T-CODEC, T-LAT, T-FLOOD, T-FLOOD-B, T-NN, T-PRES, T-CHAN, T-
 **Under `test_run`** ([09 §9.4](09-agent-api.md)). `tier: target` starts `run.ts --json [--allow-human] [suite]` as a job of kind `test`, in its own process group, with `FR_HUB` = this hub (its bound port) and `FR_CLIENT` = the caller's origin.
 - stderr lines `@e2e {"gate", "status"}` become the job's stage; a failed gate is `ASSERTION_FAILED` with the report in `details`.
 - A cancel sends SIGTERM to the group and SIGKILL 5 s later.
-- A harness takes its own flags only from `FR_T_INPUT_ARGS`, `FR_T_PORTS_ARGS` or `FR_T_LAT_ARGS` in the hub's environment, so `test_run` runs the gates at their defaults. The bench runs them standalone.
+- A harness takes its own flags only from `FR_T_<GATE>_ARGS` in the hub's environment (`FR_T_AGENT_ARGS`, `FR_T_CODEC_ARGS`, `FR_T_FLOOD_ARGS`, `FR_T_FLOOD_B_ARGS`, `FR_T_INPUT_ARGS`, `FR_T_LAT_ARGS`, `FR_T_LED_ARGS`, `FR_T_NN_ARGS`, `FR_T_OTA_ARGS`, `FR_T_PORTS_ARGS`, `FR_T_PRES_ARGS`, `FR_T_PROV_ARGS`; `test_run` passes its environment to the child), so `test_run` runs the gates at their defaults. The bench runs them standalone.
+- Under `test_run` at the defaults: T-PROV runs reflash, ota and rename but neither erases nor provisions, so its verdict fails, unless `FR_T_PROV_ARGS` holds `--allow-erase`; T-NN never runs its stopped phase (stopping the hub would end the run that is its child), so its verdict fails there unless `FR_T_NN_ARGS` holds `--phase running`; T-AGENT ends as `error` with guidance unless `FR_T_AGENT_ARGS` holds `--since c:<run>.<seq>` (or `--prepare`); T-FLOOD-B needs a person only with `--router-off`.
 - T-INPUT's loss phase cannot run on a `--no-serial` hub (its diag needs USB); `interop-hub` covers it with `fr_net_node` (§10.3).
 
 **Standalone.** `node --conditions=@fractonica/source tests/e2e/t-<gate>.ts [flags] [--json]`, with `--allow-human` implied. `--help` (the scenario's `usage`, on stderr) and `--list` (the `run.ts --list` line) answer with exit 0, before any signal handler or hub call.
@@ -139,11 +143,41 @@ The protocol gates (T-CODEC, T-LAT, T-FLOOD, T-FLOOD-B, T-NN, T-PRES, T-CHAN, T-
 - T-INPUT arms `net loss` inside its try and always disarms it (`net loss 0 0`, retried once; else the log names `fr diag <alias> net loss 0 0`).
 - T-LAT cancels its `latency_probe` job (else the log names `fr jobs cancel <id>`) and restores every parked binding (else it names the `fr bind …`, reported as `bindings_not_restored.<B>` without changing the verdict).
 - T-PORTS releases its lend in a `finally`.
+- T-LED puts each board's LED (`status.on`, and `status.color` after the visual check) back as it read it; a failure names the `fr send`.
+- T-PRES ends `net udp_block` on every board (`net udp_block 0`, retried once) when one board fails or the run is cancelled.
+- T-PROV undoes a rename that did not come back (else names `fr devices set`); a board erased and not provisioned gets `flash_start {plan: recover}`. A cancel never cuts a serial flash or a provisioning short (the board would be left without firmware); the log says how to finish by hand.
+- T-OTA puts every board back on its normal firmware (the image it ran, or the one its wifi phase installed) with `ota_deploy` (via auto); a cancel cancels the OTA job (the node keeps its image) and logs the `fr ota … --build …` for each board.
+- T-NN restores the binding it used (cleared if it made it) and every binding it parked; once it stopped the hub, every way out starts it again (`fr hub start`).
+- T-FLOOD and T-FLOOD-B cancel their `message_send` job and end every hook they armed (`net drop_hub_link 0`, `net wifi_down 0`, retried once; else the log names the `fr diag <id> …`); a node not on USB comes back when its hook expires.
+- T-CODEC kills its step's whole process group on a cancel. T-AGENT changes nothing (reads, and a selftest that puts the LED back); it prints the restoration steps for what the agent changed.
 - Limit: `test_run`'s 5 s grace can cut off a slow cleanup (two binding restores to a node that does not answer, at up to 3 s each, or a disarm to an unresponsive node). Each request that reached the hub still completes there, and the logs name the manual commands.
 
-### Gate procedures (as run at C6)
+### Gate procedures (as run at C6, and the M1 step-7 modules)
 
-Boards stay provisioned and on the current debug firmware, which carries `net loss`, `pin_pulse` and `exec_at`. The bench figures of each run go in the checkpoint's spike note.
+Boards stay provisioned and on the current debug firmware, which carries `net loss`, `pin_pulse` and `exec_at`. The bench figures of each run go in the checkpoint's spike note. The order and the person's steps for the final re-run of all twelve are in [design m1-step7](../design/m1-step7.md).
+
+**The M1 final re-run** (2026-10-23; results in [11 §11.4](11-roadmap.md)). The order puts the cheapest and least disruptive gates first. The gates that stop the hub, change firmware, erase flash or cut power come last.
+
+| # | Gate (phases) | Boards |
+|---|---|---|
+| 1 | T-CODEC | host only |
+| 2 | S3 bring-up (build, then provisioning from its factory image) | pad-s3 |
+| 3 | T-LED | all four |
+| 4 | T-PRES bye, udp | all four |
+| 5 | T-FLOOD | all four; pad-c3 cut off |
+| 6 | T-FLOOD-B | all four |
+| 7 | T-INPUT sim, then loss, then human | sim: all four; loss: the boards on USB; human: the C3s and the C6 |
+| 8 | T-PRES unplug | the boards on USB |
+| 9 | T-PORTS | the boards on USB |
+| 10 | T-NN running, then hub stopped | pad-c6 → pad-c3 |
+| 11 | T-OTA wifi, fault, then cut | wifi, fault: the C3s and the C6; cut: the boards on USB |
+| 12 | T-PROV (erases) | the boards on USB |
+| — | T-LAT, T-AGENT | carried forward from C6, not re-run |
+
+- T-AGENT runs very last in a full re-run, because it changes every pad's firmware, pad-c6's profile and its bindings.
+- **USB data ports.** Every phase that needs a board on USB runs on the boards whose ports carry data. Only two of the bench Mac's ports did, so T-PRES unplug, T-INPUT loss, T-PORTS, T-OTA cut and T-PROV ran on two boards at a time, and boards were moved between ports by hand.
+- The first T-INPUT `sim` run after the serial fix started 0.2 s after T-FLOOD-B ended. In it, `input_simulate` answered `busy` (a press in progress) to the first press on three boards; the next three runs saw no `busy`. Not traced.
+- After a fix, re-run the gate that found it, then go on in order. The serial fix ([03 §3.4](03-firmware.md)) came after T-PRES errored on pad-s3, and everything from T-LED on was re-run.
 
 **T-INPUT** (`t-input.ts`, `needs: {human, usb}`). Flags: `--phase sim|human|loss|all`, `--devices`, `--presses 10`, `--sim-clicks 50`, `--gap-ms 400`, `--loss 5`, `--clicks 1000`, `--checkpoints 200`, `--forced 10`, `--say`.
 - **Setup:** every board on the Mac's USB, its port `open` (held by the hub). An SDK client connects to `/app` with the token from `client_generate` (never printed), without reconnect, and records each event with its epoch. Boards run in parallel, except in `human`.
@@ -180,12 +214,62 @@ Boards stay provisioned and on the current debug firmware, which carries `net lo
 - **Published:** p90 and p99, `one_way`, `a_late`, `cross_sync`, the sync uncertainty, `by_path`, the PING RTTs, RSSI, the hub's loop delay, and `sdk_hop {n, p50, p99, unseen, clock: monotonic, binary_mode}`. Raw samples: `~/.fractonica/latency/<job_id>.ndjson`.
 - **Optional runs:** `--rate 2 --mode immediate --label wifi-2hz` (a smaller `--count` is fine for a published figure); `--hub-link wired` with the Mac on Ethernet; `--label wifi-noawdl` with AWDL off.
 
-**T-AGENT** (by hand: a person pastes the prompts).
+**T-CODEC** (`t-codec.ts`, `needs: {}`; host only, never calls the hub). Flags: `--cases 1000000`, `--step gen|vectors|fuzz|all`, `--out-dir build/t-codec`.
+- `gen`: `fr gen --check`, nothing stale. `vectors`: the TS golden-vector suites and the C++ `golden_vector` tests under ASan + UBSan, cases counted per file. `fuzz`: both fuzz suites at `--cases` per target (`FR_FUZZ_N`, `FR_FUZZ_DIGESTS`), then the gate re-checks the digest parity itself: every target both sides ran, with exactly that case count, has the same digest.
+- **Pass:** the T-CODEC row of [05 §5.18](05-network.md). Fewer than 10⁶ cases is a dry run that reports everything but cannot pass. Raw outputs in `build/t-codec/`.
+
+**T-LED** (`t-led.ts`, `needs: {}`; boards one after another). Flags: `--devices`, `--phase blink|set|toggle|visual|all` (default blink,set,toggle), `--visual`, `--count 3 --on-ms 200 --off-ms 200`, `--settle-ms 1000`, `--no-node-stats`, `--say`.
+- `blink`: `status.blink {count 3}` with ack result: RESULT ok, then `status.effect_done {effect: blink}`; reported: rtt, link, and effect_done after the RESULT against count × (on + off).
+- `set`: `set {on: false}` reliable, then `set {on: true}` with ack none: sent, a `status.on` STATE true, the mirror true.
+- `toggle`: diag `stats`, `status.toggle` with `duplicate: true`, 1 s, then exactly one `status.on` STATE with the flipped value, the mirror flipped, `dup` +1 and `cached_replies` +1 (applied twice, or coalesced at the node, fails). `--no-node-stats` waives the counters for a firmware without them.
+- `visual` (a person): "Press BOOT on <alias> if its LED is lit" (green on RGB boards).
+
+**T-PRES** (`t-pres.ts`, `needs: {human, usb}`; phases in the order bye, udp, unplug). Flags: `--devices`, `--phase bye|udp|unplug|all`, `--reboots 5 --bye-max-ms 1000`, `--udp-block-s 30 --clear-max-ms 5000`, `--prompt-tries 3`, `--say`.
+- `bye` (no person): `fr.node.reboot` ×5 per board: RESULT ok, `device.offline {reason: reboot}` within 1,000 ms of the send (hub clock), `node.boot`, online again.
+- `udp` (no person; boards side by side, online on Wi-Fi with `udp_ok`): `net udp_block 30`, `device_get` every 250 ms: `hub.warning udp_blocked`, no offline event or sample, `udp_blocked` cleared within 5 s of the hook's end; reported: the warning's delay, the longest gap between frames, `device.suspect` events, the `delivery_failed` delta.
+- `unplug` (a person): `node.identify`, then "Unplug the USB cable of <alias>"; the unplug is the hub's `port.detached` or the serial session's `usb port gone`; `device.offline {reason: timeout}` must come 2.4–3.5 heartbeats later; then "Plug <alias> back in": time to online and to the TCP link.
+
+**T-PROV** (`t-prov.ts`, `needs: {usb}`; boards one after another). Flags: `--phase provision|reflash|ota|rename|all`, `--devices pad-c3,pad-c3b,pad-c6`, `--new alias:port[:profile]`, `--allow-erase`, `--python PATH`, `--rename-suffix -rn`, `--max-online-s 60`.
+- `provision` (only with `--allow-erase`, destructive): `fr serial lease <dev> --ttl 300 -- <pytools python> -m esptool --port $FR_PORT erase-flash`, then `device_provision` with the same alias. Pass: Wi-Fi joined within 60 s, the registry's device id, addr and alias reused, `epoch_floor` above the last epoch and the new boot's epoch after it, diag `info` PROVISIONED. Without `--allow-erase` the phase is not run and the gate fails. `--new` provisions a board the registry does not know (the S3).
+- `reflash` (`flash_start {plan: app}`) and `ota` (`ota_deploy {via: wifi, force: true}`): the registry's and the node's identity unchanged after the new boot.
+- `rename`: `device_update` to `<alias>-rn` and back; each bumps `alias_rev` by one and reaches the node.
+
+**T-OTA** (`t-ota.ts`, `needs: {human, usb}`). Flags: `--phase wifi|fault|cut|all`, `--devices`, `--no-build`, `--expect auto|log|event|none --expect-timeout-s 30`, `--cut-build`, `--cut-at-kb 256 --cut-attempts 3 --off-s 3`, `--no-ready`, `--no-restore`, `--say`.
+- `wifi`: `deploy {via: wifi, expect_log: "alive fw="}`. With `--expect auto` (the default) the whole deploy uses `expect_event node.boot` instead when any board's USB port is not open, since `expect_log` needs every board's ([09 §9.4](09-agent-api.md)); step 7 ran that way. A board already current gets the image again with `force`, so every board does a real download, reboot and health gate.
+- `fault`: `deploy {fault: health}`: every board ROLLED_BACK `health_timeout`, back on its old image, identity unchanged (a REJECT `same_fw` is retried with force).
+- `cut` (a person, per board): BOOT once when ready; at the first DOWNLOADING at or past 256 KB (hub bytes, which run ahead of the node) "Unplug <alias> now", then "Plug <alias> back in". Pass: offline mid-download, the job retried (QUEUED `device_offline`) and resumed (the hub's `ACCEPT: resuming` or the node's `(resumed)`) from a positive multiple of 64 KB (the node's USB log `slot … open for … at <offset>`, and the hub's job log `first GET of this attempt from byte <offset>`), SUCCEEDED. The cut goes to a release build of the profile (`--cut-build` names another): reinstalling the running image would be confirmed on the retry without resuming. Too late (installed before the unplug) is tried again, up to 3 times.
+
+**T-NN** (`t-nn.ts`, `needs: {human}`). Flags: `--pair pad-c6:pad-c3`, `--args '{"count":1}'`, `--phase running|stopped|all`, `--presses 10 --sim --gap-ms 1000`, `--allow-hub-stop --stopped-presses 5 --down-s 60`, `--max-p50-ms 10`, `--keep-bindings`, `--say`.
+- The binding `<from>.boot.down → <to>.status.blink` is set (the same binding already there is reused and left as it was); the trigger's other `boot.*` bindings are parked.
+- `running`: `node.identify` on the trigger, "Press BOOT on <from> 10 times" (with `--sim`, or without a person, `input_simulate` clicks, reported as simulated). Pass: one firing per press, ok, a blink per firing, at least half the firings on `espnow`, espnow `rtt_us` p50 ≤ 10 ms; `latency_stats` recorded.
+- `stopped` (a person and `--allow-hub-stop`, standalone only, through the CLI on 127.0.0.1:7420): the counters, `fr hub stop`, "press BOOT on <from> 5 times" (stderr and `sk say`: no dashboard), `fr hub start`, the counters again: fired ≥ 5 with none failed, the target took as many node frames. `fr hub stop` refuses while jobs run.
+  - A press outside the 60 s window does not count. In step 7's first stopped run, 3 firings came for 5 presses asked, and the run was recorded as a miss.
+  - **Counters that went back** (since M1 step 7; `nn-flood-stats` `wentBack`). A per-boot counter of either node that is lower after the hub restart means a reboot, and the phase fails. `stats bindings` `rtt_p50_us` is a gauge, not a counter, so it is left out. At step 7 it fell from 4,473 to 4,406 µs and was read as a reboot. Under the fixed rule the second stopped run passes: 6 presses for 5 asked, 6 fired via espnow, 0 failed.
+
+**T-FLOOD** (`t-flood.ts`, `needs: {}`). Flags: `--cut pad-c3`, `--devices`, `--count 1000 --interval-ms 100`, `--hook-s`, `--topic t-flood`, `--min-delivery 99.9`, `--max-seeds 3`, `--settle-ms 2000`.
+- `stats bcast|relay|msgs` and `info` on every node; `net drop_hub_link <run + 100 s>` on the cut-off node, offline at the hub before the first broadcast; `message_send {to: broadcast, count 1000, interval_ms 100}` as a job; the cut-off node's counters over USB while still cut off; the hook ended; every node's counters again.
+- **Pass:** the T-FLOOD row of [05 §5.18](05-network.md) on every node (topic counts where the node tracks the topic, else `bcast.delivered`), no broadcast over the hub links only.
+
+**T-FLOOD-B** (`t-flood-b.ts`, `needs: {usb}`). Flags: `--devices`, `--down`, `--isolate pad-c3|none`, `--outage-s 120 --rate 1`, `--router-off`, `--say`, `--min-delivery 99 --back-s 10 --settle-ms 3000 --topic t-flood-b`.
+- Default (router left on): `net wifi_down <outage + 60>` on every node and `net drop_hub_link` on the isolated node, so it lives on ESP-NOW alone as pad-c3 did on its charger at C5; it refuses to start when no node would keep a hub link. Broadcasts at 1 Hz for 120 s; both hooks are ended after the last broadcast plus 3 s (an outage of about 125 s), and each node's TCP return is timed from its own hook's end.
+- **Isolation needs USB** (since M1 step 7; test in `e2e-gates-c`). Only a node on a USB port the hub holds is isolated. A node on Wi-Fi alone is ESP-NOW only once its `wifi_down` is armed. Isolating it first made it unreachable, so its `wifi_down` could not be armed. Rules:
+  - When the default pad-c3 is not on USB, no node is isolated, and the run says so.
+  - An explicit `--isolate` of a node not on USB is refused.
+  - The hub link is kept through the outage by the USB nodes that are not isolated (at step 7: pad-c3b and pad-s3).
+  - A hook on a node not on USB cannot be ended early; the node comes back when the hook expires (at step 7: 51 s after the run).
+- `--router-off`: dashboard prompts ask the person to power the router off and on; the router's return is the first USB node whose Wi-Fi rejoins.
+- **Pass:** ≥ 99 % delivery on every node, every node back on TCP < 10 s after.
+
+**T-AGENT** (by hand: a person pastes the prompts; `t-agent.ts`, `needs: {human, usb}`, brackets the session and judges it from the hub). Flags: `--prepare`, `--since c:<run>.<seq>`, `--devices`, `--min-presses 1`, `--no-selftest`, `--wait-min N`, `--say`.
+- `--prepare` (right before the session): read-only bench checks (pads online and provisioned, USB ports open for `expect_log`, pad-c6 on `c6-pad`, the `c6-pad-mono` profile, the `fr` shim, RSSI), then the cursor, the launch command, the three prompts verbatim and the check command.
+- `--since <cursor>` (after the session; with `--wait-min` while it runs): (a) the binding in `binding_list`, each pad-c6 `boot.down` matched one to one to its `node.binding_fired` and pad-c3's `status.effect_done {blink}`, the firings' `rtt_us`; (b) a deploy of origin `mcp`, via wifi, every device updated with its expectation matched (the result's `expect` says which); (c) a `c6-pad-mono` build and `flash_start --plan full` of that build by `mcp`, pad-c6 online on it with profile `c6-pad-mono` and driver `led_gpio`, and `diag selftest status` ok. The hub does not record which client sent `binding_set` or `input_simulate`, so (a) is proven by its effects.
+
+**T-AGENT session**.
 - **Before:** all three pads provisioned and online on the current debug firmware. For (b) with `--expect-log`, every pad on a Mac USB port the hub holds open; otherwise the agent must use `--expect-event node.boot`. The `fr` shim at `~/.local/bin/fr` (`fr doctor --fix`).
 - **Session:** from the checkout, `claude --plugin-dir <checkout>/plugin` (for strict isolation, a temporary `CLAUDE_CONFIG_DIR`), with other MCP servers disabled. The SessionStart line shows the hub status; `/mcp` shows `fractonica` connected with 44 tools.
 - **Run:** the three prompts are pasted verbatim, one at a time. The only human help is tool approvals (or `mcp__plugin_fractonica_fractonica__*` pre-allowed) and an optional `prompt_human` press.
 - **Pass:** the T-AGENT row above. For (c), `diag selftest status` is the hands-free proof that the LED is driven. The dashboard's Agents page lists the `mcp` jobs. The transcript is exported for the spike note.
-- **After:** revert the agent's edit and redeploy; flash pad-c6 back to `c6-pad` (`--plan full`); `fr bind ls pad-c6` to check that the agent's binding did not duplicate a slot.
+- **After** (`t-agent.ts --since` prints these steps; it runs none): revert only the agent's edit (`git checkout -- <its file>`); flash pad-c6 back to `c6-pad` first (`fr build --profile c6-pad && fr flash pad-c6 --profile c6-pad --plan full`), so the redeploy does not rebuild `c6-pad-mono` for it; then redeploy the other pads (`fr deploy pad-c3,pad-c3b --via wifi --expect-event node.boot`); `fr bind ls pad-c6` to check that the agent's binding did not duplicate a slot (`fr bind rm pad-c6 <slot>` if it should go). T-AGENT changes every pad's firmware, pad-c6's profile and its bindings, so it runs last in a full re-run.
 
 ## 10.6 CI (once the repo exists)
 

@@ -4,6 +4,7 @@ import type { Check } from '@fractonica/host';
 import { cliFlag, exitCodeForResult, findOp, type Job, type LogLine, type PortInfo, type Remediation, type Result, type ToolError } from '@fractonica/protocol';
 
 import { renderProbe } from './render-latency.ts';
+import { renderGateReport, targetReport } from './render-tests.ts';
 
 function yamlish(v: unknown, indent = ''): string {
   if (v === null || v === undefined) {
@@ -94,9 +95,10 @@ function renderOta(data: unknown): string | null {
   }
   const d = data as { dry_run?: unknown; job?: unknown; builds?: unknown; summary?: unknown; counts?: unknown; expect?: unknown };
   const lines: string[] = [];
+  const e = d.expect as { log?: string; event?: string; timeout_s?: number } | null | undefined;
+  const expectWhat = e && typeof e === 'object' ? `${e.log !== undefined ? `log ${JSON.stringify(e.log)}` : `event ${e.event}`} within ${e.timeout_s}s` : null;
   if (d.dry_run === true) {
-    const e = d.expect as { log?: string; event?: string; timeout_s?: number } | null | undefined;
-    lines.push(`dry run, nothing done${e ? `; then expect ${e.log !== undefined ? `log ${JSON.stringify(e.log)}` : `event ${e.event}`} within ${e.timeout_s}s` : ''}`);
+    lines.push(`dry run, nothing done${expectWhat ? `; then expect ${expectWhat}` : ''}`);
   }
   if (d.job && typeof d.job === 'object') {
     const j = d.job as { job?: unknown; status?: unknown; progress?: { pct?: unknown } };
@@ -123,6 +125,9 @@ function renderOta(data: unknown): string | null {
     if (counts.length) {
       lines.push(counts.map(([k, n]) => `${String(n)} ${k}`).join(', '));
     }
+  }
+  if (d.dry_run !== true && expectWhat) {
+    lines.push(`expected ${expectWhat}`); // what the EXPECT column answers (a deploy result)
   }
   return lines.join('\n');
 }
@@ -284,6 +289,14 @@ function renderJob(job: Job): string {
   }
   if (job.kind === 'latency' && job.result && typeof job.result === 'object') {
     return [head, renderProbe(job.result as Row)].join('\n'); // fr latency probe (design c6 §6 S7)
+  }
+  if (job.kind === 'test') {
+    // fr test run --tier target: a failed run keeps its gate report in the error's details (ASSERTION_FAILED).
+    const err = job.error as ToolError | undefined;
+    const report = targetReport(job.result ?? err?.details);
+    if (report) {
+      return [head, ...(err ? errorLines(err) : []), renderGateReport(report, job.job_id)].join('\n');
+    }
   }
   if (job.result) {
     parts.push(yamlish(job.result, '  ').replace(/^\n/, ''));

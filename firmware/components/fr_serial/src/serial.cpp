@@ -176,6 +176,9 @@ int log_vprintf(const char *fmt, va_list ap)
 void writer_task(void *)
 {
     static char out[kMaxRecord];
+    // A library may print one log line in several vprintf calls (the Wi-Fi blob's "wifi certification
+    // version" line, then its '\n'); a frame popped in between must not land on that line's end.
+    bool line_open = false;
     for (;;) {
         size_t n = s_frames.pop(out);
         bool frame = n > 0;
@@ -186,10 +189,17 @@ void writer_task(void *)
             ulTaskNotifyTake(pdTRUE, kIdleWait);
             continue;
         }
+        if (frame && line_open) {
+            usb_serial_jtag_write_bytes("\n", 1, kWriteTimeout);
+            line_open = false;
+        }
         // The driver's TX ring takes a write whole or not at all, so a dropped line never leaves half
         // a line behind for the host to misparse.
         if (usb_serial_jtag_write_bytes(out, n, kWriteTimeout) == static_cast<int>(n)) {
             s_frames_tx += frame ? 1 : 0;
+            if (!frame) {
+                line_open = out[n - 1] != '\n';
+            }
         } else if (frame) {
             ++s_frames_failed;
         } else {

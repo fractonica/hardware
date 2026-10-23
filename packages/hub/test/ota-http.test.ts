@@ -77,9 +77,10 @@ describe('NodeHttpServer', () => {
   it('serves the authorized image whole (200) and by Range (206), reporting progress offsets', async () => {
     const asked: [string, string][] = [];
     const sent: number[] = [];
+    const served: [number, number][] = [];
     const port = await serve((fw, ip) => {
       asked.push([fw, ip]);
-      return { path: file, size: image.length, onSent: (end) => sent.push(end) };
+      return { path: file, size: image.length, onSent: (end) => sent.push(end), onServe: (start, end) => served.push([start, end]) };
     });
     const whole = await get(port, `/ota/${FW.toUpperCase()}.bin`);
     expect(whole.status).toBe(200);
@@ -104,6 +105,12 @@ describe('NodeHttpServer', () => {
     const head = await get(port, `/ota/${FW}.bin`, {}, 'HEAD');
     expect(head.status).toBe(200);
     expect(head.body.length).toBe(0);
+    // Each GET says where it starts (the orchestrator logs an attempt's first one); a HEAD serves nothing.
+    expect(served).toEqual([
+      [0, image.length - 1],
+      [4096, image.length - 1],
+      [100, 199],
+    ]);
   });
 
   it('answers 416 with the size for a range it cannot serve', async () => {
