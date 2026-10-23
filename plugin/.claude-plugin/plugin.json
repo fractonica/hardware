@@ -1,0 +1,13 @@
+{
+  "name": "fractonica",
+  "version": "0.1.0",
+  "description": "Drive Fractonica ESP32 nodes through the local hub: devices, ports, build, flash, OTA, logs, commands, bindings, latency and tests, as MCP tools served by `fr mcp`.",
+  "author": { "name": "Fractonica" },
+  "keywords": ["esp32", "esp-idf", "embedded", "hardware", "mcp"],
+  "mcpServers": {
+    "fractonica": {
+      "command": "${HOME}/.local/bin/fr",
+      "args": ["mcp"]
+    }
+  }
+}

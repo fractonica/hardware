@@ -4,15 +4,17 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { dirname, join } from 'node:path';
 
 import { emitCpp } from './emit/cpp.ts';
+import { emitSdk } from './emit/sdk.ts';
 import { emitTs } from './emit/ts.ts';
 import { emitVectors } from './emit/vectors.ts';
-import { loadModel, type GeneratedFile } from './model.ts';
+import { catalogHash, loadModel, type GeneratedFile } from './model.ts';
 
 export * from './model.ts';
 
 // ---- emitters ----
 
 export { emitCpp } from './emit/cpp.ts';
+export { emitSdk, SDK_EVENT_KEYS, SDK_GEN_DIR, SDK_INSTANCE_KEYS, sdkCamel, sdkSnake } from './emit/sdk.ts';
 export { emitTs, TS_GEN_DIR } from './emit/ts.ts';
 export { emitVectors, VECTORS_DIR, type GoldenVector } from './emit/vectors.ts';
 // fr gen firmware: the board composition root (packages/codegen/src/board.ts).
@@ -28,6 +30,8 @@ export const GENERATED_ROOTS: readonly string[] = [
   'firmware/components/fr_proto/gen',
   'firmware/components/fr_caps/gen',
   'firmware/test/host/gen',
+  // The SDK's typed facades (design c6 §4.1).
+  'packages/sdk/src/gen',
 ];
 
 export interface GenerateOptions {
@@ -55,7 +59,7 @@ export function generateFiles(sourceDir: string): GeneratedFile[] {
   const model = loadModel(sourceDir);
   const vectors = emitVectors(model);
   // Both suites check every case (decode-only and error cases included) and fuzz with them as corpora.
-  const files = [...emitTs(model), ...vectors.files, ...emitCpp(model, vectors.cases)];
+  const files = [...emitTs(model), ...emitSdk(model, catalogHash(model)), ...vectors.files, ...emitCpp(model, vectors.cases)];
   const seen = new Set<string>();
   for (const f of files) {
     if (seen.has(f.path) || f.path.startsWith('/') || f.path.split('/').includes('..')) {

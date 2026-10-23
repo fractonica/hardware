@@ -12,7 +12,7 @@ import { SchemaError } from '@fractonica/codegen';
 
 import { genAll, genFirmware } from '../src/gen.ts';
 import { cliExitCode, renderResult } from '../src/render.ts';
-import { REGISTRY_HASH } from '../../protocol/src/ops.ts';
+import { REGISTRY_HASH } from '../../protocol/src/registry-hash.ts';
 import { exitCodeForResult } from '../../protocol/src/result.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');

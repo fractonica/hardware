@@ -42,7 +42,7 @@
 - **Commands:** `{id, fields, result, delivery: fast|reliable, idempotent, visibility: public|test, examples, doc}`. `result` lists the RESULT fields.
 - **Events:** `{id, fields, priority: realtime|normal|bulk}`.
 - **Fields:** `{id, type, optional, default, range, max, unit, doc}`. A field id is its wire field number and is never reused.
-- **Traits are derived, never set directly.** Generated glue computes them: the `multi_press_max` trait from the config of the same name, the `long_press` trait from `long_press_ms > 0`, and LED traits from the driver's `features()`. Profiles set only `config`.
+- **Traits are derived, never set directly.** Generated glue computes them: the `multi_press_max` trait from the config of the same name, the `long_press` trait from `long_press_ms > 0`, and LED traits from the driver's `features()`. Profiles set only `config`. Since C6 `fr gen firmware` also writes them into the build manifest (§7.4).
 
 **Types:** `bool`, `u8/u16/u32`, `i8/i16/i32`, `f32`, enums, `rgb` (u32 0xRRGGBB), `duration_ms`, `string{max}`, `bytes{max}`, `array<T>{max}`.
 
@@ -190,6 +190,8 @@ DescriptorCap { port u8, cap_id u16, version u16 (major<<8|minor), name string�
 - **On the wire.** `fr.node.describe` returns the encoded `Descriptor` as `result: {descriptor: {id: 1, type: bytes, max: 1200}}`, which is wire-identical to a nested message field. It is about 90 B for two capabilities and at most 1,200 B, so it fits one BULK RESULT over TCP or serial.
 - **Hashes.** HELLO's `descriptor_hash` is FNV-1a 32 over those bytes, and `board_hash` FNV-1a 32 over the board id ([05 §5.7](05-network.md)).
 - **Hub use.** The hub calls `describe` during the handshake only when no artifact manifest names the HELLO's `fw_id_prefix`, and caches the result per `descriptor_hash` ([08 §8.4](08-hub.md)).
+- **Traits in the manifest** (since C6). `fr gen firmware` writes every trait of each instance into `fr_manifest.json` caps, in this order: the capability's default (or the type's zero value), then the driver's `traits:` (driver.yaml, §7.8: `led_gpio {color: mono, dimmable: false}`, `led_ws2812 {color: rgb, dimmable: true}`), then what the service derives from its config (`fr.button`: `long_press`, `multi_press_max`). `ManifestCap.traits` is typed: a record of bool, number or string, nullable, optional.
+  - **Readers.** `capability_list`, the `/app` welcome (§7.9) and the dashboard take `traits` from the running build's manifest only; `null` (no artifact names the firmware, or a build from before C6) means unknown, and the dashboard then shows every trait-gated member. An instance's `v` is the manifest cap's `version`, else the catalog's.
 
 ## 7.5 Wire encoding
 
@@ -237,18 +239,21 @@ DescriptorCap { port u8, cap_id u16, version u16 (major<<8|minor), name string�
 | Input | Output | Where |
 |---|---|---|
 | `schema/protocol.yaml` | system-message codecs, protocol `types:` (`Descriptor`, `DescriptorCap`), constants and enums (C++ + TS); envelope and serial-frame codecs on the wire runtime (TS) | `firmware/components/fr_proto/gen/`, `packages/protocol/src/gen/` (committed) |
-| `schema/capabilities/*.yaml` | C++ capability interfaces, dispatch and codecs, `catalog.hpp\|cpp`; TS types, codecs and JSON accessors (typed client facades come with the SDK) | `firmware/components/fr_caps/gen/`; `packages/protocol/src/gen/caps/` (committed) |
+| `schema/capabilities/*.yaml` | C++ capability interfaces, dispatch and codecs, `catalog.hpp\|cpp`; TS types, codecs and JSON accessors | `firmware/components/fr_caps/gen/`; `packages/protocol/src/gen/caps/` (committed) |
+| `schema/capabilities/*.yaml` | the SDK's typed facades `caps.ts` (since C6; below) | `packages/sdk/src/gen/` (committed) |
 | `schema/capabilities/*.yaml` | `catalog.ts`, `catalog.json`; one JSON Schema per command's arguments and per event | `packages/protocol/src/gen/`, `packages/protocol/src/gen/schemas/` (committed) |
 | both schemas | golden vectors; the host suite's `vectors.inc` (every vector) and `decoders.inc` (fuzz targets) | `schema/vectors/*.json`, `firmware/test/host/gen/` (committed; [10 §10.4](10-testing.md)) |
 | `*.cap.yaml` | `diag_json.hpp\|cpp` on cJSON from the `espressif/cjson` component (IDF 6 removed its `json` component): `traits_to_json` for diag `caps` in every build; under `FR_TEST_HOOKS` (debug builds) the JSON ↔ protobuf-wire codecs for diag `call` and `parse_args_json` | `firmware/components/fr_caps/gen/` (committed; the `call` half is outside the size budget) |
 | profile + board + driver manifests | `fr_board` composition root, `components.cmake`, `sdkconfig.board`, `fr_manifest.json` | build directory (`<build>/fr_gen/`; [03 §3.6](03-firmware.md)) |
 | profile (first generation, or a new instance) | `<profile>.slots.lock` | `firmware/profiles/` (committed) |
-| hub registry (live) | `devices.ts` for an app project | returned by `client_generate`; written by the caller ([09 §9.4](09-agent-api.md)) |
+| hub registry (live) | `devices.ts`, `token.ts` and `.gitignore` for an app project | returned by `client_generate`; written by `fr codegen client` (§7.9, [09 §9.4](09-agent-api.md)) |
 
 - **`fr gen` is a local command**, like `fr doctor`: it needs a checkout, not a hub (a hub `gen` op is deferred). `fr gen [--check]` regenerates every committed output, writes only changed files and deletes orphans under the generated roots. `--check` writes nothing and exits 1 with `{ok: false, data: {stale}}`; a schema problem is `INVALID_SOURCE` (exit 64). `fr gen firmware --profile <p> [--out <dir>] [--fault health]` defaults to `firmware/apps/<app>/build/<p>-debug/fr_gen` (`<p>-debug-fault/fr_gen` with `--fault`, which also writes the `sdkconfig.fault` layer and removes a stale one without it); with `--json` its data carries `manifest` (the full `fr_manifest.json`), `part_profile` and `fault`, which `fr build` reads ([03 §3.8](03-firmware.md)).
 - **Protocol constants** belong to the hand-written runtimes (C++ `fr::wire::kFlag*`, `kCls*`, `kSerial*`; TS `FLAG`, `CLS`, `SERIAL_TYPE`). Generated code never redefines them: it `static_assert`s (C++) or type-checks (TS) them against `protocol.yaml`.
 - **`catalog_hash`** is FNV-1a 32 over the canonical catalog JSON; C++ and TS carry the same value. Every image carries it in `fr_app_desc`, and the hub's ingest fails a build whose image disagrees with `fr_manifest.json` ([06 §6.8](06-identity-ota.md)).
 - **Naming.** Capability `fr.<name>` → C++ `fr::cap::PascalCase(name)` in `gen/<name>.hpp|cpp`; members stay snake_case, and a C++ keyword gets a trailing `_`. A generated TS type that would shadow a hand-written `@fractonica/protocol` export gets a `Msg` suffix (`LogLineMsg`).
+- **SDK facades** (since C6; `fr gen` writes 71 files in all). `packages/sdk/src/gen/caps.ts` holds, per capability, `<P>Client` (its public commands as camelCase methods), `<P>Events`, `<P>State` (camelCase) and `<P>Props` (wire names), gathered in `CapClients`, `CapEvents`, `CapState` and `CapProps`, plus `CAP_META` (delivery, method and member names; commands that take args are marked) and `CATALOG_HASH`. Types follow the JSON form `/app` speaks: bytes as hex, `u64` as a decimal string, enums by member name. It imports only the SDK's own types.
+  - **Refusals.** The SDK maps names with one rule (snake_case on the wire, camelCase in apps), so generation fails when a name does not survive snake → camel → snake; an event field camelCases to an event key (`type, part, device, inst, tDevUs, tHubUs, late, epoch, cursor, replayed`); an event and a property share a name (both are `<inst>.<name>` events, [09 §9.2](09-agent-api.md)); a command camelCases to an instance key (`name, cap, port, v, traits, state, device`); or two generated type names collide.
 
 **CI:**
 - `fr gen --check` (anything stale fails);
@@ -342,6 +347,7 @@ Each driver ships `hardware/drivers/<driver>/driver.yaml` (`schema: fractonica/d
 - `binds` (the board manifest section) and `accepts_kinds` (a board entry without `kind` is kind `gpio`);
 - `config` fields with `type`, `from` (a board entry key), `default` and `doc`; `type: gpio` marks a claimed pin, which the validator checks against the board;
 - `cap_config`: the driver's defaults for its service's capability config (`led_ws2812`: `max_brightness: 64`);
+- `traits` (since C6): the trait values the driver fixes, which `fr gen firmware` writes into the manifest (§7.4; `led_gpio {color: mono, dimmable: false}`, `led_ws2812 {color: rgb, dimmable: true}`);
 - the `resources` it consumes: `gpio` (equal to its `type: gpio` fields), `rmt_tx`, `ledc_*`, and `fr_core`'s `input_slot` and `timer` ([03 §3.4](03-firmware.md));
 - its registry `dependencies`, pinned exactly.
 
@@ -352,28 +358,29 @@ The validator uses it ([04 §4.3](04-boards.md)).
 ## 7.9 Client SDK (`@fractonica/sdk` + generated types)
 
 **Packages**
-- `@fractonica/sdk`: the hand-written runtime (connection, reconnect, device directory, events, commands, property mirror, stats). ESM, browsers and Node ≥ 22.4 (global `WebSocket`), zero dependencies. It is published as JS ([08 §8.12](08-hub.md)).
-- `@fractonica/protocol`: the hub's control-plane types and operation registry, the wire runtime, and the generated codecs and catalog (the typed `CapClients` and `CapEvents` come with the SDK). Three entry points: the root (hub types, ops, wire runtime), `/wire` (the wire runtime alone) and `/gen` (generated code). The root does not re-export `/gen`, so a stale or deleted `gen/` cannot stop the CLI, and with it `fr gen`, from loading; `@fractonica/codegen` imports only `/wire`, so `fr gen` can always regenerate `gen/`.
-- `devices.ts`: generated per app project by `fr codegen client`. It holds the device ids, aliases, profiles and capability instances known at codegen time. Groups come in M2.
-- **M1 availability.** Until the packages are published, games outside the repo depend on `file:<repo>/packages/sdk` (built JS). Hosted apps are covered in [08 §8.10](08-hub.md).
+- `@fractonica/sdk`: the hand-written runtime (connection, reconnect and resume, device directory, events, commands, property mirror, stats) plus the generated facades (`src/gen/caps.ts`, §7.6). ESM, browsers and Node ≥ 22.4 (global `WebSocket`, or pass one, e.g. from `ws`), zero runtime dependencies. `@fractonica/sdk/wire` holds the `fr-app/1` frame types and constants, which the hub imports as types. Built with `tsc` for now ([08 §8.12](08-hub.md)).
+- `@fractonica/protocol`: the hub's control-plane types and operation registry, the wire runtime, and the generated codecs and catalog. Four entry points: the root (hub types, ops, wire runtime, REGISTRY_HASH), `/wire` (the wire runtime alone), `/gen` (generated code) and `/browser` (since C6: cursors, events, names, ops, results, types and the `fr-ws/1` frames, with no `node:` import below it; the dashboard's). The root does not re-export `/gen`, so a stale or deleted `gen/` cannot stop the CLI, and with it `fr gen`, from loading; `@fractonica/codegen` imports only `/wire`, so `fr gen` can always regenerate `gen/`.
+- `devices.ts`: generated per app project by `fr codegen client` (below). It holds the device ids, aliases, profiles, boards and capability instances known at codegen time. Groups come in M2.
+- **M1 availability.** Until the packages are published, games outside the repo depend on `file:<repo>/packages/sdk` (built JS). Hosted apps are covered in [08 §8.10](08-hub.md). `web/demo` (the M1 demo page, [11 §11.5](11-roadmap.md)) is the reference app.
 
 ```ts
 import { connect } from '@fractonica/sdk';
 import { devices } from './fractonica/devices';              // fr codegen client --out ./fractonica
-import { token } from './fractonica/token';                   // generated, git-ignored
+import { token } from './fractonica/token';                   // generated, git-ignored; a page the hub serves omits it
 
-const hub = await connect({ url: 'ws://127.0.0.1:7420/app', registry: devices, token });
+const hub = await connect({ registry: devices, token });      // ws://127.0.0.1:7420/app, or /app of the hub serving the page
 
 const pad = hub.devices.byAlias('pad-red-1');                  // typed: { node, boot: Button, status: Led }
-pad.on('boot.down', (e) => player.jump());                     // e: { device, tDevUs, tHubUs, late }
+pad.on('boot.down', (e) => player.jump());                     // e: { part: 'event', type, device, inst, tDevUs, tHubUs, late, cursor, … }
 pad.on('boot.long_press', (e) => openMenu(e.heldMs));
 // pad.on('boot.dwn', …)                                       // ✗ compile error
 
-pad.status.set({ on: true, color: 0x00ff00 });                 // fast: resolves when sent
-await pad.status.blink({ onMs: 80, offMs: 80, count: 3 });     // reliable: resolves on RESULT ok
+pad.status.set({ on: true, color: 0x00ff00 });                 // fast: resolves {sent, coalesced} once written
+await pad.status.blink({ onMs: 80, offMs: 80, count: 3 });     // reliable: resolves {status: 'ok', tHubUs, rttMs, fields}, else rejects CommandError
 
 hub.on('device.online',  (d) => ui.connected(d.alias));
 hub.on('device.offline', (d) => ui.disconnected(d.alias));
+hub.on('gap', () => game.resync());                            // events were lost across a reconnect
 
 function tick() { if (pad.boot.state.pressed) player.charge(); requestAnimationFrame(tick); }   // mirrored, no round trip
 
@@ -383,38 +390,65 @@ for (const d of hub.devices.withCapability('fr.led')) d.status?.set({ on: false 
 hub.devices.on('added', (d) => { if (d.has('fr.button')) d.on('*.down', () => spawnPlayer(d.alias)); });
 ```
 
-**Transport `fr-app/1`** (WebSocket `ws://<hub>:7420/app`; JSON text frames in M1). Wire fields are snake_case; the generated SDK exposes camelCase.
+**Transport `fr-app/1`** (WebSocket `ws://<hub>:7420/app`; JSON text frames in M1, a binary frame closes 4400). Every frame is an object whose `t` key names it. Wire fields are snake_case; the SDK exposes camelCase. Types: `packages/sdk/src/wire.ts`.
 
-| Direction | Frame |
+| Direction | Frame (`t`) |
 |---|---|
-| app → hub | `hello {v: 1, token, catalog_hash, registry_rev, subscribe?}` |
-| hub → app | `welcome {v, catalog_hash, registry_rev, devices: [{id, alias, online, profile, fw, caps: [{port, name, cap, v, traits}], props}]}` |
-| hub → app | `evt {dev, inst, evt, t_dev_us, t_hub_us, cursor, late, fields}` |
+| app → hub | `hello {v: 1, token, catalog_hash, registry_rev \| null, subscribe?: {devices?, types?}, resume?}`, the first frame, within 5 s |
+| hub → app | `welcome {v, catalog_hash, registry_rev, hub_run, t_hub_us, cursor, devices: [{id, alias, online, presence, profile, fw, caps: [{port, name, cap, v, traits \| null}], props: {<inst>: {<prop>: value}}}]}`, provisioned devices only; `cursor` is the hub's head |
+| hub → app | `evt {dev, inst, evt, t_dev_us, t_hub_us, cursor, late, epoch?, replayed?, fields}` |
 | hub → app | `state {dev, inst, prop, value, t_hub_us}` |
-| hub → app | `presence {dev, state: online\|suspect\|offline\|asleep, reason}` |
-| hub → app | `device.added / device.removed / registry.drift / catalog {hash, json}` |
-| app → hub | `cmd {req, dev, inst, cmd, args, ack: none\|result}`. Validated against the generated JSON Schema before encoding |
-| hub → app | `result {req, ok, status, t_hub_us, fields?}` |
-| app → hub | `msg {req, to: "broadcast" \| <dev>, topic, data}` (`topic` ≤ 32 B, `data` JSON of ≤ 168 B as UTF-8 text, as `message_send`, [09 §9.4](09-agent-api.md); groups come in M2) |
-| hub → app | `msg {dev, topic, data}` |
-| both | `ping {id}` / `pong {id}` every 2 s; feeds `hub.stats().rttMs` |
+| hub → app | `presence {dev, state: online\|suspect\|offline, reason?, link?}` |
+| hub → app | `msg {dev, topic, data, dst, t_hub_us, cursor, replayed?}` |
+| hub → app | `device.added {device}` (newly provisioned, or its instances changed); `registry.drift {registry_rev, dev?, alias?, previous_alias?}` (a rename, a new device); `catalog {hash, json}` (the app's `catalog_hash` differs); `device.removed {dev}` is never sent in M1 (`device_forget` is M2) |
+| app → hub | `cmd {req, dev (id or alias), inst, cmd, args?, ack: none\|result, timeout_ms?}`. Args are validated against the generated JSON Schema before encoding |
+| hub → app | `result {req, ok, status, t_hub_us, rtt_ms?, link?, fields?, error?}` |
+| app → hub | `msg {req, to: "broadcast" \| <dev>, topic, data?}` (`topic` ≤ 32 B, `data` JSON of ≤ 168 B as UTF-8 text, as `message_send`, [09 §9.4](09-agent-api.md); groups come in M2) |
+| both | `ping {id}` / `pong {id, t_hub_us}` every 2 s; feeds `hub.stats().rttMs` and `hubClockOffsetMs` |
+| hub → app | `gap {lost: true, from_cursor?, to_cursor?}`; `error {req?, code, message}` (a bad frame, or a refused `cmd`/`msg` with its `req`) |
 
-- **Token.**
+- **Results.** `status` is the RESULT status in lower case or the hub's own outcome (`sent`, `offline`, `timeout`, `not_found`, `injection_disabled`…, as `command_send`). `t_hub_us` is when the RESULT arrived, or when the CMD was written for `sent`.
+  - `ack: none` (fast): answered `sent` once the CMD is written to the link, `fields.coalesced: true` when a newer one for the same (device, instance, command) replaced it first. No RESULT is awaited.
+  - `ack: result` (reliable): the RESULT, with `rtt_ms` and `link`.
+  - `msg`: a broadcast answers `sent` with `fields {seq, sessions, seeded}` ([08 §8.4](08-hub.md)); a unicast one, its ACK's status.
+- **Hub side** ([08 §8.7](08-hub.md)). Close codes 4400 (no valid hello within 5 s, a bad first frame, a binary frame, `subscribe.types` over 1,024 characters joined by commas), 4401 (token), 4409 (major), 4429 (queue overflow), 1001 (hub stopping). Frames are written directly up to 256 KiB buffered, then queued, with `state` frames coalescing per property in the queue; past 10,000 queued the socket closes 4429. A socket silent for 6 s is dead. At most 64 reliable commands and MSGs in flight per socket (beyond: `busy` at once); timeout 5 s by default, 30 s at most. The hub also coalesces fast commands per (device, instance, command), but only while an earlier one is still being written, which is rare: the SDK's coalescing does the work.
+- **Subscriptions.** `subscribe.devices` takes ids or aliases (default: every provisioned device); `subscribe.types` takes globs over `<inst>.<member>`, plus `presence` and `msg` (default all), matched in linear time ([09 §9.2](09-agent-api.md)). The SDK notes the ids its aliases resolved to (from the welcome, `device.added`, and `registry.drift` by `alias` or `previous_alias`) and sends each later hello with the names given followed by those ids, so an alias subscription survives a rename and a reconnect; the hub admits by id or alias.
+- **Resume and gaps.** Each later hello carries `resume` = the last cursor the SDK saw. Within the same hub run the hub replays the stored matching `evt` and `msg` frames after it, marked `replayed: true`, before live frames; state and presence are not replayed, since the welcome carries them. More than 1,000 matching misses, the oldest older than 60 s, or a cursor from another hub run → `gap {lost: true}`, and the socket stays open (at most 10,000 stored events are scanned). The SDK emits `gap`. An app that acts on input skips `replayed` events (the demo's relay does).
+- **Token** (`app_token`, [08 §8.8](08-hub.md)). It opens `/app` only.
   - Pages served by the hub under `/apps/<name>/` get it injected as `window.__FRACTONICA__ = {token}`, and `connect()` reads it when no token is passed.
-  - `fr codegen client` writes it to `fractonica/token.ts` and adds that file to a generated `.gitignore`. `devices.ts` itself has no secrets and can be committed.
+  - `fr codegen client` writes it to `token.ts` (below). `devices.ts` itself has no secrets and can be committed.
   - It is sent only in `hello`, never in the URL.
+- **SDK API.** `connect({url?, registry?, token?, subscribe?, connectTimeoutMs = 10 s, reconnect?, WebSocket?, coalesceBytes = 64 KiB})`. The default URL is `ws(s)://<page host>/app` on a page under `/apps/`, else `ws://127.0.0.1:7420/app`. `FractonicaError` codes: `HUB_UNREACHABLE` (no welcome in time), `UNAUTHORIZED` (4401), `VERSION_MISMATCH` (4409), `PROTOCOL` (4400, or an unreadable frame), `CLOSED`.
+  - **Devices.** One object per device id for the hub's life. `devices.byAlias` (typed through devices.ts; an unknown alias gives an `AnyDevice` placeholder, which `all()` lists), `byId`, `all`, `withCapability`, `on('added'|'removed')`. A device has `instances`, `has(cap)`, `msg(topic, data?)` and `raw.call(inst, cmd, args?, {ack?, timeoutMs?})`; its instances carry the generated command methods and a live camelCase `state` mirror.
+  - **Declared, not reported.** An instance devices.ts declares but the hub has not reported (on a placeholder, a `handle(id)`, or a device whose welcome or `device.added` has `caps: []`, read as "instances unknown") exists with port −1, `v ''` and traits `null`. Its calls go to the hub and reject `CommandError` (`not_found` or `offline`), never TypeError. It is left out of `instances`, `has()` and `withCapability()`, and the hub's report later fills the same object.
+  - **Events.** `{part: 'event', type, device, inst, tDevUs, tHubUs, late, epoch?, cursor, replayed?, …camelFields}`; a property change is a `<inst>.<prop>` event `{part: 'state', type, device, inst, prop, value, tHubUs}`. `on()` takes exact types, `<inst>.*`, `*.<member>` and `*`, matched in linear time (`globMatch`, a copy of the protocol's matcher, since the SDK has no runtime dependency). Hub events: `device.online|suspect|offline`, `msg`, `registry.drift`, `catalog`, `connected`, `disconnected`, `gap`, `error`.
+  - **Commands.** Without args `(opts?)`, with args `(args?, opts?)`. Fast ones resolve `{sent, coalesced}` (both false while disconnected); while more than `coalesceBytes` are buffered on the socket, a newer call replaces an unsent one per (device, instance, command); a hub refusal goes to `hub.on('error')`. Reliable ones resolve `{status: 'ok', tHubUs, rttMs?, link?, fields}` or reject `CommandError {status, result}`.
+  - `stats()` → `{connected, rttMs, rttP50Ms, rttP99Ms, reconnects, coalesced, framesIn, framesOut, hubClockOffsetMs}`.
 - **Latency rules.**
   - The SDK dispatches synchronously in the `message` handler.
-  - The hub sends in the same tick it receives and sets `TCP_NODELAY`.
-  - App sockets have their own send queue, separate from dashboard and agent traffic ([08 §8.7](08-hub.md)).
-  - Under backpressure, `fast` commands are coalesced per (device, instance, member).
-- **Binary pass-through** (the hub prepends a 7-byte header to the envelope; the SDK decodes with generated TS codecs) is an M3 option, used only if T-LAT shows the JSON step matters.
-- **Reconnect.** Exponential backoff. Device objects are keyed by `device_id` and keep their identity. The property mirror is refreshed from `welcome.props`.
+  - The hub writes `/app` frames inside the bus's `publish()`, in the tick it receives, as the bus's first listener (before `/ws`), and sets `TCP_NODELAY` ([08 §8.7](08-hub.md)).
+  - App sockets have their own send queue, separate from dashboard and agent traffic.
+  - Measured (C6): the hub → SDK callback on the same Mac p50 0.87–0.92 ms, p99 5.4–6.4 ms (T-LAT, real hub). The demo's relay (press → RESULT of the blink it sends) took 0.7–5.6 ms with host-built nodes on loopback and 13–52 ms on the bench over Wi-Fi.
+- **Binary pass-through** (the hub prepends a 7-byte header to the envelope; the SDK decodes with generated TS codecs) stays an M3 option. T-LAT measured the hub → SDK hop at p50 0.87–0.92 ms, p99 5.4–6.4 ms, against a 3.7–4.6 ms primary p50: judged not needed, although the harness's rule (p99 ≤ 1 ms and p50 ≤ primary p50 / 10, [05 §5.18](05-network.md)) reads `review` on these figures ([05 §5.14](05-network.md)).
+- **Reconnect.** No reconnect after 4400, 4401 or 4409; otherwise backoff 250 ms → 5 s, ×2, ±20 %, then a hello with `resume`. Device objects are keyed by `device_id` and keep their identity. The property mirror is refreshed from `welcome.props`.
 - **Versioning.**
-  - The protocol major must match.
-  - On a catalog-hash mismatch the hub sends `catalog`, and unknown members appear dynamically on `device.raw`.
-  - A registry-revision drift raises `registry.drift`, and new devices still work through `devices.on('added')`.
-- **Browser origins.** Games served by the hub (`/apps/<name>`) or from localhost work as-is. A game on a public `https://` origin hits mixed content and Chrome's Local Network Access prompts. Games on other devices need `--listen-app 0.0.0.0` ([08 §8.10](08-hub.md)).
+  - The protocol major must match (4409).
+  - On a catalog-hash mismatch the hub sends `catalog`, and unknown members still reach `raw` and glob listeners.
+  - **`registry_rev`** = FNV-1a 32 as 8 hex over the canonical JSON (keys sorted: `alias, caps, id, profile`) of the provisioned devices sorted by id, `caps: [[name, cap]…]` by port. Caps come from the router's live instances, else the registry firmware's manifest, else `[]`, so the rev changes once they are known. An empty registry gives `741638a5`. After the first welcome the SDK sends the latest rev it knows. A drift raises `registry.drift`, and new devices still work through `devices.on('added')`.
+- **Browser origins.** `/app` takes any loopback origin, or none ([08 §8.10](08-hub.md)), so games served by the hub (`/apps/<name>`) or by a localhost dev server work as-is. A game on a public `https://` origin hits mixed content and Chrome's Local Network Access prompts. Games on other devices would need `--listen-app` (deferred, [08 §8.10](08-hub.md)).
+
+**`fr codegen client`** (since C6) writes an app project's `fractonica/` from the op `client_generate {selector?, token = true}` ([09 §9.4](09-agent-api.md)):
+- **Result.** `{files: [{path, content, secret?}], registry_rev, catalog_hash, devices, warnings}` with:
+  - `devices.ts`: no imports; `export const devices = {catalogHash, registryRev, devices: {<alias>: {id, profile, board, caps: {<inst>: <cap>}}}} as const`, sorted by alias, no timestamp, so an unchanged registry regenerates the same bytes;
+  - `token.ts`: `export const token = '…'` (secret; left out with `token: false`);
+  - `.gitignore`: `token.ts`, always.
+  - `registry_rev` is always the whole registry's, even with a selector. Warnings name devices whose instances are unknown; a selector matching no provisioned device is `NOT_FOUND`.
+- **CLI** `fr codegen client [--out fractonica] [--selector S] [--no-token] [--json]`:
+  - checks the hub's health and REGISTRY_HASH first;
+  - writes `token.ts` 0600 (narrowing an existing file first) and never prints it; `--json` lists the files, with content only for non-secret ones;
+  - merges into an existing `.gitignore` (lines it lacks are appended; `token.ts`, `/token.ts` and `**/token.ts` count as present; `merged: updated|unchanged`);
+  - refuses any file name that is not one plain segment, and then writes nothing.
+- `fr mcp` returns secret files with their content replaced by a note to run `fr codegen client --out <dir>` in a terminal ([09 §9.6](09-agent-api.md)).
 
 ## 7.10 Adding a capability (checklist)
 

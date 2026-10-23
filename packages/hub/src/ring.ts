@@ -23,6 +23,18 @@ export function nowUs(): number {
   return Math.round(performance.timeOrigin * 1000 + performance.now() * 1000);
 }
 
+/**
+ * nowUs() less the system's monotonic clock (process.hrtime: mach_absolute_time on macOS, CLOCK_MONOTONIC on
+ * Linux), which every process on the Mac reads alike; fixed for a process. nowUs() is the wall clock at
+ * process start carried on by the monotonic clock, and the NTP-disciplined wall clock drifts from that by
+ * the crystal's error (about 20 ppm measured on the lab Mac): two processes started apart disagree on "now"
+ * by that drift times the time between their starts, hours for a long-running hub. Another process puts a
+ * hub time on its own clock through this offset instead (the T-LAT hub -> SDK hop, design c6 D25).
+ */
+export function monoOffsetUs(): number {
+  return Math.round(performance.timeOrigin * 1000 + performance.now() * 1000 - Number(process.hrtime.bigint()) / 1000);
+}
+
 export class RingRetention {
   #db: Db;
   #table: 'logs' | 'events';

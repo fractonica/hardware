@@ -90,6 +90,11 @@ class SerialEndpoint implements Endpoint {
     return true;
   }
 
+  /** Every line queued so far is written or refused: a serial lease closes the port after the BYE (design c6 D4). */
+  flushed(): Promise<void> {
+    return this.#tail;
+  }
+
   /** Ends the session on this port; the next line from it starts a new endpoint. */
   close(): void {
     if (!this.closed) {

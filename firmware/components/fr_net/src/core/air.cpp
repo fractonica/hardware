@@ -57,7 +57,7 @@ bool same_directory(const Directory &a, const Directory &b)
 void Net::ensure_timer()
 {
     if (timer_ == nullptr) {
-        timer_ = core_.timer([this] { tick(); });
+        timer_ = core_.timer([this] { on_timer(); });
     }
 }
 

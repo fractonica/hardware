@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>T-PORTS Web Serial</title>
+    <!--
+      The T-PORTS fixture (design c6 D27; spec 10 §10.5): a Web Serial page that holds an Espressif USB port
+      the way a browser tool would, so the hub must name Chrome in PORT_BUSY_EXTERNAL. tests/e2e/t-ports.ts
+      serves it on http://127.0.0.1:7431/ (loopback is a secure context; never the hub's origin, which does
+      no Web Serial), with /ports (the hub's port_list, fetched by the harness) and /holding, /released and
+      /error, which tell the harness what happened here. Connect opens the chosen port at 115200 and at once
+      deasserts DTR and RTS (RTS resets a USB-Serial/JTAG chip; DTR with RTS can enter its ROM loader).
+    -->
+    <style>
+      :root {
+        --bg: #fbfbfa;
+        --fg: #1d1d1b;
+        --muted: #6b6b66;
+        --line: #deded9;
+        --ok: #1f7a43;
+        --bad: #b3261e;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #171716;
+          --fg: #ececea;
+          --muted: #a2a29c;
+          --line: #34342f;
+          --ok: #5fc287;
+          --bad: #f08a80;
+        }
+      }
+      body {
+        margin: 0;
+        padding: 24px 16px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 15px/1.5 system-ui, sans-serif;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+      }
+      p.note {
+        color: var(--muted);
+        margin: 0 0 16px;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+      button {
+        font: inherit;
+        padding: 6px 14px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      #status {
+        font-weight: 600;
+        font-size: 18px;
+        margin: 16px 0 4px;
+      }
+      #status.holding {
+        color: var(--ok);
+      }
+      #status.error {
+        color: var(--bad);
+      }
+      pre {
+        color: var(--muted);
+        margin: 0 0 16px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 4px 8px;
+        border-bottom: 1px solid var(--line);
+        white-space: nowrap;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 500;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>T-PORTS: hold a USB serial port</h1>
+      <p class="note" id="support">Pick the port the test names. Leave this tab open until it asks you to close it.</p>
+      <div class="controls">
+        <button id="connect">Connect</button>
+        <button id="disconnect" disabled>Disconnect</button>
+        <label><input type="checkbox" id="read" /> read its output</label>
+      </div>
+      <div id="status">IDLE</div>
+      <pre id="info"></pre>
+      <h2>Ports the hub sees</h2>
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr><th>device</th><th>path</th><th>state</th><th>holder</th></tr>
+          </thead>
+          <tbody id="ports"><tr><td colspan="4">…</td></tr></tbody>
+        </table>
+      </div>
+    </main>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let port = null;
+      let reader = null;
+      /** The read loop while one runs: Disconnect waits for it, since a port with a locked readable cannot close. */
+      let loop = null;
+      let bytes = 0;
+
+      function show(state, info, cls) {
+        $('status').textContent = state;
+        $('status').className = cls || '';
+        $('info').textContent = info ? JSON.stringify(info, null, 2) : '';
+      }
+
+      // Tells the harness (same origin); a page opened some other way just carries on.
+      function notify(path, body) {
+        fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }).catch(() => undefined);
+      }
+
+      async function readLoop(p) {
+        while (p.readable && p === port) {
+          reader = p.readable.getReader();
+          try {
+            for (;;) {
+              const { value, done } = await reader.read();
+              if (done) {
+                break;
+              }
+              bytes += value.length;
+              $('info').textContent = `read ${bytes} bytes`;
+            }
+          } catch {
+            // the device went away, or Disconnect cancelled the read
+          } finally {
+            reader.releaseLock();
+            reader = null;
+          }
+        }
+      }
+
+      $('connect').onclick = async () => {
+        let p = null;
+        try {
+          p = await navigator.serial.requestPort({ filters: [{ usbVendorId: 0x303a }] });
+          await p.open({ baudRate: 115200 });
+        } catch (e) {
+          // No port picked, or Chrome could not open it (the hub holds it): the harness may lend it and ask again.
+          show(`ERROR: ${e.message}`, null, 'error');
+          notify('/error', { message: String(e.message) });
+          return;
+        }
+        // Open now, so this tab holds it even if the signals cannot be set: say so instead of hiding the hold.
+        const info = { ...p.getInfo() };
+        try {
+          // At once: RTS is EN (a reset) on USB-Serial/JTAG boards, and DTR with RTS can enter the ROM loader.
+          await p.setSignals({ dataTerminalReady: false, requestToSend: false });
+        } catch (e) {
+          info.signals_error = String(e.message);
+        }
+        port = p;
+        show('HOLDING', info, 'holding');
+        $('connect').disabled = true;
+        $('disconnect').disabled = false;
+        notify('/holding', info);
+        if ($('read').checked) {
+          loop = readLoop(p);
+        }
+      };
+
+      $('disconnect').onclick = async () => {
+        const p = port;
+        port = null;
+        try {
+          await reader?.cancel().catch(() => undefined);
+          await loop;
+          loop = null;
+          await p?.close();
+        } catch (e) {
+          notify('/error', { message: `close: ${String(e.message)}` });
+        } finally {
+          show('RELEASED');
+          $('connect').disabled = false;
+          $('disconnect').disabled = true;
+          notify('/released', {});
+        }
+      };
+
+      async function poll() {
+        try {
+          const r = await fetch('/ports');
+          const { ports } = await r.json();
+          $('ports').innerHTML = '';
+          for (const p of ports || []) {
+            const tr = document.createElement('tr');
+            for (const v of [p.alias || p.device_id || '-', p.path, p.state, p.holder || '']) {
+              const td = document.createElement('td');
+              td.textContent = v;
+              tr.append(td);
+            }
+            $('ports').append(tr);
+          }
+        } catch {
+          // no harness behind this page
+        }
+        setTimeout(poll, 1000);
+      }
+
+      if (!('serial' in navigator)) {
+        $('support').textContent = 'Web Serial needs Google Chrome (or another Chromium browser) on a secure origin such as http://127.0.0.1.';
+        $('connect').disabled = true;
+      }
+      void poll();
+    </script>
+  </body>
+</html>

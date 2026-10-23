@@ -2,7 +2,8 @@
 // board manifest and the bound drivers' driver.yaml, freezes instance ports in the profile's
 // slots.lock, and writes the per-profile glue into the build directory: the fr_board composition
 // root, components.cmake, sdkconfig.board and fr_manifest.json, plus sdkconfig.fault for a fault build
-// (spec 03 §3.8). The slots.lock is the only file it writes into the source tree.
+// (spec 03 §3.8). The slots.lock is the only file it writes into the source tree. C6 (design c6 D13, D24)
+// adds each instance's traits to the manifest and the board's T-LAT test_pin to sdkconfig.board.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -23,20 +24,46 @@ import {
   type ConfigEntry,
   type GeneratedFile,
   type JsonScalar,
+  type Field,
   type Model,
   type SchemaIssue,
 } from './model.ts';
 
 // ---- framework facts ----
 
+/** What an L2 service is to the generator (design c2 §5). */
+export interface ServiceFacts {
+  /** The HAL contract its driver must implement. */
+  implements: string;
+  service: string;
+  /** The fr_core header that declares it. */
+  header: string;
+  /** fr_core timers its init() takes. */
+  timers: number;
+  /**
+   * Traits the service derives from its effective config, as its constructor does (design c6 D13): they win
+   * over the capability's trait defaults and the driver's `traits:`.
+   */
+  traits?: (config: Readonly<Record<string, JsonScalar>>) => Record<string, JsonScalar>;
+}
+
 /**
- * The L2 service behind each capability (design c2 §5): the HAL contract its driver must implement, the
- * fr_core header that declares it and the fr_core timers its init() takes (ButtonService: lockout, long
- * press, click gap; LedService: effect phases). A capability without an entry has no primitive-driver
- * path yet.
+ * The L2 service behind each capability (design c2 §5): ButtonService takes three timers (lockout, long press,
+ * click gap) and derives both of its traits from config; LedService takes one (effect phases) and reports what
+ * its driver's features() say, which driver.yaml `traits:` declares. A capability without an entry has no
+ * primitive-driver path yet.
  */
-export const SERVICES: Readonly<Record<string, { implements: string; service: string; header: string; timers: number }>> = {
-  'fr.button': { implements: 'hal.ButtonSource', service: 'fr::ButtonService', header: 'fr/services/button_service.hpp', timers: 3 },
+export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
+  'fr.button': {
+    implements: 'hal.ButtonSource',
+    service: 'fr::ButtonService',
+    header: 'fr/services/button_service.hpp',
+    timers: 3,
+    traits: (c) => ({
+      long_press: Number(c.long_press_ms ?? 0) > 0,
+      multi_press_max: Math.min(5, Math.max(1, Number(c.multi_press_max ?? 2))),
+    }),
+  },
   'fr.led': { implements: 'hal.LightOutput', service: 'fr::LedService', header: 'fr/services/led_service.hpp', timers: 1 },
 };
 
@@ -93,9 +120,12 @@ const RawBoard = z.looseObject({
     reserved: z.record(z.string(), z.array(int)).optional(),
     strapping: z.array(int).optional(),
     strapping_levels: z.record(numKey, z.enum(STRAP_LEVELS)).optional(),
+    free: z.array(int).optional(),
   }),
   resources: z.record(z.string(), int).optional(),
   rf: z.looseObject({ max_tx_power_qdbm: int.min(8).max(84).nullable().optional() }).optional(),
+  /** The T-LAT loopback pin (04 §4.3, design c6 D24): CONFIG_FR_TEST_PIN; none without it. */
+  test_pin: int.min(0).max(48).nullable().optional(),
 });
 type RawBoard = z.infer<typeof RawBoard>;
 
@@ -121,6 +151,8 @@ const RawDriver = z.strictObject({
   accepts_kinds: z.array(z.string()).min(1),
   config: z.record(ident, RawDriverField).optional(),
   cap_config: z.record(z.string(), jsonScalar).optional(),
+  /** Capability traits this driver gives its service (design c6 D13), e.g. fr.led color/dimmable from features(). */
+  traits: z.record(ident, jsonScalar).optional(),
   resources: z.record(z.string(), int).optional(),
   dependencies: z.record(z.string(), z.string()).optional(),
 });
@@ -170,6 +202,11 @@ export interface ManifestCap {
   driver: string;
   /** Effective service config: capability YAML defaults, then driver cap_config, then the profile. */
   config: Record<string, JsonScalar>;
+  /**
+   * Every trait of the capability as the firmware's descriptor reports it (design c6 D13): its default (or zero
+   * value), then the driver's `traits:`, then what the service derives from `config`.
+   */
+  traits: Record<string, JsonScalar>;
 }
 
 /** fr_manifest.json, which `fr build` copies into the artifact manifest (`caps`). */
@@ -180,6 +217,8 @@ export interface FirmwareManifest {
   app: string;
   target: string;
   catalog_hash: number;
+  /** The board's T-LAT test pin (04 §4.3, design c6 D24); null without one. */
+  test_pin: number | null;
   caps: ManifestCap[];
 }
 
@@ -311,6 +350,8 @@ function renderFragment(inp: Inputs): string {
     `CONFIG_FR_PART_PROFILE="${board.flash.part_profile}"`,
     // 05 §5.3: some boards' antennas only associate with the TX power capped (C3 minis at 8.5 dBm).
     ...(board.rf?.max_tx_power_qdbm != null ? [`CONFIG_FR_WIFI_MAX_TX_POWER_QDBM=${board.rf.max_tx_power_qdbm}`] : []),
+    // Design c6 D24: debug builds drive it open-drain for diag pin_pulse (fr_core's test_pin.cpp).
+    ...(board.test_pin != null ? [`CONFIG_FR_TEST_PIN=${board.test_pin}`] : []),
     '',
   ].join('\n');
 }
@@ -452,6 +493,18 @@ function checkCapValue(e: ConfigEntry, v: unknown): string | null {
   return null;
 }
 
+/** A trait's value when nothing sets it: its encoding's zero (an enum's 0 member). */
+function zeroValue(f: Field): JsonScalar {
+  const t = f.type;
+  if (t.kind === 'enum') {
+    return (t.def.members.find((m) => m.value === 0) ?? t.def.members[0]).name;
+  }
+  if (t.kind === 'scalar') {
+    return t.name === 'bool' ? false : 0;
+  }
+  return t.kind === 'string' ? '' : 0;
+}
+
 /** C++ literal for a capability config value. */
 function capLiteral(cap: Capability, e: ConfigEntry, v: JsonScalar): string {
   const t = e.type;
@@ -481,6 +534,8 @@ interface ResolvedInstance {
   driverConfig: { name: string; field: RawDriverField; value: JsonScalar }[];
   /** Capability config entries that have a value, in YAML order. */
   capConfig: { entry: ConfigEntry; value: JsonScalar }[];
+  /** Every capability trait, as ManifestCap.traits. */
+  traits: Record<string, JsonScalar>;
   pins: number[];
 }
 
@@ -568,6 +623,32 @@ function lookupEntry(data: Record<string, unknown>, section: string, entry: stri
   }
   const e = (s as Record<string, unknown>)[entry];
   return e && typeof e === 'object' && !Array.isArray(e) ? (e as Record<string, unknown>) : null;
+}
+
+/**
+ * Design c6 D24: the board's test_pin must be one of its pins.free, never reserved and never claimed by an
+ * instance of this profile, since debug builds drive it; a strapping pin gets the usual warning.
+ */
+function checkTestPin(board: RawBoard, insts: ResolvedInstance[], reserved: Map<number, string>, strapping: Set<number>, issues: Issues): void {
+  const pin = board.test_pin;
+  if (pin == null) {
+    return;
+  }
+  const bf = boardFile(board.id);
+  const group = reserved.get(pin);
+  if (group !== undefined) {
+    issues.add(bf, ['test_pin'], `test_pin GPIO${pin} is reserved for ${group} on ${board.id}`);
+  }
+  const owner = insts.find((i) => i.pins.includes(pin));
+  if (owner) {
+    issues.add(bf, ['test_pin'], `test_pin GPIO${pin} is claimed by '${owner.name}' (${owner.bind})`);
+  }
+  if (!(board.pins.free ?? []).includes(pin)) {
+    issues.add(bf, ['test_pin'], `test_pin GPIO${pin} is not in pins.free of ${board.id}`);
+  }
+  if (strapping.has(pin)) {
+    issues.warnings.push(strapWarning('test_pin', pin, 'board test_pin', board.pins.strapping_levels?.[String(pin)]));
+  }
 }
 
 function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: Issues): ResolvedInstance[] {
@@ -711,8 +792,30 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       }
     }
 
+    // Design c6 D13: the traits the firmware will report, so the hub, apps and the dashboard know them from the
+    // artifact: the capability's defaults, the driver's `traits:`, then what the service derives from config.
+    const traits: Record<string, JsonScalar> = {};
+    for (const t of cap?.traits ?? []) {
+      traits[t.name] = t.default ?? zeroValue(t);
+    }
+    // A driver for another contract is reported above; its traits would only repeat that.
+    const ownTraits = service !== undefined && driver.implements === service.implements ? driver.traits : undefined;
+    for (const [key, value] of Object.entries(ownTraits ?? {})) {
+      const t = cap?.traits.find((x) => x.name === key);
+      const p = !cap ? null : !t ? `${cap.name} has no trait '${key}'` : checkCapValue(t, value);
+      if (p) {
+        issues.add(df, ['traits', key], p);
+        ok = false;
+        continue;
+      }
+      traits[key] = value;
+    }
+    if (service?.traits) {
+      Object.assign(traits, service.traits(Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value]))));
+    }
+
     if (ok && cap && service) {
-      out.push({ name, port: 0, bind: c.bind, cap, service, driver, driverConfig, capConfig, pins });
+      out.push({ name, port: 0, bind: c.bind, cap, service, driver, driverConfig, capConfig, traits, pins });
     }
   }
 
@@ -741,6 +844,8 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       }
     }
   }
+
+  checkTestPin(board, out, reserved, strapping, issues);
 
   // Peripheral budgets (RMT, LEDC, ...) against the board's resources, fr_core's pools against CORE_POOLS.
   const need = new Map<string, { total: number; users: string[] }>();
@@ -949,6 +1054,7 @@ function buildManifest(inp: Inputs, model: Model, insts: ResolvedInstance[]): Fi
     app: inp.profile.app,
     target: inp.board.idf_target,
     catalog_hash: catalogHash(model),
+    test_pin: inp.board.test_pin ?? null,
     caps: insts.map((i) => ({
       name: i.name,
       port: i.port,
@@ -957,6 +1063,7 @@ function buildManifest(inp: Inputs, model: Model, insts: ResolvedInstance[]): Fi
       version: `${i.cap.version.major}.${i.cap.version.minor}`,
       driver: i.driver.id,
       config: Object.fromEntries(i.capConfig.map((c) => [c.entry.name, c.value])),
+      traits: i.traits,
     })),
   };
 }

@@ -1,0 +1,161 @@
+T-AGENT transcript, 2026-10-23 (fresh Claude Code session with only the Fractonica plugin;
+started with `claude --plugin-dir /Users/dimas/projects/fractonica-hardware/plugin`; pasted by the user).
+Tool-call details are collapsed as Claude Code shows them.
+
+▗ ▗   ▖ ▖  Claude Code v2.1.308
+           Haiku 5.5 · Claude Max
+ ▘▘   ▝▝   ~/projects/fractonica-hardware
+
+❯ /login
+  ⎿  Login successful
+
+❯ /model
+  ⎿  Set model to Haiku 5.5 and saved as your default for new sessions
+
+❯ make pad-c3's LED blink when pad-c6's BOOT is pressed, prove it, and report
+  the latency
+
+⏺ Skill(fractonica:e2e-verify)
+  ⎿  Successfully loaded skill
+
+  Called plugin:fractonica:fractonica 8 times (ctrl+o to expand)
+
+⏺ The binding works end to end: the press produced node.binding_fired on pad-c6
+  (path 0, ESP-NOW, rtt 5.4 ms) and status.effect_done on pad-c3. Now I'll take
+  about 10 presses for latency samples.
+
+  Called plugin:fractonica:fractonica 20 times (ctrl+o to expand)
+
+⏺ Ten-plus presses are done, each confirmed on pad-c3. Pulling latency stats now
+  while the samples are still in the hub's memory.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ The binding is live: pressing pad-c6's BOOT makes pad-c3's LED blink, and the
+  blink is confirmed on every press. The ESP-NOW node-to-node path (no hub in
+  it) has a trigger-to-result p50 of 4.4 ms and p99 of 8.6 ms.
+
+  What I set up
+  - binding_set pad-c6.boot.down → pad-c3.status.blink {count: 1} landed in
+    pad-c6 slot 1. Slot 0 was already a ping → blink binding, and I left it
+    alone.
+
+  Proof
+  - 11 simulated BOOT clicks on pad-c6 (one verification press plus 10 for
+    latency).
+  - Each press was followed by wait_for_event on pad-c3 for status.effect_done
+    (effect blink), using the cursor taken before that press. All 11 matched.
+  - The first press also produced node.binding_fired on pad-c6 with path: 0
+    (ESP-NOW) and rtt_us: 5438.
+  - Caveat: effect_done is the firmware reporting that the blink ran. I did not
+    check the LED optically or read pad-c3's logs. If you want that, I can run
+    logs_assert on pad-c3 or ask you to watch the LED during a real press.
+
+  Latency (latency_stats, 300 s window)
+
+  | Measure                                   | p50     | p99      | Samples |
+  | Binding trigger → pad-c3 RESULT (ESP-NOW) | 4.36 ms | 8.62 ms  | 11      |
+  | Input → hub, pad-c6                       | 10.05 ms| 50.31 ms | 33      |
+  | Input → hub, pad-c3                       | 4.31 ms | 27.31 ms | 11      |
+
+  - The input → hub figures for pad-c6 include samples from earlier in the
+    window, so the 50 ms p99 is not only from these presses.
+  - The hub's event-loop p99 was 22.3 ms, which matches the startup warning
+    about event-loop delay. Node frames can wait that long before the hub
+    handles them. The binding path bypasses the hub, so it is not affected.
+
+✻ Baked for 1m 21s · done 11:56 AM
+
+❯ change a log line and roll it out to all nodes over Wi-Fi
+
+⏺ Skill(fractonica:build-deploy)
+  ⎿  Successfully loaded skill
+
+  Searched for 1 pattern, read 1 file, ran 1 shell command (ctrl+o to expand)
+
+⏺ The "fr: ready" banner is the hub's log contract, and the code comment says
+  fields may be appended but never removed or reordered. I'll append a
+  build-date field at the end.
+
+⏺ Update(firmware/components/fr_core/src/core.cpp)
+  ⎿  Added 2 lines, removed 2 lines
+      -             "reset=%s slot=%s caps=%u epoch=%u",
+      +             "reset=%s slot=%s caps=%u epoch=%u built=%s %s",
+      -             static_cast<unsigned>(s_identity.epoch));
+      +             static_cast<unsigned>(s_identity.epoch), app->date, app->time);
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ I added a build-date field to the fr: ready boot banner and rolled it out over
+  Wi-Fi to all three nodes. All three updated and came back on the new
+  firmware, and each showed the new line.
+
+  The change
+  - File: firmware/components/fr_core/src/core.cpp, around line 1360.
+  - The banner now ends with built=<date> <time>, taken from the app descriptor.
+    I appended it because the code comment says the banner is a hub contract
+    where fields may be appended but not removed or reordered.
+
+  Rollout (job j_ceb4e549f157, completed)
+
+  | Device  | Profile | Outcome | Expect  |
+  | pad-c3  | c3o-pad | updated | matched |
+  | pad-c3b | c3o-pad | updated | matched |
+  | pad-c6  | c6-pad  | updated | matched |
+
+  - Summary: 3 updated, 0 failed, 0 rolled back. Total time was about 29 s.
+  - The expectation was expect_log: "built=", checked after each device returned
+    on its new fw_id.
+
+  Things to know
+  - The deploy built the whole working tree, which has 148 uncommitted modified
+    files, not just my one-line edit. Those in-progress changes are now running
+    on all three nodes. If you did not intend that, tell me and I can roll back
+    to the previous firmware or deploy from a clean commit.
+  - Builds are debug builds, the deploy default.
+
+✻ Worked for 57s · done 11:57 AM
+
+❯ switch pad-c6 to the c6-pad-mono profile
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ The c6-pad-mono profile exists. Its newest build is from yesterday, so I'll
+  build it fresh from the current tree, which includes the banner change.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ The build passed with no diagnostics. Two warnings are about strapping pins
+  (GPIO9 is the BOOT button, which is expected). Now I'll flash over USB with
+  the full plan, which keeps pad-c6's identity.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ Flash completed. Next I'll wait for pad-c6 to come back online on the new
+  firmware, then check its capabilities and make it blink to prove the switch.
+
+  Called plugin:fractonica:fractonica 4 times (ctrl+o to expand)
+
+⏺ pad-c6 is back on the new firmware and its LED blink ran. The flash may have
+  cleared the boot → pad-c3 binding I set earlier, so I'll check that.
+
+  Called plugin:fractonica:fractonica (ctrl+o to expand)
+
+⏺ pad-c6 is now on the c6-pad-mono profile, and I checked that the firmware is
+  running and responding.
+
+  - Build: node/c6-pad-mono/debug/79fb32f36bc6, built from the current tree with
+    no diagnostics. The tree is still dirty (uncommitted changes), and the
+    build records that.
+  - Flash: a full write over USB on /dev/cu.usbmodem1101. pad-c6 kept its
+    identity (addr 2, alias pad-c6, epoch floor 43).
+  - Online: it came back on fw_id 79fb32f36bc6 with OTA state valid.
+  - Proof: status.blink {count: 3} produced status.effect_done (blink) on pad-c6
+    about 2 ms after the send.
+  - Bindings: both survived the flash. The ping binding is in slot 0, and the
+    boot.down → pad-c3 blink binding is in slot 1, matching the registry.
+
+  I didn't re-run the button-to-pad-c3 latency test on the new profile. Say if
+  you want that.
+
+✻ Brewed for 1m 8s · done 11:59 AM

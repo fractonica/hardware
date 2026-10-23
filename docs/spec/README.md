@@ -48,7 +48,7 @@
 | D12 | **Hub is the sole owner of serial ports** (leases for external tools; no Web Serial in the dashboard) | Chrome held your board's port on day one; contention otherwise breaks flashing and agents | proposed |
 | D13 | **Agent surfaces: CLI `--json` + REST + WS events + MCP stdio**; jobs, pre-action cursors, PID-checked leases; destructive ops (M2) need a human on the Mac | Works for every agent; race-free waits; safe against accidents | proposed |
 | D14 | **Security off in the PoC** (LAN lab); AES-CCM envelope security in M3; never secure boot or flash encryption on lab boards | You don't need security; eFuses are irreversible | **decided: no security work planned**; the envelope keeps its SEC bit reserved |
-| D15 | **SDK speaks JSON over WS in M1**; binary pass-through only if latency tests show it matters | Tens of µs vs milliseconds on the radio; readable by agents | proposed |
+| D15 | **SDK speaks JSON over WS in M1**; binary pass-through only if latency tests show it matters | Tens of µs vs milliseconds on the radio; readable by agents | **kept at C6**: T-LAT's hub → SDK hop is p50 0.9 ms against 3.7–4.6 ms to the hub; binary mode judged not needed (11 §11.4) |
 | D16 | **M1 boards: your two ESP32-C3 boards with the 0.42" OLED** (plus the C6 Super Mini); S3 later | You have two identical C3 OLED boards, which is ideal for node ↔ node tests | **decided** |
 | D17 | **HIL fixture is required** (a spare ESP32 that presses BOOT pins and reads LEDs electronically) | Agents must be able to test real buttons without you | **decided: M2, first item** |
 | D18 | **Analog inputs** become a capability (`fr.analog_in`); scale target 20–30 nodes | Your use cases need analog inputs and dozens of nodes | **decided: M2** |

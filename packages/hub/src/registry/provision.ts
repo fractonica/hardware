@@ -15,6 +15,7 @@ import type { HubContext } from '../context.ts';
 import { flashPlan, hardResetCapturing, runPytools } from '../flash.ts';
 import type { JobCtx } from '../jobs.ts';
 import { readNetwork } from '../network.ts';
+import { assertPortFree, nameBusyHolder } from '../ports/holders.ts';
 import { nowUs } from '../ring.ts';
 import { routerInfo } from '../router/index.ts';
 import { normalizeMac } from '../serial.ts';
@@ -88,6 +89,8 @@ export async function startProvision(input: ProvisionInput, hub: HubContext, dep
       throw aliasTaken(alias, holder.device_id);
     }
   }
+  // A serial lease, or another program (a Web Serial tab), has the port: refused before the job (design c6 D5).
+  await assertPortFree(hub, { ...entry, alias: alias ?? (isDeviceId(entry.key) ? registryOf(hub).get(entry.key)?.alias : undefined) });
   const job = hub.jobs.start('provision', [entry.key], [`port:${entry.key}`, `device:${entry.key}`], (ctx) =>
     provisionJob(hub, ctx, { ...input, alias }, entry.key, deps),
   );
@@ -311,6 +314,9 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
       prov_ts,
       probe: { chip: probe.chip, description: probe.description, features: probe.features, flash_size: probe.flash_size, mac: deviceId },
     };
+  } catch (err) {
+    // The sidecar's "port busy" names nobody: lsof says who (a Web Serial tab opened since the pre-check).
+    throw await nameBusyHolder(hub, { path: lease.path, key: portKey }, err);
   } finally {
     // The CSV and image hold the password: gone as soon as the flash is over, whatever happened.
     rendered?.dispose();

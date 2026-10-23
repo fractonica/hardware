@@ -1,7 +1,7 @@
 // fr_net hub frames and commands (spec 05 §5.6-5.8, §5.10): the RESULT envelope and its link (a serial
 // request is answered on serial), WELCOME floors on the unicast window, DUP requests answered from the
 // response cache (byte-identical, never run twice), bulk RESULTs, fast and broadcast CMDs, frames that are
-// not for this node, LATEST hub frames, expire_at and exec_at.
+// not for this node, LATEST hub frames and expire_at (exec_at: net_exec_at_test.cpp).
 #include "tests/net_fakes.hpp"
 
 namespace {
@@ -329,18 +329,12 @@ TEST(net_expire_at_is_honoured_once_synced)
     CHECK_EQ(r.host.calls.size(), 4u);
 }
 
-TEST(net_exec_at_answers_unsupported)
+TEST(net_cmd_skips_unknown_non_critical_tlvs)
 {
+    // exec_at has its own suite (net_exec_at_test.cpp, design c6 D22).
     NetRig r;
     r.session(LinkKind::tcp);
     r.clear_sent();
-    wire::ExtBuilder ext;
-    ext.add_value(wire::kExtExecAtUs, static_cast<uint32_t>(r.core.now() + 500'000));
-    r.deliver(LinkKind::tcp, r.hub.cmd(2, 1, {}, wire::kFlagAckReq, ext.view()));
-    CHECK(r.host.calls.empty());
-    auto res = results(r.tcp);
-    REQUIRE_EQ(res.size(), 1u);
-    CHECK_EQ(res[0].result.status, static_cast<uint8_t>(fr::Err::unsupported));
     // Unknown non-critical TLVs are skipped (trace_id here is known, 0x7E is not).
     wire::ExtBuilder other;
     other.add_value(wire::kExtTraceId, 0x1234);

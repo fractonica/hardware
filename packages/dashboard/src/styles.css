@@ -1,0 +1,79 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+
+/* Semantic colours (light, and dark when the Mac is): bg-bg, bg-panel, text-fg, text-muted, border-line,
+   and the tones accent, ok, warn, bad. */
+@theme inline {
+  --color-bg: var(--fr-bg);
+  --color-panel: var(--fr-panel);
+  --color-sunk: var(--fr-sunk);
+  --color-line: var(--fr-line);
+  --color-fg: var(--fr-fg);
+  --color-muted: var(--fr-muted);
+  --color-accent: var(--fr-accent);
+  --color-ok: var(--fr-ok);
+  --color-warn: var(--fr-warn);
+  --color-bad: var(--fr-bad);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+}
+
+:root {
+  --fr-bg: #f4f5f7;
+  --fr-panel: #ffffff;
+  --fr-sunk: #eef0f3;
+  --fr-line: #dde1e6;
+  --fr-fg: #1b1f24;
+  --fr-muted: #667085;
+  --fr-accent: #2f6fde;
+  --fr-ok: #1f8a4c;
+  --fr-warn: #b7791f;
+  --fr-bad: #c53030;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fr-bg: #0f1216;
+    --fr-panel: #171b21;
+    --fr-sunk: #1e232b;
+    --fr-line: #2a313b;
+    --fr-fg: #e6e9ee;
+    --fr-muted: #8b95a5;
+    --fr-accent: #5b93f0;
+    --fr-ok: #3fb872;
+    --fr-warn: #e0a53a;
+    --fr-bad: #ef5d5d;
+    color-scheme: dark;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--fr-bg);
+  color: var(--fr-fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+
+/* A tile that just saw an input (data-flash, design c6 §5) lights up and fades out. */
+.tile {
+  transition:
+    box-shadow 600ms ease-out,
+    background-color 600ms ease-out;
+}
+.tile[data-flash] {
+  transition: none;
+  box-shadow: 0 0 0 2px var(--fr-accent);
+  background-color: color-mix(in oklab, var(--fr-accent) 12%, var(--fr-panel));
+}
+
+.xterm-host .xterm {
+  padding: 6px;
+  height: 100%;
+}

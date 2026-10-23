@@ -301,9 +301,10 @@ describe('re-push', () => {
     c6.bindings.set(9, encodeBinding({ ...c6.bindingTable()[0], slot: 9 }));
     const before = binds(c6);
     c6.hello(); // a new handshake on the same link
-    await until(() => binds(c6).clear === before.clear + 1, 3000, 'the stray cleared');
+    // The stray goes first, then the missing row is set (its own round trip): wait for both.
+    await until(() => binds(c6).clear > before.clear && binds(c6).set > before.set, 3000, 'the stray cleared and the row re-set');
     expect(c6.bindingTable().map(hex)).toEqual(want);
-    expect(binds(c6).set).toBe(before.set + 1);
+    expect(binds(c6)).toMatchObject({ clear: before.clear + 1, set: before.set + 1 });
     // An unchanged table: nothing pushed.
     const steady = binds(c6);
     c6.hello();

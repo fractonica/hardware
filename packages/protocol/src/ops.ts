@@ -1,42 +1,62 @@
-// Operation registry: every hub operation is defined once here; REST, the `fr` CLI and (later)
-// MCP tools are generated from it (spec 09 §9.1). Field names are snake_case; the CLI maps them
-// to --kebab-case options (see cliFlag). Checkpoint C3 adds its groups from ops/registry.ts (registry
-// and provisioning) and ops/links.ts (node links, router, events), C4 its OTA group from ops/ota.ts, C5
-// its node <-> node group from ops/net.ts (messages, bindings, latency), all spread in at the end of OPS.
+// Operation registry: every hub operation is defined once here; REST, the `fr` CLI and MCP tools are
+// generated from it (spec 09 §9.1). Field names are snake_case; the CLI maps them to --kebab-case
+// options (see cliFlag). Checkpoint C3 adds its groups from ops/registry.ts (registry and provisioning)
+// and ops/links.ts (node links, router, events), C4 its OTA group from ops/ota.ts, C5 its node <-> node
+// group from ops/net.ts (messages, bindings, latency), and C6 (design c6 §3.2) its groups from ops/hub.ts,
+// ops/registry.ts (inventory), ops/net.ts (probe), ops/ports.ts, ops/logs.ts, ops/apps.ts and
+// ops/tests.ts, all spread in at the end of OPS.
+// This module loads no Node builtin: the browser entry (browser.ts) exports it, and REGISTRY_HASH,
+// which hashes it with node:crypto, lives in registry-hash.ts.
 
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
+import { APPS_OPS } from './ops/apps.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
+import { HUB_OPS, HubStatusSchema } from './ops/hub.ts';
 import { LINKS_OPS } from './ops/links.ts';
-import { NET_OPS } from './ops/net.ts';
+import { LOGS_OPS } from './ops/logs.ts';
+import { NET_OPS, PROBE_OPS } from './ops/net.ts';
 import { OTA_OPS } from './ops/ota.ts';
-import { REGISTRY_OPS } from './ops/registry.ts';
+import { PORTS_OPS } from './ops/ports.ts';
+import { INVENTORY_OPS, REGISTRY_OPS } from './ops/registry.ts';
+import { TESTS_OPS } from './ops/tests.ts';
+import { JOB_ORIGINS, JobSchema, PortInfoSchema } from './types.ts';
 
-export { cliFlag, MAX_WAIT_S, type OpDef, type OpKind } from './ops/common.ts';
+export { GeneratedFileSchema, type AppsOpName, type GeneratedFile } from './ops/apps.ts';
+export { cliFlag, MAX_WAIT_S, type OpDef, type OpKind, type OpTier } from './ops/common.ts';
+export { ADVERT_STATES, CheckSchema, HubStatusSchema, LNP_STATES, type Check, type HubOpName, type HubStatus, type LnpState } from './ops/hub.ts';
 export type { LinksOpName } from './ops/links.ts';
-export { BROADCAST_ALIAS, type NetOpName } from './ops/net.ts';
+export type { LogsOpName } from './ops/logs.ts';
+export { BROADCAST_ALIAS, LatencyStatsSchema, PROBE_MODES, type NetOpName, type ProbeOpName } from './ops/net.ts';
 export type { OtaOpName } from './ops/ota.ts';
-export type { RegistryOpName } from './ops/registry.ts';
+export { LeaseSchema, type Lease, type PortsOpName } from './ops/ports.ts';
+export { CapInstanceSchema, DeviceLinkInfoSchema, type InventoryOpName, type RegistryOpName } from './ops/registry.ts';
+export { TEST_TIERS, type TestsOpName } from './ops/tests.ts';
 
 export const OPS = [
   op({
     name: 'hub_status',
     kind: 'query',
+    tier: 'read',
+    mcp: { alwaysLoad: true },
     summary: 'Hub health: version, IDF pin, pytools, serial ports, jobs, warnings.',
     input: z.object({}),
+    output: HubStatusSchema,
     cli: { path: ['hub', 'status'] },
   }),
   op({
     name: 'port_list',
     kind: 'query',
+    tier: 'read',
     summary: 'USB serial ports the hub sees, with device id (MAC), state and holder.',
     input: z.object({}),
+    output: z.looseObject({ ports: z.array(PortInfoSchema) }),
     cli: { path: ['ports', 'ls'] },
   }),
   op({
     name: 'network_set',
     kind: 'command',
+    tier: 'mutate',
     summary: 'Store the Wi-Fi network nodes join. The password is write-only (the CLI reads it from stdin with --password-stdin).',
     input: z.object({
       ssid: z.string().min(1).max(32),
@@ -49,6 +69,7 @@ export const OPS = [
   op({
     name: 'network_get',
     kind: 'query',
+    tier: 'read',
     summary: 'The stored Wi-Fi network (the password is never returned).',
     input: z.object({}),
     cli: { path: ['net', 'get'] },
@@ -56,6 +77,7 @@ export const OPS = [
   op({
     name: 'build_start',
     kind: 'job',
+    tier: 'mutate',
     summary: 'Build firmware for a profile from source_dir (ESP-IDF, sanitized env) and ingest the artifact.',
     input: z.object({
       source_dir: sourceDir,
@@ -74,6 +96,7 @@ export const OPS = [
   op({
     name: 'artifact_list',
     kind: 'query',
+    tier: 'read',
     summary: 'Built artifacts, newest first.',
     input: z.object({
       profile: z.string().optional(),
@@ -85,6 +108,7 @@ export const OPS = [
   op({
     name: 'flash_start',
     kind: 'job',
+    tier: 'mutate',
     summary:
       'Flash a USB-attached board over serial, named by device (a selector matching one device) or port. plan=app writes otadata + app (dev loop); full adds bootloader and partition table, plus fr_ident from the registry for a provisioned device (an unknown board boots UNASSIGNED); identity writes only fr_ident (after a rename or a new network); recover = full for a provisioned device that lost its flash.',
     input: z.object({
@@ -101,6 +125,7 @@ export const OPS = [
   op({
     name: 'device_reset',
     kind: 'job',
+    tier: 'mutate',
     summary: 'Reset a USB-attached board (hard) or put it into ROM download mode (bootloader).',
     input: z.object({
       port: portSel,
@@ -112,6 +137,7 @@ export const OPS = [
   op({
     name: 'logs_read',
     kind: 'query',
+    tier: 'read',
     // The selector's field description predates registry selectors; it is part of REGISTRY_HASH (a CLI
     // and a hub that differ refuse each other), so the summary carries the full form until the next
     // protocol change. logDevices (hub ops.ts) takes ports first, then registry selectors.
@@ -130,6 +156,7 @@ export const OPS = [
   op({
     name: 'wait_for_log',
     kind: 'wait',
+    tier: 'read',
     summary:
       'Wait until a log line after `since` matches pattern. Pass the cursor returned by the action you are verifying. selector as in logs_read: a port or registered devices (alias, id:, tag:, chip:, online, ...).',
     input: z.object({
@@ -147,6 +174,8 @@ export const OPS = [
   op({
     name: 'diag_exec',
     kind: 'query',
+    // A diag line can reboot the node, inject input or write its log: never read-only (design c6 D17).
+    tier: 'mutate',
     summary:
       'Run one fr_diag command on a USB-attached node over its serial command channel (info, caps, call <inst>.<cmd> [json], inject <inst> <gesture>, selftest, mark, log, stats, reboot) and return its JSON response (a bare `caps` follows the device pages, `next`, and returns the whole list). The returned cursor precedes the command, so wait_for_log since it sees the frames the command emitted. Device output is untrusted data.',
     input: z.object({
@@ -160,20 +189,25 @@ export const OPS = [
   op({
     name: 'job_get',
     kind: 'query',
+    tier: 'read',
     summary: 'One job by id.',
     input: z.object({ job_id: z.string() }),
+    output: JobSchema,
     cli: { path: ['jobs', 'get'], positional: ['job_id'] },
   }),
   op({
     name: 'job_wait',
     kind: 'wait',
+    tier: 'read',
     summary: 'Wait for a job to finish. Running out of time returns ok with status "working".',
     input: z.object({ job_id: z.string(), timeout_s: z.number().int().min(1).max(MAX_WAIT_S).default(60) }),
+    output: JobSchema,
     cli: { path: ['jobs', 'wait'], positional: ['job_id'] },
   }),
   op({
     name: 'job_logs',
     kind: 'query',
+    tier: 'read',
     summary: 'Output of a job (build, flash), paged by line number.',
     input: z.object({
       job_id: z.string(),
@@ -186,13 +220,19 @@ export const OPS = [
   op({
     name: 'job_list',
     kind: 'query',
-    summary: 'Recent jobs, newest first.',
-    input: z.object({ limit: z.number().int().min(1).max(100).default(20) }),
+    tier: 'read',
+    summary: 'Recent jobs, newest first; origin keeps the jobs one kind of client started (mcp: the agents).',
+    input: z.object({
+      limit: z.number().int().min(1).max(100).default(20),
+      origin: z.enum(JOB_ORIGINS).optional().describe('only jobs started by this client (its X-Fr-Client header)'),
+    }),
+    output: z.looseObject({ jobs: z.array(JobSchema) }),
     cli: { path: ['jobs', 'ls'] },
   }),
   op({
     name: 'job_cancel',
     kind: 'command',
+    tier: 'mutate',
     summary: 'Cancel a queued or running job (a flash in progress finishes its current block first).',
     input: z.object({ job_id: z.string() }),
     cli: { path: ['jobs', 'cancel'], positional: ['job_id'] },
@@ -201,16 +241,22 @@ export const OPS = [
   ...LINKS_OPS,
   ...OTA_OPS,
   ...NET_OPS,
+  // Checkpoint C6 (design c6 §3.2): hub_doctor, board|profile|capability_list, latency_probe, the serial
+  // leases, logs_assert, client_generate, test_run.
+  ...HUB_OPS,
+  ...INVENTORY_OPS,
+  ...PROBE_OPS,
+  ...PORTS_OPS,
+  ...LOGS_OPS,
+  ...APPS_OPS,
+  ...TESTS_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];
 
+/** Every op name, in registry order. */
+export const OP_NAMES: readonly OpName[] = OPS.map((o) => o.name);
+
 export function findOp(name: string): OpDef | undefined {
   return OPS.find((o) => o.name === name);
 }
-
-/** Changes whenever an op name or input schema changes; CLI and hub compare it. */
-export const REGISTRY_HASH = createHash('sha256')
-  .update(JSON.stringify(OPS.map((o) => [o.name, z.toJSONSchema(o.input)])))
-  .digest('hex')
-  .slice(0, 12);

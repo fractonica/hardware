@@ -5,23 +5,32 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { dirname } from 'node:path';
 
 import { checkSourceDir, paths, pytoolsSource } from '@fractonica/host';
-import { type FaultKind, formatCursor, FrError, HUB_VERSION, MAX_WAIT_S, parseCursor, REGISTRY_HASH, type LogLine, type OpName } from '@fractonica/protocol';
+import { type FaultKind, formatCursor, FrError, HUB_VERSION, type JobOrigin, MAX_WAIT_S, parseCursor, REGISTRY_HASH, type LogLine, type OpName } from '@fractonica/protocol';
 
+import { APPS_HANDLERS } from './apps/ops.ts';
 import { buildVariant, listArtifacts } from './artifacts.ts';
 import { NET_HANDLERS } from './bindings/ops.ts';
 import { runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
+import { HUB_HANDLERS } from './doctor/ops.ts';
 import { mintCursor } from './events/index.ts';
 import { hardResetCapturing, runPytools } from './flash.ts';
+import { PROBE_HANDLERS } from './latency/ops.ts';
+import { LOGS_HANDLERS } from './logs/ops.ts';
 import { type StoredLine, toLogLine } from './logstore.ts';
 import { readNetwork, writeNetwork } from './network.ts';
+import { assertPortFree, listPorts, nameBusyHolder } from './ports/holders.ts';
+import { PORTS_HANDLERS } from './ports/ops.ts';
+import { INVENTORY_HANDLERS } from './registry/catalog-ops.ts';
 import { type FlashStartInput, startFlash } from './registry/flashing.ts';
+import { isDeviceId, registryOf } from './registry/hub.ts';
 import { REGISTRY_HANDLERS } from './registry/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
 import { routerStatus } from './router/index.ts';
 import { LINKS_HANDLERS } from './router/ops.ts';
 import { OTA_HANDLERS } from './ota/ops.ts';
 import { normalizeMac } from './serial.ts';
+import { TESTS_HANDLERS } from './tests/ops.ts';
 
 // Moved to context.ts (design c3 §4); re-exported for existing importers.
 export type { Handler, HubContext } from './context.ts';
@@ -240,6 +249,11 @@ export const HANDLERS: Record<OpName, Handler> = {
     } catch {
       // a registry that cannot list yet: the count is unknown, not an error of hub_status
     }
+    // C6 parts (design c6 §3.3): each may add warnings (LNP_DENIED, the advert, a stale dashboard, ...).
+    for (const part of [hub.prompts, hub.leases, hub.lnp, hub.advert, hub.appServer, hub.wsServer, hub.staticSite, hub.latencyProbe]) {
+      warnings.push(...(part?.warnings?.() ?? []));
+    }
+    const lnp = hub.lnp?.status();
     return {
       version: HUB_VERSION,
       registry_hash: REGISTRY_HASH,
@@ -257,10 +271,17 @@ export const HANDLERS: Record<OpName, Handler> = {
       jobs: hub.jobs.counts(),
       head: mintCursor(hub),
       warnings,
+      ...(hub.prompts ? { prompts: hub.prompts.pending() } : {}),
+      ...(lnp ? { lnp: lnp.lnp, lnp_checked_at: lnp.checked_at, launched_by: lnp.launched_by } : {}),
+      ...(hub.advert ? { advert: hub.advert.status() } : {}),
+      ...(hub.staticSite ? { dashboard: hub.staticSite.dashboard() } : {}),
+      ...(hub.sleepGuard ? { sleep_guard: { active: hub.sleepGuard.active() } } : {}),
+      ...(router ? { router: { counters: router.counters } } : {}),
     };
   },
 
-  port_list: (_input, hub) => ({ ports: hub.serial.list() }),
+  // With `external`: other programs that have a port open too, from lsof at most every 2 s (design c6 D5).
+  port_list: (_input, hub) => listPorts(hub),
 
   network_set: (input: { ssid: string; password?: string; bssid?: string; country?: string }, hub) => {
     // net_id is created with the record and kept by later changes; hub_host follows the Mac's name.
@@ -323,6 +344,9 @@ export const HANDLERS: Record<OpName, Handler> = {
 
   device_reset: async (input: { port: string; mode: 'hard' | 'bootloader'; wait_s?: number }, hub) => {
     const entry = await hub.serial.resolveWait(input.port);
+    const alias = isDeviceId(entry.key) ? registryOf(hub).get(entry.key)?.alias : undefined;
+    // A serial lease, or another program (a Web Serial tab), has the port: refused before the job (design c6 D5).
+    await assertPortFree(hub, { ...entry, ...(alias ? { alias } : {}) });
     const job = hub.jobs.start('reset', [entry.key], [`port:${entry.key}`, `device:${entry.key}`], async (ctx) => {
       if (input.mode === 'hard') {
         return { mode: 'hard', via: await hardResetCapturing(hub, entry.key, ctx) };
@@ -330,6 +354,9 @@ export const HANDLERS: Record<OpName, Handler> = {
       const lease = await hub.serial.lease(entry.key, `job ${ctx.jobId}`);
       try {
         return await runPytools({ cmd: 'reset', port: lease.path, mode: input.mode }, ctx);
+      } catch (err) {
+        // The sidecar's "port busy" names nobody: lsof says who (design c6 D5).
+        throw await nameBusyHolder(hub, { path: lease.path, key: entry.key, ...(alias ? { alias } : {}) }, err);
       } finally {
         lease.release();
       }
@@ -448,7 +475,7 @@ export const HANDLERS: Record<OpName, Handler> = {
   job_wait: (input: { job_id: string; timeout_s: number }, hub) => hub.jobs.wait(input.job_id, input.timeout_s),
   job_logs: (input: { job_id: string; after_line: number; max_lines: number; errors_only: boolean }, hub) =>
     hub.jobs.logs(input.job_id, input.after_line, input.max_lines, input.errors_only),
-  job_list: (input: { limit: number }, hub) => ({ jobs: hub.jobs.list(input.limit) }),
+  job_list: (input: { limit: number; origin?: JobOrigin }, hub) => ({ jobs: hub.jobs.list(input.limit, input.origin) }),
   job_cancel: (input: { job_id: string }, hub) => hub.jobs.cancel(input.job_id),
 
   // Checkpoint C3 groups (design c3 §4): registry and provisioning (H1), node links, router, events (H2).
@@ -458,4 +485,12 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...OTA_HANDLERS,
   // Checkpoint C5 (design c5 §4): message_send, binding_set|list|clear, latency_stats (H1).
   ...NET_HANDLERS,
+  // Checkpoint C6 (design c6 §3.3), one module per area.
+  ...APPS_HANDLERS, // client_generate (S1)
+  ...HUB_HANDLERS, // hub_doctor (S2)
+  ...INVENTORY_HANDLERS, // board_list, profile_list, capability_list (S2)
+  ...LOGS_HANDLERS, // logs_assert (S4)
+  ...TESTS_HANDLERS, // test_run (S4)
+  ...PORTS_HANDLERS, // serial_lease, serial_lease_renew, serial_release (S5)
+  ...PROBE_HANDLERS, // latency_probe (S7)
 };

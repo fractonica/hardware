@@ -18,6 +18,8 @@ export interface StartInfo {
   pid?: number;
   log?: string;
   already?: boolean;
+  /** The dashboard's URL (hub_status.dashboard.url, design c6 D10), when the hub answers it. */
+  dashboard?: string;
 }
 
 export interface StopInfo {
@@ -59,10 +61,17 @@ async function waitFor(cond: () => Promise<boolean>, timeoutMs: number): Promise
   return false;
 }
 
+/** Where the running hub serves its dashboard, from hub_status; absent from a hub that does not say. */
+async function dashboardUrl(): Promise<{ dashboard?: string }> {
+  const st = await hubCall('hub_status', {}, 3000);
+  const url = st.ok ? (st.data as { dashboard?: { url?: unknown } }).dashboard?.url : undefined;
+  return typeof url === 'string' ? { dashboard: url } : {};
+}
+
 export async function startHub(foreground: boolean): Promise<StartInfo> {
   const health = await hubHealth();
   if (health) {
-    return { started: false, already: true, pid: health.pid };
+    return { started: false, already: true, pid: health.pid, ...(await dashboardUrl()) };
   }
   const args = ['--conditions=@fractonica/source', HUB_MAIN];
   if (foreground) {
@@ -77,7 +86,7 @@ export async function startHub(foreground: boolean): Promise<StartInfo> {
   child.unref();
   const up = await waitFor(async () => (await hubHealth()) !== null, 10_000);
   const h = await hubHealth();
-  return up && h ? { started: true, pid: h.pid, log: paths.log() } : { started: false, log: paths.log() };
+  return up && h ? { started: true, pid: h.pid, log: paths.log(), ...(await dashboardUrl()) } : { started: false, log: paths.log() };
 }
 
 /** Stop guard (spec 08 §8.2): a failed Result while the hub has queued or working jobs, else null. */

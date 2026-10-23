@@ -9,6 +9,7 @@ idf_component_register(SRCS "src/app_desc.cpp"
                             "src/services/button_service.cpp"
                             "src/services/descriptor.cpp"
                             "src/services/led_service.cpp"
+                            "src/test_pin.cpp"
                        INCLUDE_DIRS "include"
                        # Public: the generated capability classes (and fr_caps' FR_TEST_HOOKS definition,
                        # which changes their vtables) reach every component that includes fr_core.
@@ -16,8 +17,9 @@ idf_component_register(SRCS "src/app_desc.cpp"
                        # fr_serial and fr_diag sit below fr_core: start() brings them up. fr_net runs the hub
                        # link; it requires fr_core in turn (a cycle IDF links by repeating the libraries), as
                        # fr_ota does (its Kconfig also holds FR_TEST_FAULT_HEALTH, which fr_app_desc reports).
+                       # esp_driver_gpio: the T-LAT test pin (src/test_pin.cpp, design c6 D24).
                        PRIV_REQUIRES fr_serial fr_diag fr_net fr_ota app_update esp_app_format esp_partition
-                                     esp_system esp_timer espcoredump nvs_flash
+                                     esp_system esp_timer espcoredump nvs_flash esp_driver_gpio
                        LDFRAGMENTS "linker.lf")
 
 # fr_app_desc is referenced by nothing: without this the linker would leave app_desc.cpp's object out of

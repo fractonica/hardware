@@ -63,6 +63,9 @@ const ADDED_COLUMNS: { table: string; column: string; decl: string }[] = [
   { table: 'networks', column: 'hub_host', decl: 'TEXT' },
   // C4: a fault build's kind (spec 03 §3.8; NULL for every other build): implicit picks skip those rows.
   { table: 'artifacts', column: 'fault', decl: 'TEXT' },
+  // C6: who started a job (design c6 D18: the X-Fr-Client header, cli|mcp|dashboard|app; NULL without
+  // one), so job_list filters in SQL. The json keeps it too.
+  { table: 'jobs', column: 'origin', decl: 'TEXT' },
 ];
 
 export function openDb(file: string): Db {

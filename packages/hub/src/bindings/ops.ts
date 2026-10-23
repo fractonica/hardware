@@ -98,7 +98,7 @@ function sleepUntil(at: number, signal: AbortSignal): Promise<void> {
 }
 
 /** One send of message_send: a hub broadcast, or a unicast to each selected device. */
-async function sendOnce(hub: HubContext, input: MessageInput, devices: Device[] | null, data: Uint8Array) {
+async function sendOnce(hub: HubContext, input: Pick<MessageInput, 'to' | 'topic'>, devices: Device[] | null, data: Uint8Array) {
   if (!devices) {
     const body = encodeMsgMsg({ topic: input.topic, data });
     const sent = hub.broadcast.broadcast({ cls: CLS.MSG, kind: KIND.MSG.MSG, port: PORT.NODE, body });
@@ -118,6 +118,27 @@ async function sendOnce(hub: HubContext, input: MessageInput, devices: Device[] 
     });
   }
   return { to: input.to, topic: input.topic, bytes: data.length, results };
+}
+
+/** The MSG data, checked to fit (INVALID_ARGS), and the devices `to` names: null for a broadcast. */
+function messagePlan(hub: HubContext, msg: { to: string; topic: string; data?: unknown }): { data: Uint8Array; devices: Device[] | null } {
+  const data = msgData(msg.data);
+  try {
+    encodeMsgMsg({ topic: msg.topic, data });
+  } catch (e) {
+    throw new FrError('INVALID_ARGS', `the MSG does not fit: ${(e as Error).message} (data is at most 168 bytes of JSON)`);
+  }
+  return { data, devices: msg.to.toLowerCase() === BROADCAST_ALIAS ? null : selectDevices(hub, msg.to) };
+}
+
+/**
+ * One message_send of count 1 (design c6 §3.3), which the `/app` bridge's `msg` shares: `to: broadcast` is
+ * one hub broadcast, anything else a selector, with one reliable unicast MSG per device (per-device
+ * outcomes; DEVICE_OFFLINE only when none has a link). `data` is JSON, sent as its UTF-8 text.
+ */
+export async function sendMessage(hub: HubContext, msg: { to: string; topic: string; data?: unknown }) {
+  const { data, devices } = messagePlan(hub, msg);
+  return sendOnce(hub, msg, devices, data);
 }
 
 /** count > 1: a job of kind msg (design c5 §4) sending every interval_ms; progress = sent. */
@@ -234,16 +255,10 @@ function rowView(hub: HubContext, row: BindingRow) {
 
 export const NET_HANDLERS: Record<NetOpName, Handler> = {
   message_send: async (input: MessageInput, hub) => {
-    const data = msgData(input.data);
-    try {
-      encodeMsgMsg({ topic: input.topic, data });
-    } catch (e) {
-      throw new FrError('INVALID_ARGS', `the MSG does not fit: ${(e as Error).message} (data is at most 168 bytes of JSON)`);
-    }
-    const devices = input.to.toLowerCase() === BROADCAST_ALIAS ? null : selectDevices(hub, input.to);
     if (input.count <= 1) {
-      return sendOnce(hub, input, devices, data);
+      return sendMessage(hub, input);
     }
+    const { data, devices } = messagePlan(hub, input);
     const targets = devices ? devices.map((d) => d.device_id) : [BROADCAST_ALIAS];
     const job = hub.jobs.start('msg', targets, [], (ctx) => repeat(hub, input, devices, data, ctx));
     return hub.jobs.wait(job.job_id, Math.min(input.wait_s ?? 0, MAX_WAIT_S));

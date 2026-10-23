@@ -168,7 +168,7 @@ void add_link_states(cJSON *res, const NetStatus &n)
             cJSON_AddBoolToObject(wifi, "trial", true);
         }
     }
-    if (n.hub_link_dropped || n.udp_blocked || n.ip_blocked || n.wifi_held) {
+    if (n.hub_link_dropped || n.udp_blocked || n.ip_blocked || n.wifi_held || n.loss_pct != 0) {
         cJSON *hooks = cJSON_AddObjectToObject(res, "hooks");
         cJSON_AddBoolToObject(hooks, "drop_hub_link", n.hub_link_dropped);
         cJSON_AddBoolToObject(hooks, "udp_block", n.udp_blocked);
@@ -176,6 +176,13 @@ void add_link_states(cJSON *res, const NetStatus &n)
         cJSON_AddBoolToObject(hooks, "wifi_down", n.wifi_held);
         if (n.wifi_held) {
             cJSON_AddNumberToObject(hooks, "wifi_down_s", n.wifi_held_s);  // seconds left
+        }
+        if (n.loss_pct != 0) {
+            // design c6 D21: `net loss` in force, with the seconds it has left.
+            cJSON *loss = cJSON_AddObjectToObject(hooks, "loss");
+            cJSON_AddNumberToObject(loss, "pct", n.loss_pct);
+            cJSON_AddStringToObject(loss, "dir", loss_dir_name(static_cast<LossDir>(n.loss_dir)));
+            cJSON_AddNumberToObject(loss, "s_left", n.loss_s);
         }
     }
 }
@@ -206,6 +213,7 @@ Fail cmd_info(std::string_view, Host &host, cJSON *res, size_t)
     cJSON_AddStringToObject(res, "reset", reset_reason());
     cJSON_AddStringToObject(res, "slot", running != nullptr ? running->label : "?");
     cJSON_AddBoolToObject(res, "inject_enabled", FR_TEST_HOOKS != 0);
+    cJSON_AddNumberToObject(res, "test_pin", host.test_pin());  // design c6 D24: -1 without one
     add_link_states(res, host.net_status());
     return ok;
 }
@@ -631,6 +639,14 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t room)
     cJSON_AddNumberToObject(res, "tcp_rx_bad", n.tcp_rx_bad);
     cJSON_AddNumberToObject(res, "udp_tx_fail", n.udp_tx_fail);
     cJSON_AddNumberToObject(res, "hook_dropped", n.hook_dropped);
+    // design c6 D21-D23: what `net loss` dropped, exec_at's table, and the link task -> core task wait.
+    cJSON_AddNumberToObject(res, "loss_tx", n.loss_tx);
+    cJSON_AddNumberToObject(res, "loss_rx", n.loss_rx);
+    cJSON_AddNumberToObject(res, "cmds_scheduled", n.cmds_scheduled);
+    cJSON_AddNumberToObject(res, "exec_late", n.exec_late);
+    cJSON_AddNumberToObject(res, "exec_cancelled", n.exec_cancelled);
+    cJSON_AddNumberToObject(res, "exec_late_us_max", n.exec_late_us_max);
+    cJSON_AddNumberToObject(res, "rx_queue_us_max", n.rx_queue_us_max);
     for (size_t i = 1; i < kStatSectionCount; ++i) {
         add_stat_section(res, i, n);
     }
@@ -710,13 +726,63 @@ Fail cmd_reboot(std::string_view args, Host &host, cJSON *, size_t)
     return ok;
 }
 
-// ---- net (debug hooks) ----
+// ---- net (debug hooks), pin_pulse ----
+
+#if FR_TEST_HOOKS
+constexpr uint32_t kMaxHookSeconds = 86400;
+
+/** A decimal in lo..hi, the whole word. */
+bool parse_uint(std::string_view s, uint32_t lo, uint32_t hi, uint32_t &out)
+{
+    uint32_t v = 0;
+    auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+    if (s.empty() || ec != std::errc{} || end != s.data() + s.size() || v < lo || v > hi) {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+/** `net loss <pct> <s> [both|tx|rx]` (design c6 D21, T-INPUT). */
+Fail cmd_net_loss(std::string_view args, Host &host, cJSON *res)
+{
+    std::string_view pct_arg = next_word(args);
+    std::string_view secs_arg = next_word(args);
+    std::string_view dir_arg = next_word(args);
+    uint32_t pct = 0;
+    uint32_t s = 0;
+    LossDir dir = LossDir::both;
+    if (dir_arg == "tx") {
+        dir = LossDir::tx;
+    } else if (dir_arg == "rx") {
+        dir = LossDir::rx;
+    } else if (!dir_arg.empty() && dir_arg != "both") {
+        dir_arg = "?";
+    }
+    if (!parse_uint(pct_arg, 0, 100, pct) || !parse_uint(secs_arg, 0, kMaxHookSeconds, s) || dir_arg == "?" ||
+        !args.empty()) {
+        return fail("invalid_args", "usage: net loss <pct 0-100> <seconds 0-86400> [both|tx|rx] (0 ends it)");
+    }
+    Status st = host.net_loss(static_cast<uint8_t>(pct), s, dir);
+    if (!st) {
+        return fail(err_name(st.error()));
+    }
+    cJSON_AddStringToObject(res, "hook", "loss");
+    cJSON_AddNumberToObject(res, "pct", pct);
+    cJSON_AddNumberToObject(res, "s", s);
+    cJSON_AddStringToObject(res, "dir", loss_dir_name(dir));
+    return ok;
+}
+#endif
 
 Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
 {
 #if FR_TEST_HOOKS
-    constexpr uint32_t kMaxSeconds = 86400;
+    constexpr uint32_t kMaxSeconds = kMaxHookSeconds;
     std::string_view name = next_word(args);
+    if (name == "loss") {
+        return cmd_net_loss(args, host, res);
+    }
     std::string_view secs = next_word(args);
     NetHook hook;
     if (name == "drop_hub_link") {
@@ -728,7 +794,8 @@ Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
     } else if (name == "wifi_down") {
         hook = NetHook::wifi_down;
     } else {
-        return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds>");
+        return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds> | "
+                                    "loss <pct> <seconds> [both|tx|rx]");
     }
     uint32_t s = 0;
     auto [end, ec] = std::from_chars(secs.data(), secs.data() + secs.size(), s);
@@ -751,6 +818,37 @@ Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
 #endif
 }
 
+/**
+ * `pin_pulse <us>` (design c6 D24, T-LAT): drives the board's test_pin low for 10-100000 µs, open-drain, and
+ * answers when it went low (`at_us`, esp_timer µs of the falling edge) as soon as it did; the release follows
+ * from a one-shot timer. `busy` while a pulse runs.
+ */
+Fail cmd_pin_pulse(std::string_view args, Host &host, cJSON *res, size_t)
+{
+#if FR_TEST_HOOKS
+    constexpr uint32_t kMinUs = 10;
+    constexpr uint32_t kMaxUs = 100000;
+    std::string_view us_arg = next_word(args);
+    uint32_t us = 0;
+    if (!parse_uint(us_arg, kMinUs, kMaxUs, us) || !args.empty()) {
+        return fail("invalid_args", "usage: pin_pulse <us> (10-100000)");
+    }
+    auto p = host.pin_pulse(us);
+    if (!p) {
+        return fail(err_name(p.error()), p.error() == Err::unsupported ? "no test_pin on this board" : nullptr);
+    }
+    cJSON_AddNumberToObject(res, "pin", p->pin);
+    cJSON_AddNumberToObject(res, "us", us);
+    cJSON_AddNumberToObject(res, "at_us", static_cast<double>(p->at));
+    return ok;
+#else
+    (void)args;
+    (void)host;
+    (void)res;
+    return fail("unsupported", "test hooks are off in this build");
+#endif
+}
+
 struct Command {
     const char *name;
     /** `room`: characters the response JSON may take (after any `#<id> `), for commands that page. */
@@ -761,6 +859,7 @@ constexpr Command kCommands[] = {
     {"info", cmd_info},         {"caps", cmd_caps}, {"call", cmd_call},   {"inject", cmd_inject},
     {"selftest", cmd_selftest}, {"mark", cmd_mark}, {"log", cmd_log},     {"stats", cmd_stats},
     {"reboot", cmd_reboot},     {"net", cmd_net},   {"neighbors", cmd_neighbors},
+    {"pin_pulse", cmd_pin_pulse},
 };
 
 /** `#<id> ` prefix: 1-8 decimal digits. Returns the id text (empty when absent); false if malformed. */

@@ -76,18 +76,22 @@ fractonica/                       # this folder; unrelated experiments move to e
 │  ├─ partitions/fr-{4,8,16}mb-v1.csv
 │  ├─ test/host/                   # host C++ suite: codecs, vectors, fuzz, services (`pnpm test:host`, 10 §10.4)
 │  └─ config/                      # sdkconfig.framework[.<target>], sdkconfig.build.{debug,release}, sdkconfig.local (git-ignored)
-├─ packages/                       # TypeScript (pnpm workspace)
-│  ├─ protocol/                    # Zod control-plane schemas + generated device codecs
-│  ├─ host/                        # host toolchain shared by hub and CLI: paths, IDF env, pytools, `fr doctor`
+├─ packages/                       # TypeScript (pnpm workspace: packages/*, web/*)
+│  ├─ protocol/                    # Zod control-plane schemas, `fr-ws/1` frames, generated device codecs
+│  ├─ host/                        # host toolchain shared by hub and CLI: paths, IDF env, pytools, `fr doctor`, web dist builds
 │  ├─ codegen/                     # `fr gen`
 │  ├─ hub/                         # hub server
-│  ├─ dashboard/                   # React SPA, served by the hub
-│  ├─ sdk/                         # @fractonica/sdk runtime (browser + Node)
-│  └─ cli/                         # `fr` (incl. `fr mcp` stdio adapter)
-├─ web/<name>/                     # hosted apps served at /apps/<name> (M1: web/demo)
+│  ├─ dashboard/                   # React SPA (Vite, hash routes); `dist/` served by the hub at `/` (08 §8.9)
+│  ├─ sdk/                         # @fractonica/sdk: `fr-app/1` client (browser + Node) + generated src/gen/caps.ts (07 §7.9)
+│  └─ cli/                         # `fr` (incl. `fr mcp` stdio adapter, `fr codegen client`)
+├─ web/<name>/                     # hosted apps (Vite); the hub serves dist/ at /apps/<name>/ with the app token injected (08 §8.10)
+│                                  #   M1: web/demo, with src/fractonica/devices.ts from `fr codegen client` (token.ts git-ignored)
 ├─ tools/pytools/                  # uv project: esptool 5.6 API sidecar, NVS image gen, panic decode
-├─ plugin/                         # Claude Code plugin: skills, plugin.json (mcpServers), hooks, AGENTS.md
-└─ tests/                          # e2e (hub-driven), HIL scenarios, virtual-fleet sim
+├─ plugin/                         # Claude Code plugin: .claude-plugin/plugin.json (MCP server `fractonica` = `fr mcp`), skills
+│                                  #   fleet-ops, build-deploy, e2e-verify, SessionStart hook, AGENTS.md (09 §9.8)
+├─ .claude-plugin/marketplace.json # lists plugin/ (`/plugin marketplace add <checkout>`)
+└─ tests/e2e/                      # gate harnesses t-*.ts, run.ts (`test_run` tier target), lib/, fixtures/ (10 §10.5)
+                                   #   HIL scenarios and the virtual fleet come in M2
 ```
 
 ## 2.5 Naming
@@ -102,6 +106,7 @@ fractonica/                       # this folder; unrelated experiments move to e
 | Device id | 12 lowercase hex digits of the factory MAC (`1cdbd416ba34`) |
 | Alias | RFC 1123 label `^[a-z]([a-z0-9-]{0,29}[a-z0-9])?$` (`pad-red-1`). `broadcast`, `all`, `online` and `offline` are reserved |
 | Hub ports | 7420/tcp on loopback (API, WS, dashboard, SDK `/app`); 7421/tcp + udp on the LAN (node links); 7422/tcp on the LAN (node HTTP: OTA images; core dumps later) |
+| Hub service advert | mDNS `_fractonica._tcp`, instance `Fractonica <host>`, port 7421, TXT `http=7422 api=7420` ([05 §5.12.5](05-network.md)) |
 
 ## 2.6 Key flows
 
@@ -111,18 +116,18 @@ fractonica/                       # this folder; unrelated experiments move to e
 2. `ButtonService` emits `boot.down` at once (leading-edge debounce, [07 §7.8](07-capabilities-sdk.md)).
 3. If a binding exists for this event, the node first sends the bound command directly to its target over ESP-NOW ([07 §7.11](07-capabilities-sdk.md)).
 4. Dispatch encodes `EVENT(port=1, kind=down)` into an envelope (URGENT) and sends it over UDP to the hub ([05 §5.10](05-network.md)).
-5. The hub receives on its UDP socket, filters duplicates per [05 §5.8](05-network.md), decodes with the generated codec, and publishes `device/<id>/event/boot/down` on its bus in the same tick.
-6. The `/app` WebSocket queue sends it to the subscribed SDK client. The SDK fires `device.on('boot.down')`.
+5. The hub receives on its UDP socket, filters duplicates per [05 §5.8](05-network.md), decodes with the generated codec, and publishes the event `boot.down` (`<inst>.<member>`, [09 §9.2](09-agent-api.md)) on its bus in the same tick.
+6. The `/app` bridge, the bus's first listener, writes the `evt` frame to each subscribed SDK client inside that publish; `/ws` (the dashboard) is the second listener ([08 §8.7](08-hub.md)). The SDK fires `device.on('boot.down')`.
 
-Target: p50 ≤ 10 ms in router mode and ≤ 5 ms in gateway mode, measured, not assumed ([05 §5.14](05-network.md)).
+Target: p50 ≤ 10 ms in router mode and ≤ 5 ms in gateway mode, measured, not assumed ([05 §5.14](05-network.md)). T-LAT at C6, hub on Wi-Fi: p50 3.7–4.6 ms to the hub, plus p50 0.9 ms from the hub to an SDK callback on the same Mac ([11 §11.4](11-roadmap.md)).
 
 ### Flow B — hub broadcast with re-flood
 
-1. The dashboard button calls `POST /api/v1/messages {to:"broadcast", topic:"start"}`.
+1. The dashboard's broadcast button (Network page) calls `message_send {to:"broadcast", topic:"ping"}` through `POST /api/v1/op/message_send`; an SDK app sends `/app` `msg {to:'broadcast', topic}` (`hub.broadcast.msg('ping')`, the demo's button). Resource-style routes such as `POST /api/v1/messages` are deferred ([09 §9.1](09-agent-api.md)).
 2. The hub builds one MSG envelope (`src=0x0000`, `dst=0xFFFF`, `ttl=2`, `seq` from the hub BCAST space) and sends the same bytes on every session of every node (TCP and serial).
 3. Each node that received it over a hub link delivers it once and **seeds** an ESP-NOW broadcast after a random 1–16 ms delay. It cancels the seed once it has heard 2 copies over ESP-NOW; copies on hub links never count.
 4. Nodes whose IP link is slow or down get the ESP-NOW copy. The BCAST duplicate window makes delivery exactly once, and HEARTBEAT watermarks drive repairs ([05 §5.9](05-network.md)).
-5. Nodes react through bindings (for example `msg:start → status.blink`); apps see it as `msg`.
+5. Nodes react through bindings (for example `msg:ping → status.blink`); apps see it as `msg`.
 
 ### Flow C — agent edit → build → OTA → verify
 

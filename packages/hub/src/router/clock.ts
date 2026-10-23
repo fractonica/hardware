@@ -1,6 +1,8 @@
 // Per-node clock offset (spec 05 §5.12.4, 08 §8.4): bursts of SYNC_REQ/SYNC_RES, the minimum-RTT sample
 // of each burst, linear skew between bursts, uncertainty = RTT_min / 2. Node times are its esp_timer µs
-// since boot; hub times are µs since the Unix epoch (ring.ts nowUs). Both fit a double exactly.
+// since boot; hub times are µs since the Unix epoch (ring.ts nowUs). Both fit a double exactly. A burst
+// replaces the estimate only when it is at least as good as the one it would replace, allowing that one
+// 50 ppm of drift since (design c6 §6 S7): a burst over Wi-Fi does not overwrite a better one over USB.
 
 export interface SyncSample {
   /** Hub send time of SYNC_REQ. */
@@ -23,11 +25,21 @@ export interface ClockInfo {
   /** Hub µs of the burst the offset comes from. */
   at_us: number;
   samples: number;
+  /** Bursts since that did not replace it: worse than it, even allowing for its age (design c6 §6 S7). */
+  kept: number;
 }
+
+/** What other parts read of a node's clock (the latency probe, design c6 §6 S7): the conversions, no updates. */
+export type ClockView = Pick<NodeClock, 'synced' | 'info' | 'toNode' | 'toHub' | 'unwrap'>;
 
 /** Skew is estimated only over at least this much hub time, and clamped (a crystal is within ±40 ppm). */
 const SKEW_MIN_SPAN_US = 10e6;
 const SKEW_MAX = 500e-6;
+/**
+ * How fast an estimate is taken to age: a newer burst replaces it only when its uncertainty is at most the
+ * estimate's plus this rate times the time since (a crystal's ±40 ppm, rounded up).
+ */
+const AGE_RATE = 50e-6;
 
 export function rttOf(s: SyncSample): number {
   return s.t4 - s.t1 - (s.t3 - s.t2);
@@ -42,7 +54,11 @@ export class NodeClock {
   #last: ClockInfo | null = null;
   #skew = 0;
 
-  /** Takes the minimum-RTT sample of a burst; returns the new estimate, or null for an empty burst. */
+  /**
+   * Takes the minimum-RTT sample of a burst. It becomes the estimate unless the current one is better even
+   * after aging it at AGE_RATE (that one is kept, and counted in `kept`); returns the estimate after the
+   * burst, or null for an empty burst.
+   */
   addBurst(samples: readonly SyncSample[]): ClockInfo | null {
     const valid = samples.filter((s) => rttOf(s) >= 0);
     if (!valid.length) {
@@ -52,12 +68,17 @@ export class NodeClock {
     const rtt = rttOf(best);
     const at = best.t4;
     const offset = offsetOf(best);
+    const last = this.#last;
+    if (last && rtt / 2 > last.uncertainty_us + Math.max(0, at - last.at_us) * AGE_RATE) {
+      last.kept++;
+      return last;
+    }
     if (this.#anchor && at - this.#anchor.at >= SKEW_MIN_SPAN_US) {
       const skew = (offset - this.#anchor.offset) / (at - this.#anchor.at);
       this.#skew = Math.max(-SKEW_MAX, Math.min(SKEW_MAX, skew));
     }
     this.#anchor ??= { at, offset };
-    this.#last = { offset_us: offset, uncertainty_us: rtt / 2, skew_ppm: this.#skew * 1e6, rtt_us: rtt, at_us: at, samples: valid.length };
+    this.#last = { offset_us: offset, uncertainty_us: rtt / 2, skew_ppm: this.#skew * 1e6, rtt_us: rtt, at_us: at, samples: valid.length, kept: 0 };
     return this.#last;
   }
 
@@ -66,7 +87,7 @@ export class NodeClock {
   }
 
   info(): ClockInfo | null {
-    return this.#last;
+    return this.#last && { ...this.#last };
   }
 
   /** Forget everything (the node rebooted: a new epoch is a new clock). */

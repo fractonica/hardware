@@ -9,6 +9,10 @@
 // (peer.cpp) and bindings (bindings.cpp). The same timer serves their deadlines: relay delays, node -> node
 // retries, the ESP-NOW heartbeat. This file keeps the hub link; its receive path hands node frames the hub
 // forwarded to air.cpp and seeds the ESP-NOW flood with the hub's broadcasts.
+//
+// C6 (design c6 D21-D23): hub CMDs with exec_at wait in fixed slots for the timer (on_timer, never inside
+// another dispatch), the `net loss` hook drops hub-link envelopes at random both ways, and receive() takes
+// the link task's receive time.
 #include "fr/net/net.hpp"
 
 #include <algorithm>
@@ -30,6 +34,26 @@ namespace {
 
 constexpr std::array<LinkKind, 2> kSessionLinks{LinkKind::serial, LinkKind::tcp};
 
+/** loss()'s PRNG starts from the jitter's seed mixed with this, so the two streams never coincide. */
+constexpr uint32_t kLossSeedMix = 0x10551055u;
+
+/** A µs span as a u32 statistic: negative ones are 0, longer ones saturate. */
+uint32_t us_u32(TimeUs us)
+{
+    return static_cast<uint32_t>(std::clamp<TimeUs>(us, 0, UINT32_MAX));
+}
+
+/** xorshift32, as the jitter's: deterministic per seed, and never stuck at 0. */
+uint32_t xorshift32(uint32_t &state)
+{
+    uint32_t x = state != 0 ? state : 0x9E3779B9u;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    state = x;
+    return x;
+}
+
 }  // namespace
 
 Net::Net(Core &core, Host &host, const Config &cfg) : core_(core), host_(host), cfg_(cfg)
@@ -43,6 +67,7 @@ Net::Net(Core &core, Host &host, const Config &cfg) : core_(core), host_(host), 
     ttl_ = static_cast<uint8_t>(ttl << 4 | ttl);
     rng_ = cfg_.rng_seed;
     rng_seeded_ = cfg_.rng_seed != 0;
+    loss_rng_ = cfg_.rng_seed ^ kLossSeedMix;
     relay_ = cfg_.relay;
 }
 
@@ -108,13 +133,17 @@ void Net::link_changed(LinkKind k)
     arm();
 }
 
-void Net::receive(LinkKind from, std::span<const uint8_t> envelope)
+void Net::receive(LinkKind from, std::span<const uint8_t> envelope, TimeUs at)
 {
     if (index_of(from) >= kLinkKinds) {
         return;
     }
     ++ls(from).rx;
-    rx_at_ = core_.now();
+    // Design c6 D23: everything timed by this envelope's arrival counts from the link task's stamp; the core
+    // queue in between (the network queue, a busy core task) is measured instead of hidden in TIME's t2.
+    const TimeUs now = core_.now();
+    rx_at_ = std::min(at, now);
+    state_.rx_queue_us_max = std::max(state_.rx_queue_us_max, us_u32(now - rx_at_));
     in_receive_ = true;
     handle(from, envelope);
     in_receive_ = false;
@@ -162,6 +191,10 @@ State Net::state() const
     State s = state_;
     s.bcast.watermark = bcast_.watermark();
     s.bindings.rtt_p50_us = rtt_p50();
+    if (s.loss_pct != 0) {
+        const TimeUs left = std::max<TimeUs>(loss_until_ - core_.now(), 0);
+        s.loss_s_left = static_cast<uint32_t>((left + 999'999) / 1'000'000);
+    }
     return s;
 }
 
@@ -173,6 +206,9 @@ void Net::reset_stats()
     state_.events_dropped = state_.delivery_failed = state_.cmds = state_.cmds_refused = 0;
     state_.dup = state_.old = state_.cached_replies = state_.sessions_lost = state_.hook_drops = 0;
     state_.sessions_timed_out = 0;
+    state_.loss_tx = state_.loss_rx = 0;
+    state_.cmds_scheduled = state_.exec_late = state_.exec_cancelled = 0;
+    state_.exec_late_us_max = state_.rx_queue_us_max = 0;
     state_.relay = {};
     state_.bcast = {};  // state() reads the watermark from the window
     state_.bindings = {};
@@ -235,6 +271,25 @@ void Net::ip_block(uint32_t seconds)
     start_ip_block(seconds);
 }
 
+void Net::loss(uint8_t pct, uint32_t seconds, LossDir dir)
+{
+    if (pct == 0 || seconds == 0) {
+        defer_loss_ = false;
+        state_.loss_pct = 0;
+        arm();
+        return;
+    }
+    // Deferred like the others: the RESULT of `net loss` must not be lost to it.
+    if (in_receive_) {
+        defer_loss_ = true;
+        defer_loss_pct_ = pct;
+        defer_loss_s_ = seconds;
+        defer_loss_dir_ = dir;
+        return;
+    }
+    start_loss(pct, seconds, dir);
+}
+
 // ---- capability emissions ----
 
 void Net::event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields, TimeUs at)
@@ -293,6 +348,13 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
     }
     if (link(from) == nullptr) {
         ++s.rx_drop;  // nothing attached of that kind: no session can answer through it
+        return;
+    }
+    if (lose(LossDir::rx)) {
+        // As if the network ate it: the session clock does not see it either.
+        ++state_.loss_rx;
+        ++state_.hook_drops;
+        ++s.rx_drop;
         return;
     }
     auto e = unpack_envelope(envelope);
@@ -372,7 +434,8 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
         if (unicast && (h.flags & kFlagAckReq) != 0) {
             if (h.cls == kClsCmd || h.cls == kClsOta) {
                 // A retried request (a CMD, an OFFER): its response again, byte-identical, and the request
-                // not run twice (05 §5.8).
+                // not run twice (05 §5.8). A CMD still scheduled by exec_at has no response yet: its DUP is
+                // dropped (counted in dup above), and the RESULT follows at execution (design c6 D22).
                 resend_cached(h.src, h.epoch, h.seq, from);
             } else if (h.cls == kClsEvent || h.cls == kClsMsg) {
                 send_ack(h);  // the first ACK was lost: an ACK is idempotent, so a fresh one does
@@ -463,6 +526,14 @@ void Net::on_welcome(LinkKind from, std::span<const uint8_t> body)
     for (LinkKind k : kSessionLinks) {
         if (k != from && ls(k).session && w->hub_epoch != state_.hub_epoch) {
             lose_session(k, DropReason::hub_restarted);
+        }
+    }
+    // Design c6 D22: CMDs an earlier hub run scheduled are dropped unrun; their hub is gone, and its clock
+    // offset with it. A WELCOME of the same run (the other link, a reconnect) keeps them.
+    for (Scheduled &x : exec_) {
+        if (x.used && x.cmd.epoch != w->hub_epoch) {
+            x.used = false;
+            ++state_.exec_cancelled;
         }
     }
     // 05 §5.8: the node resets its hub entries on every WELCOME, with the floors the hub gives. A WELCOME of
@@ -585,52 +656,129 @@ void Net::on_cmd(const EnvelopeView &e, bool unicast, LinkKind from)
         ++ls(from).rx_drop;
         return;
     }
-    const bool respond = unicast && (h.flags & kFlagAckReq) != 0;
-    // Requests arrive on TCP or serial, where a RESULT may go BULK (design c3 §2).
-    const size_t capacity = from == LinkKind::udp ? cap::Reply::kRealtimeCapacity : cap::Reply::kBulkCapacity;
-    cap::Reply reply(std::span<uint8_t>(reply_buf_, capacity));
-    Status st;
+    const CmdRef c{.from = from,
+                   .respond = unicast && (h.flags & kFlagAckReq) != 0,
+                   .port = h.port,
+                   .kind = h.kind,
+                   .src = h.src,
+                   .epoch = h.epoch,
+                   .seq = h.seq};
+    // Design c6 D22 order: the port rule and DUPs came first (above, handle()), then expire_at, then exec_at.
     const std::optional<uint32_t> expire_at = h.ext.value(kExtExpireAtUs);
-    if (h.ext.find(kExtExecAtUs)) {
-        // Scheduled execution arrives with T-LAT (design c3 §9, decision 9).
-        st = std::unexpected(Err::unsupported);
-        ++state_.cmds_refused;
-    } else if (expire_at && state_.time_synced() && seq_after(low32(rx_at_), *expire_at)) {
+    if (expire_at && state_.time_synced() && seq_after(low32(rx_at_), *expire_at)) {
         // Arrived after the hub had given up on it: never run late (05 §5.6, §5.8). An unsynced node
         // cannot compare clocks and ignores the TLV.
-        st = std::unexpected(Err::expired);
         ++state_.cmds_refused;
-    } else {
-        ++state_.cmds;
-        st = host_.dispatch(h.port, h.kind, e.body, reply);
-    }
-    if (!respond) {
+        answer_cmd(c, std::unexpected(Err::expired), {});
         return;
+    }
+    if (const std::optional<uint32_t> exec_at = h.ext.value(kExtExecAtUs)) {
+        if (!unicast) {
+            // exec_at is in one destination's clock (05 §5.6), and a broadcast has a clock per node: dropped
+            // unrun, as before C6, since running it now is what the critical TLV exists to prevent.
+            ++state_.cmds_refused;
+            return;
+        }
+        if (Status st = schedule(c, *exec_at, h.flags, e.body); !st) {
+            ++state_.cmds_refused;
+            answer_cmd(c, st, {});
+        }
+        return;  // scheduled: dispatch and RESULT come at its time (run_scheduled)
+    }
+    run_cmd(c, e.body);
+}
+
+void Net::run_cmd(const CmdRef &c, std::span<const uint8_t> args)
+{
+    // Requests arrive on TCP or serial, where a RESULT may go BULK (design c3 §2).
+    const size_t capacity = c.from == LinkKind::udp ? cap::Reply::kRealtimeCapacity : cap::Reply::kBulkCapacity;
+    cap::Reply reply(std::span<uint8_t>(reply_buf_, capacity));
+    ++state_.cmds;
+    const Status st = host_.dispatch(c.port, c.kind, args, reply);
+    // Only a successful dispatch owns what it wrote into the reply.
+    answer_cmd(c, st, st ? reply.bytes() : std::span<const uint8_t>{});
+}
+
+void Net::answer_cmd(const CmdRef &c, const Status &st, std::span<const uint8_t> fields)
+{
+    if (!c.respond) {
+        return;  // a fast CMD or a broadcast: Q0, never answered (05 §5.8)
     }
     uint8_t prefix[kResultPrefixSize];
     Writer pw(prefix, sizeof(prefix));
-    pack_result_prefix({.req_epoch = h.epoch, .req_seq = h.seq, .status = wire_status(st)}, pw);
-    // Only a successful dispatch owns what it wrote into the reply.
-    const std::span<const uint8_t> fields = st ? reply.bytes() : std::span<const uint8_t>{};
+    pack_result_prefix({.req_epoch = c.epoch, .req_seq = c.seq, .status = wire_status(st)}, pw);
     const size_t len = kHeaderSize + kResultPrefixSize + fields.size();
     const uint8_t flags = len > kRtSize ? kFlagBulk : 0;
-    auto env = build(flags, kClsResult, h.kind, ++seq_, h.src, h.port, pw.bytes(), fields);
+    auto env = build(flags, kClsResult, c.kind, ++seq_, c.src, c.port, pw.bytes(), fields);
     if (env.empty()) {
         return;  // cannot happen: the bulk Reply leaves room for the header and prefix
     }
-    cache(h.src, h.epoch, h.seq, env);
+    cache(c.src, c.epoch, c.seq, env);
     if (defer_bye_) {
         // The request asked for a BYE (fr.node.reboot), which takes the node offline at the hub and fails
         // what it still waits for. The hub orders frames per link only, so the RESULT and then the BYE
         // both take the link the request came on (TCP or serial: the hub never sends UDP), never UDP or
         // the other session, where the BYE could overtake it (design c3 §3, decision 17).
-        defer_bye_via_ = static_cast<uint8_t>(1u << index_of(from));
-        transmit_on(from, env);
+        defer_bye_via_ = static_cast<uint8_t>(1u << index_of(c.from));
+        transmit_on(c.from, env);
         return;
     }
-    const uint8_t via = answer_route(from, kClsResult, h.kind, flags, env.size());
+    const uint8_t via = answer_route(c.from, kClsResult, c.kind, flags, env.size());
     if (via != 0) {
         transmit(via, env);
+    }
+}
+
+Status Net::schedule(const CmdRef &c, uint32_t exec_at, uint8_t flags, std::span<const uint8_t> args)
+{
+    // exec_at is in the node's clock as the hub's TIME offset maps it: a node no TIME request reached yet
+    // cannot be the clock the hub meant, and running it now could be early or late alike (design c6 D22).
+    if (!state_.time_synced()) {
+        return std::unexpected(Err::busy);
+    }
+    // 05 §5.6: executed 0-2 s after its arrival, in the u32 clock's serial arithmetic; else LATE.
+    const int32_t ahead = static_cast<int32_t>(exec_at - low32(rx_at_));
+    if (ahead < 0 || static_cast<uint32_t>(ahead) > kExecWindowUs) {
+        ++state_.exec_late;
+        return std::unexpected(Err::late);
+    }
+    if ((flags & kFlagBulk) != 0 || args.size() > sizeof(Scheduled::args)) {
+        return std::unexpected(Err::invalid_args);  // the slots hold realtime CMDs only
+    }
+    auto slot = std::find_if(exec_.begin(), exec_.end(), [](const Scheduled &x) { return !x.used; });
+    if (slot == exec_.end()) {
+        return std::unexpected(Err::busy);
+    }
+    slot->used = true;
+    slot->cmd = c;
+    slot->due = rx_at_ + ahead;
+    slot->len = static_cast<uint8_t>(args.size());
+    std::copy(args.begin(), args.end(), slot->args);
+    ++state_.cmds_scheduled;
+    return {};
+}
+
+void Net::run_scheduled()
+{
+    for (;;) {
+        const TimeUs now = core_.now();
+        Scheduled *next = nullptr;
+        for (Scheduled &x : exec_) {
+            if (x.used && x.due <= now && (next == nullptr || x.due < next->due)) {
+                next = &x;
+            }
+        }
+        if (next == nullptr) {
+            return;
+        }
+        state_.exec_late_us_max = std::max(state_.exec_late_us_max, us_u32(now - next->due));
+        // Handled as a request: a BYE or a debug hook it asks for follows its RESULT, as in receive(). The
+        // slot stays taken until the dispatch returns, so nothing can be scheduled into its arguments.
+        in_receive_ = true;
+        run_cmd(next->cmd, std::span<const uint8_t>(next->args, next->len));
+        in_receive_ = false;
+        next->used = false;
+        run_deferred();
     }
 }
 
@@ -694,8 +842,9 @@ void Net::on_sync_req(LinkKind from, std::span<const uint8_t> body)
         ++ls(from).rx_drop;
         return;
     }
-    // t2 when the request reached the core task, t3 now; the answer takes the link the request came on,
-    // since the hub measures that link's round trip (05 §5.12.4).
+    // t2 when the request reached its link task (design c6 D23: the core queue is not part of the link's
+    // delay), t3 now; the answer takes the link the request came on, since the hub measures that link's
+    // round trip (05 §5.12.4).
     const fr::proto::TimeSyncRes res{.t1 = req->t1,
                                      .t2 = static_cast<uint64_t>(rx_at_),
                                      .t3 = static_cast<uint64_t>(core_.now())};
@@ -989,6 +1138,10 @@ void Net::run_deferred()
         defer_ip_block_ = false;
         start_ip_block(defer_ip_block_s_);
     }
+    if (defer_loss_) {
+        defer_loss_ = false;
+        start_loss(defer_loss_pct_, defer_loss_s_, defer_loss_dir_);
+    }
 }
 
 void Net::start_drop(uint32_t seconds)
@@ -1014,6 +1167,26 @@ void Net::start_ip_block(uint32_t seconds)
     // The TCP connection stays as it is: one the hub closes meanwhile is not reconnected until the end.
     update_holds();
     arm();
+}
+
+void Net::start_loss(uint8_t pct, uint32_t seconds, LossDir dir)
+{
+    state_.loss_pct = std::min<uint8_t>(pct, 100);
+    state_.loss_dir = dir;
+    loss_until_ = core_.now() + static_cast<TimeUs>(seconds) * 1'000'000;
+    arm();
+}
+
+bool Net::lose(LossDir way)
+{
+    if (state_.loss_pct == 0 || (state_.loss_dir != LossDir::both && state_.loss_dir != way)) {
+        return false;
+    }
+    if (core_.now() >= loss_until_) {
+        state_.loss_pct = 0;  // its time ran out ahead of the tick that would have ended it
+        return false;
+    }
+    return xorshift32(loss_rng_) % 100 < state_.loss_pct;
 }
 
 void Net::end_drop()
@@ -1048,15 +1221,30 @@ void Net::lose_stale_sessions(uint8_t which)
     }
 }
 
+void Net::on_timer()
+{
+    armed_for_ = kNever;  // the timer fired: arm() starts it again, whatever running() says now
+    // Scheduled CMDs first (design c6 D22): T-LAT measures how late they run. Only from here, at the top of
+    // the core task, never from tick(): a hook's end runs that inside the request that asked for it (`net
+    // ip_block 0`, `net drop_hub_link 0`) or inside a console line, where a CMD would be dispatched inside
+    // another dispatch, or its own slot, taken until its dispatch returns, run twice. One due meanwhile
+    // waits for this timer, which arm() starts at once for it.
+    run_scheduled();
+    tick();
+}
+
 void Net::tick()
 {
-    armed_for_ = kNever;  // the timer fired: arm() below starts it again, whatever running() says now
+    armed_for_ = kNever;  // arm() below starts the timer again, whatever running() says now
     const TimeUs now = core_.now();
     if (dropping() && now >= drop_until_) {
         end_drop();
     }
     if (state_.udp_blocked && now >= udp_block_until_) {
         state_.udp_blocked = false;
+    }
+    if (state_.loss_pct != 0 && now >= loss_until_) {
+        state_.loss_pct = 0;
     }
     if (state_.ip_blocked && now >= ip_block_until_) {
         end_ip_block();
@@ -1134,6 +1322,14 @@ void Net::arm()
     }
     if (state_.ip_blocked) {
         next = std::min(next, ip_block_until_);
+    }
+    if (state_.loss_pct != 0) {
+        next = std::min(next, loss_until_);
+    }
+    for (const Scheduled &x : exec_) {
+        if (x.used) {
+            next = std::min(next, x.due);
+        }
     }
     if (ls(LinkKind::udp).udp_ok) {
         next = std::min(next, last_echo_ + ms_us(cfg_.heartbeat_ms) * kUdpOkIntervals);
@@ -1282,6 +1478,14 @@ bool Net::transmit_on(LinkKind k, std::span<const uint8_t> envelope)
     }
     LinkState &s = ls(k);
     Link *l = link(k);
+    if (l != nullptr && s.up && lose(LossDir::tx)) {
+        // Lost after it left: the sender took it as sent (no UDP -> TCP rescue, no busy for an OTA frame),
+        // and only a retry, a twin or the hub's resync makes up for it (design c6 D21). A link that is down
+        // fails it as before: nothing left.
+        ++state_.loss_tx;
+        ++state_.hook_drops;
+        return true;
+    }
     if (l == nullptr || !l->send(envelope)) {
         ++s.tx_fail;
         return false;
@@ -1438,6 +1642,13 @@ void Net::service_pending(Pending &p, TimeUs now)
             }
             p.retry_at = kNever;
             if (p.deadline == kNever) {  // UDP was its only path
+                // A UDP loss burst longer than the retries must not lose fresh input while TCP carries:
+                // one copy over TCP, then TCP's own give-up after tcp_delivery_ms (design c6, bench).
+                if (!stale && ls(LinkKind::tcp).session && transmit_on(LinkKind::tcp, env)) {
+                    p.via |= kViaTcp;
+                    p.deadline = now + ms_us(cfg_.tcp_delivery_ms);
+                    return;
+                }
                 if (!stale) {
                     ++state_.delivery_failed;
                 }
@@ -1461,16 +1672,12 @@ void Net::seed_rng(const std::array<uint8_t, 6> &mac)
     }
     rng_ = fnv1a32(std::span<const uint8_t>(mac));
     rng_seeded_ = true;
+    loss_rng_ = rng_ ^ kLossSeedMix;
 }
 
 uint32_t Net::next_random()
 {
-    uint32_t x = rng_ != 0 ? rng_ : 0x9E3779B9u;  // xorshift32 must not start at 0
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    rng_ = x;
-    return x;
+    return xorshift32(rng_);
 }
 
 uint32_t Net::jittered_us(uint32_t ms, uint32_t pct)

@@ -220,6 +220,7 @@ describe('device_reset', () => {
   it('does not wait by default over REST/MCP', async () => {
     const waits: unknown[] = [];
     const hub = {
+      db: freshDb(), // the registry, for the device's alias in a refusal
       serial: { resolveWait: async () => ({ key: DEV, path: '/dev/cu.usbmodem1' }) },
       jobs: { start: () => ({ job_id: 'j1' }), wait: (_id: string, s: number) => waits.push(s) },
     } as unknown as HubContext;

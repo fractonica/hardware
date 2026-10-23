@@ -291,18 +291,14 @@ TEST(net_tcp_copy_of_a_udp_q1_fails_after_delivery_ms)
     CHECK_EQ(r.net.state().delivery_failed, 1u);
 }
 
-TEST(net_q1_udp_retries_with_backoff_then_gives_up)
+TEST(net_q1_udp_retries_with_backoff_then_gets_a_tcp_copy)
 {
     NetRig r;
     r.udp_ok_session();
     r.clear_sent();
     r.net.event(1, 1, Priority::realtime, {}, fr::cap::kNowUs);
-    std::optional<fr::TimeUs> gave_up;
     for (int ms = 0; ms < 500; ++ms) {
         r.core.advance_ms(1);
-        if (!gave_up && r.net.state().delivery_failed == 1) {
-            gave_up = r.core.now();
-        }
     }
     auto ev = r.udp.frames_of(wire::kClsEvent);
     REQUIRE_EQ(ev.size(), 4u);  // FR_MAX_ATTEMPTS sends, the first included
@@ -314,12 +310,46 @@ TEST(net_q1_udp_retries_with_backoff_then_gives_up)
     CHECK(within(ev[1].at - ev[0].at, 20));
     CHECK(within(ev[2].at - ev[1].at, 40));
     CHECK(within(ev[3].at - ev[2].at, 80));
-    REQUIRE(gave_up.has_value());
-    // Seen at the end of the 1 ms step it happened in.
-    const fr::TimeUs last_wait = *gave_up - ev[3].at;
-    CHECK(last_wait >= 160 * 750 && last_wait <= 160 * 1250 + 1000);
     CHECK_EQ(r.net.state().link(LinkKind::udp).retries, 3u);
-    CHECK(r.tcp.frames_of(wire::kClsEvent).empty());
+    // Out of UDP attempts while TCP carries: one copy over TCP (same bytes), not a lost input.
+    auto on_tcp = r.tcp.frames_of(wire::kClsEvent);
+    REQUIRE_EQ(on_tcp.size(), 1u);
+    CHECK_BYTES(on_tcp[0].bytes, ev[0].bytes);
+    const fr::TimeUs last_wait = on_tcp[0].at - ev[3].at;
+    CHECK(last_wait >= 160 * 750 && last_wait <= 160 * 1250 + 1000);
+    CHECK_EQ(r.net.state().delivery_failed, 0u);
+    // Still unACKed FR_TCP_DELIVERY_MS after the copy: TCP's own give-up.
+    r.core.advance_ms(1000);
+    r.deliver(LinkKind::tcp, r.hub.heartbeat());  // keeps the session
+    CHECK_EQ(r.net.state().delivery_failed, 0u);
+    r.core.advance_ms(1100);
+    CHECK_EQ(r.net.state().delivery_failed, 1u);
+    CHECK_EQ(r.tcp.frames_of(wire::kClsEvent).size(), 1u);  // TCP is not re-sent
+}
+
+TEST(net_q1_udp_rescue_is_acked_and_skips_stale_input)
+{
+    NetRig r;
+    r.udp_ok_session();
+    r.clear_sent();
+    r.net.event(1, 1, Priority::realtime, {}, fr::cap::kNowUs);
+    r.core.advance_ms(500);
+    auto on_tcp = r.tcp.frames_of(wire::kClsEvent);
+    REQUIRE_EQ(on_tcp.size(), 1u);
+    r.deliver(LinkKind::tcp, r.hub.ack(r.host.id.epoch, on_tcp[0].seq));
+    r.core.advance_ms(2500);
+    r.deliver(LinkKind::tcp, r.hub.heartbeat());
+    CHECK_EQ(r.net.state().delivery_failed, 0u);
+    // An event already older than FR_EVENT_MAX_AGE_MS when its UDP tries run out is dropped, not rescued.
+    NetRig s;
+    s.udp_ok_session();
+    s.clear_sent();
+    s.net.event(1, 2, Priority::realtime, {}, s.core.now() - 900'000);
+    s.core.advance_ms(500);
+    CHECK_EQ(s.udp.frames_of(wire::kClsEvent).size(), 3u);  // 900, ~920, ~960 ms old; stale before the 4th
+    CHECK(s.tcp.frames_of(wire::kClsEvent).empty());
+    CHECK_EQ(s.net.state().delivery_failed, 0u);
+    CHECK_EQ(s.net.state().events_dropped, 1u);
 }
 
 TEST(net_q1_ack_stops_retries)
@@ -342,7 +372,11 @@ TEST(net_q1_ack_stops_retries)
     for (const Frame &f : later) {
         CHECK_EQ(f.seq, ev[1].seq);
     }
-    CHECK_EQ(r.net.state().delivery_failed, 1u);
+    // Then its TCP copy; it fails only by TCP's own deadline.
+    auto on_tcp = r.tcp.frames_of(wire::kClsEvent);
+    REQUIRE_EQ(on_tcp.size(), 1u);
+    CHECK_EQ(on_tcp[0].seq, ev[1].seq);
+    CHECK_EQ(r.net.state().delivery_failed, 0u);
 }
 
 TEST(net_q1_on_tcp_is_not_retried_and_fails_after_delivery_ms)

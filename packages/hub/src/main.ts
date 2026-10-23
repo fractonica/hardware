@@ -2,26 +2,38 @@
 // Normally started by `fr hub start --detach` (spec 08 §8.2 lifecycle).
 
 import { mkdirSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { idfStatus, paths, pytoolsStatus, readIdfLock, type IdfStatus, type PytoolsStatus } from '@fractonica/host';
 import { HUB_API_PORT, HUB_VERSION, REGISTRY_HASH } from '@fractonica/protocol';
 
+import { createAppServer } from './apps/server.ts';
 import { createBindings } from './bindings/index.ts';
+import type { HubContext, HubRunOptions } from './context.ts';
 import { nextHubEpoch, nextHubRun, openDb } from './db.ts';
 import { createEvents } from './events/index.ts';
 import { buildServer } from './http.ts';
 import { JobRunner } from './jobs.ts';
+import { createAdvert } from './lan/advert.ts';
+import { createLnp } from './lan/lnp.ts';
+import { createLatencyProbe } from './latency/probe.ts';
 import { NODE_LINK_PORT, SerialFrameTap, SleepGuard } from './links/index.ts';
 import { holdPort, runningHubPid, writePidfile } from './lock.ts';
 import { LogStore } from './logstore.ts';
 import { createOta, NODE_HTTP_PORT } from './ota/index.ts';
+import { createPortHolders } from './ports/holders.ts';
+import { createLeases } from './ports/leases.ts';
+import { createPrompts } from './prompts.ts';
 import { createRegistry, sweepIdentAtStart } from './registry/index.ts';
 import { RingRetention } from './ring.ts';
 import { createRouter } from './router/index.ts';
 import { CursorSeq } from './seq.ts';
 import { SerialPortManager } from './serial.ts';
+import { listenLoopbackV6 } from './web/guard.ts';
+import { createStaticSite } from './web/static.ts';
+import { createWsServer } from './web/ws.ts';
 
 const HOST = '127.0.0.1';
 
@@ -41,6 +53,16 @@ async function main(): Promise<void> {
   // its own port (0: ephemeral), never the running hub's 7422.
   const nodeHttpPort = Number(arg('--node-http-port', String(NODE_HTTP_PORT)));
   const useSerial = !process.argv.includes('--no-serial');
+  // How this hub runs, for the C6 parts (design c6 §3.3); --no-advert keeps it out of mDNS.
+  const runOpts: HubRunOptions = {
+    apiHost: HOST,
+    apiPort: port,
+    nodeHost,
+    nodePort,
+    nodeHttpPort,
+    noAdvert: process.argv.includes('--no-advert'),
+    serial: useSerial,
+  };
   mkdirSync(paths.home(), { recursive: true });
   // Single instance: hold the API address before opening hub.db or any serial port.
   const guard = await holdPort(HOST, port);
@@ -124,48 +146,76 @@ async function main(): Promise<void> {
   await refreshEnv();
   const envTimer = setInterval(() => void refreshEnv().catch(() => undefined), 60_000);
 
-  const app = buildServer(
-    {
-      db,
-      logs,
-      serial,
-      jobs,
-      startedAt: Date.now(),
-      hubSourceDir,
-      idf: () => idf,
-      pytools: () => pytools,
-      seq,
-      registry,
-      router,
-      events,
-      hubEpoch,
-      ota,
-      broadcast: router,
-      bindings,
-    },
-    port,
-  );
+  // The C6 parts (design c6 §3.3), each from the module its stream owns; they reach the rest through `hub`.
+  const ctx = () => hub;
+  const hub: HubContext = {
+    db,
+    logs,
+    serial,
+    jobs,
+    startedAt: Date.now(),
+    hubSourceDir,
+    idf: () => idf,
+    pytools: () => pytools,
+    seq,
+    registry,
+    router,
+    events,
+    hubEpoch,
+    ota,
+    broadcast: router,
+    bindings,
+    run: runOpts,
+    prompts: createPrompts(ctx, runOpts),
+    leases: createLeases(ctx, runOpts),
+    portHolders: createPortHolders(ctx, runOpts),
+    lnp: createLnp(ctx, runOpts),
+    advert: createAdvert(ctx, runOpts),
+    appServer: createAppServer(ctx, runOpts),
+    wsServer: createWsServer(ctx, runOpts),
+    staticSite: createStaticSite(ctx, runOpts),
+    latencyProbe: createLatencyProbe(ctx, runOpts),
+    sleepGuard,
+  };
+  const app = buildServer(hub, port);
   await new Promise<void>((r) => guard.close(() => r()));
   await app.listen({ host: HOST, port });
+  runOpts.apiPort = (app.server.address() as AddressInfo).port; // the bound one (a test hub may ask for 0)
+  // [::1] too (design c6 D9): a browser may resolve localhost to ::1 first. Not fatal when it fails.
+  const v6 = await listenLoopbackV6(app);
   if (useSerial) {
     serial.start(); // only once this process owns the address
   }
   await events.start();
+  // The /app bridge is the event bus's first listener and /ws its second (design c6 D7): both subscribe
+  // in start(), before the router, bindings or OTA do.
+  await hub.appServer.start();
+  await hub.wsServer.start();
   eventsRing.start();
   await router.start(); // node links (TCP/UDP :7421) once the API is up
   bindings.start(); // its router hooks and event subscriptions, once the router runs
   await ota.start(); // the node HTTP listener (:7422) serves only nodes with a session, so after the router
+  // The rest of C6: prompts, the lease sweeper, the LAN self-test, the advert (of :7421, so after the
+  // router), the latency probe and the dashboard's staleness check.
+  for (const part of [hub.prompts, hub.leases, hub.lnp, hub.advert, hub.latencyProbe, hub.staticSite]) {
+    await part.start();
+  }
   console.log(
     JSON.stringify({
       event: 'listening',
       version: HUB_VERSION,
       registry_hash: REGISTRY_HASH,
-      port,
-      node_port: nodePort,
+      port: runOpts.apiPort,
+      // Where the dashboard is served (design c6 D10), on the bound port.
+      dashboard: hub.staticSite.dashboard().url,
+      // The bound ports (a test hub asks for 0); UDP shares TCP's number unless --node-port names both.
+      node_port: router.ports()?.tcp ?? nodePort,
+      node_udp_port: router.ports()?.udp ?? nodePort,
       node_http_port: ota.httpPort(),
       // A node HTTP port that is taken leaves the hub up; OTA over Wi-Fi fails with no_http_listener.
       ...(ota.listenError() ? { node_http_error: ota.listenError() } : {}),
       ...(useSerial ? {} : { serial: false }),
+      ...(v6.error ? { v6_error: v6.error } : {}),
       run,
       hub_epoch: hubEpoch,
       pid: process.pid,
@@ -185,6 +235,11 @@ async function main(): Promise<void> {
     // Jobs still running here (`fr hub stop --force`, or a signal from elsewhere) are aborted: that
     // kills their build groups and sidecars, and lets them record "cancelled" while the db is open.
     jobs.cancelAll();
+    // C6 parts first: their sockets close (1001) before the API does, leases end (hub_stop) and reopen
+    // nothing, the advert's dns-sd is killed, pending prompts are cancelled while the bus still runs.
+    for (const part of [hub.appServer, hub.wsServer, hub.staticSite, hub.latencyProbe, hub.advert, hub.lnp, hub.leases, hub.prompts]) {
+      await Promise.resolve(part.stop()).catch(() => undefined);
+    }
     await app.close().catch(() => undefined);
     await Promise.resolve(ota.stop()).catch(() => undefined);
     bindings.stop();

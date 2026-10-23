@@ -2,7 +2,12 @@
 // list of globs in which `*` matches any run of characters (dots included: `boot.*`, `*.effect_done`), and
 // `where` is a set of field values an event must carry.
 
+import { matchType } from '@fractonica/protocol';
+
 import type { HubEvent } from '../context.ts';
+
+/** The linear glob matcher (09 §9.2), shared with the dashboard; globs come from /ws and /app clients. */
+export { matchType };
 
 /** `"boot.*, device.online"` (or an array of such strings) -> ['boot.*', 'device.online']; empty parts dropped. */
 export function parseTypes(types: string | readonly string[] | undefined): string[] {
@@ -11,22 +16,6 @@ export function parseTypes(types: string | readonly string[] | undefined): strin
   }
   const parts = typeof types === 'string' ? [types] : types;
   return parts.flatMap((t) => t.split(',')).map((t) => t.trim()).filter(Boolean);
-}
-
-const RE_SPECIAL = /[\\^$+?.()|{}[\]]/g;
-const regexCache = new Map<string, RegExp>();
-
-/** Whether `type` matches one glob. */
-export function matchType(glob: string, type: string): boolean {
-  let re = regexCache.get(glob);
-  if (!re) {
-    re = new RegExp(`^${glob.replace(RE_SPECIAL, '\\$&').replace(/\*/g, '.*')}$`);
-    if (regexCache.size > 1000) {
-      regexCache.clear();
-    }
-    regexCache.set(glob, re);
-  }
-  return re.test(type);
 }
 
 export function matchTypes(globs: readonly string[], type: string): boolean {

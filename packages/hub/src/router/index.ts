@@ -8,6 +8,10 @@
 // repair from HEARTBEAT watermarks, node broadcasts fanned out to the other sessions with ttl_remaining 1,
 // node -> node frames forwarded over the target's session, DIRECTORY to every session whenever the registry
 // changes, unicast MSGs, the latency samples latency_stats reads, and the RouterHooks the bindings register.
+// C6 (design c6 §6 S7, D22, D28) adds what T-LAT's probe drives (src/latency): commands that execute at a
+// hub time (EXT exec_at_us through the TIME offset) or go over a chosen link, PING round trips on demand,
+// a faster TIME resync while a probe runs, and every capability event with its link and arrival µs; plus
+// the late/resync counters and the resync rule T-INPUT checks.
 //
 // Everything on the receive path runs synchronously in the tick the envelope arrived in (spec 08 §8.2
 // rule 2); only the handshake and commands await answers.
@@ -50,10 +54,12 @@ import {
 
 import {
   type BroadcastSent,
+  type CommandResult,
   type Device,
   type Events,
   type HelloSeen,
   type HubBroadcast,
+  type HubEvent,
   type Lifecycle,
   type LinkName,
   MSG_EVENT,
@@ -74,7 +80,7 @@ import { readNetwork } from '../network.ts';
 import { nowUs } from '../ring.ts';
 import type { SerialPortManager } from '../serial.ts';
 import { CapDirectory, descriptorCaps, instanceAt, type PortCap } from './caps.ts';
-import { type ClockInfo, NodeClock, rttOf, type SyncSample } from './clock.ts';
+import { type ClockInfo, type ClockView, NodeClock, rttOf, type SyncSample } from './clock.ts';
 import { BINDING_PATHS, type DeviceLatency, LatencyRecorder, type LoopDelay, LoopMonitor } from './latency.ts';
 import { cmp16, cmp32, ReplayWindow } from './window.ts';
 
@@ -196,12 +202,59 @@ export interface RouterDeps {
   onSessions?: (sessions: number) => void;
 }
 
-/** A RESULT, as sendCommand resolves it. */
-export interface CommandResult {
-  status: number;
-  fields: Uint8Array;
-  rtt_ms: number;
-  link: string;
+// A RESULT, as sendCommand resolves it: defined with the Router interface (design c6 §3.3 adds the µs stamps).
+export type { CommandResult } from '../context.ts';
+
+/** How one CMD goes out (Router.sendCommand's options, plus what the T-LAT probe uses; design c6 §6 S7). */
+export interface CommandOptions {
+  ack: 'none' | 'result';
+  /** For ack result: how long the RESULT may take (an exec_at CMD's covers its lead too). */
+  timeoutMs: number;
+  /** The same envelope twice (T-LED): the node's response cache must absorb the second. */
+  duplicate?: boolean;
+  bulk?: boolean;
+  /**
+   * Hub µs to execute at (05 §5.6 EXT exec_at_us): the node's clock at that time through the TIME offset, low
+   * 32 bits. INVALID_ARGS before the device is synced, and on a BULK CMD (the node refuses one, D22).
+   */
+  execAt?: number;
+  /** The session to send on instead of the best one: DEVICE_OFFLINE when the device has none of that kind. */
+  via?: Exclude<LinkName, 'udp'>;
+  /** EXT trace_id (05 §5.6), u32: correlation for latency tracing. */
+  traceId?: number;
+}
+
+/** What Router.ping resolves with (design c6 §6 S7). */
+export interface PingResult {
+  /** Hub clock round trip, PING written to PONG received. */
+  rtt_us: number;
+  /** The session the PING went out on, and the link its PONG came back on (udp once the node is udp_ok). */
+  link: Exclude<LinkName, 'udp'>;
+  back: LinkName;
+  /** The node's clock when it answered (PONG t1, low 32 bits). */
+  node_t1: number;
+}
+
+/**
+ * A capability EVENT or STATE as the router published it, with what the bus does not carry (design c6 §6 S7):
+ * the link it came on and its arrival time. Listeners run synchronously in the receive tick, after the bus.
+ */
+export interface CapEventSeen {
+  /** As published: type, cursor, t_hub_us (the device time through the TIME offset), part, member, late. */
+  event: HubEvent;
+  link: LinkName;
+  /** When the envelope arrived, µs since the Unix epoch (the router clock's nowUs). */
+  rx_us: number;
+  /** The node's own time of the event (the TIME prefix's t_us, low 32 bits). */
+  t_us: number;
+}
+
+/** A faster TIME resync for some devices (Router.timeProfile; spec 05 §5.12.4: every 10 s during latency tests). */
+export interface TimeProfile {
+  /** Time between bursts (default 10 s). */
+  resyncMs?: number;
+  /** SYNC_REQs per burst (default the router's timeBurst). */
+  burst?: number;
 }
 
 /** What device_get and hub_status show of a device's links (design c3 §4). */
@@ -276,14 +329,17 @@ interface Peer {
   window: ReplayWindow;
   latest: Map<string, number>;
   latestMax: number;
+  /** Clock ms of the last get_state (handshake or resync), and whether a resync's is still unanswered (D28). */
   resyncAt: number;
+  resyncing: boolean;
   clock: NodeClock;
   syncing: boolean;
   nextSyncAt: number;
   /** Last UNICAST seq the hub used toward this device (counters start at 1 each run). */
   ucast: number;
-  mirror: Map<string, { value: unknown; epoch: number; t_us: number; t_hub_us: number }>;
-  lastEvent: Map<number, { epoch: number; t_us: number }>;
+  /** `rx`: hub µs it arrived (the ORDER_WINDOW_US guard on the u32 device time). */
+  mirror: Map<string, { value: unknown; epoch: number; t_us: number; t_hub_us: number; rx: number }>;
+  lastEvent: Map<number, { epoch: number; t_us: number; rx: number }>;
   heartbeat: PresenceHeartbeat | null;
   /**
    * The bcast_base of the last WELCOME it got: its BCAST window's floor (05 §5.8), so nothing at or below
@@ -315,6 +371,8 @@ interface Pending {
   /** null once the device said BYE: no session to fail it with, it waits out byeGraceMs. */
   session: Session | null;
   sentAt: number;
+  /** clock.nowUs() when the frame was handed to the link: CommandResult.sent_us. */
+  sentUs: number;
   link: string;
   timer: NodeJS.Timeout;
   resolve(r: CommandResult): void;
@@ -327,6 +385,10 @@ const BCAST_TTL = 0x22;
 /** The ttl byte's offset in the envelope (05 §5.6): repair, fan-out and forwarding change only its low nibble. */
 const TTL_OFFSET = 16;
 const EMPTY = new Uint8Array(0);
+// Device times are u32 µs, compared with RFC 1982, which turns over 2^31 µs (35.8 min) apart. An out-of-order
+// EVENT or STATE arrives within seconds of the newer one, so a frame is older only while the previous one of
+// its instance arrived less than this long ago (C6 bench: a press after 45 quiet minutes came out late).
+const ORDER_WINDOW_US = 30 * 60 * 1_000_000;
 
 /** The envelope bytes with ttl_remaining (the ttl byte's low nibble) set to `remaining`; a copy. */
 function withRemaining(bytes: Uint8Array, remaining: number): Uint8Array {
@@ -350,6 +412,8 @@ function commandId(cap: string, name: string): number {
 const NODE_GET_STATE = commandId('fr.node', 'get_state');
 const NODE_SET_ALIAS = commandId('fr.node', 'set_alias');
 const NODE_DESCRIBE = commandId('fr.node', 'describe');
+/** A resync's get_state waits half a heartbeat interval, at least this long (design c6 D28). */
+const RESYNC_MIN_TIMEOUT_MS = 100;
 
 const hex = (b: Uint8Array) => Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('hex');
 const low32 = (n: number) => ((Math.round(n) % 2 ** 32) + 2 ** 32) % 2 ** 32;
@@ -372,6 +436,13 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   #unsubscribePorts: (() => void) | null = null;
   #pending = new Map<string, Pending>();
   #syncWait = new Map<string, (s: { t2: number; t3: number; t4: number }) => void>();
+  /** ping(): `<device>/<t0>` -> what its PONG resolves (design c6 §6 S7). */
+  #pingWait = new Map<string, (pong: { t1: number; link: LinkName; rxUs: number }) => void>();
+  /** Active TIME profiles per device id (timeProfile): the fastest resync and the largest burst win. */
+  #profiles = new Map<string, Set<Required<TimeProfile>>>();
+  #capListeners = new Set<(e: CapEventSeen) => void>();
+  /** When the envelope being handled arrived (set by envelope() for its synchronous receive path), else null. */
+  #rxUs: number | null = null;
   /** Descriptor caps by descriptor_hash (firmware the hub has no manifest for). */
   #descriptors = new Map<number, PortCap[] | null>();
   /** The BCAST counter: also the broadcast id; WELCOME's bcast_base is its last value (05 §5.8-5.9). */
@@ -424,6 +495,12 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     forward_ttl: 0,
     /** DIRECTORY rounds sent to every session after a registry change. */
     directory_pushes: 0,
+    // Ordering (design c6 D28; 05 §5.8, T-INPUT).
+    /** Events delivered with `late` (older than the last of their instance in the same epoch). */
+    late: 0,
+    /** get_state sent because a HEARTBEAT's state_seq was ahead of the hub; and of those, the ones that failed. */
+    resync: 0,
+    resync_failed: 0,
   };
 
   constructor(deps: RouterDeps) {
@@ -530,23 +607,145 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     return [...this.#peers.values()].filter((p) => isUp(p.presence)).map((p) => p.id);
   }
 
-  sendCommand(
-    deviceId: string,
-    port: number,
-    cmdId: number,
-    args: Uint8Array,
-    opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate?: boolean; bulk?: boolean },
-  ): Promise<CommandResult> {
+  /**
+   * One unicast CMD (05 §5.8) on the device's best link, or the one `via` names; with ack 'result',
+   * resolves with its RESULT. `execAt` schedules it on the node (05 §5.6, design c6 D22): its RESULT comes
+   * when it ran (or LATE, BUSY at once), so timeoutMs must cover the lead.
+   */
+  sendCommand(deviceId: string, port: number, cmdId: number, args: Uint8Array, opts: CommandOptions): Promise<CommandResult> {
     const peer = this.#peers.get(deviceId);
-    const session = peer && this.#best(peer);
+    const session = peer && (opts.via ? peer.sessions[opts.via] : this.#best(peer));
     if (!peer || !session || !isUp(peer.presence)) {
+      const why = opts.via && peer && isUp(peer.presence) ? `no ${opts.via} session` : `no hub link (${peer?.presence ?? 'unknown'})`;
       return Promise.reject(
-        new FrError('DEVICE_OFFLINE', `${peer?.alias ?? deviceId} has no hub link (${peer?.presence ?? 'unknown'})`, {
+        new FrError('DEVICE_OFFLINE', `${peer?.alias ?? deviceId} has ${why}`, {
           remediation: [{ tool: 'wait_for_device', args: { selector: peer?.alias ?? `id:${deviceId}`, state: 'online' } }],
         }),
       );
     }
     return this.#request(peer, session, port, cmdId, args, opts);
+  }
+
+  /**
+   * One PING with ACK_REQ (05 §5.7) on the device's best session, or `via`, resolving with the hub clock round
+   * trip once its PONG (matched on t0) is back (design c6 §6 S7: the T-LAT probe's RTT per link). Its round
+   * trip is a latency_stats sample too, as every PONG's. Rejects DEVICE_OFFLINE without the session, TIMEOUT
+   * after timeoutMs (default 1 s).
+   */
+  ping(deviceId: string, opts: { via?: Exclude<LinkName, 'udp'>; timeoutMs?: number } = {}): Promise<PingResult> {
+    const peer = this.#peers.get(deviceId);
+    const session = peer && (opts.via ? peer.sessions[opts.via] : this.#best(peer));
+    if (!peer || !session || !isUp(peer.presence) || !session.welcomed) {
+      return Promise.reject(new FrError('DEVICE_OFFLINE', `${peer?.alias ?? deviceId} has no ${opts.via ?? 'hub'} link to PING over`));
+    }
+    const link = session.ep.kind;
+    let t0 = low32(this.#clock.nowUs());
+    while (this.#pingWait.has(`${peer.id}/${t0}`)) {
+      t0 = (t0 + 1) >>> 0; // distinct even on a clock that does not move
+    }
+    const key = `${peer.id}/${t0}`;
+    const timeoutMs = opts.timeoutMs ?? 1000;
+    return new Promise<PingResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.#pingWait.delete(key);
+        reject(new FrError('TIMEOUT', `no PONG from ${peer.alias} within ${timeoutMs} ms`, { details: { device: peer.id, link } }));
+      }, timeoutMs);
+      this.#pingWait.set(key, (pong) => {
+        clearTimeout(timer);
+        this.#pingWait.delete(key);
+        resolve({ rtt_us: (low32(pong.rxUs) - t0) >>> 0, link, back: pong.link, node_t1: pong.t1 });
+      });
+      if (!this.#sendFrame(session, CLS.PRESENCE, KIND.PRESENCE.PING, PORT.NODE, encodePresencePing({ t0 }), { ackReq: true })) {
+        clearTimeout(timer);
+        this.#pingWait.delete(key);
+        reject(new FrError('DEVICE_OFFLINE', `${peer.alias}: the ${link} link refused the PING (closed or backed up)`));
+      }
+    });
+  }
+
+  /** The device's clock estimate (TIME, 05 §5.12.4), to convert between its time and the hub's; null for a device never seen. */
+  clock(deviceId: string): ClockView | null {
+    return this.#peers.get(deviceId)?.clock ?? null;
+  }
+
+  /**
+   * Resyncs the devices' clocks faster while the returned release is not called (05 §5.12.4: every 10 s
+   * during latency tests; design c6 §6 S7): a burst at the next tick, then every resyncMs. Several profiles on
+   * one device: the fastest resync and the largest burst apply.
+   */
+  timeProfile(deviceIds: string[], opts: TimeProfile = {}): () => void {
+    const p: Required<TimeProfile> = { resyncMs: opts.resyncMs ?? 10_000, burst: opts.burst ?? this.#cfg.timeBurst };
+    const now = this.#clock.now();
+    for (const id of new Set(deviceIds)) {
+      let set = this.#profiles.get(id);
+      if (!set) {
+        set = new Set();
+        this.#profiles.set(id, set);
+      }
+      set.add(p);
+      const peer = this.#peers.get(id);
+      if (peer) {
+        peer.nextSyncAt = Math.min(peer.nextSyncAt, now);
+      }
+    }
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      for (const id of new Set(deviceIds)) {
+        const set = this.#profiles.get(id);
+        set?.delete(p);
+        if (set && !set.size) {
+          this.#profiles.delete(id);
+          const peer = this.#peers.get(id);
+          if (peer) {
+            peer.nextSyncAt = Math.min(peer.nextSyncAt, this.#clock.now() + this.#cfg.timeResyncMs);
+          }
+        }
+      }
+    };
+  }
+
+  /** Every capability event and state the router publishes, with its link and arrival time (CapEventSeen); returns the unsubscribe. */
+  onCapEvent(fn: (e: CapEventSeen) => void): () => void {
+    this.#capListeners.add(fn);
+    return () => this.#capListeners.delete(fn);
+  }
+
+  /** The resync interval and burst size for a device: its fastest TIME profile, else the router's. */
+  #timing(peer: Peer): { resyncMs: number; burst: number } {
+    const set = this.#profiles.get(peer.id);
+    if (!set?.size) {
+      return { resyncMs: this.#cfg.timeResyncMs, burst: this.#cfg.timeBurst };
+    }
+    let resyncMs = Infinity;
+    let burst = 0;
+    for (const p of set) {
+      resyncMs = Math.min(resyncMs, p.resyncMs);
+      burst = Math.max(burst, p.burst);
+    }
+    return { resyncMs, burst };
+  }
+
+  /**
+   * Ends the device's serial session for a reason of the hub's own (a serial lease, design c6 D4): a hub
+   * BYE on the USB line (the node then greets again at once, 05 §5.11), then the session ends as an
+   * unplugged port's does. Resolves once the BYE line is written, so the caller may close the port.
+   */
+  async endSerialSession(deviceId: string, reason: string): Promise<boolean> {
+    const peer = this.#peers.get(deviceId);
+    const s = peer?.sessions.serial;
+    if (!peer || !s) {
+      return false;
+    }
+    this.#endSession(s, reason, { bye: true });
+    if (!this.#sessionsOf(peer).length) {
+      this.#offline(peer, reason);
+    }
+    await s.ep.flushed?.();
+    return true;
   }
 
   sendOta(deviceId: string, kind: number, body: Uint8Array, opts: { ackReq?: boolean } = {}): { link: SessionKind; seq: number } {
@@ -647,10 +846,11 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       return Promise.reject(new FrError('INVALID_ARGS', `cannot encode the MSG: ${(e as Error).message}`));
     }
     const link = session.ep.kind;
+    const sentUs = this.#clock.nowUs();
     if (!this.#send(session, bytes)) {
       return Promise.reject(new FrError('DEVICE_OFFLINE', `${peer.alias}: the ${link} link refused the MSG (closed or backed up)`));
     }
-    return this.#awaitAnswer(peer, session, seq, opts.timeoutMs, 'ACK', { topic }).then((r) => ({ status: r.status, rtt_ms: r.rtt_ms, link }));
+    return this.#awaitAnswer(peer, session, seq, opts.timeoutMs, 'ACK', { topic }, sentUs).then((r) => ({ status: r.status, rtt_ms: r.rtt_ms, link }));
   }
 
   /** A flood-rate token (design c5 §7): true while seeded broadcasts stay within floodPerS. */
@@ -941,13 +1141,23 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     if (this.#stopped) {
       return; // a HELLO answering stop()'s BYE must not start a session on a hub that is going away
     }
+    // Its arrival, for everything this envelope stamps: RESULT rx_us, TIME t4, PONG round trips, events.
+    const outer = this.#rxUs;
+    this.#rxUs = this.#clock.nowUs();
     try {
       this.#receive(from, bytes);
     } catch (e) {
       // One bad frame (or a bug) must not take the link down with it.
       this.#counters.rx_bad++;
       console.error(JSON.stringify({ event: 'router_error', message: (e as Error).message, stack: (e as Error).stack }));
+    } finally {
+      this.#rxUs = outer;
     }
+  }
+
+  /** When the envelope being handled arrived; the clock's now outside the receive path. */
+  #arrival(): number {
+    return this.#rxUs ?? this.#clock.nowUs();
   }
 
   // ---- receive path ----
@@ -1360,13 +1570,27 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         if (this.#hooks.size) {
           this.#runHooks('heartbeat', (x) => x.heartbeat?.(peer.id, hb.value));
         }
-        // Resync (05 §5.8): the node sent a STATE the hub has not seen. One get_state per interval at most,
-        // so a STATE still in flight behind the heartbeat costs at most one spare round trip.
+        // Resync (05 §5.8, design c6 D28): the node sent a STATE the hub has not seen. One get_state at a
+        // time, and half an interval since the last: a STATE still in flight behind the heartbeat costs at
+        // most one spare round trip, and a lost get_state is retried at the very next heartbeat (a whole
+        // interval would skip one when the node's heartbeat jitter makes it early). So it times out within
+        // half an interval: waited for the 2 s of a handshake command, a lost one held off the next one or
+        // two heartbeats' retries (T-INPUT's loss phase saw clicks stuck past its 2.5 s checkpoint).
         const now = this.#clock.now();
         const best = this.#best(peer);
-        if (best?.ready && hb.value.state_seq !== 0 && cmp32(hb.value.state_seq, peer.latestMax) > 0 && now - peer.resyncAt >= peer.hbMs) {
+        if (best?.ready && hb.value.state_seq !== 0 && cmp32(hb.value.state_seq, peer.latestMax) > 0 && !peer.resyncing && now - peer.resyncAt >= peer.hbMs / 2) {
           peer.resyncAt = now;
-          void this.#request(peer, best, PORT.NODE, NODE_GET_STATE, EMPTY, { ack: 'result', timeoutMs: this.#cfg.handshakeCmdTimeoutMs }).catch(() => undefined);
+          peer.resyncing = true;
+          this.#counters.resync++;
+          const failed = () => {
+            this.#counters.resync_failed++;
+          };
+          const timeoutMs = Math.min(this.#cfg.handshakeCmdTimeoutMs, Math.max(RESYNC_MIN_TIMEOUT_MS, peer.hbMs / 2));
+          void this.#request(peer, best, PORT.NODE, NODE_GET_STATE, EMPTY, { ack: 'result', timeoutMs })
+            .then((r) => r.status !== STATUS.OK && failed(), failed)
+            .finally(() => {
+              peer.resyncing = false;
+            });
         }
         break;
       }
@@ -1388,13 +1612,15 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         break;
       case KIND.PRESENCE.PONG: {
         // It refreshed last_rx above, which is all a presence PING asks for; its round trip is a
-        // latency_stats sample (t0 is the hub's own µs clock, low 32 bits).
+        // latency_stats sample (t0 is the hub's own µs clock, low 32 bits), and answers a ping() call.
         const pong = decodePresencePong(env.body);
         if (pong.ok) {
-          const rtt = (low32(this.#clock.nowUs()) - pong.value.t0) >>> 0;
+          const rxUs = this.#arrival();
+          const rtt = (low32(rxUs) - pong.value.t0) >>> 0;
           if (rtt < 10_000_000) {
             this.#latency.add(peer.id, 'ping', link, rtt, this.#clock.now());
           }
+          this.#pingWait.get(`${peer.id}/${pong.value.t0}`)?.({ t1: pong.value.t1, link, rxUs });
         }
         break;
       }
@@ -1427,11 +1653,20 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     }
     this.#pending.delete(key);
     clearTimeout(pending.timer);
-    pending.resolve({ status: p.status, fields: env.body.slice(), rtt_ms: Math.round(this.#clock.now() - pending.sentAt), link: pending.link });
+    const rxUs = this.#arrival();
+    pending.resolve({
+      status: p.status,
+      fields: env.body.slice(),
+      rtt_ms: Math.round(this.#clock.now() - pending.sentAt),
+      link: pending.link,
+      t_hub_us: Math.round(rxUs),
+      sent_us: pending.sentUs,
+      rx_us: rxUs,
+    });
   }
 
   #syncRes(peer: Peer, env: Envelope): void {
-    const t4 = this.#clock.nowUs();
+    const t4 = this.#arrival();
     const d = decodeTimeSyncRes(env.body);
     if (!d.ok) {
       return;
@@ -1499,34 +1734,38 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     const cap = inst && findCap(inst.cap_id);
     const member = cap && (part === 'event' ? cap.events : cap.properties).find((m) => m.id === h.kind);
     let type: string;
+    let name: string;
     let fields: Record<string, unknown>;
     if (inst && member) {
-      type = `${inst.name}.${member.name}`;
+      name = member.name;
+      type = `${inst.name}.${name}`;
       const d = decodeMember(inst.cap_id, part, h.kind, env.body);
       fields = d.ok ? d.value : { raw: hex(env.body), error: d.error };
     } else {
       // No manifest or descriptor names this port: still delivered, by number.
-      type = `port${h.port}.${part}${h.kind}`;
+      name = `${part}${h.kind}`;
+      type = `port${h.port}.${name}`;
       fields = env.body.length ? { raw: hex(env.body) } : {};
     }
-    const now = this.#clock.nowUs();
+    const now = this.#arrival();
     const synced = peer.clock.synced();
     const tHub = synced ? Math.round(peer.clock.toHub(peer.clock.unwrap(tUs, now))) : Math.round(now);
     let late = false;
     if (part === 'event') {
       const last = peer.lastEvent.get(h.port);
-      if (last && last.epoch === h.epoch && cmp32(tUs, last.t_us) < 0) {
+      if (last && last.epoch === h.epoch && now - last.rx < ORDER_WINDOW_US && cmp32(tUs, last.t_us) < 0) {
         late = true; // delivered, flagged, and it does not move the instance's clock back (05 §5.8)
+        this.#counters.late++;
       } else {
-        peer.lastEvent.set(h.port, { epoch: h.epoch, t_us: tUs });
+        peer.lastEvent.set(h.port, { epoch: h.epoch, t_us: tUs, rx: now });
       }
     } else {
       const m = peer.mirror.get(type);
-      if (m && m.epoch === h.epoch && cmp32(tUs, m.t_us) < 0) {
+      if (m && m.epoch === h.epoch && now - m.rx < ORDER_WINDOW_US && cmp32(tUs, m.t_us) < 0) {
         this.#counters.stale++; // older than the mirror: not forwarded
         return;
       }
-      peer.mirror.set(type, { value: member ? fields[member.name] : fields, epoch: h.epoch, t_us: tUs, t_hub_us: tHub });
+      peer.mirror.set(type, { value: member ? fields[member.name] : fields, epoch: h.epoch, t_us: tUs, t_hub_us: tHub, rx: now });
     }
     const replayed = synced && now - tHub > this.#cfg.replayedAfterMs * 1000;
     if (part === 'event') {
@@ -1534,7 +1773,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       const input = synced && !replayed && h.port >= PORT.CAP_FIRST && h.port <= PORT.CAP_LAST;
       this.#sampleEvent(peer, link, type, fields, input ? now - tHub : null);
     }
-    this.#deps.events.publish({
+    const event = this.#deps.events.publish({
       type,
       device: peer.id,
       alias: peer.alias,
@@ -1542,9 +1781,23 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       t_dev_us: tUs,
       epoch: h.epoch,
       fields,
+      // Which half of the capability and which member (design c6 §3.3): /app sends `evt` or `state` by it.
+      part,
+      member: name,
       ...(late ? { late: true } : {}),
       ...(replayed ? { replayed: true } : {}),
     });
+    // After the bus (D7: /app and /ws first), with what it does not carry: the link and the arrival µs.
+    if (this.#capListeners.size) {
+      const seen: CapEventSeen = { event, link, rx_us: now, t_us: tUs };
+      for (const fn of this.#capListeners) {
+        try {
+          fn(seen);
+        } catch (err) {
+          console.error(JSON.stringify({ event: 'cap_listener_failed', device: peer.id, message: (err as Error).message }));
+        }
+      }
+    }
   }
 
   /**
@@ -1629,7 +1882,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       return;
     }
     session.ready = true;
-    peer.nextSyncAt = this.#clock.now() + this.#cfg.timeResyncMs;
+    peer.nextSyncAt = this.#clock.now() + this.#timing(peer).resyncMs;
     // 5. online, and per link: a node online over USB that joins Wi-Fi gets device.link, not a second
     // device.online (provisioning waits for its TCP link this way).
     if (!isUp(peer.presence)) {
@@ -1684,9 +1937,10 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   async #timeBurst(session: Session, log = false): Promise<void> {
     const peer = session.peer;
     const samples: SyncSample[] = [];
+    const burst = this.#timing(peer).burst;
     peer.syncing = true;
     try {
-      for (let i = 0; i < this.#cfg.timeBurst; i++) {
+      for (let i = 0; i < burst; i++) {
         if (session.closed) {
           return;
         }
@@ -1814,7 +2068,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       }
       const best = this.#best(peer);
       if (best?.ready && !peer.syncing && now >= peer.nextSyncAt) {
-        peer.nextSyncAt = now + this.#cfg.timeResyncMs;
+        peer.nextSyncAt = now + this.#timing(peer).resyncMs;
         void this.#timeBurst(best).catch(() => undefined);
       }
     }
@@ -1971,6 +2225,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         latest: new Map(),
         latestMax: 0,
         resyncAt: 0,
+        resyncing: false,
         clock: new NodeClock(),
         syncing: false,
         nextSyncAt: 0,
@@ -2089,19 +2344,33 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     }
   }
 
-  #request(
-    peer: Peer,
-    session: Session,
-    port: number,
-    cmdId: number,
-    args: Uint8Array,
-    opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate?: boolean; bulk?: boolean },
-  ): Promise<CommandResult> {
-    const seq = this.#nextSeq(peer);
+  #request(peer: Peer, session: Session, port: number, cmdId: number, args: Uint8Array, opts: CommandOptions): Promise<CommandResult> {
+    const synced = peer.clock.synced();
+    if (opts.execAt !== undefined && !synced) {
+      // exec_at is the node's own clock (design c6 D22): nothing to convert to before a TIME burst.
+      return Promise.reject(new FrError('INVALID_ARGS', `exec_at: ${peer.alias}'s clock is not synced yet (TIME, 05 §5.12.4)`));
+    }
+    const ext: ExtTlv[] = [];
     // No late execution (05 §5.8): once the node's clock is known, a CMD that arrives after hub time + 1 s
     // (in node time) answers EXPIRED instead of running.
-    const ext = peer.clock.synced() ? [extTlv(EXT.EXPIRE_AT_US, low32(peer.clock.toNode(this.#clock.nowUs()) + this.#cfg.cmdExpireMs * 1000))] : undefined;
-    const bulk = Boolean(opts.bulk) || 18 + 7 + args.length > MTU.REALTIME;
+    if (synced) {
+      ext.push(extTlv(EXT.EXPIRE_AT_US, low32(peer.clock.toNode(this.#clock.nowUs()) + this.#cfg.cmdExpireMs * 1000)));
+    }
+    if (opts.execAt !== undefined) {
+      ext.push(extTlv(EXT.EXEC_AT_US, low32(peer.clock.toNode(opts.execAt))));
+    }
+    if (opts.traceId !== undefined) {
+      ext.push(extTlv(EXT.TRACE_ID, opts.traceId >>> 0));
+    }
+    // The 18-byte header, its EXT block (the len byte and the TLVs; room for expire_at's at least) and the
+    // args: over the realtime MTU it goes BULK, which a CMD carrying exec_at cannot (the node answers
+    // INVALID_ARGS, D22).
+    const extBytes = Math.max(7, ext.length ? 1 + ext.reduce((n, t) => n + 2 + t.value.length, 0) : 0);
+    const bulk = Boolean(opts.bulk) || 18 + extBytes + args.length > MTU.REALTIME;
+    if (opts.execAt !== undefined && bulk) {
+      return Promise.reject(new FrError('INVALID_ARGS', 'exec_at: a BULK command cannot carry exec_at'));
+    }
+    const seq = this.#nextSeq(peer);
     let bytes: Uint8Array;
     try {
       bytes = this.#encode(peer, seq, CLS.CMD, cmdId, port, args, { ackReq: opts.ack === 'result', bulk, ext });
@@ -2109,6 +2378,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       return Promise.reject(new FrError('INVALID_ARGS', `cannot encode the command: ${(e as Error).message}`));
     }
     const link = session.ep.kind;
+    const sentUs = this.#clock.nowUs();
     if (!this.#send(session, bytes)) {
       return Promise.reject(new FrError('DEVICE_OFFLINE', `${peer.alias}: the ${link} link refused the command (closed or backed up)`));
     }
@@ -2116,13 +2386,21 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       this.#send(session, bytes); // the same envelope again (T-LED): the node's response cache must absorb it
     }
     if (opts.ack === 'none') {
-      return Promise.resolve({ status: STATUS.OK, fields: EMPTY, rtt_ms: 0, link });
+      return Promise.resolve({ status: STATUS.OK, fields: EMPTY, rtt_ms: 0, link, t_hub_us: Math.round(sentUs), sent_us: sentUs, rx_us: null });
     }
-    return this.#awaitAnswer(peer, session, seq, opts.timeoutMs, 'RESULT', { port, cmd: cmdId });
+    return this.#awaitAnswer(peer, session, seq, opts.timeoutMs, 'RESULT', { port, cmd: cmdId }, sentUs);
   }
 
   /** Waits for the RESULT or ACK answering the hub frame `seq` to `peer` (05 §5.8), as #result matches it. */
-  #awaitAnswer(peer: Peer, session: Session, seq: number, timeoutMs: number, what: 'RESULT' | 'ACK', details: Record<string, unknown>): Promise<CommandResult> {
+  #awaitAnswer(
+    peer: Peer,
+    session: Session,
+    seq: number,
+    timeoutMs: number,
+    what: 'RESULT' | 'ACK',
+    details: Record<string, unknown>,
+    sentUs: number,
+  ): Promise<CommandResult> {
     const link = session.ep.kind;
     return new Promise<CommandResult>((resolve, reject) => {
       const key = `${peer.id}/${seq}`;
@@ -2134,7 +2412,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
           }),
         );
       }, timeoutMs);
-      this.#pending.set(key, { peer, session, sentAt: this.#clock.now(), link, timer, resolve, reject });
+      this.#pending.set(key, { peer, session, sentAt: this.#clock.now(), sentUs, link, timer, resolve, reject });
     });
   }
 
@@ -2179,4 +2457,16 @@ export function routerLoopDelay(router: Router | undefined, windowMs: number): L
   return router instanceof HubRouter ? router.loopDelay(windowMs) : null;
 }
 
+/**
+ * What the T-LAT probe (src/latency, design c6 §6 S7) drives beyond the Router interface: exec_at and link
+ * choice in sendCommand, ping, clock, timeProfile, onCapEvent, and the device's link info.
+ */
+export type ProbeRouter = Pick<HubRouter, 'sendCommand' | 'ping' | 'clock' | 'timeProfile' | 'onCapEvent' | 'info' | 'instances' | 'loopDelay' | 'presence'>;
+
+/** The router as the latency probe needs it when `router` is the hub's own, else null. */
+export function routerProbe(router: Router | undefined): ProbeRouter | null {
+  return router instanceof HubRouter ? router : null;
+}
+
+export type { ClockInfo, ClockView } from './clock.ts';
 export type { DeviceLatency, LoopDelay } from './latency.ts';

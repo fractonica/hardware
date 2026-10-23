@@ -1,8 +1,17 @@
 import { z } from 'zod';
 
 export const JOB_STATUSES = ['queued', 'working', 'completed', 'failed', 'cancelled'] as const;
-// msg: a repeated message_send (design c5 §4).
-export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg'] as const;
+// msg: a repeated message_send (design c5 §4); test: test_run, latency: latency_probe (design c6 D19).
+export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg', 'test', 'latency'] as const;
+
+/**
+ * Who started a job (design c6 D18): the `X-Fr-Client` request header (CLIENT_HEADER) of the call that
+ * started it, kept on the job row; job_list filters by it and the dashboard's Agents page shows `mcp`.
+ */
+export const JOB_ORIGINS = ['cli', 'mcp', 'dashboard', 'app'] as const;
+export type JobOrigin = (typeof JOB_ORIGINS)[number];
+/** The request header naming the client (lower case, as Node delivers headers). */
+export const CLIENT_HEADER = 'x-fr-client';
 
 export const JobSchema = z.object({
   job_id: z.string(),
@@ -11,6 +20,8 @@ export const JobSchema = z.object({
   stage: z.string().optional(),
   progress: z.object({ pct: z.number().optional(), message: z.string().optional() }).optional(),
   targets: z.array(z.string()),
+  /** Absent for a job started without the header (an older client, or a job a job started). */
+  origin: z.enum(JOB_ORIGINS).optional(),
   blocked_by: z.object({ lock: z.string(), holder_job: z.string() }).optional(),
   created_at: z.string(),
   started_at: z.string().optional(),
@@ -22,6 +33,19 @@ export type Job = z.infer<typeof JobSchema>;
 
 export const PORT_STATES = ['open', 'closed', 'leased', 'busy_external', 'error'] as const;
 
+/** A serial lease on a port (design c6 D4): the hub's handle stays closed until it ends. */
+export const PortLeaseSchema = z.object({
+  lease_id: z.string(),
+  holder_pid: z.number().int().optional(),
+  expires_at: z.string(),
+  by: z.enum(['external', 'job']).optional(),
+});
+export type PortLease = z.infer<typeof PortLeaseSchema>;
+
+/** A program other than the hub that has a port open (`lsof`, design c6 D5), e.g. Google Chrome. */
+export const PortHolderSchema = z.object({ app: z.string(), pid: z.number().int() });
+export type PortHolder = z.infer<typeof PortHolderSchema>;
+
 export const PortInfoSchema = z.object({
   path: z.string(),
   usb_serial: z.string().optional(),
@@ -29,10 +53,47 @@ export const PortInfoSchema = z.object({
   vid: z.string().optional(),
   pid: z.string().optional(),
   state: z.enum(PORT_STATES),
+  /** For display: the hub, `lease l_… (pid N)`, or the external program. */
   holder: z.string().optional(),
   lines: z.number(),
+  lease: PortLeaseSchema.optional(),
+  external: z.array(PortHolderSchema).optional(),
 });
 export type PortInfo = z.infer<typeof PortInfoSchema>;
+
+/** Registry presence (05 §5.10); `unknown` before this hub run has heard of the device. */
+export const PRESENCES = ['online', 'suspect', 'offline', 'unknown'] as const;
+export type Presence = (typeof PRESENCES)[number];
+
+/** A registry row (spec 08 §8.8 `devices`; the hub's context.ts Device). */
+export const DeviceSchema = z.looseObject({
+  device_id: z.string(),
+  addr: z.number().int().nullable(),
+  alias: z.string(),
+  alias_rev: z.number().int(),
+  net: z.number().int().nullable(),
+  board: z.string().nullable(),
+  profile: z.string().nullable(),
+  chip: z.string().nullable(),
+  tags: z.array(z.string()),
+  role: z.enum(['node', 'gateway']),
+  fw_id: z.string().nullable(),
+  provisioned: z.boolean(),
+  last_seen: z.string().nullable(),
+  last_epoch: z.number().int().nullable(),
+  created_at: z.string(),
+});
+
+/** A registry row as device_list and device_get return it: plus presence and, when attached, its USB port. */
+export const DeviceViewSchema = DeviceSchema.extend({
+  presence: z.enum(PRESENCES),
+  port: z.string().optional(),
+  port_state: z.enum(PORT_STATES).optional(),
+});
+export type DeviceView = z.infer<typeof DeviceViewSchema>;
+
+/** Log levels, most severe first (ESP_LOG letters); a minimum level keeps itself and those before it. */
+export const LOG_LEVELS = ['E', 'W', 'I', 'D', 'V'] as const;
 
 /** `frame`: a decoded `@fr1:` serial line; `diag`: a `#<id> {...}` serial command channel response. */
 export const LOG_KINDS = ['esp_log', 'raw', 'boot', 'frame', 'diag'] as const;
@@ -83,6 +144,9 @@ export const AppDescSchema = z.object({
 });
 export type AppDesc = z.infer<typeof AppDescSchema>;
 
+/** A config or trait value of a capability instance (a JSON scalar). */
+export const CapValueSchema = z.union([z.boolean(), z.number(), z.string()]);
+
 /** One capability instance of a build, from the generated fr_manifest.json (design c2 §6). */
 export const ManifestCapSchema = z.looseObject({
   name: z.string(),
@@ -92,7 +156,13 @@ export const ManifestCapSchema = z.looseObject({
   version: z.string(),
   driver: z.string(),
   /** Effective service config (capability defaults, driver, profile). */
-  config: z.record(z.string(), z.union([z.boolean(), z.number(), z.string()])),
+  config: z.record(z.string(), CapValueSchema),
+  /**
+   * Every trait the firmware reports (design c6 D13): the capability's default, then the driver.yaml
+   * `traits:`, then what the service derives from config, e.g. `{color: 'rgb', dimmable: true}`. Absent
+   * before C6 builds; null where the traits are unknown.
+   */
+  traits: z.record(z.string(), CapValueSchema).nullable().optional(),
 });
 export type ManifestCap = z.infer<typeof ManifestCapSchema>;
 
@@ -123,6 +193,8 @@ export const ArtifactManifestSchema = z.object({
   partitions: z.array(PartitionSchema),
   /** Capability instances by port (absent before C2 builds); the hub names decoded frames from them. */
   caps: z.array(ManifestCapSchema).optional(),
+  /** The board's T-LAT test_pin GPIO (design c6 D24) from fr_manifest.json: null without one, absent before C6 builds. */
+  test_pin: z.number().int().min(0).max(48).nullable().optional(),
   /** FNV-1a 32 of the canonical catalog JSON the firmware was generated from. */
   catalog_hash: z.number().int().min(0).max(0xffffffff).optional(),
   /** The image's fr_app_desc (absent before C4 builds). */

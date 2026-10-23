@@ -1,16 +1,19 @@
 // The hub is the only owner of USB serial ports (spec 08 §8.2-8.3). Espressif USB-Serial/JTAG
 // ports are discovered by polling, keyed by their USB serial number (the chip MAC), opened with
-// DTR/RTS deasserted, and split into log lines. Flashing borrows a port through a lease. The serial
-// command channel (fr_diag) writes lines through the hub's own handle.
+// DTR/RTS deasserted, and split into log lines. Flashing borrows a port through a lease, and so does
+// another program through a serial lease (design c6 D4, ports/leases.ts); before either, the hub asks who
+// else has the port open (D5, ports/holders.ts). The serial command channel (fr_diag) writes lines through
+// the hub's own handle.
 
 import { StringDecoder } from 'node:string_decoder';
 
-import { FrError, type PortInfo, SERIAL_PREFIX } from '@fractonica/protocol';
-import { run } from '@fractonica/host';
+import { FrError, type PortHolder, type PortInfo, type PortLease, SERIAL_PREFIX } from '@fractonica/protocol';
 import { SerialPort } from 'serialport';
 
+import type { PortHolders } from './context.ts';
 import type { Db } from './db.ts';
 import type { LogStore } from './logstore.ts';
+import { busyExternal, holderText, LsofHolders, portLeased } from './ports/holders.ts';
 
 const ESPRESSIF_VID = '303a';
 const POLL_MS = 500;
@@ -30,6 +33,11 @@ const REPEAT_FLUSH_MS = 1000;
  * silent after wake on a handle that still looked open, so every open port is closed and reopened.
  */
 const RESUME_GAP_MS = 10_000;
+/**
+ * A poll this late did not watch the ports in between (the Mac slept, or the loop stalled): a leased port's
+ * absence is not counted across the gap, so a lease outlives a sleep (ports/leases.ts, port_gone).
+ */
+const LATE_POLL_MS = 2000;
 
 type State = PortInfo['state'];
 
@@ -53,6 +61,12 @@ interface Entry {
   repeat?: { text: string; count: number; since: number };
   /** onPortGone listeners were told this port is gone; cleared when a poll lists it again. */
   goneTold?: boolean;
+  /** A serial lease (design c6 D4) holds the port: shown in port_list, with state `leased`. */
+  lease?: PortLease;
+  /** A serial lease is being granted (the node's BYE is going out): the port is promised, still open. */
+  claimed?: boolean;
+  /** Other programs that have the port open (D5): from the failed open, or port_list's lsof. */
+  external?: PortHolder[];
 }
 
 /** "1C:DB:D4:16:BA:34" -> "1cdbd416ba34"; anything else is returned unchanged. */
@@ -74,11 +88,15 @@ function cuPath(path: string): string {
   return path.replace('/dev/tty.', '/dev/cu.');
 }
 
-async function portHolder(path: string): Promise<string | undefined> {
-  const r = await run('lsof', ['-F', 'pc', path]);
-  const cmd = /^c(.+)$/m.exec(r.stdout)?.[1];
-  const pid = /^p(\d+)$/m.exec(r.stdout)?.[1];
-  return cmd ? `${cmd} (pid ${pid})` : undefined;
+/** What a lease asks of SerialPortManager.lease besides its holder text. */
+export interface LeaseOptions {
+  /** A serial lease (design c6 D4): shown in port_list until released. */
+  lease?: PortLease;
+  /**
+   * Runs once the port is promised to this lease and before the hub closes its handle (the node's BYE on
+   * its serial session, Router.endSerialSession). Nothing the device sends after it is read.
+   */
+  beforeClose?: () => Promise<unknown>;
 }
 
 export class SerialPortManager {
@@ -90,11 +108,38 @@ export class SerialPortManager {
   #timer: NodeJS.Timeout | null = null;
   #polling = false;
   #lastPoll = 0;
+  /** When the last poll listed the ports (the `now` its lastSeen updates carry); 0 before the first. */
+  #polledAt = 0;
   #goneListeners = new Set<(key: string) => void>();
+  #changeListeners = new Set<() => void>();
+  /** Who else holds a port (design c6 D5); lsof by default. */
+  #holders: PortHolders;
+  /** Every lease asks #holders (D5); without a probe of the hub's, only a port that failed to open busy is asked about. */
+  #askEveryLease: boolean;
 
-  constructor(logs: LogStore, db: Db) {
+  constructor(logs: LogStore, db: Db, opts: { holders?: PortHolders } = {}) {
     this.#logs = logs;
     this.#db = db;
+    this.#holders = opts.holders ?? new LsofHolders();
+    this.#askEveryLease = opts.holders !== undefined;
+  }
+
+  /**
+   * The hub's holder probe (HubContext.portHolders), handed over when the lease part starts: from then on
+   * every lease asks who else has the port open, not only a port the hub failed to open (design c6 D5).
+   */
+  useHolders(holders: PortHolders): void {
+    this.#holders = holders;
+    this.#askEveryLease = true;
+  }
+
+  /** The other programs that have `path` open; none when lsof fails. */
+  async #others(path: string): Promise<PortHolder[]> {
+    try {
+      return (await this.#holders.holders([path])).get(path) ?? [];
+    } catch {
+      return [];
+    }
   }
 
   start(): void {
@@ -120,6 +165,26 @@ export class SerialPortManager {
     return () => this.#goneListeners.delete(fn);
   }
 
+  /**
+   * Calls `fn` after every poll (each 500 ms, and the one a release or an unplug triggers): list() may
+   * have changed. The listener compares list() with what it saw before (web/feeds.ts publishes
+   * port.attached, port.detached and port.state from that, design c6 §5). Returns the unsubscribe.
+   */
+  onChange(fn: () => void): () => void {
+    this.#changeListeners.add(fn);
+    return () => this.#changeListeners.delete(fn);
+  }
+
+  #changed(): void {
+    for (const fn of this.#changeListeners) {
+      try {
+        fn();
+      } catch (err) {
+        console.error(JSON.stringify({ event: 'port_change_listener_failed', message: (err as Error).message }));
+      }
+    }
+  }
+
   async poll(): Promise<void> {
     if (this.#polling) {
       return;
@@ -127,8 +192,17 @@ export class SerialPortManager {
     this.#polling = true;
     try {
       const now = Date.now();
-      if (this.#lastPoll && now - this.#lastPoll > RESUME_GAP_MS) {
-        await this.#reopenAfterResume(now - this.#lastPoll);
+      const gap = this.#lastPoll ? now - this.#lastPoll : 0;
+      if (gap > LATE_POLL_MS) {
+        // Nothing watched the ports during the gap: a leased port keeps the absence polls saw before it.
+        for (const e of this.#entries.values()) {
+          if (e.state === 'leased') {
+            e.lastSeen += gap;
+          }
+        }
+      }
+      if (gap > RESUME_GAP_MS) {
+        await this.#reopenAfterResume(gap);
       }
       this.#lastPoll = now;
       const listed = (await SerialPort.list()).filter((p) => p.vendorId?.toLowerCase() === ESPRESSIF_VID);
@@ -152,6 +226,7 @@ export class SerialPortManager {
           this.#open(e);
         }
       }
+      this.#polledAt = now;
       for (const e of this.#entries.values()) {
         if (!present.has(e.key) && !e.goneTold && !(e.state === 'open' && e.port?.isOpen)) {
           e.goneTold = true;
@@ -171,6 +246,7 @@ export class SerialPortManager {
           this.#gone.delete(key);
         }
       }
+      this.#changed();
     } finally {
       this.#polling = false;
     }
@@ -192,15 +268,17 @@ export class SerialPortManager {
             e.state = busy ? 'busy_external' : 'error';
             e.nextOpenAt = Date.now() + BUSY_RETRY_MS;
             if (busy) {
-              void portHolder(e.path).then((h) => {
+              void this.#others(e.path).then((others) => {
                 if (e.state === 'busy_external') {
-                  e.holder = h;
+                  e.external = others;
+                  e.holder = others.length ? holderText(others) : undefined;
                 }
               });
             }
             return;
           }
           e.holder = undefined;
+          e.external = undefined;
           // Never assert DTR (BOOT) or RTS (EN): a reset would roll back an image pending verification.
           port.set({ dtr: false, rts: false }, () => undefined);
         } finally {
@@ -208,7 +286,9 @@ export class SerialPortManager {
         }
       }),
     );
-    port.on('data', (chunk: Buffer) => this.#onData(e, chunk));
+    // Only while this handle is the entry's: once a lease takes the port (after the node's BYE) or the hub
+    // closes it, a line still in flight would start a new serial session (design c6 D4).
+    port.on('data', (chunk: Buffer) => e.port === port && this.#onData(e, chunk));
     port.on('close', (err?: { disconnected?: boolean } | null) => {
       if (e.port !== port) {
         return; // closed by #close, which settles the entry itself
@@ -376,27 +456,43 @@ export class SerialPortManager {
     }
   }
 
-  /** Hands the port to another process (pytools, idf.py monitor). The hub stops reading until release. */
-  async lease(selector: string, holder: string): Promise<{ path: string; key: string; release: () => void }> {
+  /**
+   * Hands the port to another process (pytools, idf.py monitor, a Web Serial page). The hub stops reading
+   * until release. Refused with PORT_LEASED while leased (to a job or a serial lease) and with
+   * PORT_BUSY_EXTERNAL, naming the program, while another program has it open (design c6 D5): asked of
+   * lsof at every lease once the hub's probe is in (useHolders), else only for a port that failed to open.
+   */
+  async lease(selector: string, holder: string, opts: LeaseOptions = {}): Promise<{ path: string; key: string; release: () => void }> {
     const e = await this.resolveWait(selector);
-    if (e.state === 'busy_external') {
-      // Ask lsof again: the program seen at the last failed open may have let go (a closed Web Serial tab).
-      const h = await portHolder(e.path);
+    if (e.state === 'leased' || e.claimed) {
+      throw portLeased(e, e);
+    }
+    if (e.state === 'busy_external' || this.#askEveryLease) {
+      // Asked again for a busy port: the program seen at the last failed open may have let go (a closed Web Serial tab).
+      const others = await this.#others(e.path);
       if (e.state === 'busy_external') {
-        e.holder = h;
+        e.external = others;
+        e.holder = others.length ? holderText(others) : undefined;
       }
-      if (h) {
-        throw new FrError('PORT_BUSY_EXTERNAL', `${e.path} is held by ${h}`, {
-          remediation: [{ human: `close the program holding the port (${h}), e.g. a Chrome Web Serial tab` }],
-          details: { holder: h },
-        });
+      if (others.length) {
+        throw busyExternal({ path: e.path, key: e.key }, others);
       }
     }
-    if (e.state === 'leased') {
-      throw new FrError('PORT_LEASED', `${e.path} is leased to ${e.holder}`, { details: { holder: e.holder } });
+    if ((e.state as State) === 'leased' || e.claimed) {
+      throw portLeased(e, e); // taken while lsof ran
+    }
+    if (opts.beforeClose) {
+      e.claimed = true;
+      try {
+        await opts.beforeClose();
+      } finally {
+        e.claimed = false;
+      }
     }
     e.state = 'leased';
     e.holder = holder;
+    e.lease = opts.lease;
+    e.external = undefined;
     await this.#close(e);
     let released = false;
     return {
@@ -409,10 +505,46 @@ export class SerialPortManager {
         released = true;
         e.state = 'closed';
         e.holder = undefined;
+        e.lease = undefined;
         e.nextOpenAt = 0;
         void this.poll();
       },
     };
+  }
+
+  /**
+   * When the poll last listed a port (ms since the epoch), null for one it does not know. A leased port
+   * stays known while it is absent, so a lease can tell a USB re-enumeration from an unplug.
+   */
+  lastSeen(selector: string): number | null {
+    try {
+      return this.resolve(selector).lastSeen;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * When the last poll listed the ports (ms since the epoch), null before the first. A lease times a port's
+   * absence up to here, not up to now: right after a Mac sleep the wall clock has jumped while no poll has
+   * run yet, and that gap is no absence (design c6 D4, port_gone).
+   */
+  lastPolled(): number | null {
+    return this.#polledAt || null;
+  }
+
+  /** What port_list's lsof found (ports/holders.ts listPorts): kept for hub_status and the next list(). */
+  noteExternal(found: Map<string, PortHolder[]>): void {
+    for (const e of this.#entries.values()) {
+      if (e.state === 'leased') {
+        continue;
+      }
+      const others = found.get(e.path) ?? [];
+      e.external = others.length ? others : undefined;
+      if (e.state === 'busy_external') {
+        e.holder = others.length ? holderText(others) : e.holder;
+      }
+    }
   }
 
   /**
@@ -440,10 +572,12 @@ export class SerialPortManager {
     }
     const e = await this.resolveWait(selector);
     if (e.state === 'leased') {
-      throw new FrError('PORT_LEASED', `${e.path} is leased to ${e.holder}`, { details: { holder: e.holder } });
+      throw portLeased(e, e);
     }
     if (e.state === 'busy_external') {
-      throw new FrError('PORT_BUSY_EXTERNAL', `${e.path} is held by ${e.holder ?? 'another program'}`, { details: { holder: e.holder } });
+      throw e.external?.length
+        ? busyExternal({ path: e.path, key: e.key }, e.external)
+        : new FrError('PORT_BUSY_EXTERNAL', `${e.path} is held by ${e.holder ?? 'another program'}`, { details: { holder: e.holder } });
     }
     const port = await this.#waitOpen(e, WRITE_OPEN_WAIT_MS, 'cannot write to it');
     if (stuck.has(port)) {
@@ -491,16 +625,22 @@ export class SerialPortManager {
   }
 
   list(): PortInfo[] {
-    return [...this.#entries.values()].map((e) => ({
-      path: e.path,
-      ...(e.usbSerial ? { usb_serial: e.usbSerial } : {}),
-      ...(/^[0-9a-f]{12}$/.test(e.key) ? { device_id: e.key } : {}),
-      ...(e.vid ? { vid: e.vid } : {}),
-      ...(e.pid ? { pid: e.pid } : {}),
-      state: e.state,
-      ...(e.holder ? { holder: e.holder } : {}),
-      lines: e.lines,
-    }));
+    return [...this.#entries.values()].map((e) => {
+      // An open port another program has open too (D5) says so; a busy one names its holder.
+      const holder = e.holder ?? (e.state === 'open' && e.external?.length ? `also ${holderText(e.external)}` : undefined);
+      return {
+        path: e.path,
+        ...(e.usbSerial ? { usb_serial: e.usbSerial } : {}),
+        ...(/^[0-9a-f]{12}$/.test(e.key) ? { device_id: e.key } : {}),
+        ...(e.vid ? { vid: e.vid } : {}),
+        ...(e.pid ? { pid: e.pid } : {}),
+        state: e.state,
+        ...(holder ? { holder } : {}),
+        lines: e.lines,
+        ...(e.lease ? { lease: { ...e.lease } } : {}),
+        ...(e.external?.length ? { external: e.external.map((h) => ({ ...h })) } : {}),
+      };
+    });
   }
 }
 

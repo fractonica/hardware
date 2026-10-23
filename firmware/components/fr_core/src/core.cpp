@@ -41,6 +41,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "test_pin.hpp"
 
 namespace fr::core {
 namespace {
@@ -319,6 +320,7 @@ struct RxBuf {
     uint16_t len;
     uint16_t cap;
     uint8_t *bytes;
+    TimeUs at;  // esp_timer µs when the link task handed it over (design c6 D23)
 };
 
 portMUX_TYPE s_buf_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -329,10 +331,10 @@ RxBuf s_rx[kRxSmall + kRxBig];
 void init_rx_pool()
 {
     for (size_t i = 0; i < kRxSmall; ++i) {
-        s_rx[i] = {.busy = false, .len = 0, .cap = kRxSmallBytes, .bytes = s_rx_small_mem[i]};
+        s_rx[i] = {.busy = false, .len = 0, .cap = kRxSmallBytes, .bytes = s_rx_small_mem[i], .at = 0};
     }
     for (size_t i = 0; i < kRxBig; ++i) {
-        s_rx[kRxSmall + i] = {.busy = false, .len = 0, .cap = kRxBigBytes, .bytes = s_rx_big_mem[i]};
+        s_rx[kRxSmall + i] = {.busy = false, .len = 0, .cap = kRxBigBytes, .bytes = s_rx_big_mem[i], .at = 0};
     }
 }
 
@@ -367,7 +369,7 @@ void on_envelope(LinkKind kind, RxBuf *b)
     if (!h) {
         ++s_env_bad;  // Net drops it too; counted here for diag `stats` env_bad
     }
-    s_net->receive(kind, env);
+    s_net->receive(kind, env, b->at);
     // HUB_ACK (06 §6.6): a WELCOME that gave this link its session. Ota also sends a RESULT it holds for
     // the hub from here (design c4 §3: after the first WELCOME).
     if (h && h->cls == wire::kClsNet && h->kind == proto::kKindNetWelcome && s_net->state().link(kind).session) {
@@ -376,9 +378,14 @@ void on_envelope(LinkKind kind, RxBuf *b)
     release_rx(b);
 }
 
-/** Any task (fr_serial reader, fr_net): copies the envelope and queues it for the core task. */
+/**
+ * Any task (fr_serial reader, fr_net): copies the envelope and queues it for the core task, stamped with the
+ * time the link task had it (design c6 D23): TIME t2, PONG t1 and the expire_at/exec_at checks leave out the
+ * wait in the network queue, which Net reports as rx_queue_us_max.
+ */
 bool deliver(LinkKind kind, std::span<const uint8_t> envelope)
 {
+    const TimeUs at = esp_timer_get_time();
     RxBuf *b = acquire_rx(envelope.size());
     if (b == nullptr) {
         s_rx_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -386,6 +393,7 @@ bool deliver(LinkKind kind, std::span<const uint8_t> envelope)
     }
     std::memcpy(b->bytes, envelope.data(), envelope.size());
     b->len = static_cast<uint16_t>(envelope.size());
+    b->at = at;
     if (!s_core.post_net([kind, b] { on_envelope(kind, b); })) {
         release_rx(b);
         s_rx_dropped.fetch_add(1, std::memory_order_relaxed);
@@ -923,11 +931,21 @@ public:
         n.tcp_rx_bad = c[kTcpRxBad];
         n.udp_tx_fail = c[kUdpTxFail];
         n.hook_dropped = st.hook_drops;
+        n.loss_tx = st.loss_tx;
+        n.loss_rx = st.loss_rx;
+        n.cmds_scheduled = st.cmds_scheduled;
+        n.exec_late = st.exec_late;
+        n.exec_cancelled = st.exec_cancelled;
+        n.exec_late_us_max = st.exec_late_us_max;
+        n.rx_queue_us_max = st.rx_queue_us_max;
         n.hub_link_dropped = st.hub_link_dropped;
         n.udp_blocked = st.udp_blocked;
         n.ip_blocked = st.ip_blocked;
         n.wifi_held = es.wifi_held;
         n.wifi_held_s = es.wifi_held_s;
+        n.loss_pct = st.loss_pct;
+        n.loss_dir = static_cast<uint8_t>(st.loss_dir);
+        n.loss_s = st.loss_s_left;
         n.espnow = {.up = air.up,
                     .channel = air.channel,
                     .peers = air.peers,
@@ -1009,6 +1027,20 @@ public:
         ESP_LOGW(TAG, "debug hook %s %" PRIu32 " s", diag::hook_name(hook), seconds);
         return {};
     }
+
+    Status net_loss(uint8_t pct, uint32_t seconds, diag::LossDir dir) override
+    {
+        // Net defers it like the hooks above: this request's RESULT is never one it drops.
+        static_assert(static_cast<uint8_t>(diag::LossDir::rx) == static_cast<uint8_t>(net::LossDir::rx));
+        s_net->loss(pct, seconds, static_cast<net::LossDir>(dir));
+        ESP_LOGW(TAG, "debug hook loss %u %% %s %" PRIu32 " s", static_cast<unsigned>(pct), diag::loss_dir_name(dir),
+                 seconds);
+        return {};
+    }
+
+    std::expected<diag::PulseInfo, Err> pin_pulse(uint32_t us) override { return fr::core::test_pin::pulse(us); }
+
+    int test_pin() const override { return fr::core::test_pin::pin(); }
 
     void reboot(bool bootloader) override { schedule_reboot(bootloader); }
 };
@@ -1218,6 +1250,8 @@ Core &start()
         ESP_LOGE(TAG, "no fr_worker: OTA and other slow work cannot run this boot");
     }
     init_rx_pool();
+    // Before any driver takes a pin: the T-LAT test pin idles released (design c6 D24).
+    fr::core::test_pin::init();
     // The runtime's timers are taken before fr::board::init can drain the pool, so `reboot` always
     // answers before it restarts. Without the wake-up alarm no timer would fire: reboot then restarts
     // at once and the serial link stays down.

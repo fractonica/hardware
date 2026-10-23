@@ -1,4 +1,4 @@
-import { HUB_API_PORT, type ErrorCode, type OpDef, type Result } from '@fractonica/protocol';
+import { CLIENT_HEADER, HUB_API_PORT, type ErrorCode, type JobOrigin, type OpDef, type Result } from '@fractonica/protocol';
 
 export function hubUrl(): string {
   return process.env.FR_HUB || `http://127.0.0.1:${HUB_API_PORT}`;
@@ -52,15 +52,25 @@ export async function hubHealth(): Promise<{ ok: boolean; version: string; regis
   }
 }
 
-export async function hubCall(op: string, input: Record<string, unknown>, timeoutMs: number): Promise<Result> {
+/**
+ * One op call. `client` names the caller in X-Fr-Client (design c6 D18): the hub records it as the origin
+ * of a job the op starts, so `fr mcp` passes `mcp` and the dashboard's Agents page can tell them apart.
+ * `cancel` aborts the request (an MCP client's cancel): the hub sees the waiter leave (a prompt_human ends
+ * as cancelled, design c6 D3), and the call resolves with a TIMEOUT Result the caller drops.
+ */
+export async function hubCall(op: string, input: Record<string, unknown>, timeoutMs: number, client: JobOrigin = 'cli', cancel?: AbortSignal): Promise<Result> {
   // AbortSignal.timeout throws on NaN or fractional delays, which would read as "hub not reachable".
   const ms = Number.isFinite(timeoutMs) ? Math.max(1, Math.ceil(timeoutMs)) : 30_000;
+  const cancelled = (): Result => ({ ok: false, cursor: '', error: { code: 'TIMEOUT', message: `${op} was cancelled by the client`, retryable: false } });
+  if (cancel?.aborted) {
+    return cancelled();
+  }
   try {
     const r = await fetch(`${hubUrl()}/api/v1/op/${op}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', [CLIENT_HEADER]: client },
       body: JSON.stringify(input),
-      signal: AbortSignal.timeout(ms),
+      signal: cancel ? AbortSignal.any([cancel, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms),
     });
     const text = await r.text();
     let body: unknown;
@@ -71,8 +81,11 @@ export async function hubCall(op: string, input: Record<string, unknown>, timeou
     }
     return toResult(r.status, body);
   } catch (e) {
+    if (cancel?.aborted) {
+      return cancelled();
+    }
     const msg = e instanceof Error ? e.message : String(e);
-    if (/abort|timeout/i.test(msg)) {
+    if (/abort|timeout/i.test(`${(e as Error)?.name} ${msg}`)) {
       return { ok: false, cursor: '', error: { code: 'TIMEOUT', message: `no answer from the hub within ${ms} ms`, retryable: true } };
     }
     return unreachable(`hub not reachable at ${hubUrl()} (${msg})`);

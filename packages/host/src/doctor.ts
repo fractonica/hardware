@@ -11,6 +11,7 @@ import { paths } from './paths.ts';
 import { run } from './proc.ts';
 import { bootstrapPytools, PINNED_ESPTOOL, pytoolsSource, pytoolsStatus } from './pytools.ts';
 import { readIdfLock, type IdfLock } from './repo.ts';
+import { webChecks } from './web.ts';
 
 export type CheckLevel = 'ok' | 'warn' | 'error';
 
@@ -143,7 +144,59 @@ async function serialPortsCheck(): Promise<Check> {
   return { id: 'serial', level: foreign ? 'warn' : 'ok', detail: notes.join('; '), ...(foreign ? { fix: 'close the other program (e.g. a Chrome Web Serial tab)' } : {}) };
 }
 
-export async function runDoctor(opts: { sourceDir: string | null; fix: boolean }): Promise<Check[]> {
+/**
+ * What a running hub says of its own Local Network self-test and advert (hub_status lnp, launched_by,
+ * advert; design c6 §5). fr doctor reports these from the hub and never probes them in its own process:
+ * macOS attributes Local Network access to the app that launched the probing process (08 §8.11).
+ */
+export interface HubSelfTests {
+  lnp?: 'allowed' | 'denied' | 'unknown';
+  lnp_checked_at?: string | null;
+  launched_by?: string;
+  advert?: { state: 'registered' | 'retrying' | 'off'; name?: string; error?: string };
+}
+
+export function hubChecks(s: HubSelfTests): Check[] {
+  const checks: Check[] = [];
+  const app = s.launched_by ?? 'the app that started the hub';
+  if (s.lnp === 'allowed') {
+    checks.push({ id: 'lnp', level: 'ok', detail: `the hub has Local Network access (launched by ${app})` });
+  } else if (s.lnp === 'denied') {
+    checks.push({
+      id: 'lnp',
+      level: 'error',
+      detail: `macOS denies the hub Local Network access (attributed to ${app}); nodes on Wi-Fi cannot reach it`,
+      fix: `System Settings → Privacy & Security → Local Network: allow ${app}, or start the hub from Terminal (fr hub restart)`,
+    });
+  } else if (s.lnp === 'unknown') {
+    checks.push({
+      id: 'lnp',
+      level: 'warn',
+      detail: s.lnp_checked_at ? "the hub's Local Network self-test got no answer (no Wi-Fi/Ethernet address, or an unexpected error)" : "the hub's Local Network self-test has not run yet",
+    });
+  }
+  const ad = s.advert;
+  if (ad?.state === 'registered') {
+    checks.push({ id: 'advert', level: 'ok', detail: `_fractonica._tcp advertised as "${ad.name ?? '?'}"` });
+  } else if (ad?.state === 'off') {
+    checks.push({ id: 'advert', level: 'ok', detail: '_fractonica._tcp advert off (a test hub, or --no-advert)' });
+  } else if (ad?.state === 'retrying') {
+    checks.push({
+      id: 'advert',
+      level: 'warn',
+      detail: `_fractonica._tcp is not advertised${ad.error ? ` (${ad.error})` : ''}; nodes that lose hub_host cannot find the hub; retried every 30 s`,
+      fix: `allow Local Network access for ${app}; check with dns-sd -B _fractonica._tcp`,
+    });
+  }
+  return checks;
+}
+
+export async function runDoctor(opts: {
+  sourceDir: string | null;
+  fix: boolean;
+  /** The running hub's self-tests (hub_status), null when no hub answers; fr doctor passes it, hub_doctor adds its own. */
+  hub?: () => Promise<HubSelfTests | null>;
+}): Promise<Check[]> {
   const checks: Check[] = [];
   const add = (c: Check) => checks.push(c);
 
@@ -261,5 +314,11 @@ export async function runDoctor(opts: { sourceDir: string | null; fix: boolean }
     add(await lanRouteCheck());
   }
   add(await serialPortsCheck());
+  // The dashboard and web/<name> bundles the hub serves (design c6 D10): --fix builds the missing and stale.
+  checks.push(...(await webChecks(opts.sourceDir, { fix: opts.fix })));
+  if (opts.hub) {
+    const self = await opts.hub().catch(() => null);
+    checks.push(...(self ? hubChecks(self) : [{ id: 'hub', level: 'ok' as const, detail: 'no hub answers; its Local Network self-test is not checked' }]));
+  }
   return checks;
 }

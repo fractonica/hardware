@@ -262,18 +262,20 @@ describe('hub REST envelope', () => {
   const ctx = { logs: { run: 7, headSeq: () => 42 } } as unknown as HubContext;
   const app = buildServer(ctx, 7420);
   afterAll(() => app.close());
+  // The guard wants this hub's Host (design c6 D9); inject's default is localhost:80.
+  const host = '127.0.0.1:7420';
 
   it('the Origin guard answers with a full envelope', async () => {
-    const r = await app.inject({ method: 'POST', url: '/api/v1/op/hub_status', headers: { origin: 'https://evil.example' }, payload: {} });
+    const r = await app.inject({ method: 'POST', url: '/api/v1/op/hub_status', headers: { host, origin: 'https://evil.example' }, payload: {} });
     expect(r.statusCode).toBe(403);
     expect(r.json()).toEqual({ ok: false, cursor: 'c:7.42', error: { code: 'INVALID_ARGS', message: 'origin https://evil.example not allowed', retryable: false } });
   });
 
   it.each([
-    ['unknown route', { method: 'GET' as const, url: '/nope' }, 404, 'NOT_FOUND'],
-    ['malformed JSON', { method: 'POST' as const, url: '/api/v1/op/hub_status', headers: { 'content-type': 'application/json' }, payload: '{nope' }, 400, 'INVALID_ARGS'],
-    ['body over 1 MB', { method: 'POST' as const, url: '/api/v1/op/hub_status', headers: { 'content-type': 'application/json' }, payload: JSON.stringify({ x: 'a'.repeat(1 << 20) }) }, 413, 'INVALID_ARGS'],
-    ['wrong content type', { method: 'POST' as const, url: '/api/v1/op/hub_status', headers: { 'content-type': 'application/xml' }, payload: '<x/>' }, 415, 'INVALID_ARGS'],
+    ['unknown route', { method: 'GET' as const, url: '/nope', headers: { host } }, 404, 'NOT_FOUND'],
+    ['malformed JSON', { method: 'POST' as const, url: '/api/v1/op/hub_status', headers: { host, 'content-type': 'application/json' }, payload: '{nope' }, 400, 'INVALID_ARGS'],
+    ['body over 1 MB', { method: 'POST' as const, url: '/api/v1/op/hub_status', headers: { host, 'content-type': 'application/json' }, payload: JSON.stringify({ x: 'a'.repeat(1 << 20) }) }, 413, 'INVALID_ARGS'],
+    ['wrong content type', { method: 'POST' as const, url: '/api/v1/op/hub_status', headers: { host, 'content-type': 'application/xml' }, payload: '<x/>' }, 415, 'INVALID_ARGS'],
   ])('%s gets a Result envelope', async (_name, req, status, code) => {
     const r = await app.inject(req);
     expect(r.statusCode).toBe(status);

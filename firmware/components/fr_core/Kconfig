@@ -1,0 +1,14 @@
+menu "Fractonica core"
+
+    config FR_TEST_PIN
+        int "T-LAT test pin (-1 = none)"
+        range -1 48
+        default -1
+        help
+            The board manifest's test_pin (spec 04 §4.3), written into sdkconfig.board by `fr gen firmware`,
+            which checks that it is a free pin no instance claims. Debug builds (FR_TEST_HOOKS) drive it
+            open-drain for diag `pin_pulse <us>` (design c6 D24): released at idle, low during a pulse, never
+            pushed high, since the T-LAT rig wires it to another board's BOOT pin, a strapping pin that must
+            read high whenever that board resets.
+
+endmenu

@@ -10,7 +10,7 @@ import { join } from 'node:path';
 
 import { expect } from 'vitest';
 
-import { findOp } from '@fractonica/protocol';
+import { findOp, type OpName } from '@fractonica/protocol';
 
 import { HANDLERS } from '../src/ops.ts';
 import type { RouterConfig } from '../src/router/index.ts';
@@ -124,7 +124,7 @@ export async function airRig(opts: { config?: Partial<RouterConfig>; usb?: reado
 /** `msg` lines of `topic` a node printed (one per MSG Net delivered to it). */
 export const msgs = (n: CppNode, topic: string) => n.of('msg').filter((l: Line) => l.topic === topic);
 
-export const call = async (r: NetRig, op: string, input: Record<string, unknown>) => (await HANDLERS[op](findOp(op)!.input.parse(input), r.hub)) as Record<string, any>;
+export const call = async (r: NetRig, op: string, input: Record<string, unknown>) => (await HANDLERS[op as OpName](findOp(op)!.input.parse(input), r.hub)) as Record<string, any>;
 
 /** The flood side of a `state` line, for failure messages and the measured numbers a suite prints. */
 export const FLOOD_KEYS = [

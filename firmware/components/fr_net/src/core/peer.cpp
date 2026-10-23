@@ -370,7 +370,9 @@ void Net::on_node_cmd(LinkKind from, const EnvelopeView &e, bool unicast, const 
     cap::Reply reply(std::span<uint8_t>(reply_buf_, cap::Reply::kRealtimeCapacity));
     Status st;
     if (h.ext.find(kExtExecAtUs)) {
-        st = std::unexpected(Err::unsupported);  // scheduled execution arrives with T-LAT
+        // Node -> node exec_at needs a clock both nodes share, which only M2's BEACON hub time gives: hub CMDs
+        // alone are scheduled (design c6 D22).
+        st = std::unexpected(Err::unsupported);
         ++state_.cmds_refused;
     } else {
         // expire_at_us is in hub-synced time, which another node cannot compute: not checked here.

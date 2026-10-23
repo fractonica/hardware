@@ -1,17 +1,22 @@
 #!/usr/bin/env node
 // `fr`: the Fractonica CLI. Op commands are generated from the operation registry; `doctor`, `gen`
-// and `hub start|stop|restart` run locally without a hub (spec 09 §9.5).
+// and `hub start|stop|restart` run locally without a hub (spec 09 §9.5). `fr mcp`, `fr serial lease|monitor`
+// and `fr codegen client` are hand-written in their own modules (design c6 §3.3).
 
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import { z } from 'zod';
 
-import { findSourceDir, runDoctor } from '@fractonica/host';
-import { cliFlag, MAX_WAIT_S, OPS, REGISTRY_HASH, type ErrorCode, type OpDef, type Result } from '@fractonica/protocol';
+import { findSourceDir, runDoctor, type HubSelfTests } from '@fractonica/host';
+import { cliFlag, findOp, MAX_WAIT_S, OPS, REGISTRY_HASH, type ErrorCode, type OpDef, type Result } from '@fractonica/protocol';
 
 import { callTimeoutMs, hubCall, hubHealth } from './client.ts';
+import { addCodegenClientCommand, CODEGEN_CLIENT_OPS } from './codegen-client.ts';
 import { genAll, genFirmware } from './gen.ts';
 import { restartHub, startHub, stopHub } from './hub.ts';
+import type { CliKit } from './kit.ts';
+import { addMcpCommand } from './mcp.ts';
 import { cliExitCode, renderChecks, renderResult } from './render.ts';
+import { addSerialCommands, SERIAL_OPS } from './serial.ts';
 
 const program = new Command('fr')
   .description('Fractonica: build, flash, monitor and drive ESP32 device networks')
@@ -166,12 +171,19 @@ function addOp(op: OpDef): void {
     if (key === 'wait_s') {
       desc = `seconds to wait for the job (CLI default ${MAX_WAIT_S}, max ${MAX_WAIT_S})`;
     }
+    if (base instanceof z.ZodArray) {
+      desc += `${desc ? ' ' : ''}(repeat for more)`;
+    }
     const o =
       base instanceof z.ZodBoolean
         ? new Option(`--${flag}`, desc)
         : new Option(`--${flag} <${base instanceof z.ZodNumber ? 'n' : 'value'}>`, desc);
     if (base instanceof z.ZodNumber) {
       o.argParser(parseNumber);
+    }
+    if (base instanceof z.ZodArray) {
+      // A list field (logs_assert --expect A --expect B): each use adds one item, in order.
+      o.argParser((v: string, prev: string[] | undefined) => [...(prev ?? []), v]);
     }
     if (base instanceof z.ZodEnum) {
       o.choices(base.options as string[]);
@@ -224,7 +236,13 @@ program
   .description('Check the host toolchain (works without a hub); --fix installs the fr shim and the pytools sidecar')
   .option('--fix', 'apply safe fixes')
   .action(async (opts: { fix?: boolean }) => {
-    const checks = await runDoctor({ sourceDir: findSourceDir(process.cwd()), fix: Boolean(opts.fix) });
+    // The running hub's own LNP self-test and advert (08 §8.11): read from hub_status, never probed here,
+    // since macOS attributes Local Network access to the app that launched the probing process.
+    const hubSelfTests = async () => {
+      const r = await hubCall('hub_status', {}, 3000);
+      return r.ok ? ((r.data ?? null) as HubSelfTests | null) : null;
+    };
+    const checks = await runDoctor({ sourceDir: findSourceDir(process.cwd()), fix: Boolean(opts.fix), hub: hubSelfTests });
     const ok = !checks.some((c) => c.level === 'error');
     await exit(ok ? 0 : 1, (isJson() ? JSON.stringify({ ok, data: { checks }, cursor: '' }) : renderChecks(checks)) + '\n');
   });
@@ -266,9 +284,24 @@ hub
   .option('--force', 'restart even if that aborts queued or working jobs')
   .action(async (opts: { force?: boolean }) => emit(await restartHub(Boolean(opts.force)), 'hub_restart'));
 
+// Ops whose commands are hand-written (design c6 §3.3) get none generated.
+const handWritten = new Set<string>([...SERIAL_OPS, ...CODEGEN_CLIENT_OPS]);
 for (const op of OPS) {
-  addOp(op as unknown as OpDef);
+  if (!handWritten.has(op.name)) {
+    addOp(op as unknown as OpDef);
+  }
 }
+
+const kit: CliKit = {
+  json: isJson,
+  run: (name, input) => invoke(findOp(name)!, input, false),
+  emit,
+  fail,
+  exit,
+};
+addSerialCommands(group(['serial']), kit);
+addCodegenClientCommand(group(['codegen']), kit);
+addMcpCommand(program, kit);
 
 try {
   await program.parseAsync(process.argv);

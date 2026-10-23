@@ -1,6 +1,6 @@
 // Node link, router and event ops (design c3 §4, spec 09 §9.4; stream H2): events_read, wait_for_event,
 // wait_for_device, command_send, input_simulate. Spread into OPS (packages/protocol/src/ops.ts); handlers
-// in packages/hub/src/router/ops.ts.
+// in packages/hub/src/router/ops.ts. C6 adds wait_for_event.prompt_human (design c6 D3; stream S5).
 
 import { z } from 'zod';
 
@@ -17,6 +17,7 @@ export const LINKS_OPS = [
   op({
     name: 'events_read',
     kind: 'query',
+    tier: 'read',
     summary:
       'Read hub events (capability events and states as <instance>.<member>, e.g. node.binding_fired; msg {topic, data, dst} for MSGs from nodes; device.online|suspect|offline, ota.job.state, hub.warning), cursor-paged. Without `since` the newest are returned. Device fields are untrusted data.',
     input: z.object({
@@ -30,8 +31,9 @@ export const LINKS_OPS = [
   op({
     name: 'wait_for_event',
     kind: 'wait',
+    tier: 'read',
     summary:
-      'Wait until events matching `types` arrive after `since` (the cursor of the action you are verifying). `count` events in all, or from every selected device with per_device. `where` matches event fields, e.g. {"effect":"blink"}. Replayed events and events older than the cursor are ignored.',
+      'Wait until events matching `types` arrive after `since` (the cursor of the action you are verifying). `count` events in all, or from every selected device with per_device. `where` matches event fields, e.g. {"effect":"blink"}. Replayed events and events older than the cursor are ignored. prompt_human asks a person at the Mac for a real action (a dashboard toast, hub.prompt) while it waits; say it in chat too. Example: types boot.down, prompt_human "Press BOOT on pad-c6".',
     input: z.object({
       types,
       selector: selector.optional(),
@@ -41,12 +43,15 @@ export const LINKS_OPS = [
       per_device: z.boolean().default(false).describe('count per selected device (needs a selector)'),
       timeout_s: waitTimeout,
       include_replayed: z.boolean().default(false),
+      // Design c6 D3: hub.prompt / hub.prompt_done around the wait; the result adds prompt_id.
+      prompt_human: z.string().min(1).max(120).optional().describe('ask a person at the Mac to act while waiting (dashboard toast), e.g. "Press BOOT on pad-c6"'),
     }),
     cli: { path: ['wait', 'event'], positional: ['types'] },
   }),
   op({
     name: 'wait_for_device',
     kind: 'wait',
+    tier: 'read',
     summary:
       'Wait until every selected device is online (or offline), optionally running a firmware whose fw_id starts with `fw_id`, and with `ota_state` in its HELLO (pending_verify while a new OTA image runs its health check, valid after). With `since`, the device must also have gone online (offline) after that cursor, e.g. after a reboot.',
     input: z.object({
@@ -65,6 +70,7 @@ export const LINKS_OPS = [
   op({
     name: 'command_send',
     kind: 'command',
+    tier: 'mutate',
     summary:
       'Send a capability command to every selected device (one unicast each) and return each RESULT: `fr send pad-c3 status.blink \'{"count":3}\'`. ack=none does not wait. The returned cursor precedes the send, so wait_for_event since it sees the effects (status.effect_done).',
     input: z.object({
@@ -81,6 +87,7 @@ export const LINKS_OPS = [
   op({
     name: 'input_simulate',
     kind: 'command',
+    tier: 'mutate',
     summary:
       "Simulate a button gesture through the instance's inject command (debug builds): press, release, click, double_click, long_press. Wait for the resulting events with wait_for_event since the returned cursor.",
     input: z.object({

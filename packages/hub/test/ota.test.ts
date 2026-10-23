@@ -191,6 +191,7 @@ describe('the 7422 gate', () => {
       onOta: (fn) => router.onOta(fn),
       tcpAddress: (id) => (lanIp === null ? router.tcpAddress(id) : lanIp),
       hooks: (h) => router.hooks(h),
+      endSerialSession: (id, reason) => router.endSerialSession(id, reason),
     });
     const r = await open({ wrapRouter: wrap });
     const art = addArtifact(r.db, dir, { size: 20_000 });

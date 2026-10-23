@@ -699,8 +699,8 @@ describe('commands', () => {
     const base = { selector: 'tag:poc', command: 'status.blink', ack: 'result' as const, timeout_s: 2, duplicate: false };
     const out = (await HANDLERS.command_send({ ...base, args: '{"count":3}' }, r.hub)) as { results: Record<string, unknown>[] };
     expect(out.results).toEqual([
-      { device: 'aaaaaaaaaa01', alias: 'pad-a', status: 'ok', fields: {}, rtt_ms: expect.any(Number), link: 'tcp' },
-      { device: 'aaaaaaaaaa02', alias: 'pad-b', status: 'ok', fields: {}, rtt_ms: expect.any(Number), link: 'tcp' },
+      { device: 'aaaaaaaaaa01', alias: 'pad-a', status: 'ok', fields: {}, rtt_ms: expect.any(Number), link: 'tcp', t_hub_us: expect.any(Number) },
+      { device: 'aaaaaaaaaa02', alias: 'pad-b', status: 'ok', fields: {}, rtt_ms: expect.any(Number), link: 'tcp', t_hub_us: expect.any(Number) },
     ]);
     expect(blinks).toEqual([3, 3]);
     // Invalid args fail the op before anything is sent: a range, an unknown field, not JSON.
@@ -811,6 +811,38 @@ describe('events from frames', () => {
     const old = waitForEvent(r.events, (x) => x.type === 'status.effect_done' && x.replayed === true);
     n.event(3, 1, encodeLedEffectDone({ effect: 'none' }), { tUs: (n.nodeNowUs() - 3_000_000) >>> 0 });
     await old;
+  });
+
+  it('compares u32 device times only between frames that arrive within 30 min: after 45 quiet minutes a press is not late, a STATE not stale', async () => {
+    const clock = new ManualClock();
+    const r = await open({ clock });
+    const id = 'aabbccddee32';
+    const n = r.node({ mac: id, addr: 52, alias: 'pad-q', autoHeartbeat: false });
+    n.describeAs([STATUS_LED]);
+    await n.connected(r.events);
+    const t0 = n.nodeNowUs() >>> 0;
+    const first = waitForEvent(r.events, (x) => x.type === 'status.effect_done');
+    n.event(3, 1, encodeLedEffectDone({ effect: 'blink' }), { tUs: t0 });
+    await first;
+    const on = waitForEvent(r.events, (x) => x.type === 'status.on');
+    n.state(3, 1, encodeLedOnState({ on: true }), { tUs: t0 });
+    await on;
+
+    // 45 min later on both clocks: 2.7e9 µs, which RFC 1982 reads as older than t0.
+    clock.advance(45 * 60 * 1000);
+    const t1 = (t0 + 45 * 60 * 1_000_000) >>> 0;
+    const next = waitForEvent(r.events, (x) => x.type === 'status.effect_done' && x.fields?.effect === 'none');
+    n.event(3, 1, encodeLedEffectDone({ effect: 'none' }), { tUs: t1 });
+    expect((await next).late).toBeUndefined();
+    const off = waitForEvent(r.events, (x) => x.type === 'status.on');
+    n.state(3, 1, encodeLedOnState({ on: false }), { tUs: t1 });
+    expect((await off).fields).toEqual({ on: false });
+    expect(r.router.info(id)!.properties).toEqual({ 'status.on': false });
+
+    // Within the window the rule still holds.
+    const late = waitForEvent(r.events, (x) => x.type === 'status.effect_done' && x.late === true);
+    n.event(3, 1, encodeLedEffectDone({ effect: 'blink' }), { tUs: (t1 - 500_000) >>> 0 });
+    await late;
   });
 
   it('calls get_state when a HEARTBEAT reports a STATE the hub has not seen', async () => {

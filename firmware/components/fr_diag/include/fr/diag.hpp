@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <span>
 #include <string_view>
 
@@ -170,12 +171,23 @@ struct NetStatus {
     uint32_t tcp_rx_bad = 0;
     uint32_t udp_tx_fail = 0;
     uint32_t hook_dropped = 0;  // envelopes the debug hooks dropped
+    // C6 (design c6 D21-D23): `net loss`, exec_at and the link task's receive time.
+    uint32_t loss_tx = 0;           // envelopes `net loss` dropped on their way out (also in hook_dropped)
+    uint32_t loss_rx = 0;           // ... and on their way in
+    uint32_t cmds_scheduled = 0;    // exec_at CMDs stored to run at their time
+    uint32_t exec_late = 0;         // exec_at CMDs answered LATE
+    uint32_t exec_cancelled = 0;    // scheduled CMDs a new hub run's WELCOME dropped
+    uint32_t exec_late_us_max = 0;  // the most a scheduled CMD ran after its time (not a counter)
+    uint32_t rx_queue_us_max = 0;   // the longest wait of a hub-link envelope for the core task (not a counter)
     // Debug hooks in force.
     bool hub_link_dropped = false;
     bool udp_blocked = false;
     bool ip_blocked = false;
     bool wifi_held = false;    // `net wifi_down`
     uint32_t wifi_held_s = 0;  // ... seconds left
+    uint8_t loss_pct = 0;      // `net loss` (0: off)
+    uint8_t loss_dir = 0;      // LossDir
+    uint32_t loss_s = 0;       // ... seconds left
     // C5 (design c5 §2): counters since boot or the last `stats reset`.
     EspnowStatus espnow;
     RelayCounters relay;
@@ -192,6 +204,28 @@ enum class NetHook : uint8_t {
     udp_block,      // send nothing over UDP (T-PRES)
     ip_block,       // drop every envelope on TCP and UDP, both ways, serial untouched; no reconnect
     wifi_down,      // disconnect the STA, no join or scan, the radio stays on channel C (T-FLOOD-B)
+};
+
+/** `net loss <pct> <s> [both|tx|rx]` (design c6 D21): which hub-link envelopes it drops. */
+enum class LossDir : uint8_t { both = 0, tx = 1, rx = 2 };
+
+constexpr const char *loss_dir_name(LossDir dir)
+{
+    switch (dir) {
+    case LossDir::both:
+        return "both";
+    case LossDir::tx:
+        return "tx";
+    case LossDir::rx:
+        return "rx";
+    }
+    return "?";
+}
+
+/** A `pin_pulse` (design c6 D24): the test pin and when it went low (esp_timer µs, the falling edge). */
+struct PulseInfo {
+    int pin;
+    TimeUs at;
 };
 
 /** The hook as `net <name> <seconds>` names it. */
@@ -231,6 +265,14 @@ public:
      * the fr.diag.exec that asked for it still goes out (fr_net defers it).
      */
     virtual Status net_hook(NetHook hook, uint32_t seconds) = 0;
+    /** `net loss` (design c6 D21): drops `pct` % of the hub-link envelopes going `dir` for `seconds` (either 0
+     * ends it); like net_hook, it starts once the current request has been answered. */
+    virtual Status net_loss(uint8_t pct, uint32_t seconds, LossDir dir) = 0;
+    /** `pin_pulse <us>` (design c6 D24): the board's test_pin low for `us`, released by a one-shot timer;
+     * busy while a pulse runs, unsupported without a test_pin. */
+    virtual std::expected<PulseInfo, Err> pin_pulse(uint32_t us) = 0;
+    /** The board's test_pin (CONFIG_FR_TEST_PIN), -1 without one. */
+    virtual int test_pin() const = 0;
     /** Restarts shortly after the response line has gone out. */
     virtual void reboot(bool bootloader) = 0;
 

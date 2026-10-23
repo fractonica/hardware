@@ -11,5 +11,6 @@ accepts_kinds: [gpio]
 config:                                 # same order as LedGpio::Config
   gpio:         { type: gpio, from: board.gpio }
   active_level: { type: enum, values: [low, high], from: board.active_level, default: high }
+traits: { color: mono, dimmable: false } # fr.led traits its service reports (features() is neither: on/off only; design c6 D13)
 resources: { gpio: 1 }
 dependencies: {}

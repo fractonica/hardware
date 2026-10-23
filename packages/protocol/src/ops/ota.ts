@@ -16,6 +16,7 @@ export const OTA_OPS = [
   op({
     name: 'ota_deploy',
     kind: 'job',
+    tier: 'mutate',
     summary:
       "Update the selected devices' firmware: an HTTP pull over Wi-Fi from the hub (or serial, via), one child job per device with OFFER -> download -> reboot -> health check. The artifact is `build`, else the newest debug artifact of each device's registry profile (or `profile`); a fault build only by naming it, and only over Wi-Fi (auto picks Wi-Fi for it; via serial is INVALID_ARGS). A device already running it reports already_current (unless force). Events: ota.job.state.",
     input: z.object({
@@ -35,6 +36,7 @@ export const OTA_OPS = [
   op({
     name: 'ota_status',
     kind: 'query',
+    tier: 'read',
     summary: 'OTA jobs: per-device state (QUEUED .. SUCCEEDED, FAILED, ROLLED_BACK, TIMED_OUT, CANCELLED), bytes and timings, by job or by selector.',
     input: z.object({
       selector: selector.optional(),
@@ -47,6 +49,7 @@ export const OTA_OPS = [
   op({
     name: 'deploy',
     kind: 'job',
+    tier: 'mutate',
     summary:
       "The happy path in one call: build once per distinct registry profile of the selected devices (build_start; fault: health builds a debug image that never passes its health check), hand each profile's devices to ota_deploy with that build (via), wait for each back online on the new fw_id, then for expect_log / expect_event since the device last went down. A device already running the build is already_current. Per device: outcome updated | already_current | rolled_back | failed, the OTA state, expect matched | timeout | skipped. A fault deploy goes over Wi-Fi and expects rolled_back. The job fails (OTA_FAILED, OTA_ROLLED_BACK, BUILD_FAILED or TIMEOUT for an expectation) unless every device ends as expected, with the per-device results in error.details.",
     input: z.object({

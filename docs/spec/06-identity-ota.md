@@ -137,7 +137,7 @@ hub_ip,data,string,192.168.0.17
 `fr devices provision --port <usb-serial> [--profile c6-pad] [--alias pad-red-1]`, the dashboard wizard, or MCP `device_provision`. It is one job of kind `provision`. Whatever can fail without touching the board (a missing network record, an unknown `--build` or `--profile`, a taken alias) fails before the job starts.
 
 1. **Discover.** USB VID 0x303A / PID 0x1001 gives the MAC from the serial number without opening the port ([04 §4.5](04-boards.md)).
-2. **Acquire.** Take an exclusive port lease. If a foreign process holds the port, fail with `PORT_BUSY_EXTERNAL` and name it (e.g. "Google Chrome, PID 715: close the Web Serial tab").
+2. **Acquire.** Before the job starts, the port must be free: a lease fails it with `PORT_LEASED`, a foreign holder with `PORT_BUSY_EXTERNAL` naming it from `lsof` (`/dev/cu.usbmodem2101 (pad-c3b) is held by Google Chrome (pid 715)`, `details.holders`, a remediation per holder), and no job starts. The same check runs before `flash_start` and `device_reset` jobs ([09 §9.4](09-agent-api.md)). The job then takes the port exclusively; a pytools busy error inside it names the holder the same way. Checked on the bench at C6 (T-PORTS: Chrome holding the port by Web Serial).
 3. **Probe.** Using the esptool API ([§6.10](#610-esptool-integration-hub-pytools)), read chip, revision, features (embedded flash and PSRAM), flash size, MAC and security info. Refuse (`INCOMPATIBLE_PROFILE`) if secure boot or flash encryption is enabled.
 4. **Select** (before the registry, so a missing artifact costs no address).
    - Choose the profile: requested, then registry, then board detection (M1: the profiles with a `debug` node artifact built for the probed chip).
@@ -342,7 +342,7 @@ Terminal: `SUCCEEDED`, `FAILED(code)`, `ROLLED_BACK {reason}`, `TIMED_OUT {code,
   "build_id": "node/c6-pad/debug/9f2c1e07ab12",
   "app": "node", "profile": "c6-pad", "build_type": "debug", "board": "esp32c6-supermini",
   "target": "esp32c6", "chip_id": 13, "min_chip_rev": 0, "max_chip_rev": 99,
-  "part_profile": "fr-4mb-v1", "proto": "1.0", "catalog_hash": 3639287564,
+  "part_profile": "fr-4mb-v1", "proto": "1.0", "catalog_hash": 3639287564, "test_pin": 20,
   "version": "6d074fa-dirty.9f2c1e07",
   "source_dir": "/Users/dimas/projects/fractonica-hardware", "git": { "sha": "6d074fa…", "dirty": true },
   "idf": { "tag": "v6.1", "commit": "…" },
@@ -355,13 +355,16 @@ Terminal: `SUCCEEDED`, `FAILED(code)`, `ROLLED_BACK {reason}`, `TIMED_OUT {code,
                         { "offset": "0x10000", "blob": "sha256:…", "role": "app" } ] },
   "debug": { "elf": { "blob": "sha256:…", "size": 6815744 }, "map": { "blob": "sha256:…", "size": 1048576 } },
   "caps": [ { "name": "boot", "port": 1, "cap": "fr.button", "cap_id": 1, "version": "1.0", "driver": "button_gpio",
-              "config": { "debounce_ms": 20, "long_press_ms": 600, "multi_press_gap_ms": 250, "multi_press_max": 2 } },
+              "config": { "debounce_ms": 20, "long_press_ms": 600, "multi_press_gap_ms": 250, "multi_press_max": 2 },
+              "traits": { "long_press": true, "multi_press_max": 2 } },
             { "name": "status", "port": 2, "cap": "fr.led", "cap_id": 2, "version": "1.0", "driver": "led_ws2812",
-              "config": { "max_brightness": 64 } } ]
+              "config": { "max_brightness": 64 }, "traits": { "color": "rgb", "dimmable": true } } ]
 }
 ```
 
 - **Caps.** Ingest copies `caps` (with each port's effective service config) and `catalog_hash` (u32) from the build's `fr_manifest.json` ([03 §3.8](03-firmware.md)); the hub names a device's frames from them ([08 §8.3](08-hub.md)).
+- **Traits** (since C6). Each cap carries `traits`, every trait of the capability as the firmware reports it (default, then the driver.yaml `traits:`, then what the service derives from its config; [03 §3.6](03-firmware.md)). `ManifestCap.traits` is a record of bool, number or string, nullable and optional: absent in builds from before C6. `capability_list`, the `/app` welcome and the dashboard take each instance's traits from its firmware's manifest; null (a build from before C6, or firmware the hub did not build) shows every trait-gated member ([07 §7.9](07-capabilities-sdk.md)).
+- **`test_pin`** (since C6). The board's T-LAT test pin GPIO (0..48), null without one, absent in builds from before C6 ([03 §3.4](03-firmware.md), [04 §4.3](04-boards.md)).
 - **Version label.** `version` is a display label: `<sha>-dirty.<fw_id[0:8]>` for a tree that is dirty at ingest, plain `<sha>` for a clean one. `<sha>` is the image's own `esp_app_desc_t.version` (IDF's `git describe --always --tags --dirty` at configure time: the short commit while the repo has no tags) without a trailing `-dirty`, so `-dirty` appears once. The tree's git state at ingest decides, not the image's suffix, which IDF fixes at configure time and can be stale; the `fw_id` part tells two dirty builds of one commit apart.
 - **Fault builds** ([03 §3.8](03-firmware.md)) keep `build_type: debug` and add `"fault": "health"`; `app_desc.fault` is 1. The `artifacts.fault` column keeps them out of every newest-artifact pick (flash, provision, OTA, deploy): they are used only when named by `build_id`.
 - **Debug files.** `debug.elf` and `debug.map` keep the app ELF and linker map of every `fw_id` (never flashed), for panic and core-dump decoding after the build dir has been reused. Ingest checks `sha256(ELF) == elf_sha256`. The blob store has no GC yet: each distinct build adds about 7 MB.

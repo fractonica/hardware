@@ -259,10 +259,11 @@ const FrManifestSchema = z.looseObject({
   schema: z.literal('fractonica/fr-manifest@1'),
   caps: z.array(ManifestCapSchema),
   catalog_hash: z.number().int().min(0).max(0xffffffff),
+  test_pin: ArtifactManifestSchema.shape.test_pin,
 });
 
-/** The caps and catalog_hash of a generated fr_manifest.json; null when the build has none. */
-export function readFrManifest(genDir: string): { caps: ManifestCap[]; catalog_hash: number } | null {
+/** The caps, catalog_hash and test_pin of a generated fr_manifest.json; null when the build has none. */
+export function readFrManifest(genDir: string): { caps: ManifestCap[]; catalog_hash: number; test_pin?: number | null } | null {
   const file = join(genDir, 'fr_manifest.json');
   if (!existsSync(file)) {
     return null;
@@ -277,7 +278,8 @@ export function readFrManifest(genDir: string): { caps: ManifestCap[]; catalog_h
   if (!parsed.success) {
     throw new FrError('BUILD_FAILED', `${file} does not match fractonica/fr-manifest@1: ${z.prettifyError(parsed.error)}`);
   }
-  return { caps: parsed.data.caps, catalog_hash: parsed.data.catalog_hash };
+  const { caps, catalog_hash, test_pin } = parsed.data;
+  return { caps, catalog_hash, ...(test_pin !== undefined ? { test_pin } : {}) };
 }
 
 export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManifest; manifestPath: string } {
@@ -351,6 +353,7 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
     flash: { mode: flasher.flash_settings.flash_mode, freq: flasher.flash_settings.flash_freq, size: flasher.flash_settings.flash_size, files },
     partitions: parsePartitionTable(ptable),
     ...(fr ? { caps: fr.caps, catalog_hash: fr.catalog_hash } : {}),
+    ...(fr?.test_pin !== undefined ? { test_pin: fr.test_pin } : {}),
     app_desc: appDesc,
     ...(inp.fault ? { fault: inp.fault } : {}),
     debug,

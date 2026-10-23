@@ -1,0 +1,12 @@
+{
+  "name": "fractonica",
+  "description": "The Fractonica plugin for Claude Code, from this checkout",
+  "owner": { "name": "Fractonica" },
+  "plugins": [
+    {
+      "name": "fractonica",
+      "source": "./plugin",
+      "description": "Drive Fractonica ESP32 nodes through the local hub: devices, ports, build, flash, OTA, logs, commands, bindings, latency and tests, as MCP tools served by `fr mcp`."
+    }
+  ]
+}

@@ -1,11 +1,27 @@
-// What the hub's parts share (design c3 §4, c4 §4, c5 §4): the op handlers' HubContext and the interfaces
-// the registry (packages/hub/src/registry), the node links and router (src/links, src/router), the event
-// store and bus (src/events), the OTA service (src/ota) and the node <-> node services (hub broadcasts in
-// src/router, bindings in src/bindings) implement and use; main.ts builds them with createRegistry,
-// createRouter, createEvents, createOta and createBindings.
+// What the hub's parts share (design c3 §4, c4 §4, c5 §4, c6 §3.3): the op handlers' HubContext and the
+// interfaces the registry (packages/hub/src/registry), the node links and router (src/links, src/router),
+// the event store and bus (src/events), the OTA service (src/ota), the node <-> node services (hub
+// broadcasts in src/router, bindings in src/bindings) and the C6 parts (prompts, leases, the LAN
+// self-test and advert, /app, /ws, static serving, the latency probe) implement and use; main.ts builds
+// them with createRegistry, createRouter, createEvents, createOta, createBindings and the C6 create*.
+
+import type { FastifyInstance } from 'fastify';
+import type { z } from 'zod';
 
 import type { IdfStatus, PytoolsStatus } from '@fractonica/host';
-import type { Header } from '@fractonica/protocol';
+import type {
+  ADVERT_STATES,
+  Header,
+  HubEvent as ProtocolHubEvent,
+  Job,
+  Lease,
+  LnpState,
+  OpName,
+  OPS,
+  PortHolder,
+  Prompt,
+  PromptOutcome,
+} from '@fractonica/protocol';
 import type { OtaState, PresenceHeartbeat } from '@fractonica/protocol/gen';
 
 import type { Db } from './db.ts';
@@ -94,25 +110,12 @@ export interface Registry {
   update(deviceId: string, patch: Partial<Pick<Device, 'alias' | 'tags'>>): Device;
 }
 
-/** One event on the bus and in the `events` table (spec 08 §8.7, 09 §9.2 type grammar). */
-export interface HubEvent {
-  /** `c:<run>.<seq>`. */
-  cursor: string;
-  seq: number;
-  /** `<instance>.<event>`, `device.online|suspect|offline|provisioned`, `hub.*`, ... */
-  type: string;
-  device?: string;
-  alias?: string;
-  /** Device time through the TIME offset, else the hub's receive time (µs since the Unix epoch). */
-  t_hub_us: number;
-  t_dev_us?: number;
-  epoch?: number;
-  fields?: Record<string, unknown>;
-  /** Older than one already delivered for the same instance in the same epoch (05 §5.8). */
-  late?: boolean;
-  /** Buffered during an outage (spec 08 §8.7). */
-  replayed?: boolean;
-}
+/**
+ * One event on the bus and in the `events` table (spec 08 §8.7, 09 §9.2 type grammar): the protocol's
+ * HubEventSchema, so `/ws`, `/app` and events_read share one shape. Capability members carry `part`
+ * (event or state) and `member` (design c6 §3.3), set by the router's #publishCap.
+ */
+export type HubEvent = ProtocolHubEvent;
 
 export interface Events {
   /** Synchronous: allocates the cursor from the shared Seq, notifies subscribers, enqueues persistence. */
@@ -136,6 +139,20 @@ export interface OtaFrame {
   seq: number;
 }
 
+/** A RESULT (or a MSG's ACK), as Router.sendCommand resolves it. */
+export interface CommandResult {
+  status: number;
+  fields: Uint8Array;
+  rtt_ms: number;
+  link: string;
+  /** When the RESULT arrived, rounded µs since the Unix epoch; for ack none, when the CMD was written (design c6 §3.3). */
+  t_hub_us: number;
+  /** When the CMD was handed to the link, µs since the Unix epoch (the router clock's nowUs). */
+  sent_us: number;
+  /** When its RESULT arrived, µs since the Unix epoch; null for ack none, which has no RESULT. */
+  rx_us: number | null;
+}
+
 export interface Router {
   presence(deviceId: string): Presence;
   /** device_ids with a session up. */
@@ -147,7 +164,15 @@ export interface Router {
     cmdId: number,
     args: Uint8Array,
     opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate?: boolean; bulk?: boolean },
-  ): Promise<{ status: number; fields: Uint8Array; rtt_ms: number; link: string }>;
+  ): Promise<CommandResult>;
+  /**
+   * Ends the device's serial session for a reason of the hub's own (a serial lease, design c6 D4): a hub
+   * BYE on its USB line, so the node stops sending into it and greets again at once, then the session
+   * ends (`device.link {link: serial, up: false, reason}`; `device.offline` when it was its only one).
+   * Resolves once the BYE line has been handed to the port, so the caller may close it then; false when
+   * the device had no serial session.
+   */
+  endSerialSession(deviceId: string, reason: string): Promise<boolean>;
   /** After a rename: fr.node.set_alias if the device is online. */
   pushAlias(deviceId: string): void;
   /**
@@ -314,6 +339,142 @@ export interface Lifecycle {
   stop(): Promise<void> | void;
 }
 
+// ---- C6: apps and agents (design c6 §3.3) ----
+
+/** An op's parsed input (schema defaults applied), for typed handlers: `(input: OpInput<'serial_lease'>, hub) => ...`. */
+export type OpInput<N extends OpName> = z.output<Extract<(typeof OPS)[number], { name: N }>['input']>;
+
+/** How main.ts runs the hub (its addresses and flags), for the C6 parts to read. */
+export interface HubRunOptions {
+  /** The API listener (127.0.0.1:7420); apiPort is the bound port once it listens (a test hub may ask for 0). */
+  apiHost: string;
+  apiPort: number;
+  /** The node link listeners (TCP and UDP, 0.0.0.0:7421) and the node HTTP port (7422). */
+  nodeHost: string;
+  nodePort: number;
+  nodeHttpPort: number;
+  /** `--no-advert`. The advert is off for a test hub too (node port not 7421, or host not 0.0.0.0; design c6 §5). */
+  noAdvert: boolean;
+  /** false with `--no-serial`: the USB ports belong to another hub. */
+  serial: boolean;
+}
+
+/**
+ * A C6 part (design c6 §3.3). main.ts builds each with `create<Part>(hub, run)` from the module its stream
+ * owns, starts it once the API listens and stops it before the db closes.
+ * `hub` is a getter: the HubContext holds the parts too. `warnings` adds lines to hub_status.warnings.
+ */
+export interface HubPart extends Lifecycle {
+  warnings?(): string[];
+}
+
+/** What builds a part (each module exports one): the HubContext getter and how the hub runs. */
+export type CreatePart<P> = (hub: () => HubContext, run: HubRunOptions) => P;
+
+/**
+ * A part with routes on the API port. buildServer (http.ts) adds them once, in a scope behind the guard
+ * (web/guard.ts: Host, Origin per route, JSON-only mutations, HTML headers) with @fastify/websocket
+ * registered, so a route may be `{ websocket: true }`.
+ */
+export interface WebRoutes {
+  routes(app: FastifyInstance): void | Promise<void>;
+}
+
+/** A pending prompt_human (design c6 D3): done() publishes hub.prompt_done once and drops it from pending(). */
+export interface PromptHandle {
+  readonly prompt: Prompt;
+  done(outcome: PromptOutcome): void;
+}
+
+/**
+ * prompt_human (design c6 D3; stream S5, prompts.ts): what a wait asks a person at the bench to do, while
+ * it waits. A waiting client that disconnects ends its prompt as cancelled.
+ */
+export interface Prompts extends HubPart {
+  /** Registers a prompt (`prompt_id` p_<8hex>) and publishes hub.prompt, which is stored. */
+  open(p: { text: string; selector?: string; types: string[]; expires_at: string }): PromptHandle;
+  /** The pending ones, oldest first: hub_status.prompts. */
+  pending(): Prompt[];
+}
+
+/**
+ * Serial leases (design c6 D4; stream S5, ports/): the hub lets go of a USB port while another program
+ * holds it, and takes it back when the lease ends (released, expired, holder gone, port gone, hub stop).
+ */
+export interface Leases extends HubPart {
+  /** Grants one: a BYE on the serial session (Router.endSerialSession), the handle closed, port.leased published. */
+  lease(input: OpInput<'serial_lease'>): Promise<Lease>;
+  renew(input: OpInput<'serial_lease_renew'>): { lease_id: string; expires_at: string };
+  /** Ends one: the hub reopens the port and publishes port.released. */
+  release(input: OpInput<'serial_release'>): Promise<{ lease_id: string; port: string; released: true }>;
+  /** The leases in force, oldest first (port_list rows, the dashboard's Agents page). */
+  list(): Lease[];
+}
+
+/** Who else has a serial port open (design c6 D5; stream S5, ports/holders.ts). */
+export interface PortHolders {
+  /**
+   * The programs other than the hub and its children that have each path open (`lsof -F pc`, 3 s timeout),
+   * for PORT_BUSY_EXTERNAL messages and port_list; a path nobody else holds is absent from the map.
+   */
+  holders(paths: string[]): Promise<Map<string, PortHolder[]>>;
+}
+
+/** The Local Network permission self-test's last answer (design c6 §5): hub_status lnp, lnp_checked_at, launched_by. */
+export interface LnpStatus {
+  lnp: LnpState;
+  /** ISO time of the last self-test; null before the first. */
+  checked_at: string | null;
+  /** The app macOS attributes the hub's Local Network access to: `__CFBundleIdentifier`, else TERM_PROGRAM, else unknown. */
+  launched_by: string;
+}
+
+/** The Local Network permission self-test (design c6 §5; stream S2, lan/lnp.ts): a UDP connect to the LAN gateway every 30 s. */
+export interface Lnp extends HubPart {
+  status(): LnpStatus;
+}
+
+/** hub_status.advert. */
+export interface AdvertStatus {
+  state: (typeof ADVERT_STATES)[number];
+  /** The registered service instance name, e.g. `Fractonica <LocalHostName>`. */
+  name?: string;
+  error?: string;
+}
+
+/** The `_fractonica._tcp` mDNS advert nodes find the hub by (design c6 §5, D26; stream S2, lan/advert.ts). */
+export interface Advert extends HubPart {
+  status(): AdvertStatus;
+}
+
+/**
+ * `/app`, the `fr-app/1` socket of @fractonica/sdk apps (design c6 §4; stream S1, apps/server.ts). Its
+ * start() makes the bridge the event bus's first listener (D7): main.ts starts it right after the event
+ * store, before the router or anything else subscribes.
+ */
+export interface AppServer extends HubPart, WebRoutes {}
+
+/** `/ws`, the dashboard's `fr-ws/1` socket (design c6 D6; stream S2, web/ws.ts): started right after the AppServer (D7). */
+export interface WsServer extends HubPart, WebRoutes {}
+
+/** hub_status.dashboard: where the dashboard is served, whether its dist exists, whether it is older than its sources. */
+export interface DashboardStatus {
+  url: string;
+  built: boolean;
+  stale: boolean;
+}
+
+/** Static serving of `/` (packages/dashboard/dist) and `/apps/<name>/` (design c6 D10; stream S2, web/static.ts). */
+export interface StaticSite extends HubPart, WebRoutes {
+  dashboard(): DashboardStatus;
+}
+
+/** T-LAT's active probe (design c6 §6.7; stream S7, latency/): latency_probe jobs. */
+export interface LatencyProbe extends HubPart {
+  /** Starts a probe job (kind latency, locking `device:<from>` and `device:<to>`). */
+  probe(input: OpInput<'latency_probe'>): Job;
+}
+
 export interface HubContext {
   db: Db;
   logs: LogStore;
@@ -336,6 +497,20 @@ export interface HubContext {
   broadcast: HubBroadcast;
   /** Bindings (design c5 §4). */
   bindings: Bindings;
+  /** How main.ts runs this hub (apiPort is the bound port once it listens); absent in test contexts. */
+  run?: HubRunOptions;
+  // C6 parts (design c6 §3.3); hub_status reads them.
+  prompts: Prompts;
+  leases: Leases;
+  portHolders: PortHolders;
+  lnp: Lnp;
+  advert: Advert;
+  appServer: AppServer;
+  wsServer: WsServer;
+  staticSite: StaticSite;
+  latencyProbe: LatencyProbe;
+  /** Whether the Mac is held awake (links/sleep-guard.ts): hub_status.sleep_guard. */
+  sleepGuard: { active(): boolean };
 }
 
 /** An op handler (packages/protocol/src/ops.ts): the parsed input (typed per handler) and the hub. */

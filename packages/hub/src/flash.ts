@@ -9,6 +9,7 @@ import { type ArtifactManifest, type ErrorCode, ERROR_CODES, FrError } from '@fr
 import { blobPath } from './artifacts.ts';
 import type { HubContext } from './context.ts';
 import type { JobCtx } from './jobs.ts';
+import { nameBusyHolder } from './ports/holders.ts';
 
 /** Flash plans (06 §6.4). */
 export type PlanName = 'app' | 'full' | 'identity' | 'recover';
@@ -85,7 +86,7 @@ export function flashPlan(m: ArtifactManifest | null, plan: PlanName, opts: { id
  * Hard reset through the hub's open port, so the ROM, bootloader and boot banner lines are captured
  * (06 §6.4 step 8); falls back to esptool when the hub cannot, and then the boot log may be incomplete.
  */
-export async function hardResetCapturing(hub: Pick<HubContext, 'serial'>, key: string, ctx: JobCtx): Promise<'hub' | 'esptool'> {
+export async function hardResetCapturing(hub: Pick<HubContext, 'serial'> & Partial<Pick<HubContext, 'portHolders'>>, key: string, ctx: JobCtx): Promise<'hub' | 'esptool'> {
   try {
     await hub.serial.hardReset(key);
     return 'hub';
@@ -95,6 +96,9 @@ export async function hardResetCapturing(hub: Pick<HubContext, 'serial'>, key: s
     try {
       await runPytools({ cmd: 'reset', port: lease.path, mode: 'hard' }, ctx);
       return 'esptool';
+    } catch (err) {
+      // The sidecar's "port busy" names nobody: lsof says who (design c6 D5).
+      throw await nameBusyHolder(hub, { path: lease.path, key }, err);
     } finally {
       lease.release();
     }

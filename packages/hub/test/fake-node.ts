@@ -16,6 +16,10 @@
 // repaired), ACKs unicast MSGs, keeps a binding table behind fr.node bind_set / bind_clear / bind_list (or
 // answers unsupported, like firmware before C5), sends MSGs and node -> node frames, and windows the node
 // frames the hub forwards or fans out by their (src, epoch), answering a forwarded CMD or Q1 MSG to its source.
+// T-LAT (design c6 §6 S7, D22, D25): a FakeNode schedules hub CMDs that carry exec_at (BUSY unsynced, LATE
+// outside 0..2 s, INVALID_ARGS on BULK, 8 slots, the RESULT at execution, a DUP of a scheduled one dropped,
+// a new hub epoch cancelling them), and testPin() wires its diag pin_pulse to another FakeNode's button,
+// which then sends `down` stamped at the pulse and `up` once it ends.
 
 import { createHash, randomBytes } from 'node:crypto';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
@@ -46,6 +50,7 @@ import {
   ADDR,
   type Binding,
   decodeBinding,
+  decodeDiagExecArgs,
   decodeEnvelope,
   decodeMsgMsg,
   decodeNetWelcome,
@@ -57,6 +62,7 @@ import {
   encodeBinding,
   encodeBindingList,
   encodeDescriptor,
+  encodeDiagExecResult,
   encodeEnvelope,
   encodeMsgMsg,
   encodeNodeBindListResult,
@@ -70,6 +76,7 @@ import {
   encodePresenceHello,
   encodePresencePong,
   encodeTimeSyncRes,
+  findCap,
   KIND,
   type NetWelcome,
   type OtaOffer,
@@ -205,6 +212,10 @@ export interface FakeOtaOptions {
 }
 
 const OTA_ALIGN = 4096;
+const BUTTON = findCap('fr.button')!;
+/** fr.button's `down` and `up` event ids (the T-LAT rig's B side). */
+const BUTTON_DOWN = BUTTON.events.find((e) => e.name === 'down')!.id;
+const BUTTON_UP = BUTTON.events.find((e) => e.name === 'up')!.id;
 
 /** The download a FakeNode runs: its job, the ACCEPT code it answered, and how to keep its offset. */
 interface OtaRun {
@@ -319,6 +330,20 @@ export class FakeNode {
   #bseen = new Set<number>();
   /** (src, epoch) -> seqs taken, for node frames (05 §5.8: a window per origin). */
   #nodeSeen = new Map<string, Set<number>>();
+  // ---- T-LAT (design c6 §6 S7) ----
+  /** exec_at counters, as fr_net names them (D22); `late_us_max`: how late a scheduled CMD ran. */
+  exec = { scheduled: 0, late: 0, cancelled: 0, late_us_max: 0 };
+  /** Scheduled CMDs (exec_at) by `src/epoch/seq`, until they run. */
+  #scheduled = new Map<string, NodeJS.Timeout>();
+  /** pin_pulse edges this node made (its clock, at_us). */
+  pulses: number[] = [];
+  /** Return true to lose this hub CMD on the way (the node never sees it); counted in cmdsLost. */
+  loseCmd: ((header: Header) => boolean) | null = null;
+  cmdsLost = 0;
+  /** false: SYNC_REQs go unanswered, so the hub never has this node's clock (firmware without TIME). */
+  answerTime = true;
+  /** performance.now() until which the test_pin is low (a pin_pulse meanwhile answers busy). */
+  #pinLowUntil = 0;
 
   constructor(opts: FakeNodeOptions) {
     const addr = opts.addr ?? ADDR.UNASSIGNED;
@@ -521,6 +546,7 @@ export class FakeNode {
 
   close(): void {
     this.#stopHeartbeats();
+    this.#cancelScheduled();
     clearInterval(this.#helloTimer ?? undefined);
     if (this.#otaJob) {
       this.#otaJob.done = true;
@@ -567,6 +593,10 @@ export class FakeNode {
     }
     const { header: h, prefix } = d.value;
     const body = d.value.body.slice();
+    if (h.cls === CLS.CMD && this.loseCmd?.(h)) {
+      this.cmdsLost++;
+      return;
+    }
     // Recorded even while unplugged: what the hub sent is what the tests look at.
     this.frames.push({ header: h, prefix, body, via });
     if (this.silent) {
@@ -577,7 +607,11 @@ export class FakeNode {
       if (!w.ok) {
         throw new Error(`bad WELCOME: ${w.error}`);
       }
-      // The node's hub windows restart at the floors WELCOME names (05 §5.8).
+      // The node's hub windows restart at the floors WELCOME names (05 §5.8); a new hub epoch cancels what
+      // the last one scheduled (design c6 D22).
+      if (this.welcome && this.welcome.hub_epoch !== w.value.hub_epoch) {
+        this.#cancelScheduled();
+      }
       this.welcome = w.value;
       this.welcomes++;
       this.#floor = w.value.ucast_floor;
@@ -615,7 +649,7 @@ export class FakeNode {
     this.#seen.add(h.seq);
     switch (h.cls) {
       case CLS.TIME:
-        if (h.kind === KIND.TIME.SYNC_REQ) {
+        if (h.kind === KIND.TIME.SYNC_REQ && this.answerTime) {
           const req = decodeTimeSyncReq(body);
           const t2 = BigInt(this.nodeNowUs());
           const t3 = BigInt(this.nodeNowUs());
@@ -1068,39 +1102,150 @@ export class FakeNode {
   }
 
   #command(h: Header, args: Uint8Array): void {
-    const key = `${h.port}/${h.kind}`;
-    let status: number = STATUS.OK;
-    let fields: Uint8Array = new Uint8Array(0);
+    let r: { status: number; fields: Uint8Array };
     const expire = extValue(h, EXT.EXPIRE_AT_US);
     const late = expire !== undefined ? (this.nodeNowUs() - expire) >>> 0 : 0;
+    const execAt = extValue(h, EXT.EXEC_AT_US);
     if (expire !== undefined && this.timeSynced && late !== 0 && late < 0x80000000) {
-      status = STATUS.EXPIRED;
+      r = { status: STATUS.EXPIRED, fields: new Uint8Array(0) };
+    } else if (execAt !== undefined) {
+      const refused = this.#schedule(h, args, execAt);
+      if (refused === null) {
+        return; // its RESULT goes out when it runs
+      }
+      r = { status: refused, fields: new Uint8Array(0) };
     } else {
-      this.executions.set(key, (this.executions.get(key) ?? 0) + 1);
-      if (h.port === PORT.NODE && h.kind === 7) {
-        // get_state: every property again with fresh seqs.
-        for (const [k, v] of this.props) {
-          const [port, id] = k.split('/').map(Number);
-          this.#state(port, id, v);
-        }
-      }
-      const handler = this.handlers.get(key);
-      const bind = handler ? null : this.#bindCommand(h, args);
-      if (handler) {
-        const r = handler(args, h) ?? {};
-        status = r.status ?? STATUS.OK;
-        fields = r.fields ?? fields;
-      } else if (bind) {
-        status = bind.status;
-        fields = bind.fields ?? fields;
-      } else if (!(h.port === PORT.NODE && (h.kind === 7 || h.kind === 4))) {
-        status = STATUS.NOT_FOUND;
-      }
+      r = this.#execute(h, args);
     }
     if (!(h.flags & FLAG.ACK_REQ)) {
       return; // a fast command: no RESULT
     }
-    this.#answer(h, CLS.RESULT, h.kind, fields, status);
+    this.#answer(h, CLS.RESULT, h.kind, r.fields, r.status);
+  }
+
+  /**
+   * exec_at (design c6 D22), after the expire_at check: BUSY while unsynced, LATE unless it is 0..2 s ahead
+   * on this node's clock, INVALID_ARGS for a BULK CMD, BUSY with 8 already scheduled; else it runs then
+   * (null). A node -> node CMD with exec_at stays UNSUPPORTED.
+   */
+  #schedule(h: Header, args: Uint8Array, execAt: number): number | null {
+    if (h.src !== ADDR.HUB) {
+      return STATUS.UNSUPPORTED;
+    }
+    if (!this.timeSynced) {
+      return STATUS.BUSY;
+    }
+    const d = (execAt - (this.nodeNowUs() >>> 0)) | 0; // int32(exec_at - low32(rx_at))
+    if (d < 0 || d > 2_000_000) {
+      this.exec.late++;
+      return STATUS.LATE;
+    }
+    if (h.flags & FLAG.BULK) {
+      return STATUS.INVALID_ARGS;
+    }
+    if (this.#scheduled.size >= 8) {
+      return STATUS.BUSY;
+    }
+    const key = `${h.src}/${h.epoch}/${h.seq}`;
+    const due = this.nodeNowUs() + d;
+    this.exec.scheduled++;
+    // A timer can fire a little early (libuv's cached loop time): armed again for what is left, as an
+    // esp_timer would not fire early at all.
+    const fire = () => {
+      const left = due - this.nodeNowUs();
+      if (left > 200) {
+        this.#scheduled.set(key, setTimeout(fire, Math.ceil(left / 1000)));
+        return;
+      }
+      this.#scheduled.delete(key);
+      if (this.silent) {
+        return;
+      }
+      this.exec.late_us_max = Math.max(this.exec.late_us_max, this.nodeNowUs() - due);
+      const r = this.#execute(h, args);
+      if (h.flags & FLAG.ACK_REQ) {
+        this.#answer(h, CLS.RESULT, h.kind, r.fields, r.status);
+      }
+    };
+    this.#scheduled.set(key, setTimeout(fire, d / 1000));
+    return null;
+  }
+
+  /** A new hub epoch (or the end): scheduled CMDs never run. */
+  #cancelScheduled(): void {
+    for (const t of this.#scheduled.values()) {
+      clearTimeout(t);
+      this.exec.cancelled++;
+    }
+    this.#scheduled.clear();
+  }
+
+  /** Runs a CMD's handler (or the built-in fr.node ones): its RESULT status and fields. */
+  #execute(h: Header, args: Uint8Array): { status: number; fields: Uint8Array } {
+    const key = `${h.port}/${h.kind}`;
+    let status: number = STATUS.OK;
+    let fields: Uint8Array = new Uint8Array(0);
+    this.executions.set(key, (this.executions.get(key) ?? 0) + 1);
+    if (h.port === PORT.NODE && h.kind === 7) {
+      // get_state: every property again with fresh seqs.
+      for (const [k, v] of this.props) {
+        const [port, id] = k.split('/').map(Number);
+        this.#state(port, id, v);
+      }
+    }
+    const handler = this.handlers.get(key);
+    const bind = handler ? null : this.#bindCommand(h, args);
+    if (handler) {
+      const r = handler(args, h) ?? {};
+      status = r.status ?? STATUS.OK;
+      fields = r.fields ?? fields;
+    } else if (bind) {
+      status = bind.status;
+      fields = bind.fields ?? fields;
+    } else if (!(h.port === PORT.NODE && (h.kind === 7 || h.kind === 4))) {
+      status = STATUS.NOT_FOUND;
+    }
+    return { status, fields };
+  }
+
+  /**
+   * The T-LAT rig (design c6 D25): this node's test_pin (`pin`) wired to `to`'s button on `port`. Its diag
+   * `pin_pulse <us>` (fr.diag.exec, answered as fr_diag does: `{"ok":true,"pin","us","at_us"}`, busy while a
+   * pulse is low) pulls the line low: `to` stamps the edge `isrUs` later on its own clock and sends `down`
+   * (realtime), then `up` when the pulse ends. `to: null` is a pin wired to nothing; `lose(n)` true: the
+   * n-th pulse (from 1) never reaches `to` (a loose jumper).
+   */
+  testPin(pin: number, to: FakeNode | null, opts: { port?: number; isrUs?: number; lose?: (pulse: number) => boolean } = {}): void {
+    const port = opts.port ?? 1;
+    const isrUs = opts.isrUs ?? 30;
+    const answer = (json: unknown) => ({ fields: encodeDiagExecResult({ json: JSON.stringify(json) }) });
+    this.handlers.set(`${PORT.DIAG}/1`, (args) => {
+      const d = decodeDiagExecArgs(args);
+      const m = d.ok ? /^pin_pulse (\d+)$/.exec(d.value.line.trim()) : null;
+      if (!m) {
+        return answer({ ok: false, error: 'unknown_command' });
+      }
+      const us = Number(m[1]);
+      if (us < 10 || us > 100_000) {
+        return answer({ ok: false, error: 'invalid_args', detail: 'us 10..100000' });
+      }
+      if (performance.now() < this.#pinLowUntil) {
+        return answer({ ok: false, error: 'busy' });
+      }
+      const at = this.nodeNowUs();
+      this.#pinLowUntil = performance.now() + us / 1000;
+      this.pulses.push(at);
+      if (to && !opts.lose?.(this.pulses.length)) {
+        to.#wirePress(port, isrUs, us);
+      }
+      return answer({ ok: true, pin, us, at_us: at });
+    });
+  }
+
+  /** The wire pulls this node's button low now (its ISR edge isrUs later) and releases it after `us`. */
+  #wirePress(port: number, isrUs: number, us: number): void {
+    this.event(port, BUTTON_DOWN, new Uint8Array(0), { prio: 'realtime', tUs: this.nodeNowUs() + isrUs });
+    setTimeout(() => !this.silent && this.event(port, BUTTON_UP, new Uint8Array(0), { prio: 'realtime' }), us / 1000);
   }
 
   /**

@@ -3,6 +3,8 @@
 import type { Check } from '@fractonica/host';
 import { cliFlag, exitCodeForResult, findOp, type Job, type LogLine, type PortInfo, type Remediation, type Result, type ToolError } from '@fractonica/protocol';
 
+import { renderProbe } from './render-latency.ts';
+
 function yamlish(v: unknown, indent = ''): string {
   if (v === null || v === undefined) {
     return 'null';
@@ -280,6 +282,9 @@ function renderJob(job: Job): string {
   if (job.kind === 'msg' && job.result && typeof job.result === 'object') {
     return [head, renderMessage(job.result as Row)].join('\n');
   }
+  if (job.kind === 'latency' && job.result && typeof job.result === 'object') {
+    return [head, renderProbe(job.result as Row)].join('\n'); // fr latency probe (design c6 §6 S7)
+  }
   if (job.result) {
     parts.push(yamlish(job.result, '  ').replace(/^\n/, ''));
   }
@@ -336,9 +341,9 @@ export function diagFailure(op: string, r: Result): { error: string; detail?: st
   return { error: String(res.error ?? 'failed'), ...(res.detail !== undefined ? { detail: String(res.detail) } : {}) };
 }
 
-/** Exit status of a command's Result: exitCodeForResult, and 1 for a diag command the device failed. */
+/** Exit status of a command's Result: exitCodeForResult (0 for a done job_cancel), and 1 for a diag command the device failed. */
 export function cliExitCode(op: string, r: Result): number {
-  return diagFailure(op, r) ? 1 : exitCodeForResult(r);
+  return diagFailure(op, r) ? 1 : exitCodeForResult(r, op);
 }
 
 export function renderResult(op: string, r: Result): { out: string; err: string } {

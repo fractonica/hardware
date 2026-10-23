@@ -1,8 +1,9 @@
 // Long-running work (build, flash, reset) as durable jobs with FIFO locks (spec 09 §9.2).
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes } from 'node:crypto';
 
-import { FrError, type Job } from '@fractonica/protocol';
+import { FrError, type Job, type JobOrigin } from '@fractonica/protocol';
 
 import type { Db } from './db.ts';
 
@@ -16,7 +17,17 @@ export interface JobCtx {
 
 type JobFn = (ctx: JobCtx) => Promise<unknown>;
 
+/**
+ * The client an API call came from (design c6 D18): http.ts runs each op inside it, from the request's
+ * X-Fr-Client header, so start() records it as the job's origin however deep in a handler the job starts.
+ * A job started by a job (its fn runs in the same context) keeps the origin.
+ */
+export const requestClient = new AsyncLocalStorage<JobOrigin>();
+
 const TERMINAL = new Set(['completed', 'failed', 'cancelled']);
+
+/** What changed in a job (onChange): its status (queued, working, an end), its stage, or its progress. */
+export type JobChange = 'status' | 'stage' | 'progress';
 
 function now(): string {
   return new Date().toISOString();
@@ -32,6 +43,7 @@ export class JobRunner {
   #lockHolders = new Map<string, string>();
   /** job id -> the lock key it is queued on. */
   #queuedOn = new Map<string, string>();
+  #changeListeners = new Set<(job: Job, change: JobChange) => void>();
 
   constructor(db: Db) {
     this.#db = db;
@@ -46,14 +58,37 @@ export class JobRunner {
     }
   }
 
-  start(kind: Job['kind'], targets: string[], locks: string[], fn: JobFn): Job {
-    const job: Job = { job_id: 'j_' + randomBytes(6).toString('hex'), kind, status: 'queued', targets, created_at: now() };
+  /** `origin`: who started it (default: the client of the API call this runs in, if it named one). */
+  start(kind: Job['kind'], targets: string[], locks: string[], fn: JobFn, origin: JobOrigin | undefined = requestClient.getStore()): Job {
+    const job: Job = { job_id: 'j_' + randomBytes(6).toString('hex'), kind, status: 'queued', targets, ...(origin ? { origin } : {}), created_at: now() };
     const abort = new AbortController();
     this.#jobs.set(job.job_id, job);
     this.#aborts.set(job.job_id, abort);
     this.#persist(job);
+    this.#changed(job, 'status');
     void this.#run(job, abort, locks, fn);
     return { ...job };
+  }
+
+  /**
+   * Calls `fn` with a copy of the job whenever its status, stage or progress changes, synchronously
+   * (design c6 §5: job.state events and `/ws` job frames, web/feeds.ts and web/ws.ts). Returns the
+   * unsubscribe.
+   */
+  onChange(fn: (job: Job, change: JobChange) => void): () => void {
+    this.#changeListeners.add(fn);
+    return () => this.#changeListeners.delete(fn);
+  }
+
+  #changed(job: Job, change: JobChange): void {
+    for (const fn of this.#changeListeners) {
+      try {
+        fn({ ...job }, change);
+      } catch (err) {
+        // A failing listener must not fail the job.
+        console.error(JSON.stringify({ event: 'job_listener_failed', job_id: job.job_id, message: (err as Error).message }));
+      }
+    }
   }
 
   async #run(job: Job, abort: AbortController, locks: string[], fn: JobFn): Promise<void> {
@@ -67,6 +102,7 @@ export class JobRunner {
       job.started_at = now();
       delete job.blocked_by;
       this.#persist(job);
+      this.#changed(job, 'status');
       const ctx: JobCtx = {
         jobId: job.job_id,
         signal: abort.signal,
@@ -75,9 +111,11 @@ export class JobRunner {
           job.stage = name;
           this.#log(job.job_id, `stage: ${name}`, 'event');
           this.#persist(job);
+          this.#changed(job, 'stage');
         },
         progress: (pct, message) => {
           job.progress = { pct, ...(message ? { message } : {}) };
+          this.#changed(job, 'progress');
         },
       };
       job.result = await fn(ctx);
@@ -91,6 +129,7 @@ export class JobRunner {
       delete job.blocked_by;
       job.ended_at = now();
       this.#persist(job);
+      this.#changed(job, 'status');
       for (const w of this.#waiters.get(job.job_id) ?? []) {
         w();
       }
@@ -157,8 +196,10 @@ export class JobRunner {
 
   #persist(job: Job): void {
     this.#db
-      .prepare('INSERT INTO jobs (job_id, kind, status, created_at, json) VALUES (?, ?, ?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET status = excluded.status, json = excluded.json')
-      .run(job.job_id, job.kind, job.status, job.created_at, JSON.stringify(job));
+      .prepare(
+        'INSERT INTO jobs (job_id, kind, status, created_at, origin, json) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(job_id) DO UPDATE SET status = excluded.status, json = excluded.json',
+      )
+      .run(job.job_id, job.kind, job.status, job.created_at, job.origin ?? null, JSON.stringify(job));
   }
 
   get(jobId: string): Job {
@@ -203,8 +244,13 @@ export class JobRunner {
     return { lines, next_line: last, truncated: lines.length === maxLines };
   }
 
-  list(limit: number): Job[] {
-    const rows = this.#db.prepare('SELECT json FROM jobs ORDER BY created_at DESC LIMIT ?').all(limit) as { json: string }[];
+  /** Newest first; `origin` keeps the jobs one kind of client started (design c6 D18). */
+  list(limit: number, origin?: JobOrigin): Job[] {
+    const rows = (
+      origin
+        ? this.#db.prepare('SELECT json FROM jobs WHERE origin = ? ORDER BY created_at DESC LIMIT ?').all(origin, limit)
+        : this.#db.prepare('SELECT json FROM jobs ORDER BY created_at DESC LIMIT ?').all(limit)
+    ) as { json: string }[];
     return rows.map((r) => this.#jobs.get((JSON.parse(r.json) as Job).job_id) ?? (JSON.parse(r.json) as Job));
   }
 

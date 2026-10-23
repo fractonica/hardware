@@ -11,6 +11,7 @@ import { decodeMember, encodeMember, findCap, jsonSchema, statusName } from '@fr
 import type { Device, Handler, HubContext, HubEvent, Presence } from '../context.ts';
 import type { Db } from '../db.ts';
 import { EventStore, matchTypes, matchWhere, mintCursor, mintTimeUs, parseTypes, tailEvents } from '../events/index.ts';
+import { humanPrompt, type WaitPrompt } from '../prompts.ts';
 import { CapDirectory, instanceNamed, type PortCap } from './caps.ts';
 import { routerInfo, routerInstances } from './index.ts';
 
@@ -138,7 +139,86 @@ export interface CommandOutcome {
   fields?: Record<string, unknown>;
   rtt_ms?: number;
   link?: string;
+  /** When the RESULT arrived (µs since the Unix epoch); for ack none, when the CMD was written (design c6 §3.3). */
+  t_hub_us?: number;
   error?: string;
+}
+
+type Cap = NonNullable<ReturnType<typeof findCap>>;
+
+/** A command checked and encoded for one device, or already answered by the hub (outcome). */
+type CommandPlan =
+  | { base: { device: string; alias: string }; outcome: CommandOutcome }
+  | { base: { device: string; alias: string }; outcome: null; inst: PortCap; cap: Cap; cmd: Cap['commands'][number]; bytes: Uint8Array };
+
+/** Checks one device's command and encodes its args (throws INVALID_ARGS), sending nothing. */
+function planCommand(hub: HubContext, dev: Device, instance: string, command: string, args: Record<string, unknown>): CommandPlan {
+  const base = { device: dev.device_id, alias: dev.alias };
+  if (!isUp(hub.router.presence(dev.device_id))) {
+    return { base, outcome: { ...base, status: 'offline', error: `${dev.alias} is ${hub.router.presence(dev.device_id)}` } };
+  }
+  const instances = instancesOf(hub, dev);
+  const inst = instanceNamed(instances, instance);
+  if (!inst) {
+    const known = instances ? ` (instances: ${['node', 'diag', ...instances.map((c) => c.name)].join(', ')})` : ' (no manifest or descriptor for its firmware)';
+    return { base, outcome: { ...base, status: 'not_found', error: `no instance ${instance}${known}` } };
+  }
+  const cap = findCap(inst.cap_id);
+  const cmd = cap?.commands.find((c) => c.name === command);
+  if (!cap || !cmd) {
+    return { base, outcome: { ...base, status: 'not_found', error: `${inst.cap} has no command ${command}` } };
+  }
+  // Test-only commands (inject) exist in debug builds only; HELLO says whether this one has them.
+  const helloCaps = routerInfo(hub.router, dev.device_id)?.hello_caps;
+  if (cmd.visibility === 'test' && helloCaps != null && !(helloCaps & INJECT_ENABLED)) {
+    return { base, outcome: { ...base, status: 'injection_disabled', error: `${dev.alias} runs a release build: ${inst.name}.${cmd.name} is compiled out (rebuild as debug)` } };
+  }
+  return { base, inst, cap, cmd, bytes: encodeArgs(cap.name, cmd.name, args), outcome: null };
+}
+
+/** Sends a planned command; offline and timeout are outcomes, other failures throw. */
+async function sendPlanned(hub: HubContext, p: CommandPlan, opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate?: boolean }): Promise<CommandOutcome> {
+  if (p.outcome) {
+    return p.outcome;
+  }
+  const { base, inst, cap, cmd, bytes } = p;
+  try {
+    const r = await hub.router.sendCommand(base.device, inst.port, cmd.id, bytes, opts);
+    if (opts.ack === 'none') {
+      return { ...base, status: 'sent', link: r.link, t_hub_us: r.t_hub_us };
+    }
+    const fields = r.fields.length ? decodeMember(cap.id, 'result', cmd.id, r.fields) : null;
+    return {
+      ...base,
+      status: statusName(r.status)?.toLowerCase() ?? String(r.status),
+      fields: fields === null ? {} : fields.ok ? fields.value : { raw: Buffer.from(r.fields).toString('hex'), error: fields.error },
+      rtt_ms: r.rtt_ms,
+      link: r.link,
+      t_hub_us: r.t_hub_us,
+    };
+  } catch (e) {
+    if (e instanceof FrError && (e.code === 'DEVICE_OFFLINE' || e.code === 'TIMEOUT')) {
+      return { ...base, status: e.code === 'TIMEOUT' ? 'timeout' : 'offline', error: e.message };
+    }
+    throw e;
+  }
+}
+
+/**
+ * One command to one device (design c6 §3.3): command_send's per-device path, which the `/app` bridge
+ * shares. `<instance>.<command>` with JSON args, checked against the device's firmware and encoded (an
+ * invalid one throws INVALID_ARGS before anything is sent); an offline device, a missing instance or
+ * command, a release build for a test-only command, a timeout are outcomes, not errors.
+ */
+export function sendCommandTo(
+  hub: HubContext,
+  dev: Device,
+  instance: string,
+  command: string,
+  args: Record<string, unknown>,
+  opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate?: boolean },
+): Promise<CommandOutcome> {
+  return sendPlanned(hub, planCommand(hub, dev, instance, command, args), opts);
 }
 
 /** One unicast per device (05 §5.8), in parallel; per-device failures are results, not errors. */
@@ -151,56 +231,8 @@ async function sendToAll(
   opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate: boolean },
 ): Promise<CommandOutcome[]> {
   // Encode (and validate) once per capability before anything is sent: invalid args fail the whole op.
-  const plans = devices.map((dev) => {
-    const base = { device: dev.device_id, alias: dev.alias };
-    if (!isUp(hub.router.presence(dev.device_id))) {
-      return { base, outcome: { ...base, status: 'offline', error: `${dev.alias} is ${hub.router.presence(dev.device_id)}` } };
-    }
-    const instances = instancesOf(hub, dev);
-    const inst = instanceNamed(instances, instance);
-    if (!inst) {
-      const known = instances ? ` (instances: ${['node', 'diag', ...instances.map((c) => c.name)].join(', ')})` : ' (no manifest or descriptor for its firmware)';
-      return { base, outcome: { ...base, status: 'not_found', error: `no instance ${instance}${known}` } };
-    }
-    const cap = findCap(inst.cap_id);
-    const cmd = cap?.commands.find((c) => c.name === command);
-    if (!cap || !cmd) {
-      return { base, outcome: { ...base, status: 'not_found', error: `${inst.cap} has no command ${command}` } };
-    }
-    // Test-only commands (inject) exist in debug builds only; HELLO says whether this one has them.
-    const helloCaps = routerInfo(hub.router, dev.device_id)?.hello_caps;
-    if (cmd.visibility === 'test' && helloCaps != null && !(helloCaps & INJECT_ENABLED)) {
-      return { base, outcome: { ...base, status: 'injection_disabled', error: `${dev.alias} runs a release build: ${inst.name}.${cmd.name} is compiled out (rebuild as debug)` } };
-    }
-    return { base, inst, cap, cmd, bytes: encodeArgs(cap.name, cmd.name, args), outcome: null };
-  });
-  return Promise.all(
-    plans.map(async (p): Promise<CommandOutcome> => {
-      if (p.outcome) {
-        return p.outcome;
-      }
-      const { base, inst, cap, cmd, bytes } = p;
-      try {
-        const r = await hub.router.sendCommand(base.device, inst.port, cmd.id, bytes, opts);
-        if (opts.ack === 'none') {
-          return { ...base, status: 'sent', link: r.link };
-        }
-        const fields = r.fields.length ? decodeMember(cap.id, 'result', cmd.id, r.fields) : null;
-        return {
-          ...base,
-          status: statusName(r.status)?.toLowerCase() ?? String(r.status),
-          fields: fields === null ? {} : fields.ok ? fields.value : { raw: Buffer.from(r.fields).toString('hex'), error: fields.error },
-          rtt_ms: r.rtt_ms,
-          link: r.link,
-        };
-      } catch (e) {
-        if (e instanceof FrError && (e.code === 'DEVICE_OFFLINE' || e.code === 'TIMEOUT')) {
-          return { ...base, status: e.code === 'TIMEOUT' ? 'timeout' : 'offline', error: e.message };
-        }
-        throw e;
-      }
-    }),
-  );
+  const plans = devices.map((dev) => planCommand(hub, dev, instance, command, args));
+  return Promise.all(plans.map((p) => sendPlanned(hub, p, opts)));
 }
 
 /**
@@ -249,7 +281,7 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
   },
 
   wait_for_event: async (
-    input: { types: string; selector?: string; where?: unknown; since: string; count: number; per_device: boolean; timeout_s: number; include_replayed: boolean },
+    input: { types: string; selector?: string; where?: unknown; since: string; count: number; per_device: boolean; timeout_s: number; include_replayed: boolean; prompt_human?: string },
     hub,
   ) => {
     const after = sinceSeq(input.since, hub) ?? 0;
@@ -295,6 +327,7 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     };
     let wake = () => {};
     let timer: NodeJS.Timeout | undefined;
+    let prompt: WaitPrompt | null = null;
     // Subscribed before reading the backlog, so nothing published in between is missed (seen dedups).
     const unsubscribe = hub.events.subscribe((e) => {
       take(e);
@@ -315,6 +348,11 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
         }
       }
       if (!done()) {
+        // prompt_human (design c6 D3): a person at the bench is asked while the wait runs (hub.prompt), and
+        // the prompt ends with it; a client that goes away ends both.
+        if (input.prompt_human) {
+          prompt = humanPrompt(hub, { text: input.prompt_human, selector: input.selector, types: globs, timeoutS: input.timeout_s }, () => wake());
+        }
         await new Promise<void>((resolve) => {
           wake = resolve;
           timer = setTimeout(resolve, input.timeout_s * 1000);
@@ -323,15 +361,20 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     } finally {
       unsubscribe();
       clearTimeout(timer);
+      prompt?.end(done());
     }
     found.sort((a, b) => a.seq - b.seq);
+    const promptId = prompt ? { prompt_id: prompt.prompt_id } : {};
     if (!done()) {
       const missing = input.per_device ? ids!.filter((id) => (perDevice.get(id) ?? 0) < input.count) : undefined;
+      if (prompt?.cancelled()) {
+        throw new FrError('INTERNAL', `cancelled: the waiting client went away (prompt ${prompt.prompt_id})`, { details: { events: found, ...promptId } });
+      }
       throw new FrError('TIMEOUT', `${found.length}/${input.count}${input.per_device ? ' per device' : ''} ${globs.join(',')} within ${input.timeout_s}s`, {
-        details: { events: found, ...(missing ? { missing } : {}) },
+        details: { events: found, ...(missing ? { missing } : {}), ...promptId },
       });
     }
-    return { matched: true, events: found, cursor: mintCursor(hub) };
+    return { matched: true, events: found, cursor: mintCursor(hub), ...promptId };
   },
 
   wait_for_device: async (input: { selector: string; state: 'online' | 'offline'; fw_id?: string; ota_state?: string; since?: string; timeout_s: number }, hub) => {

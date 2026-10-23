@@ -10,6 +10,7 @@ import { loadManifest, newestBuildId } from '../artifacts.ts';
 import type { Device, HubContext } from '../context.ts';
 import { type FlashPlan, flashPlan, hardResetCapturing, type IdentRegion, identRegion, type PlanName, runPytools } from '../flash.ts';
 import { readNetwork } from '../network.ts';
+import { assertPortFree, nameBusyHolder } from '../ports/holders.ts';
 import { identNet, renderIdent, type RenderedIdent } from './ident.ts';
 import { attachedPort, isDeviceId, registryOf, resolveOne } from './hub.ts';
 import { CHIP_IDS, markIdentWritten, markImageFlashed, prepareIdentity, type ProvisionRecord, provisionOf } from './store.ts';
@@ -167,6 +168,8 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
     };
   }
 
+  // A serial lease, or another program (a Web Serial tab), has the port: refused before the job (design c6 D5).
+  await assertPortFree(hub, { ...entry, ...(dev ? { alias: dev.alias } : {}) });
   const deviceKey = dev?.device_id ?? entry.key;
   const job = hub.jobs.start('flash', [deviceKey], [`port:${entry.key}`, `device:${deviceKey}`], async (ctx) => {
     // The row as it is now that this job holds the port and the device: a provisioning that ran ahead
@@ -245,7 +248,10 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
           ...(chipId !== undefined ? { expect_chip_id: chipId } : {}),
         },
         ctx,
-      );
+      ).catch(async (err: unknown) => {
+        // The sidecar's "port busy" names nobody: lsof says who.
+        throw await nameBusyHolder(hub, { path: lease.path, key: lease.key, ...(cur ? { alias: cur.alias } : {}) }, err);
+      });
       rendered?.dispose();
       rendered = null;
       lease.release();

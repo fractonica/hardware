@@ -103,6 +103,7 @@ describe('the M1 profiles', () => {
       app: 'node',
       target: 'esp32c6',
       catalog_hash: r.manifest.catalog_hash,
+      test_pin: 20,
       caps: [
         {
           name: 'boot',
@@ -112,8 +113,18 @@ describe('the M1 profiles', () => {
           version: '1.0',
           driver: 'button_gpio',
           config: { debounce_ms: 20, long_press_ms: 600, multi_press_gap_ms: 250, multi_press_max: 2 },
+          traits: { long_press: true, multi_press_max: 2 },
         },
-        { name: 'status', port: 2, cap: 'fr.led', cap_id: 2, version: '1.0', driver: 'led_ws2812', config: { max_brightness: 64 } },
+        {
+          name: 'status',
+          port: 2,
+          cap: 'fr.led',
+          cap_id: 2,
+          version: '1.0',
+          driver: 'led_ws2812',
+          config: { max_brightness: 64 },
+          traits: { color: 'rgb', dimmable: true },
+        },
       ],
     });
     expect(JSON.parse(file(r, 'fr_manifest.json'))).toEqual(r.manifest);
@@ -137,7 +148,13 @@ describe('the M1 profiles', () => {
 
   it('c6-pad-mono swaps the driver and nothing else', () => {
     const r = gen(fixture({ locks: true }), 'c6-pad-mono', false);
-    expect(r.manifest.caps[1]).toMatchObject({ name: 'status', port: 2, driver: 'led_gpio', config: { max_brightness: 255 } });
+    expect(r.manifest.caps[1]).toMatchObject({
+      name: 'status',
+      port: 2,
+      driver: 'led_gpio',
+      config: { max_brightness: 255 },
+      traits: { color: 'mono', dimmable: false },
+    });
     expect(file(r, 'fr_board/fr_board.cpp')).toContain('c.gpio = 15;');
     expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio led_gpio)');
     expect(file(r, 'components.cmake')).not.toContain('led_ws2812');
@@ -162,6 +179,7 @@ describe('the M1 profiles', () => {
         'CONFIG_FR_BOARD="esp32c6-supermini"',
         'CONFIG_FR_PROFILE="c6-pad"',
         'CONFIG_FR_PART_PROFILE="fr-4mb-v1"',
+        'CONFIG_FR_TEST_PIN=20',
         '',
       ].join('\n'),
     );
@@ -354,7 +372,7 @@ describe('validation', () => {
 
   it("rejects a profile that needs more of fr_core's timers or input slots than it has", () => {
     const dir = fixture();
-    const pins = [0, 1, 2, 3, 14, 18, 19, 20];
+    const pins = [0, 1, 2, 3, 14, 18, 19, 21]; // free pins but the test_pin (20)
     const addButtons = (n: number) =>
       edit(dir, PROFILE('c6-pad'), (y) => {
         for (const [i, gpio] of pins.slice(0, n).entries()) {
@@ -436,6 +454,61 @@ describe('validation', () => {
     ]);
   });
 
+  it('derives the button traits from config and takes the LED traits from the driver (design c6 D13)', () => {
+    const dir = fixture();
+    edit(dir, PROFILE('c6-pad'), (y) => {
+      y.caps.boot.config = { multi_press_max: 3, long_press_ms: 0 };
+    });
+    expect(gen(dir, 'c6-pad').manifest.caps.map((c) => c.traits)).toEqual([
+      { long_press: false, multi_press_max: 3 },
+      { color: 'rgb', dimmable: true },
+    ]);
+    // A driver that declares nothing leaves the capability's defaults.
+    edit(dir, 'hardware/drivers/led_ws2812/driver.yaml', (y) => {
+      delete y.traits;
+    });
+    expect(gen(dir, 'c6-pad').manifest.caps[1].traits).toEqual({ color: 'mono', dimmable: false });
+  });
+
+  it("rejects driver traits the capability does not have or cannot hold", () => {
+    const dir = fixture();
+    edit(dir, 'hardware/drivers/led_ws2812/driver.yaml', (y) => {
+      y.traits = { color: 'cmyk', dimmable: true, glow: 1 };
+    });
+    expect(issuesOf(() => gen(dir, 'c6-pad')).map(formatIssue)).toEqual([
+      'hardware/drivers/led_ws2812/driver.yaml: traits.color: expected one of mono, rgb, got "cmyk"',
+      "hardware/drivers/led_ws2812/driver.yaml: traits.glow: fr.led has no trait 'glow'",
+    ]);
+  });
+
+  it('writes test_pin and checks it is a free, unclaimed, unreserved pin (design c6 D24)', () => {
+    const dir = fixture();
+    const C3 = 'hardware/boards/esp32c3-oled042.board.yaml';
+    const c3 = gen(dir, 'c3o-pad');
+    expect(c3.manifest.test_pin).toBe(10);
+    expect(file(c3, 'sdkconfig.board')).toContain('\nCONFIG_FR_WIFI_MAX_TX_POWER_QDBM=34\nCONFIG_FR_TEST_PIN=10\n');
+    edit(dir, C6, (y) => {
+      y.test_pin = 12;
+    });
+    expect(messages(dir)).toEqual(['test_pin GPIO12 is reserved for usb on esp32c6-supermini', 'test_pin GPIO12 is not in pins.free of esp32c6-supermini']);
+    edit(dir, C6, (y) => {
+      y.test_pin = 15;
+    });
+    expect(messages(dir, 'c6-pad-mono')).toEqual(["test_pin GPIO15 is claimed by 'status' (leds.status)", 'test_pin GPIO15 is not in pins.free of esp32c6-supermini']);
+    edit(dir, C3, (y) => {
+      y.test_pin = 2;
+    });
+    expect(gen(dir, 'c3o-pad').warnings).toContain(
+      'test_pin: GPIO2 (board test_pin) is a strapping pin and must be high at reset; nothing wired to it may pull it low while the chip resets',
+    );
+    edit(dir, C6, (y) => {
+      delete y.test_pin;
+    });
+    const none = gen(dir, 'c6-pad');
+    expect(none.manifest.test_pin).toBeNull();
+    expect(file(none, 'sdkconfig.board')).not.toContain('CONFIG_FR_TEST_PIN');
+  });
+
   it('rejects a board value the driver does not know', () => {
     const dir = fixture();
     edit(dir, C6, (y) => {
@@ -496,6 +569,12 @@ describe('driver manifests', () => {
     expect(d.dependencies ?? {}).toEqual(pinned);
     for (const v of Object.values(pinned)) {
       expect(v).toMatch(/^==/);
+    }
+    // design c6 D13: an LED driver's `traits:` say what its features() returns, which LedService reports.
+    if (d.implements === 'hal.LightOutput') {
+      const features = /LightFeatures features\(\) const override \{ return \{([^}]*)\}; \}/.exec(hpp)?.[1];
+      expect(features).toBeDefined();
+      expect(d.traits).toEqual({ color: /\.rgb = true/.test(features!) ? 'rgb' : 'mono', dimmable: /\.dimmable = true/.test(features!) });
     }
   });
 

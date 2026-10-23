@@ -25,6 +25,10 @@ export const ERROR_CODES = [
   'EXPIRED',
   'CAPABILITY_UNSUPPORTED',
   'INJECTION_DISABLED',
+  // Design c6 D19: the hub has no Local Network permission (macOS LNP; a human approves it), and a
+  // logs_assert that did not hold (CLI exit 6).
+  'LNP_DENIED',
+  'ASSERTION_FAILED',
   'INTERNAL',
 ] as const;
 
@@ -124,6 +128,8 @@ export function exitCodeFor(code: ErrorCode | undefined): number {
     case 'PORT_BUSY_EXTERNAL':
     case 'PORT_LEASED':
       return 5;
+    case 'ASSERTION_FAILED':
+      return 6;
     case 'BUILD_FAILED':
       return 7;
     case 'FLASH_FAILED':
@@ -140,11 +146,18 @@ export function exitCodeFor(code: ErrorCode | undefined): number {
   }
 }
 
-/** Exit code for a whole envelope: a failed call, or a job that ended failed or cancelled. "working" is 0. */
-export function exitCodeForResult(r: Result): number {
+/**
+ * Exit code for a whole envelope of `op`: a failed call, or a job that ended failed or cancelled. "working"
+ * is 0, and so is job_cancel answering with the job it cancelled (or one that had already ended): that op
+ * did what it was asked. A wait on a job that ended cancelled (job_wait, flash --wait) still exits 1.
+ */
+export function exitCodeForResult(r: Result, op?: string): number {
   if (!r.ok) {
     // A failed body without a code (not a real envelope) must still exit non-zero.
     return exitCodeFor(r.error?.code ?? 'INTERNAL');
+  }
+  if (op === 'job_cancel') {
+    return 0;
   }
   const data = r.data as { status?: string; error?: { code?: ErrorCode } } | null | undefined;
   if (data?.status === 'failed') {

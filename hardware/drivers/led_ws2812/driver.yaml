@@ -13,5 +13,6 @@ config:                                 # same order as LedWs2812::Config
   color_order: { type: enum, values: [GRB, RGB], from: board.color_order, default: GRB }
 cap_config:                             # fr.led config defaults for this driver (spec 04 §4.6)
   max_brightness: 64                    # full white is blinding and draws ~60 mA
+traits: { color: rgb, dimmable: true }  # fr.led traits its service reports (features() is rgb and dimmable; design c6 D13)
 resources: { gpio: 1, rmt_tx: 1 }
 dependencies: { espressif/led_strip: "==3.1.0~1" }   # must match idf_component.yml

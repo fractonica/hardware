@@ -2,9 +2,9 @@
 // control (WifiSta), hub_host resolution and the TCP socket; it sleeps in select() on the TCP socket and an
 // eventfd that Wi-Fi events, TX frames and drop requests poke. The core task's side never blocks: a TCP
 // frame is appended to a lock-free FIFO, a UDP datagram is one non-blocking sendto() on a socket that
-// lives for the whole run, so only one task ever writes to each socket.
+// lives for the whole run, so only one task ever writes to each socket. The address chain, with the hub's
+// `_fractonica._tcp` advert as its last step (design c6 D26), is hub_resolve.hpp's.
 #include <fcntl.h>
-#include <strings.h>
 #include <sys/select.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -32,6 +32,7 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
+#include "hub_resolve.hpp"
 #include "protocol.hpp"  // generated fr::proto::kMtuBulk
 #include "wifi_sta.hpp"
 
@@ -55,6 +56,9 @@ constexpr TimeUs kStableUs = 10'000'000;  // a connection that lasted this long 
 constexpr TimeUs kConnectTimeoutUs = 3'000'000;
 constexpr TimeUs kIdleWaitUs = 1'000'000;  // longest select() wait, so deadlines are never far off
 constexpr uint32_t kMdnsTimeoutMs = 1000;
+// The hub's advert (05 §5.12.5 step 4, 08 §8.10): SRV port 7421, TXT http=7422 api=7420.
+constexpr const char *kAdvertService = "_fractonica";
+constexpr const char *kAdvertProto = "_tcp";
 // 05 §5.11: SO_KEEPALIVE idle 5 s, interval 1 s, count 3 on both ends.
 constexpr int kKeepIdleS = 5;
 constexpr int kKeepIntvlS = 1;
@@ -94,17 +98,93 @@ const char *drop_text(DropReason why)
     return "?";
 }
 
+/** hub_resolve.hpp's lookups on lwIP and espressif/mdns, each bounded by kMdnsTimeoutMs. fr_net task. */
+class EspResolver final : public detail::Resolver
+{
+public:
+    uint32_t mdns_a(const char *name) override
+    {
+        esp_ip4_addr_t a{};
+        esp_err_t err = mdns_query_a(name, kMdnsTimeoutMs, &a);
+        if (err != ESP_OK || a.addr == 0) {
+            ESP_LOGD(TAG, "hub: mDNS %s.local: %s", name, esp_err_to_name(err));
+            return 0;
+        }
+        return a.addr;
+    }
+
+    uint32_t dns(const char *host) override
+    {
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        addrinfo *res = nullptr;
+        uint32_t ip = 0;
+        if (getaddrinfo(host, nullptr, &hints, &res) == 0 && res != nullptr) {
+            ip = reinterpret_cast<const sockaddr_in *>(res->ai_addr)->sin_addr.s_addr;
+        }
+        if (res != nullptr) {
+            freeaddrinfo(res);
+        }
+        return ip;
+    }
+
+    bool browse(detail::Advert &out) override
+    {
+        mdns_result_t *res = nullptr;
+        esp_err_t err = mdns_query_ptr(kAdvertService, kAdvertProto, kMdnsTimeoutMs, 1, &res);
+        if (err != ESP_OK || res == nullptr) {
+            ESP_LOGD(TAG, "hub: mDNS %s.%s.local: %s", kAdvertService, kAdvertProto,
+                     err != ESP_OK ? esp_err_to_name(err) : "no answer");
+            return false;
+        }
+        fill(out, *res);
+        mdns_query_results_free(res);
+        return out.instance[0] != '\0';
+    }
+
+    bool srv(detail::Advert &out) override
+    {
+        mdns_result_t *res = nullptr;
+        esp_err_t err = mdns_query_srv(out.instance, kAdvertService, kAdvertProto, kMdnsTimeoutMs, &res);
+        if (err != ESP_OK || res == nullptr) {
+            return false;
+        }
+        fill(out, *res);
+        mdns_query_results_free(res);
+        return out.port != 0;
+    }
+
+private:
+    /** What one answer gave: the PTR instance, the SRV target and port, the target's first IPv4. */
+    static void fill(detail::Advert &out, const mdns_result_t &r)
+    {
+        if (r.instance_name != nullptr) {
+            std::snprintf(out.instance, sizeof(out.instance), "%s", r.instance_name);
+        }
+        if (r.hostname != nullptr) {
+            std::snprintf(out.host, sizeof(out.host), "%s", r.hostname);
+        }
+        if (r.port != 0) {
+            out.port = r.port;
+        }
+        for (const mdns_ip_addr_t *a = r.addr; a != nullptr && out.ip == 0; a = a->next) {
+            if (a->addr.type == ESP_IPADDR_TYPE_V4) {
+                out.ip = a->addr.u_addr.ip4.addr;
+            }
+        }
+    }
+};
+
 /** The hub address, the TCP connection and the UDP socket. Methods run on the fr_net task unless noted. */
 class Hub
 {
 public:
     void configure(const Settings &s)
     {
-        port_ = s.hub_port;
-        in_addr a{};
-        if (s.hub_ip[0] != '\0' && inet_aton(s.hub_ip, &a) != 0) {
-            fallback_ip_ = a.s_addr;
-        }
+        default_port_ = s.hub_port;
+        hub_port_.store(s.hub_port, std::memory_order_relaxed);
+        address_.configure(s.hub_port, detail::parse_ipv4(s.hub_ip));
     }
 
     bool open_udp()
@@ -167,11 +247,12 @@ private:
     void set_tcp_up(bool v);
     void set_udp_up(bool v);
 
-    uint16_t port_ = 7421;
-    uint32_t fallback_ip_ = 0;  // fr_ident hub_ip (network order)
-    uint32_t last_ip_ = 0;      // the last address hub_host resolved to this boot
+    uint16_t default_port_ = 7421;  // CONFIG_FR_HUB_PORT
+    detail::HubAddress address_;     // the chain: hub_host, its last address, hub_ip, the advert
+    EspResolver resolver_;
     bool unresolved_said_ = false;  // "does not resolve" logged since the last address
     std::atomic<uint32_t> hub_ip_{0};  // what TCP connects to and UDP sends to (network order)
+    std::atomic<uint16_t> hub_port_{7421};  // ... at this port: the configured one, or the advert's SRV port
     char resolved_host_[FR_ID_HOST_MAX + 1] = {};  // hub_host behind hub_ip_, for diag (under host_mux_)
     mutable portMUX_TYPE host_mux_ = portMUX_INITIALIZER_UNLOCKED;
 
@@ -242,66 +323,35 @@ void Hub::notify(const Hooks &hooks)
 void Hub::resolve(const WifiSta &wifi)
 {
     // 05 §5.12.5: hub_host by mDNS on every attempt (macOS answers for <LocalHostName>.local whatever
-    // Local Network Privacy says), then the address it last had, then fr_ident's hub_ip.
+    // Local Network Privacy says), then the address it last had, then fr_ident's hub_ip, then the hub's
+    // _fractonica._tcp advert (design c6 D26; a C6 node with no hub_host finds the hub by itself).
     const char *host = wifi.hub_host();
-    uint32_t ip = 0;
-    const char *how = nullptr;
-    size_t len = std::strlen(host);
-    in_addr literal{};
-    if (len > 0 && inet_aton(host, &literal) != 0) {
-        ip = literal.s_addr;
-        how = "literal";
-    } else if (len > 6 && strcasecmp(host + len - 6, ".local") == 0) {
-        char name[FR_ID_HOST_MAX + 1];
-        std::snprintf(name, sizeof(name), "%.*s", static_cast<int>(len - 6), host);  // mDNS wants no domain
-        esp_ip4_addr_t a{};
-        esp_err_t err = mdns_query_a(name, kMdnsTimeoutMs, &a);
-        if (err == ESP_OK && a.addr != 0) {
-            ip = a.addr;
-            how = "mdns";
-        } else {
-            ESP_LOGD(TAG, "hub: mDNS %s: %s", host, esp_err_to_name(err));
-        }
-    } else if (len > 0) {
-        addrinfo hints{};
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        addrinfo *res = nullptr;
-        if (getaddrinfo(host, nullptr, &hints, &res) == 0 && res != nullptr) {
-            ip = reinterpret_cast<const sockaddr_in *>(res->ai_addr)->sin_addr.s_addr;
-            how = "dns";
-        }
-        if (res != nullptr) {
-            freeaddrinfo(res);
-        }
-    }
-    if (ip != 0) {
-        last_ip_ = ip;
-    } else if (last_ip_ != 0) {
-        ip = last_ip_;
-        how = "last address";
-    } else if (fallback_ip_ != 0) {
-        ip = fallback_ip_;
-        how = "hub_ip";
-    }
-    const char *shown = len > 0 ? host : "(no hub_host)";
-    if (ip == 0) {
+    const detail::Resolved r = address_.resolve(host, resolver_);
+    const char *shown = host[0] != '\0' ? host : "(no hub_host)";
+    if (r.ip == 0) {
         if (!unresolved_said_) {
-            ESP_LOGW(TAG, "hub: %s does not resolve and there is no fallback address", shown);
+            ESP_LOGW(TAG, "hub: %s does not resolve, there is no fallback address and no %s.%s advert answers",
+                     shown, kAdvertService, kAdvertProto);
             unresolved_said_ = true;
         }
     } else {
         unresolved_said_ = false;
-        if (ip != hub_ip_.load(std::memory_order_relaxed)) {
-            const uint8_t *b = reinterpret_cast<const uint8_t *>(&ip);
-            ESP_LOGI(TAG, "hub: %s is %u.%u.%u.%u (%s)", shown, b[0], b[1], b[2], b[3], how);
+        if (r.ip != hub_ip_.load(std::memory_order_relaxed) || r.port != hub_port_.load(std::memory_order_relaxed)) {
+            const uint8_t *b = reinterpret_cast<const uint8_t *>(&r.ip);
+            if (r.port == default_port_) {
+                ESP_LOGI(TAG, "hub: %s is %u.%u.%u.%u (%s)", shown, b[0], b[1], b[2], b[3], detail::how_name(r.how));
+            } else {
+                ESP_LOGI(TAG, "hub: %s is %u.%u.%u.%u port %u (%s)", shown, b[0], b[1], b[2], b[3], r.port,
+                         detail::how_name(r.how));
+            }
         }
+        hub_port_.store(r.port, std::memory_order_relaxed);  // published by hub_ip_'s release below
     }
     portENTER_CRITICAL(&host_mux_);
     std::snprintf(resolved_host_, sizeof(resolved_host_), "%s", host);
     portEXIT_CRITICAL(&host_mux_);
-    hub_ip_.store(ip, std::memory_order_release);
-    set_udp_up(ip != 0);
+    hub_ip_.store(r.ip, std::memory_order_release);
+    set_udp_up(r.ip != 0);
 }
 
 void Hub::start_connect(TimeUs now)
@@ -330,7 +380,7 @@ void Hub::start_connect(TimeUs now)
     setsockopt(fd_, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
     sockaddr_in a{};
     a.sin_family = AF_INET;
-    a.sin_port = htons(port_);
+    a.sin_port = htons(hub_port_.load(std::memory_order_relaxed));
     a.sin_addr.s_addr = ip;
     if (connect(fd_, reinterpret_cast<const sockaddr *>(&a), sizeof(a)) == 0) {
         on_connected(now);
@@ -366,7 +416,8 @@ void Hub::on_connected(TimeUs now)
     connects_.fetch_add(1, std::memory_order_relaxed);
     uint32_t ip = hub_ip_.load(std::memory_order_relaxed);
     const uint8_t *q = reinterpret_cast<const uint8_t *>(&ip);
-    ESP_LOGI(TAG, "hub: connected to %u.%u.%u.%u:%u", q[0], q[1], q[2], q[3], port_);
+    const unsigned port = hub_port_.load(std::memory_order_relaxed);
+    ESP_LOGI(TAG, "hub: connected to %u.%u.%u.%u:%u", q[0], q[1], q[2], q[3], port);
     set_tcp_up(true);
 }
 
@@ -636,8 +687,8 @@ fr::Status Hub::udp_send(std::span<const uint8_t> env)
     }
     sockaddr_in a{};
     a.sin_family = AF_INET;
-    a.sin_port = htons(port_);
     a.sin_addr.s_addr = hub_ip_.load(std::memory_order_acquire);
+    a.sin_port = htons(hub_port_.load(std::memory_order_relaxed));  // after the address: its acquire covers it
     // Non-blocking: when the driver has no TX buffer (ENOMEM) the datagram is lost; Net retries Q1.
     if (sendto(udp_fd_, env.data(), env.size(), MSG_DONTWAIT, reinterpret_cast<const sockaddr *>(&a), sizeof(a)) < 0) {
         udp_fail_.fetch_add(1, std::memory_order_relaxed);

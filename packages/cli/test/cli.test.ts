@@ -1,15 +1,18 @@
 import { spawn } from 'node:child_process';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { callTimeoutMs, toResult } from '../src/client.ts';
-import { renderResult } from '../src/render.ts';
-import { cliFlag, findOp, OPS, REGISTRY_HASH, type OpDef } from '../../protocol/src/ops.ts';
+import { cliExitCode, renderResult } from '../src/render.ts';
+import { cliFlag, findOp, OPS, type OpDef } from '../../protocol/src/ops.ts';
+import { REGISTRY_HASH } from '../../protocol/src/registry-hash.ts';
 import { exitCodeForResult } from '../../protocol/src/result.ts';
 
 const MAIN = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'main.ts');
@@ -23,6 +26,7 @@ describe('flags', () => {
     expect(cliFlag('expect_timeout_s')).toBe('expect-timeout');
     expect(cliFlag('max_lines')).toBe('max-lines');
     expect(cliFlag('source_dir')).toBe('source-dir');
+    expect(cliFlag('ttl_s')).toBe('ttl'); // fr serial lease <dev> --ttl 120 (design c6 D4)
   });
 });
 
@@ -67,6 +71,14 @@ describe('exitCodeForResult', () => {
     expect(exitCodeForResult({ ok: true, cursor: '', data: { status: 'cancelled' } })).toBe(1);
     expect(exitCodeForResult({ ok: true, cursor: '', data: null })).toBe(0);
   });
+  it('job_cancel answering the job it cancelled is success; a wait on a cancelled job is not (as fr mcp)', () => {
+    const cancelled = { ok: true, cursor: '', data: { job_id: 'j_1', status: 'cancelled' } } as const;
+    expect(exitCodeForResult(cancelled, 'job_cancel')).toBe(0);
+    expect(cliExitCode('job_cancel', cancelled)).toBe(0);
+    expect(cliExitCode('job_cancel', { ok: true, cursor: '', data: { job_id: 'j_1', status: 'failed' } })).toBe(0); // it had already ended
+    expect(cliExitCode('job_cancel', { ok: false, cursor: '', error: { code: 'NOT_FOUND', message: 'no job', retryable: false } })).toBe(3);
+    expect(cliExitCode('job_wait', cancelled)).toBe(1);
+  });
 });
 
 describe('renderResult', () => {
@@ -90,6 +102,8 @@ describe('fr (subprocess)', { timeout: 20_000 }, () => {
   let server: Server;
   let hubUrl = '';
   const requests: { op: string; body: Record<string, unknown> }[] = [];
+  /** The X-Fr-Client header of each op call (design c6 D18). */
+  const clients: (string | undefined)[] = [];
   const replies = new Map<string, { status: number; body: unknown }>();
   // The fake hub reports this pid, so a stop that wrongly went ahead would only kill a sleep.
   const decoy = spawn('sleep', ['60'], { stdio: 'ignore' });
@@ -105,6 +119,7 @@ describe('fr (subprocess)', { timeout: 20_000 }, () => {
         }
         const name = req.url!.split('/').pop()!;
         requests.push({ op: name, body: JSON.parse(raw || '{}') as Record<string, unknown> });
+        clients.push(req.headers['x-fr-client'] as string | undefined);
         const reply = replies.get(name) ?? { status: 200, body: { ok: true, data: {}, cursor: 'c:1.1' } };
         res.statusCode = reply.status;
         res.end(typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body));
@@ -237,6 +252,68 @@ describe('fr (subprocess)', { timeout: 20_000 }, () => {
     await run(['bind', 'ls', 'tag:poc', '--live'], { op: 'binding_list', body: { selector: 'tag:poc', live: true } });
     await run(['bind', 'rm', 'pad-c6', 'all'], { op: 'binding_clear', body: { device: 'pad-c6', slot: 'all' } });
     await run(['latency', 'tag:poc', '--window', '60'], { op: 'latency_stats', body: { selector: 'tag:poc', window_s: 60 } });
+  });
+
+  it('generates the C6 commands (design c6 §3.2, spec 09 §9.5)', { timeout: 90_000 }, async () => {
+    const run = async (args: string[], want: { op: string; body: Record<string, unknown> }) => {
+      const r = await fr([...args, '--json']);
+      expect(r.code, args.join(' ')).toBe(0);
+      expect(requests.at(-1)).toEqual(want);
+    };
+    // A list field takes one item per use of its flag, in order.
+    await run(['assert', 'logs', 'pad-c3', '--since', 'c:7.120', '--expect', 'fr: ready', '--expect', 'wifi: joined', '--forbid', 'Guru Meditation'], {
+      op: 'logs_assert',
+      body: { selector: 'pad-c3', since: 'c:7.120', expect: ['fr: ready', 'wifi: joined'], forbid: ['Guru Meditation'] },
+    });
+    await run(['serial', 'renew', 'l_0123456789ab'], { op: 'serial_lease_renew', body: { lease_id: 'l_0123456789ab' } });
+    await run(['serial', 'release', 'l_0123456789ab'], { op: 'serial_release', body: { lease_id: 'l_0123456789ab' } });
+    await run(['latency', 'probe', 'pad-c6', 'pad-c3b', '--count', '100', '--rate-hz', '2', '--label', 'wifi'], {
+      op: 'latency_probe',
+      body: { from: 'pad-c6', to: 'pad-c3b', count: 100, rate_hz: 2, label: 'wifi', wait_s: 110 },
+    });
+    await run(['wait', 'event', 'boot.down', '--since', 'c:1.1', '--prompt-human', 'Press BOOT on pad-c6'], {
+      op: 'wait_for_event',
+      body: { types: 'boot.down', since: 'c:1.1', prompt_human: 'Press BOOT on pad-c6' },
+    });
+    await run(['caps', 'ls', '--device', 'pad-c6'], { op: 'capability_list', body: { device: 'pad-c6' } });
+    await run(['boards', 'ls'], { op: 'board_list', body: {} });
+    await run(['profiles', 'ls'], { op: 'profile_list', body: {} });
+    await run(['hub', 'doctor'], { op: 'hub_doctor', body: {} });
+    await run(['jobs', 'ls', '--origin', 'mcp'], { op: 'job_list', body: { origin: 'mcp' } });
+    const t = await fr(['test', 'run', 't-lat', '--tier', 'target', '--json']);
+    expect(t.code).toBe(0);
+    expect(requests.at(-1)).toEqual({ op: 'test_run', body: { suite: 't-lat', tier: 'target', source_dir: expect.any(String), wait_s: 110 } });
+    // ASSERTION_FAILED exits 6 (09 §9.3).
+    replies.set('logs_assert', { status: 200, body: { ok: false, cursor: 'c:1.1', error: { code: 'ASSERTION_FAILED', message: 'no line matched "fr: ready"', retryable: false } } });
+    const failed = await fr(['assert', 'logs', 'pad-c3', '--since', 'c:7.120', '--expect', 'fr: ready', '--json']);
+    expect(failed.code).toBe(6);
+    expect((await fr(['test', 'run', '--tier', 'sim', '--json'])).code).toBe(64);
+    // Every op call names its client: the hub records it as a job's origin (design c6 D18).
+    expect(clients.length).toBeGreaterThan(0);
+    expect(new Set(clients)).toEqual(new Set(['cli']));
+  });
+
+  it('has the hand-written C6 commands, each in its own module (design c6 §3.3)', { timeout: 60_000 }, async () => {
+    // fr mcp serves stdio until its client closes stdin (here at once): nothing but JSON-RPC on stdout.
+    const mcp = await fr(['mcp']);
+    expect(mcp.code).toBe(0);
+    expect(mcp.stdout).toBe('');
+    // fr codegen client writes what client_generate answers and nothing else: here the fake hub answers no
+    // files, so it fails and the out dir stays empty. What it writes is client-generate.test.ts's.
+    const out = mkdtempSync(join(tmpdir(), 'fr-codegen-'));
+    try {
+      const before = requests.length;
+      const gen = await fr(['codegen', 'client', '--out', out, '--json']);
+      expect(gen.code).toBe(1);
+      expect(JSON.parse(gen.stdout)).toMatchObject({ ok: false, error: { code: 'INTERNAL' } });
+      expect(requests.slice(before).map((r) => r.op)).toEqual(['client_generate']);
+      expect(readdirSync(out)).toEqual([]);
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+    // fr serial lease and monitor are serial.ts's (serial.test.ts); renew and release stay generated.
+    expect((await fr(['serial', 'release', 'l_0123456789ab', '--json'])).code).toBe(0);
+    expect(requests.at(-1)).toEqual({ op: 'serial_release', body: { lease_id: 'l_0123456789ab' } });
   });
 
   it('exits 8 for OTA_FAILED and OTA_ROLLED_BACK (spec 09 §9.3)', () => {

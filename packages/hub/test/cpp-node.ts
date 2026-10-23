@@ -1,7 +1,8 @@
 // The C++ fr_net_node for interop tests (design c3 §5, c4 §5, c5 §5): build/host-tests/fr_net_node runs the real
 // fr_net core, services and (C4) the real fr_ota core on POSIX links, and (C5) ESP-NOW on a fake air medium. CppNode is one process; CppBoard is
 // one board across boots: with --ota-dir an exited process (an OTA restart, a rollback, a crash) is power
-// cycled into the next boot, which reads what the last one left in its flash and nvs.
+// cycled into the next boot, which reads what the last one left in its flash and nvs. C6 (design c6 §6 S6) adds
+// fr.diag on port 241, the `net loss` hook and the T-LAT wire between two nodes (--pin-target, --pin-listen).
 // `pnpm test:host` builds the binary (run it again after changing C++); without it the suites are skipped.
 
 import { type ChildProcessWithoutNullStreams, spawn, spawnSync } from 'node:child_process';
@@ -28,6 +29,17 @@ export type Line = { ev: string; [k: string]: unknown };
  * `directory` (items {addr, mac} by addr), `wifi` and `inject`, and `state` the C5 counters (air_*, relay_*,
  * bcast_*, bind_*, `nodes` by path, `medium`, `msgs`).
  * Every node of one medium needs the hub's --net, its own --mac and its own --addr.
+ *
+ * C6 (design c6 §6 S6): fr.diag on port 241 answers diag_exec over the hub link (`pin_pulse <us>`, `net loss <pct>
+ * <s> [both|tx|rx]`, `net drop_hub_link|udp_block|ip_block <s>`, `stats`, `info`), and a CMD with exec_at runs at its
+ * time. Stdin `loss <pct> <s> [both|tx|rx]` starts Net's loss hook at once (line `loss` {ok, pct, s, dir}, which a
+ * diag `net loss` prints too).
+ * `--pin-target <udp port>` is the board's test pin: `pin_pulse` sends one datagram there (line `pin_pulse` {us,
+ * at_us}). `--pin-listen <udp port>` (0: any free one, given by the `pin_listen` {port} line, pinListenPort()) is
+ * the boot button wired to another node's test pin: a datagram presses it and releases it after the pulse, through
+ * the real debounce (line `pin_in` {us, at_us}; boot.down, boot.up and boot.click follow). `state` adds loss_pct,
+ * loss_dir, loss_tx, loss_rx, cmds_refused, cmds_scheduled, exec_late, exec_cancelled, exec_late_us_max and
+ * rx_queue_us_max.
  */
 export class CppNode {
   readonly lines: Line[] = [];
@@ -87,6 +99,12 @@ export class CppNode {
     this.send('state');
     await until(() => this.of('state').length > n, 2000, 'a state line');
     return this.of('state').at(-1)!;
+  }
+
+  /** With --pin-listen: the UDP port its boot input listens on (the one the OS gave for `--pin-listen 0`). */
+  async pinListenPort(timeoutMs = 5000): Promise<number> {
+    await until(() => this.of('pin_listen').length > 0, timeoutMs, 'the pin_listen line');
+    return Number(this.of('pin_listen')[0].port);
   }
 
   /** Calls `fn` once the process has exited (at once if it has). */

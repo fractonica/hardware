@@ -11,6 +11,7 @@
     "@fractonica/codegen": "workspace:*",
     "@fractonica/host": "workspace:*",
     "@fractonica/protocol": "workspace:*",
+    "@modelcontextprotocol/server": "2.3.1",
     "commander": "15.0.0",
     "zod": "4.6.7"
   }

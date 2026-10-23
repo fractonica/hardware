@@ -69,6 +69,7 @@ function hubWith(opts: { run?: number; db?: Db } = {}) {
     onOta: () => () => undefined,
     tcpAddress: () => null,
     hooks: () => () => undefined,
+    endSerialSession: async () => false,
   };
   const hub = { db, logs, events, registry, router, seq } as unknown as HubContext;
   const publish = (type: string, device?: string, extra: Partial<HubEvent> = {}) =>
@@ -153,6 +154,31 @@ describe('type globs and where', () => {
     expect(matchType('boot.d?wn', 'boot.down')).toBe(false); // `?` is literal
     expect(matchType('boot.d?wn', 'boot.d?wn')).toBe(true);
     expect(sqliteGlob('a?[b*')).toBe('a[?][[]b*');
+  });
+
+  it('match in linear time: a glob of many stars cannot stall the loop (it backtracked as a RegExp)', () => {
+    expect(matchType('', '')).toBe(true);
+    expect(matchType('', 'a')).toBe(false);
+    expect(matchType('**', '')).toBe(true);
+    expect(matchType('*.*.down', 'pad.boot.down')).toBe(true);
+    expect(matchType('*o*o*', 'boot.down')).toBe(true);
+    expect(matchType('*o*o*o*x', 'boot.down')).toBe(false);
+    expect(matchType('b*t.d*n', 'boot.down')).toBe(true);
+    expect(matchType('b*t.d*n', 'boot.downs')).toBe(false);
+    expect(matchType('a*ab', 'aaab')).toBe(true); // the star gives back characters
+    expect(matchType('.*', 'xboot')).toBe(false); // `.` is literal
+    // A short glob from a /ws sub: as a RegExp, 20 stars took about 300 ms against `boot.down` and 40 a minute
+    // (on longer types, far longer still), per event and subscriber.
+    let t0 = performance.now();
+    expect(matchType(`${'*'.repeat(20)}x`, 'boot.down')).toBe(false);
+    expect(performance.now() - t0).toBeLessThan(50);
+    t0 = performance.now();
+    for (const type of ['boot.down', 'status.effect_done', 'x'.repeat(64)]) {
+      expect(matchType(`${'*'.repeat(40)}x`, type)).toBe(type.endsWith('x'));
+    }
+    expect(matchType(`${'*a'.repeat(200)}!`, 'a'.repeat(400))).toBe(false);
+    expect(matchType(`${'*a'.repeat(200)}`, 'a'.repeat(400))).toBe(true);
+    expect(performance.now() - t0).toBeLessThan(100);
   });
 
   it('where compares event fields (and device/alias), numbers matching u64 strings', () => {
@@ -281,7 +307,7 @@ describe('wait_for_event', () => {
     const app = buildServer(hub, 7420);
     cleanups.push(() => void app.close());
     // network_get hands out no cursor of its own (and fails here: no record); the envelope's is minted.
-    const r = await app.inject({ method: 'POST', url: '/api/v1/op/network_get', payload: {} });
+    const r = await app.inject({ method: 'POST', url: '/api/v1/op/network_get', headers: { host: '127.0.0.1:7420' }, payload: {} });
     const { cursor: since } = r.json() as { cursor: string };
     expect(since).toBe(`c:1.${hub.seq.head()}`);
     const minted = events.mintedAtUs(hub.seq.head())!;

@@ -7,6 +7,9 @@
 // C5 (design c5 §3, spec 05 §5.9-5.10, 07 §7.11) adds ESP-NOW through AirLink (air.hpp): node <-> node
 // delivery with its fallback chain, managed flooding, the neighbour table, the directory and the bindings,
 // whose persistence goes through DirectoryStore and BindingStore (stores.hpp).
+//
+// C6 (design c6 D21-D23) adds the `net loss` hook, hub CMDs scheduled by exec_at, and the link task's receive
+// time, which TIME, PONG, expire_at, exec_at and the session keepalive count from.
 #pragma once
 
 #include <algorithm>
@@ -297,6 +300,9 @@ struct MsgStats {
     uint32_t other = 0;
 };
 
+/** `net loss` (design c6 D21): the envelopes the hook may drop, those sent, those received, or both. */
+enum class LossDir : uint8_t { both = 0, tx = 1, rx = 2 };
+
 struct State {
     std::array<LinkState, kLinkKinds> links{};
     uint16_t hub_epoch = 0;        // from the last WELCOME
@@ -314,6 +320,17 @@ struct State {
     bool hub_link_dropped = false;  // drop_hub_link() active
     bool udp_blocked = false;       // udp_block() active
     bool ip_blocked = false;        // ip_block() active
+    uint8_t loss_pct = 0;           // loss() active: the drop chance of each envelope, in percent (0: off)
+    LossDir loss_dir = LossDir::both;
+    uint32_t loss_s_left = 0;       // seconds loss() has left (state() fills it in)
+    // C6 (design c6 D21-D23); reset_stats() zeroes the counters and the two maxima.
+    uint32_t loss_tx = 0;           // envelopes loss() dropped on their way out (also in hook_drops)
+    uint32_t loss_rx = 0;           // ... and on their way in
+    uint32_t cmds_scheduled = 0;    // exec_at CMDs stored to run at their time (05 §5.6)
+    uint32_t exec_late = 0;         // exec_at CMDs answered LATE: not 0-2 s ahead when they arrived
+    uint32_t exec_cancelled = 0;    // scheduled CMDs a WELCOME of a new hub run dropped unrun
+    uint32_t exec_late_us_max = 0;  // the most a scheduled CMD ran after its time, in µs (not a counter)
+    uint32_t rx_queue_us_max = 0;   // the longest a hub-link envelope waited between its link task and Net (µs)
     // C5 (design c5 §2 diag stats; the per-topic MSG counts are Net::msg_stats()); reset_stats() zeroes them.
     RelayStats relay;
     BcastStats bcast;
@@ -344,6 +361,10 @@ public:
     /** A USB node whose TCP session heard nothing from the hub for more than this many tenths of an interval
      * sends over serial instead, as the hub does to it (05 §5.10; the hub's wifiSilentX10). */
     static constexpr uint32_t kWifiSilentX10 = 20;
+    /** Hub CMDs scheduled by exec_at at once (05 §5.17, design c6 D22); another answers BUSY. */
+    static constexpr size_t kExecSlots = 8;
+    /** exec_at runs a CMD at most this far ahead of its arrival (05 §5.6); further, or past, answers LATE. */
+    static constexpr uint32_t kExecWindowUs = 2'000'000;
 
     /** Stores the configuration only; the timer is taken at the first attach(). */
     Net(Core &core, Host &host, const Config &cfg);
@@ -356,8 +377,14 @@ public:
     void attach(Link &link);
     /** A link went up or down. */
     void link_changed(LinkKind kind);
-    /** An envelope from a link; the caller already copied it off the transport. */
-    void receive(LinkKind from, std::span<const uint8_t> envelope);
+    /**
+     * An envelope from a link; the caller already copied it off the transport. `at` is when the link task had
+     * it (design c6 D23): TIME t2, PONG t1, the expire_at and exec_at checks and the session keepalive count
+     * from there, not from when the core task got to it, and the wait in between is State::rx_queue_us_max.
+     * Without `at`, now: a link that runs on the core task, and the tests.
+     */
+    void receive(LinkKind from, std::span<const uint8_t> envelope, TimeUs at);
+    void receive(LinkKind from, std::span<const uint8_t> envelope) { receive(from, envelope, core_.now()); }
     /** BYE on every session, best effort (reboot, ota, sleep), and the sessions end; HELLO resumes after
      * hello_retry_ms if the node lives on. Called inside a request, the BYE follows that request's
      * RESULT, both on the link the request came on (the hub orders frames per link only). */
@@ -464,6 +491,15 @@ public:
      * hook ends, which then times it out if it went silent too long). Serial carries on as usual, so a USB
      * node stays online at the hub through the heartbeats on its serial session. */
     void ip_block(uint32_t seconds);
+    /**
+     * `net loss <pct> <s> [both|tx|rx]` (design c6 D21, T-INPUT): for `s` seconds every hub-link envelope
+     * (serial, TCP, UDP; never ESP-NOW) sent (tx) and/or received (rx) is dropped with chance `pct` percent.
+     * Each transmission is its own trial, a UDP twin and a Q1 re-send included, and a dropped one counts as
+     * sent: no UDP -> TCP rescue, as the network ate it. It holds no link, so sessions time out, HELLO and
+     * reconnect as they would. pct or seconds 0 ends it. Its PRNG is seeded apart from the jitter's, so a run
+     * under loss keeps the heartbeat and retry timing of one without.
+     */
+    void loss(uint8_t pct, uint32_t seconds, LossDir dir);
 
     // cap::Sink: capability emissions become EVENT/STATE envelopes to the hub. An EVENT first runs the
     // bindings on it (07 §7.11: right after the local emission, before and independent of the hub send).
@@ -501,6 +537,26 @@ private:
         uint8_t bytes[kRtSize];
     };
 
+    /** A hub CMD being answered: where its RESULT goes and what it names (on_cmd, or a scheduled one). */
+    struct CmdRef {
+        LinkKind from = LinkKind::tcp;  // the link it came on: a serial request is answered on serial
+        bool respond = false;           // unicast with ACK_REQ: a RESULT is owed
+        uint8_t port = 0;
+        uint8_t kind = 0;
+        uint16_t src = 0;
+        uint16_t epoch = 0;  // the request's (the hub run's)
+        uint32_t seq = 0;
+    };
+
+    /** A hub CMD whose exec_at is still ahead (05 §5.6, design c6 D22): dispatched, and answered, at `due`. */
+    struct Scheduled {
+        bool used = false;
+        CmdRef cmd;
+        TimeUs due = 0;  // core clock
+        uint8_t len = 0;
+        uint8_t args[kRtSize];  // a realtime CMD's body (BULK ones are refused)
+    };
+
     /** One response for DUP requests; `bulk` ones live in bulk_cache_ (one at a time). */
     struct Cached {
         bool used = false;
@@ -524,6 +580,14 @@ private:
     void on_presence(LinkKind from, uint8_t kind, std::span<const uint8_t> body, bool unicast);
     void on_ack(uint8_t kind, uint16_t req_epoch, uint32_t req_seq);
     void on_cmd(const fr::wire::EnvelopeView &e, bool unicast, LinkKind from);
+    /** Host::dispatch, then the RESULT (answer_cmd). */
+    void run_cmd(const CmdRef &c, std::span<const uint8_t> args);
+    /** The RESULT of `c` with status `st` and `fields`, cached for its DUPs, on the path an answer takes. */
+    void answer_cmd(const CmdRef &c, const Status &st, std::span<const uint8_t> fields);
+    /** exec_at (design c6 D22): stores `c` to run at `exec_at`, or says why not (BUSY, LATE, INVALID_ARGS). */
+    Status schedule(const CmdRef &c, uint32_t exec_at, uint8_t flags, std::span<const uint8_t> args);
+    /** The scheduled CMDs that are due, earliest first. From on_timer() only: never inside a dispatch. */
+    void run_scheduled();
     void on_ota(const fr::wire::EnvelopeView &e, bool unicast, LinkKind from);
     void on_sync_req(LinkKind from, std::span<const uint8_t> body);
     void send_ack(const fr::wire::Header &h);
@@ -552,12 +616,18 @@ private:
     void clear_udp_ok();
     /** Link::hold() as the hooks want it: every link during drop_hub_link, TCP and UDP during ip_block. */
     void update_holds();
+    /** The timer's callback: run_scheduled(), then tick(). */
+    void on_timer();
+    /** Every deadline but the scheduled CMDs'; also run at once when a debug hook ends. */
     void tick();
     void arm();
     void run_deferred();
     void start_drop(uint32_t seconds);
     void start_udp_block(uint32_t seconds);
     void start_ip_block(uint32_t seconds);
+    void start_loss(uint8_t pct, uint32_t seconds, LossDir dir);
+    /** One loss() trial for an envelope going `way` (tx or rx): true drops it. */
+    bool lose(LossDir way);
     void end_drop();
     void end_ip_block();
     /** Session timeouts resume after a hook: a session in `which` (kVia* bits) silent too long ends now. */
@@ -827,10 +897,18 @@ private:
     bool defer_drop_ = false;
     bool defer_udp_block_ = false;
     bool defer_ip_block_ = false;
-    TimeUs rx_at_ = 0;  // when the envelope being handled arrived (TIME t2)
+    TimeUs loss_until_ = 0;
+    bool defer_loss_ = false;
+    uint8_t defer_loss_pct_ = 0;
+    uint32_t defer_loss_s_ = 0;
+    LossDir defer_loss_dir_ = LossDir::both;
+    TimeUs rx_at_ = 0;  // when the envelope being handled reached its link task (TIME t2)
 
     uint32_t rng_ = 0;
     bool rng_seeded_ = false;
+    uint32_t loss_rng_ = 0;  // loss()'s own xorshift32, so the jitter draws stay as they were
+
+    std::array<Scheduled, kExecSlots> exec_{};
 
     std::array<Pending, kOutboxEntries> outbox_{};
     std::array<Cached, kCacheEntries> cache_{};

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fractonica demo</title>
+  </head>
+  <body data-connected="false">
+    <header class="bar">
+      <h1>Fractonica demo</h1>
+      <div class="status">
+        <span id="conn" class="conn">connecting…</span>
+        <span>WS rtt <output id="rtt" data-rtt-ms="">–</output></span>
+      </div>
+    </header>
+    <p id="error" class="error" hidden></p>
+    <main>
+      <section aria-labelledby="devices-h">
+        <h2 id="devices-h">Devices</h2>
+        <div id="chips" class="chips"></div>
+      </section>
+      <section aria-labelledby="relay-h">
+        <h2 id="relay-h">Relay <small>pad-c6 BOOT ↓ → pad-c3 LED blink, in this page</small></h2>
+        <p class="stats">
+          last <output id="relay-last" data-ms="">–</output>
+          · p50 <output id="relay-p50" data-ms="">–</output>
+          · p99 <output id="relay-p99" data-ms="">–</output>
+          · n <output id="relay-n">0</output>
+        </p>
+        <p class="hint">press → RESULT on the hub clock (<code>r.tHubUs − e.tHubUs</code>)</p>
+        <ol id="relay" class="rows"></ol>
+      </section>
+      <section aria-labelledby="bcast-h">
+        <h2 id="bcast-h">Broadcast</h2>
+        <button id="broadcast" type="button" disabled>Broadcast "ping"</button>
+        <output id="broadcast-result" class="result"></output>
+        <p class="hint">blinks every pad bound with <code>fr bind &lt;pad&gt;.msg:ping &lt;pad&gt;.status.blink '{"count":1}'</code></p>
+      </section>
+      <section aria-labelledby="events-h" class="wide">
+        <h2 id="events-h">Events <small>boot.* of pad-c6 and pad-c3, newest first</small></h2>
+        <ol id="events" class="rows"></ol>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

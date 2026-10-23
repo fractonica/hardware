@@ -298,6 +298,23 @@ describe('fr build with fr gen firmware', { timeout: 20_000 }, () => {
     expect(m.catalog_hash).toBe(0x1234abcd);
     expect(m.caps).toEqual([{ name: 'boot', port: 1, cap: 'fr.button', cap_id: 1, version: '1.0', driver: 'button_gpio', config: { debounce_ms: 20 } }]);
     expect(m).toMatchObject({ board: 'test-board', target: 'esp32c6', part_profile: 'fr-4mb-v1' });
+    expect(m).not.toHaveProperty('test_pin'); // a pre-C6 fr_manifest.json has none
+  });
+
+  it("ingests C6's traits per instance and the board's test_pin (design c6 D13, D24)", async () => {
+    const traits = { long_press: true, multi_press_max: 3, color: 'mono' };
+    spec.files['fr_manifest.json'] = JSON.stringify({
+      ...JSON.parse(spec.files['fr_manifest.json']),
+      test_pin: 20,
+      caps: [{ name: 'boot', port: 1, cap: 'fr.button', cap_id: 1, version: '1.0', driver: 'button_gpio', config: { debounce_ms: 20 }, traits }],
+    });
+    writeFileSync(join(src, 'gen-spec.json'), JSON.stringify(spec));
+    const db = openDb(':memory:');
+    const ctx: JobCtx = { jobId: 'j', signal: new AbortController().signal, log: () => undefined, stage: () => undefined, progress: () => undefined };
+    const r = await runBuild(db, ctx, { sourceDir: src, profile: PROFILE, buildType: 'debug', app: 'node', clean: false });
+    const m = loadManifest(db, r.build_id);
+    expect(m.test_pin).toBe(20);
+    expect(m.caps?.[0].traits).toEqual(traits);
   });
 
   it('regenerates sdkconfig when the generated firmware changes, not when only fr_manifest.json does', async () => {

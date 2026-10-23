@@ -16,6 +16,8 @@ export interface Endpoint {
   /** Ends the endpoint (TCP: destroys the socket). Serial ports stay open; only the session ends. */
   close(): void;
   readonly closed: boolean;
+  /** Serial: resolves once every line queued so far has been written (or refused), closed or not (design c6 D4). */
+  flushed?(): Promise<void>;
 }
 
 /** Where a UDP datagram came from. */

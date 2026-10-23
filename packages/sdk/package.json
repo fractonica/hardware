@@ -1,0 +1,18 @@
+{
+  "name": "@fractonica/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "@fractonica/source": "./src/index.ts", "default": "./dist/index.js" },
+    "./wire": { "@fractonica/source": "./src/wire.ts", "default": "./dist/wire.js" }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.2",
+    "ws": "8.22.0"
+  }
+}
