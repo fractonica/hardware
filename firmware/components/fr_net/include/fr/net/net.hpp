@@ -123,13 +123,18 @@ struct Identity {
     }
 };
 
-/** The Wi-Fi association, for HELLO (channel, bssid) and HEARTBEAT (rssi_ap, the wifi_up and swept bits). */
+/** The Wi-Fi association, for HELLO (channel, bssid) and HEARTBEAT (rssi_ap, the wifi_up and swept bits); and the
+ * hub link (design m2-c1-hil D11), which Net ignores and services read through fr::core::link_info()
+ * (fr/core/node_net.hpp fills these fields from Net: hub_link_info()). */
 struct LinkInfo {
     bool wifi_up = false;
     uint8_t channel = 0;             // 0: not associated
     std::array<uint8_t, 6> bssid{};  // all zero: not associated
     int8_t rssi = 0;
     uint32_t sweeps = 0;  // all-channel sweeps this boot (05 §5.4): a new one sets the next HEARTBEAT's swept bit
+    bool hub_session = false;  // a WELCOMEd hub session on serial or TCP now (State::hub_link())
+    TimeUs hub_heard_at = 0;   // the newest frame of the hub's (Net::hub_heard_at()); 0: none this boot
+    uint16_t hub_epoch = 0;    // the hub run of the last WELCOME (State::hub_epoch); 0: none yet
 };
 
 /** Node-side HEARTBEAT values Net cannot see from the core task's own state. */
@@ -390,6 +395,19 @@ public:
      * RESULT, both on the link the request came on (the hub orders frames per link only). */
     void bye(uint8_t reason);
     State state() const;
+    /**
+     * When the newest frame from the hub arrived (design m2-c1-hil D11): its link task's stamp, on the core clock;
+     * 0 for none this boot. Any frame of the hub run on a session link counts, the hub's keepalive (at least one
+     * per heartbeat interval, 05 §5.11) and a node frame it forwarded included, a WELCOME of any run too. Frames a
+     * debug hook holds (drop_hub_link, ip_block) or loss() eats do not: they never reach the node. Unlike
+     * State::hub_link(), it does not wait for a session timeout (3.5 intervals) to say the hub went quiet, nor
+     * stay fresh while drop_hub_link freezes the session.
+     */
+    TimeUs hub_heard_at() const { return hub_heard_at_; }
+    /** The hub run of the last WELCOME (State::hub_epoch, without the copy state() makes); 0 before any. */
+    uint16_t hub_epoch() const { return state_.hub_epoch; }
+    /** A WELCOMEd hub session on serial or TCP now (State::hub_link(), without the copy state() makes). */
+    bool hub_link() const { return state_.hub_link(); }
     /** `diag stats reset`: zeroes the counters (not the flags, hub_epoch or state_seq). */
     void reset_stats();
     /**
@@ -903,6 +921,7 @@ private:
     uint32_t defer_loss_s_ = 0;
     LossDir defer_loss_dir_ = LossDir::both;
     TimeUs rx_at_ = 0;  // when the envelope being handled reached its link task (TIME t2)
+    TimeUs hub_heard_at_ = 0;  // hub_heard_at()
 
     uint32_t rng_ = 0;
     bool rng_seeded_ = false;

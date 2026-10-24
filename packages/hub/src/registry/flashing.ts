@@ -2,12 +2,14 @@
 // device selector or a port. Plans that write fr_ident (full for a provisioned device, identity, recover)
 // render it from the registry when the job runs, into a temp dir the job deletes; the plan and a dry run
 // show only where it goes. Whether full writes or erases fr_ident is decided again once the job holds the
-// port: a device_provision queued ahead of it may have registered the board since the request.
+// port: a device_provision queued ahead of it may have registered the board since the request. M2-C1
+// (design m2-c1-hil D15; stream S4): once the port's device id is known, the fixture fence's image rules.
 
 import { type ArtifactManifest, FrError, MAX_WAIT_S } from '@fractonica/protocol';
 
 import { loadManifest, newestBuildId } from '../artifacts.ts';
 import type { Device, HubContext } from '../context.ts';
+import { assertFixtureImage } from '../fixture/fence.ts';
 import { type FlashPlan, flashPlan, hardResetCapturing, type IdentRegion, identRegion, type PlanName, runPytools } from '../flash.ts';
 import { readNetwork } from '../network.ts';
 import { assertPortFree, nameBusyHolder } from '../ports/holders.ts';
@@ -148,6 +150,12 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
     art = pickArtifact(hub, { build: input.build, profile: input.profile ?? dev?.profile });
   }
   const manifest = art?.manifest ?? null;
+  // An image goes onto the device (identity writes fr_ident only): a fixture build only onto the bench's
+  // fixture, and only the bench fixture's profile onto it (D15), dry run included.
+  if (art && input.plan !== 'identity') {
+    const role = (art.manifest as { role?: unknown }).role;
+    assertFixtureImage(hub, { deviceId, alias: dev?.alias }, { profile: art.manifest.profile, build_id: art.buildId, role }, 'flash_start');
+  }
   // At request time for the dry run and to fail early; the job decides again once it holds the port.
   const { writesIdent, plan } = decideIdent(hub, input.plan, dev, entry.key, art);
   // Checked before the job: without a network record a written fr_ident could not reach the hub.

@@ -8,9 +8,16 @@
 //   pad-c3's status.effect_done {effect}, job.state {job_id, kind, status, origin}, hub.prompt.
 // - Jobs, with the client that started them (X-Fr-Client, design c6 D18): deploy, build, flash. A job a job
 //   starts keeps its origin (a deploy's builds are `mcp` too).
-// - Not kept: the origin of a command or query (binding_set, input_simulate, wait_for_event, latency_stats).
-//   So (a) is proven by its effects (the binding row, each press followed by its firing and pad-c3's
-//   effect_done), and a simulated press reads the same as a real one (the optional prompt_human press).
+// - From M2-C1 (design m2-c1-hil D9, D14): op.called {op, client, instance?, gesture?, layer?}, one per device
+//   on every command_send, input_simulate and binding_set, with the call's X-Fr-Client. (a) then requires an
+//   op.called {op: binding_set, client: mcp} on pad-c6 or pad-c3, and for the press an op.called {op:
+//   input_simulate, client: mcp} on pad-c6 or a real press the agent asked for (its hub.prompt, then a
+//   proven boot.down that no input_simulate made), beside its effects (the binding row, each press followed
+//   by its firing and pad-c3's effect_done): it is no longer only proven by its effects. op.called and
+//   prompts inside a test job are the run's gates' (they call as its client), not the agent's. Whether the
+//   hub publishes op.called at all comes from the hub (t-agent.ts: its registry, or a bench_get op), never
+//   from an empty read: only a hub before M2-C1 is judged on the effects alone, and the report says so.
+// - Not kept: the origin of a query (wait_for_event, latency_stats).
 // - The deploy result says per device outcome and expect (matched | timeout | skipped); from M1 step 7 it
 //   also echoes which expectation was asked (`expect: {log | event, timeout_s}`); an older hub's does not.
 
@@ -133,6 +140,8 @@ export interface PressMatch {
   fired: number;
   /** The first few presses with no effect_done (cursors). */
   unproven: string[];
+  /** The presses that were followed by effect_done, oldest first. */
+  provenDowns: Ev[];
 }
 
 export interface MatchOptions {
@@ -165,13 +174,14 @@ export function matchPresses(downs: readonly Ev[], fired: readonly Ev[], done: r
     }
     return i >= 0;
   };
-  const r: PressMatch = { presses: d.length, proven: 0, fired: 0, unproven: [] };
+  const r: PressMatch = { presses: d.length, proven: 0, fired: 0, unproven: [], provenDowns: [] };
   for (const press of d) {
     if (take(f, usedF, press.t_hub_us, o.firedWindowMs)) {
       r.fired++;
     }
     if (take(x, usedX, press.t_hub_us, o.doneWindowMs)) {
       r.proven++;
+      r.provenDowns.push(press);
     } else if (r.unproven.length < 5) {
       r.unproven.push(press.cursor);
     }
@@ -235,6 +245,107 @@ export interface BindingInput {
   minPresses: number;
   /** latency_stats as this harness read it (the hub keeps no record of the agent's own query). */
   latencyStats?: unknown;
+  /** op.called events since the cursor on the source and the target (M2-C1). Absent: not read (judged on the effects). */
+  calls?: readonly Ev[];
+  /**
+   * Whether the hub publishes op.called at all, from what it supports (t-agent.ts hubPublishesOpCalled: its
+   * registry, or a bench_get op), never from `calls` being empty. false: a hub before M2-C1, judged on the
+   * effects alone, and said so. Absent with `calls` given: taken as true.
+   */
+  opCalled?: boolean;
+  /** hub.prompt events since the cursor: the agent asking a person (prompt_human), which a real press needs. */
+  prompts?: readonly Ev[];
+  /**
+   * When test jobs ran (kind test, from job.state): the gates a test_run starts call as the run's client (an
+   * agent's: mcp), so their op.called (T-HIL's gpio presses and its binding restore on pad-c6) and prompts
+   * are not the agent's own.
+   */
+  testWindows?: readonly TestWindow[];
+}
+
+/** A test job's span in hub time (µs): from its first job.state to its last terminal one (open: still running). */
+export interface TestWindow {
+  job_id: string;
+  from_us: number;
+  to_us: number;
+}
+
+const TERMINAL = ['completed', 'failed', 'cancelled'];
+
+/** The spans of the test jobs among job.state events (any order). */
+export function testWindows(states: readonly Ev[]): TestWindow[] {
+  const by = new Map<string, TestWindow>();
+  for (const e of [...states].sort(byTime)) {
+    const fl = obj(e.fields);
+    if (fl.kind !== 'test' || typeof fl.job_id !== 'string') {
+      continue;
+    }
+    const w = by.get(fl.job_id) ?? { job_id: fl.job_id, from_us: e.t_hub_us, to_us: Infinity };
+    if (TERMINAL.includes(String(fl.status))) {
+      w.to_us = e.t_hub_us;
+    }
+    by.set(fl.job_id, w);
+  }
+  return [...by.values()];
+}
+
+const inWindows = (e: Ev, ws: readonly TestWindow[] | undefined) => (ws ?? []).some((w) => e.t_hub_us >= w.from_us && e.t_hub_us <= w.to_us);
+
+/** How far before a press an input_simulate call on its device makes it a simulated one (ms): a gesture's down follows its call within its first segment. */
+export const SIMULATED_WITHIN_MS = 5000;
+/** How long before a real press the agent's prompt_human may have asked for it (ms): one wait_for_event lasts at most 110 s. */
+export const PROMPT_BEFORE_MS = 120_000;
+
+/**
+ * The proven presses that were real (a person's, or any press no input_simulate made): no op.called
+ * {op: input_simulate} on the source (any client, test runs included) in the SIMULATED_WITHIN_MS before it,
+ * and the agent's own hub.prompt (outside test runs) at most PROMPT_BEFORE_MS before it.
+ */
+export function realPresses(proven: readonly Ev[], calls: readonly Ev[], prompts: readonly Ev[], windows?: readonly TestWindow[], o: { skewMs?: number; source?: string } = {}): Ev[] {
+  const skew = (o.skewMs ?? MATCH.skewMs) * 1000;
+  const sims = calls.filter((c) => obj(c.fields).op === 'input_simulate' && c.alias === (o.source ?? BINDING.source));
+  const asked = prompts.filter((p) => !inWindows(p, windows));
+  return proven.filter(
+    (d) =>
+      !sims.some((c) => c.t_hub_us <= d.t_hub_us + skew && c.t_hub_us >= d.t_hub_us - SIMULATED_WITHIN_MS * 1000) &&
+      asked.some((p) => p.t_hub_us <= d.t_hub_us + skew && p.t_hub_us >= d.t_hub_us - PROMPT_BEFORE_MS * 1000),
+  );
+}
+
+/** The ops (a) must see the agent call, and on which devices (op.called is published per device). */
+export const AGENT_CALLS = [
+  { op: 'binding_set', on: [BINDING.source, BINDING.target] },
+  { op: 'input_simulate', on: [BINDING.source] },
+] as const;
+
+/** op.called counts by op and client (`binding_set: {mcp: 1}`), over the devices each op must be seen on. */
+export function callCounts(calls: readonly Ev[]): Record<string, Record<string, number>> {
+  const out: Record<string, Record<string, number>> = {};
+  for (const e of calls) {
+    const fl = obj(e.fields);
+    const rule = AGENT_CALLS.find((r) => r.op === fl.op);
+    if (!rule || !(rule.on as readonly string[]).includes(String(e.alias))) {
+      continue;
+    }
+    const client = String(fl.client ?? 'none');
+    const by = (out[String(fl.op)] ??= {});
+    by[client] = (by[client] ?? 0) + 1;
+  }
+  return out;
+}
+
+/**
+ * What op.called shows against (a): a problem per op the agent (client mcp) did not call. With
+ * `realPresses` (evaluateBinding gives it), a real press the agent asked for stands in for input_simulate:
+ * the prompt's "prove it" may be a person's press (prompt_human), which no input_simulate records.
+ */
+export function callProblems(calls: readonly Ev[], o: { realPresses?: number } = {}): string[] {
+  const counts = callCounts(calls);
+  return AGENT_CALLS.filter((r) => !counts[r.op]?.mcp && !(r.op === 'input_simulate' && (o.realPresses ?? 0) > 0)).map((r) => {
+    const others = Object.entries(counts[r.op] ?? {}).map(([c, n]) => `${n} by ${c}`);
+    const real = r.op === 'input_simulate' && o.realPresses !== undefined ? ', nor a real press it asked for (prompt_human, then a boot.down no input_simulate made)' : '';
+    return `no op.called {op: ${r.op}, client: mcp} on ${r.on.join(' or ')} after the cursor${others.length ? ` (the hub recorded ${others.join(', ')})` : ''}${real}`;
+  });
 }
 
 /** (a): the binding exists, presses after the cursor were followed by pad-c3's blink, and firings carry the latency. */
@@ -258,6 +369,16 @@ export function evaluateBinding(i: BindingInput, b: typeof BINDING = BINDING): P
   if (rows.length && stats.rtt.n === 0) {
     problems.push(`no node.binding_fired with an rtt_us from ${b.source}'s slot ${[...slots].join('/')}: no latency samples behind latency_stats`);
   }
+  // op.called (M2-C1): the agent's own binding_set and input_simulate, by client, on any hub that publishes
+  // op.called, none recorded included (D14: no longer proven by its effects). The press may instead be a
+  // real one the agent asked for. Calls inside a test run are the run's gates', not the agent's.
+  const recorded = i.calls !== undefined && i.opCalled !== false;
+  const agentCalls = recorded ? i.calls!.filter((c) => !inWindows(c, i.testWindows)) : [];
+  const real = recorded ? realPresses(m.provenDowns, i.calls!, i.prompts ?? [], i.testWindows, { source: b.source }) : [];
+  if (recorded) {
+    problems.push(...callProblems(agentCalls, { realPresses: real.length }));
+  }
+  const byTests = recorded ? i.calls!.length - agentCalls.length : 0;
   const ls = obj(i.latencyStats);
   const dev = (alias: string) => (Array.isArray(ls.devices) ? (ls.devices as Obj[]).find((d) => d.alias === alias) : undefined);
   const src = dev(b.source);
@@ -288,7 +409,16 @@ export function evaluateBinding(i: BindingInput, b: typeof BINDING = BINDING): P
             },
           }
         : {}),
-      origin_of_commands: 'not recorded by the hub (only jobs carry an origin)',
+      ...(recorded
+        ? {
+            op_called: callCounts(agentCalls),
+            ...(byTests ? { op_called_by_test_runs: byTests } : {}),
+            press_by: callCounts(agentCalls).input_simulate?.mcp ? 'input_simulate' : real.length ? 'a person (prompt_human)' : 'none',
+            real_presses: real.length,
+          }
+        : {
+            origin_of_commands: i.calls === undefined ? 'not recorded by the hub (only jobs carry an origin)' : 'the hub publishes no op.called (it has no bench_get op: a hub before M2-C1), so (a) is proven by its effects alone',
+          }),
     },
     evidence: { slots: [...slots], first_press: i.downs[0]?.cursor ?? null },
   };
@@ -504,7 +634,7 @@ export function restoreSteps(r: RestoreInput, s: typeof SWITCH = SWITCH, b: type
   }
   steps.push(
     `check ${b.source}'s bindings: fr bind ls ${b.source} (each binding in one slot; on the bench slot 0 is the demo's msg:ping -> status.blink)` +
-      (r.bindingSlots.length ? `; the agent's binding is slot ${r.bindingSlots.join('/')}: keep it, or fr bind rm ${b.source} ${r.bindingSlots[0]}` : ''),
+      (r.bindingSlots.length ? `; the agent's binding is slot ${r.bindingSlots.join('/')}: keep it for the demo, but remove it before the next T-AGENT run (its --prepare refuses a binding that is already there): fr bind rm ${b.source} ${r.bindingSlots[0]}` : ''),
   );
   return steps;
 }

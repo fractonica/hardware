@@ -71,6 +71,8 @@ export interface CapInfo {
   readonly name: string;
   readonly version: { readonly major: number; readonly minor: number };
   readonly section: 'standard' | 'system' | 'project';
+  /** A test instrument's capability (test_only: true, fr.fixture): not in CATALOG, the SDK or client output. */
+  readonly testOnly?: true;
   readonly traits: Codec<any>;
   readonly commands: readonly CapCommandInfo[];
   readonly events: readonly CapEventInfo[];

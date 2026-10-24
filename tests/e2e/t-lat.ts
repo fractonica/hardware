@@ -18,15 +18,24 @@
 // tests/e2e/run.ts (test_run) FR_T_LAT_ARGS holds the same flags. The verdict also needs each run to have
 // matched at least 90 % of its pulses: a run that lost more measured the jumper, not the latency. A
 // cancelled run (Ctrl-C, or SIGTERM from test_run's job_cancel) stops waiting at once, cancels its
-// latency_probe job and puts B's bindings back within the runner's 5 s; a binding it could not restore is
+// latency_probe job and puts B's bindings back within the runner's grace; a binding it could not restore is
 // logged with its `fr bind` command and reported as `bindings_not_restored.<B>`.
+//
+// From M2-C1 (design m2-c1-hil D14) the rig's pins go to the HIL fixture: while the hub's bench file
+// (bench_get) wires a pair's pins (A's test_pin, B's button) to fixture lines, the cross-jumpers are off and
+// the gate is skipped with that reason (benchSkip). T-LAT returns at M2-C8 on the fixture. A hub without a
+// bench (bench_get NOT_FOUND: no fixture module, or a bench file it refused) falls back to the checkout's
+// bench file, read without the validator: the rig is wired as it says. Only where neither wires a pair's
+// pins does T-LAT run; a bench_get that fails otherwise (TIMEOUT, ...) is the gate's error.
 
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
-import type { Job } from '@fractonica/protocol';
+import type { BenchStatus, Job } from '@fractonica/protocol';
 
-import type { Hub } from './lib/hub.ts';
+import { benchDuts, type BenchFileLine, benchFileLines, fixtureName } from './lib/hil.ts';
+import { type Hub, HubError } from './lib/hub.ts';
 import { runStandalone } from './lib/runner.ts';
 import { defineScenario, type Outcome, type ScenarioCtx } from './lib/scenario.ts';
 
@@ -425,6 +434,86 @@ async function direction(ctx: ScenarioCtx, o: TLatOptions, from: string, to: str
   }
 }
 
+/**
+ * Why T-LAT does not run on this bench (design m2-c1-hil D14), or null: the bench file wires a pair's A
+ * test_pin or B button to the fixture, so the cross-jumpers between them are off. A hub that has no bench
+ * (bench_get refused: a hub before M2-C1, no bench file) leaves the gate to run.
+ */
+export async function benchSkip(ctx: Pick<ScenarioCtx, 'hub' | 'signal' | 'sourceDir'>, o: TLatOptions): Promise<string | null> {
+  const r = await ctx.hub.call<BenchStatus>('bench_get', {}, 15_000, ctx.signal);
+  if (!r.ok || !r.data) {
+    // A hub hiccup says nothing about the jumpers: the gate's error, not a reason to run.
+    if (r.error?.code !== 'NOT_FOUND') {
+      throw new HubError('bench_get', r);
+    }
+    return checkoutBenchSkip(ctx, o, `${r.error.code} ${r.error.message}`);
+  }
+  const duts = benchDuts(r.data);
+  const fx = fixtureName(r.data);
+  const wired: string[] = [];
+  const find = (name: string) => duts.find((d) => d.alias === name || d.device === name);
+  for (const [from, to] of o.pairs) {
+    const tp = find(from)?.lines.test_pin;
+    if (tp?.wired && !wired.some((w) => w.startsWith(`${from} test_pin`))) {
+      wired.push(`${from} test_pin GPIO${tp.dut_gpio ?? '?'} on ${fx} ${tp.channel}`);
+    }
+    const bt = find(to)?.lines[o.input];
+    if (bt?.wired && !wired.some((w) => w.startsWith(`${to} ${o.input}`))) {
+      wired.push(`${to} ${o.input} GPIO${bt.dut_gpio ?? '?'} on ${fx} ${bt.channel}`);
+    }
+  }
+  return wired.length
+    ? `the HIL bench ${r.data.bench.id} wires the T-LAT rig's pins to the fixture (${wired.join(', ')}): the cross-jumpers are off; T-LAT returns at M2-C8 on the fixture`
+    : null;
+}
+
+/**
+ * The skip when the hub has no bench (bench_get NOT_FOUND: no fixture module, or its bench file failed to
+ * load): the rig is still wired as the checkout's bench file says (hardware/bench/<FR_BENCH or lab>.bench.yaml,
+ * the file the hub reads, design m2-c1-hil D7, read here without its validator), so a pair whose pins it
+ * wires is skipped just the same. The file is keyed by device id; the hub's registry names the aliases.
+ * Null only when the checkout has no such file or wires none of the pairs' pins.
+ */
+async function checkoutBenchSkip(ctx: Pick<ScenarioCtx, 'hub' | 'signal' | 'sourceDir'>, o: TLatOptions, why: string): Promise<string | null> {
+  const file = `hardware/bench/${process.env.FR_BENCH || 'lab'}.bench.yaml`;
+  let text: string;
+  try {
+    text = readFileSync(join(ctx.sourceDir, file), 'utf8');
+  } catch {
+    return null;
+  }
+  const lines = benchFileLines(text);
+  const ids = new Map<string, string | null>();
+  const idOf = async (name: string): Promise<string | null> => {
+    if (/^[0-9a-f]{12}$/i.test(name)) {
+      return name.toLowerCase();
+    }
+    if (!ids.has(name)) {
+      const d = await ctx.hub.call<{ devices: { device_id: string; alias: string }[] }>('device_list', { selector: name }, 15_000, ctx.signal);
+      if (!d.ok && d.error?.code !== 'NOT_FOUND') {
+        throw new HubError('device_list', d);
+      }
+      ids.set(name, d.data?.devices.find((x) => x.alias === name)?.device_id ?? null);
+    }
+    return ids.get(name) ?? null;
+  };
+  const wired: string[] = [];
+  const add = (who: string, line: string, l: BenchFileLine | undefined) => {
+    if (l?.wired && !wired.some((w) => w.startsWith(`${who} ${line}`))) {
+      wired.push(`${who} ${line} GPIO${l.dut_gpio ?? '?'} on fixture ${l.channel ?? '?'}`);
+    }
+  };
+  for (const [from, to] of o.pairs) {
+    const a = await idOf(from);
+    add(from, 'test_pin', a ? lines[a]?.test_pin : undefined);
+    const b = await idOf(to);
+    add(to, o.input, b ? lines[b]?.[o.input] : undefined);
+  }
+  return wired.length
+    ? `the checkout's ${file} wires the T-LAT rig's pins to the fixture (${wired.join(', ')}), though the hub has no bench loaded (bench_get: ${why}): the cross-jumpers are off; T-LAT returns at M2-C8 on the fixture`
+    : null;
+}
+
 export async function runTLat(ctx: ScenarioCtx, o: TLatOptions): Promise<Outcome> {
   const measured: Record<string, unknown> = {};
   const evidence: Record<string, unknown> = {};
@@ -452,6 +541,7 @@ const scenario = defineScenario({
 --hub-link wifi|wired        p99 is gated only when wired   --label L
 --keep-bindings              leave B's bindings on the button   --no-sdk   no hub -> SDK hop
 under tests/e2e/run.ts (test_run), FR_T_LAT_ARGS holds these`,
+  skip: (ctx) => benchSkip(ctx, parseArgs(ctx.args?.length ? ctx.args : (process.env.FR_T_LAT_ARGS ?? '').split(/\s+/).filter(Boolean))),
   run: (ctx) => runTLat(ctx, parseArgs(ctx.args?.length ? ctx.args : (process.env.FR_T_LAT_ARGS ?? '').split(/\s+/).filter(Boolean))),
 });
 

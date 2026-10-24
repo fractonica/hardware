@@ -134,6 +134,19 @@ describe('MCP limits (09 §9.4, §9.6)', () => {
     expect(SERVER_INSTRUCTIONS.length).toBeLessThan(1000);
   });
 
+  it('tells agents where real presses come from and what press means per layer (design m2-c1-hil D8)', () => {
+    const line = SERVER_INSTRUCTIONS.split('\n').find((l) => l.startsWith('8) '));
+    expect(line).toBeDefined();
+    for (const part of ['Real presses: prompt_human, or input_simulate {layer: gpio} where bench_get shows the line wired', 'inject = raw hold (down only)', 'gpio = real hold (long_press, click)']) {
+      expect(line, part).toContain(part);
+    }
+    // The same per-layer meaning in input_simulate's own summary, and both tools exist.
+    const sim = tools.find((t) => t.name === 'input_simulate')!;
+    expect(sim.description).toContain('press is a raw hold');
+    expect(sim.description).toContain('press is a real hold');
+    expect(tools.some((t) => t.name === 'bench_get')).toBe(true);
+  });
+
   it('gives every tool an object input schema with no anyOf/oneOf/allOf at the root', () => {
     for (const t of tools) {
       const s = t.inputSchema as Record<string, unknown>;
@@ -152,7 +165,7 @@ describe('MCP limits (09 §9.4, §9.6)', () => {
 
 describe('the plugin (09 §9.8)', () => {
   const read = (p: string) => readFileSync(join(PLUGIN, p), 'utf8');
-  const skills = ['build-deploy', 'e2e-verify', 'fleet-ops'];
+  const skills = ['build-deploy', 'e2e-verify', 'fleet-ops', 'hil-rig'];
   const docs = () => [...skills.map((s) => `skills/${s}/SKILL.md`), 'AGENTS.md'].map((p) => ({ p, text: read(p) }));
 
   it('defines one MCP server, the fr shim, and nothing in .mcp.json or bin/', () => {
@@ -165,7 +178,7 @@ describe('the plugin (09 §9.8)', () => {
     expect(market.plugins).toEqual([expect.objectContaining({ name: manifest.name, source: './plugin' })]);
   });
 
-  it('has the three skills, with only name and description in their frontmatter', () => {
+  it('has the four skills, with only name and description in their frontmatter', () => {
     expect(readdirSync(join(PLUGIN, 'skills')).sort()).toEqual(skills);
     for (const s of skills) {
       const m = /^---\n([\s\S]*?)\n---\n/.exec(read(`skills/${s}/SKILL.md`));
@@ -205,6 +218,44 @@ describe('the plugin (09 §9.8)', () => {
     for (const p of ['skills/build-deploy/SKILL.md', 'skills/fleet-ops/SKILL.md', 'AGENTS.md']) {
       expect(read(p), p).toContain('idf.py mcp-server');
     }
+  });
+
+  it('teaches the HIL rig its rules (design m2-c1-hil §4 S6) and the fleet that `all` excludes the fixture (D6)', () => {
+    const rig = read('skills/hil-rig/SKILL.md');
+    for (const rule of [
+      '**Call `bench_get` first**',
+      '`input_simulate {selector, instance: "boot", gesture, layer: "gpio"}`',
+      'Never `command_send`',
+      'fixture_internal',
+      '`layer: "inject"`',
+      'raw hold',
+      'real hold',
+      '`hil.edge`',
+      '`hil.frame`',
+      '`test_run {source_dir, tier: "hil"}`',
+      '**Release on abort**',
+      '**Never hold BOOT across a power change**',
+      '**After any fixture power loss**',
+      '**Wiring changes need a person**',
+    ]) {
+      expect(rig, rule).toContain(rule);
+    }
+    // The hub's own codes and shapes (driver.ts gate, router/ops.ts): the profile refusal is INCOMPATIBLE_PROFILE
+    // with details.problem profile_mismatch; a gpio press's `press` is per device in results[]; the fixture
+    // profile is flashed to fix-s3 over USB (D15); no op declares a power cut yet; T-HIL's gate is full_gate.
+    for (const fact of ['`INCOMPATIBLE_PROFILE` with `details.problem: "profile_mismatch"`', '`results[0]`', 'flash of anything but the bench\'s fixture profile', '`flash_start` of the bench\'s fixture profile', 'only the hub\'s own code can declare: no op does yet', '`measured.full_gate: true`', '`--any-fixture-fw`', 'not 24 bits', '`lines[].bad_frames`', '`fw_pinned: false`', '`details.problem: "fixture_mismatch"`', '`details.bench_pending`', '`serial_lease` of its port', '`status: "interrupted"`']) {
+      expect(rig, fact).toContain(fact);
+    }
+    expect(rig).not.toMatch(/`DEVICE_OFFLINE` or `profile_mismatch`/);
+    expect(rig).not.toContain('a flash or an OTA to the fixture');
+    expect(read('skills/e2e-verify/SKILL.md')).toContain('`measured.full_gate: true`');
+    expect(read('skills/e2e-verify/SKILL.md')).toContain('unless the press was a real one it asked for with `prompt_human`');
+    expect(read('skills/fleet-ops/SKILL.md')).toContain('never the HIL fixture');
+    expect(read('skills/fleet-ops/SKILL.md')).toContain('`role:fixture`');
+    expect(read('skills/e2e-verify/SKILL.md')).toContain('layer: "gpio"');
+    expect(read('skills/e2e-verify/SKILL.md')).toContain('tier: "hil"');
+    expect(read('AGENTS.md')).toContain('`bench_get`');
+    expect(read('AGENTS.md')).toContain('fr test run --tier hil');
   });
 
   it('names only real tools, and only fr commands that exist', () => {

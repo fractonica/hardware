@@ -67,7 +67,9 @@ fractonica/                       # this folder; unrelated experiments move to e
 │  └─ vectors/                     # golden test vectors (envelope, payloads, serial lines)
 ├─ hardware/
 │  ├─ boards/*.board.yaml          # verified pin facts per board (source-cited)
-│  └─ drivers/<driver>/            # IDF component + driver.yaml (button_gpio, led_gpio, led_ws2812, …)
+│  ├─ bench/<name>.bench.yaml      # HIL bench wiring (`fractonica/bench@1`, keyed by MAC; `lab` by default; M2-C1)
+│  └─ drivers/<driver>/            # IDF component + driver.yaml (button_gpio, led_gpio, led_ws2812, …;
+│                                  #   fixture_gpio and fixture_ws2812_rx for the HIL fixture, M2-C1)
 ├─ firmware/
 │  ├─ idf-version.lock             # pinned ESP-IDF tag + commit
 │  ├─ components/                  # fr_core fr_id fr_serial fr_net fr_ota fr_diag fr_proto(gen) fr_caps(gen)
@@ -88,10 +90,10 @@ fractonica/                       # this folder; unrelated experiments move to e
 │                                  #   M1: web/demo, with src/fractonica/devices.ts from `fr codegen client` (token.ts git-ignored)
 ├─ tools/pytools/                  # uv project: esptool 5.6 API sidecar, NVS image gen, panic decode
 ├─ plugin/                         # Claude Code plugin: .claude-plugin/plugin.json (MCP server `fractonica` = `fr mcp`), skills
-│                                  #   fleet-ops, build-deploy, e2e-verify, SessionStart hook, AGENTS.md (09 §9.8)
+│                                  #   fleet-ops, build-deploy, e2e-verify, hil-rig (M2-C1), SessionStart hook, AGENTS.md (09 §9.8)
 ├─ .claude-plugin/marketplace.json # lists plugin/ (`/plugin marketplace add <checkout>`)
-└─ tests/e2e/                      # gate harnesses t-*.ts, run.ts (`test_run` tier target), lib/, fixtures/ (10 §10.5)
-                                   #   HIL scenarios and the virtual fleet come in M2
+└─ tests/e2e/                      # gate harnesses t-*.ts, run.ts (`test_run` tiers target and hil), lib/, fixtures/ (10 §10.5)
+                                   #   t-hil.ts (tier hil) since M2-C1; the virtual fleet comes in M2
 ```
 
 ## 2.5 Naming

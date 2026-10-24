@@ -19,6 +19,7 @@ import {
 } from '@fractonica/protocol';
 
 import {
+  appCapabilities,
   buildCatalog,
   buildModel,
   canonicalJson,
@@ -87,6 +88,7 @@ describe('loading the committed schema', () => {
       [0x0001, 'fr.button', 'Button', 'standard'],
       [0x0002, 'fr.led', 'Led', 'standard'],
       [0x0005, 'fr.analog_in', 'AnalogIn', 'standard'],
+      [0x0006, 'fr.fixture', 'Fixture', 'standard'],
       [0x00f0, 'fr.node', 'Node', 'system'],
       [0x00f1, 'fr.ota', 'Ota', 'system'],
       [0x00f2, 'fr.diag', 'Diag', 'system'],
@@ -389,6 +391,34 @@ describe('catalog', () => {
     });
     const exec = (buildCatalog(model()).capabilities as any[]).find((c) => c.name === 'fr.diag').commands[0];
     expect(exec.result).toEqual([{ name: 'json', id: 1, type: 'string', max: 1400 }]);
+  });
+});
+
+describe('test_only capabilities (design m2-c1-hil D3)', () => {
+  const FIXTURE = 'schema/capabilities/fixture.cap.yaml';
+
+  it('keeps fr.fixture in the model and out of the catalog and its hash', () => {
+    const m = model();
+    expect(cap(m, 'fr.fixture')).toMatchObject({ id: 0x0006, section: 'standard', testOnly: true });
+    expect(m.capabilities.filter((c) => c.testOnly).map((c) => c.name)).toEqual(['fr.fixture']);
+    expect(appCapabilities(m).map((c) => c.name)).not.toContain('fr.fixture');
+    expect((buildCatalog(m).capabilities as any[]).map((c) => c.name)).toEqual(appCapabilities(m).map((c) => c.name));
+    // Without the fixture's YAML the catalog and catalog_hash are the same: a test_only capability never moves them.
+    const src = readSchemaSources(ROOT);
+    src.capabilities = src.capabilities.filter((c) => c.path !== FIXTURE);
+    const without = buildModel(src);
+    expect(without.ok && catalogHash(without.model)).toBe(catalogHash(m));
+    // Dropping the flag puts it into the catalog.
+    const shown = buildModel(edited(FIXTURE, (y) => delete y.test_only));
+    expect(shown.ok && (buildCatalog(shown.model).capabilities as any[]).some((c) => c.name === 'fr.fixture')).toBe(true);
+    expect(shown.ok && catalogHash(shown.model)).not.toBe(catalogHash(m));
+  });
+
+  it('refuses test_only on a system capability, and a flag that is not a boolean', () => {
+    expect(issuesOf(edited('schema/capabilities/diag.cap.yaml', (y) => (y.test_only = true)))).toEqual([
+      { file: 'schema/capabilities/diag.cap.yaml', path: 'test_only', message: 'fr.diag is a system capability (0x00F2); only standard and project capabilities may be test_only' },
+    ]);
+    expect(issuesOf(edited(FIXTURE, (y) => (y.test_only = 'yes'))).map((i) => i.path)).toEqual(['test_only']);
   });
 });
 

@@ -46,8 +46,8 @@ cap::Sink &sink();
  * Registers the ports (fr.node on 0, the board's instances, fr.diag on 241), attaches every capability
  * the board left unattached, builds the descriptor HELLO carries the hash of, logs the C1 ready banner
  * (plus `caps=<n> epoch=<e>`), starts the core task (priority 10), which first reports every property,
- * then starts Wi-Fi and with it the TCP/UDP links (03 §3.5 step 5) and keeps the liveness log on the
- * calling task. `ok` false marks an instance whose init failed: it stays listed but answers FAILED.
+ * then starts Wi-Fi and with it the TCP/UDP links (03 §3.5 step 5) unless CONFIG_FR_NET_RADIO=n (the serial
+ * link only, design m2-c1-hil D6), and keeps the liveness log on the calling task. `ok` false marks an instance whose init failed: it stays listed but answers FAILED.
  */
 [[noreturn]] void run_ports(std::span<const PortEntry> instances, SelftestFn selftest, size_t left_out = 0);
 

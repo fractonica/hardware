@@ -1,6 +1,7 @@
 // Node link, router and event ops (design c3 §4, spec 09 §9.4; stream H2): events_read, wait_for_event,
 // wait_for_device, command_send, input_simulate. Spread into OPS (packages/protocol/src/ops.ts); handlers
-// in packages/hub/src/router/ops.ts. C6 adds wait_for_event.prompt_human (design c6 D3; stream S5).
+// in packages/hub/src/router/ops.ts. C6 adds wait_for_event.prompt_human (design c6 D3; stream S5), M2-C1
+// input_simulate's `layer` and gesture `bounce` (design m2-c1-hil D8).
 
 import { z } from 'zod';
 
@@ -12,6 +13,17 @@ const types = z.string().min(1).describe('comma-separated event type globs, e.g.
 // The CLI passes JSON text; REST and MCP callers pass the object itself.
 const jsonObject = z.union([z.record(z.string(), z.unknown()), z.string()]);
 const waitTimeout = z.number().int().min(1).max(MAX_WAIT_S).default(30).describe('seconds to wait (cap 110)');
+
+/**
+ * Where input_simulate acts (design m2-c1-hil D8): `inject`, the instance's inject command (debug builds);
+ * `gpio`, a real press by the HIL fixture on a bench-wired line (any build). inject stays the default, so an
+ * unchanged call keeps its meaning.
+ */
+export const INPUT_LAYERS = ['inject', 'gpio'] as const;
+export type InputLayer = (typeof INPUT_LAYERS)[number];
+/** input_simulate gestures; `bounce` (a bouncy click, judged on counts) is gpio-only. */
+export const INPUT_GESTURES = ['press', 'release', 'click', 'double_click', 'long_press', 'bounce'] as const;
+export type InputGesture = (typeof INPUT_GESTURES)[number];
 
 export const LINKS_OPS = [
   op({
@@ -89,11 +101,15 @@ export const LINKS_OPS = [
     kind: 'command',
     tier: 'mutate',
     summary:
-      "Simulate a button gesture through the instance's inject command (debug builds): press, release, click, double_click, long_press. Wait for the resulting events with wait_for_event since the returned cursor.",
+      "Simulate a button gesture: press, release, click, double_click, long_press. layer inject (default) runs the instance's inject command (debug builds), where press is a raw hold (down only, no long_press or click). layer gpio has the HIL fixture press the wired line (any build; bench_get shows which lines are wired): press is a real hold (long_press at long_press_ms, a click if released before), and bounce (gpio only) is a click with contact bounce. Wait for the resulting events with wait_for_event since the returned cursor.",
     input: z.object({
       selector,
       instance: z.string().min(1).describe('button instance, e.g. boot'),
-      gesture: z.enum(['press', 'release', 'click', 'double_click', 'long_press']),
+      gesture: z.enum(INPUT_GESTURES),
+      layer: z
+        .enum(INPUT_LAYERS)
+        .default('inject')
+        .describe("inject: the instance's inject command (debug builds); gpio: a real press by the HIL fixture on a bench-wired line"),
       timeout_s: z.number().int().min(1).max(30).default(5),
     }),
     cli: { path: ['input'], positional: ['selector', 'instance', 'gesture'] },

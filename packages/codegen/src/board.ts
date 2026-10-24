@@ -3,7 +3,9 @@
 // slots.lock, and writes the per-profile glue into the build directory: the fr_board composition
 // root, components.cmake, sdkconfig.board and fr_manifest.json, plus sdkconfig.fault for a fault build
 // (spec 03 §3.8). The slots.lock is the only file it writes into the source tree. C6 (design c6 D13, D24)
-// adds each instance's traits to the manifest and the board's T-LAT test_pin to sdkconfig.board.
+// adds each instance's traits to the manifest and the board's T-LAT test_pin to sdkconfig.board. M2-C1
+// (design m2-c1-hil D5) adds bare-pin `gpio.<n>` binds for the HIL fixture's lines, the profile's `role`,
+// `net.radio` and `test_pin: none`, the drivers' own `sdkconfig` lines, and fr_core's 16-instance limit.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -50,8 +52,9 @@ export interface ServiceFacts {
 /**
  * The L2 service behind each capability (design c2 §5): ButtonService takes three timers (lockout, long press,
  * click gap) and derives both of its traits from config; LedService takes one (effect phases) and reports what
- * its driver's features() say, which driver.yaml `traits:` declares. A capability without an entry has no
- * primitive-driver path yet.
+ * its driver's features() say, which driver.yaml `traits:` declares. FixtureService (design m2-c1-hil D3, D5)
+ * takes one (the edges batch flush; the press esp_timers are its driver's own) and derives drive and decode
+ * from config. A capability without an entry has no primitive-driver path yet.
  */
 export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
   'fr.button': {
@@ -65,10 +68,70 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
     }),
   },
   'fr.led': { implements: 'hal.LightOutput', service: 'fr::LedService', header: 'fr/services/led_service.hpp', timers: 1 },
+  'fr.fixture': {
+    implements: 'hal.FixtureLine',
+    service: 'fr::FixtureService',
+    header: 'fr/services/fixture_service.hpp',
+    timers: 1,
+    traits: (c) => ({ drive: String(c.drive ?? 'none'), decode: String(c.decode ?? 'level') }),
+  },
 };
+
+/** The HIL fixture's capability: its lines' `drive` decides the power-up glitch rule (design m2-c1-hil D5). */
+const FIXTURE_CAP = 'fr.fixture';
+
+/** Fixture drives that pull a line at all; neither may sit on a pin that glitches at power-up (D11 item 7). */
+const DRIVING = ['open_drain', 'nfet_gate'];
+
+/** The fr.fixture driver that decodes WS2812 (RMT RX); fixture_gpio takes every other line (design m2-c1-hil D4). */
+const FIXTURE_RMT_DRIVER = 'fixture_ws2812_rx';
+
+/**
+ * The fr.fixture config the drivers refuse at init, so that port would report FAILED at boot (design m2-c1-hil
+ * D4): fixture_gpio returns unsupported for decode ws2812 and invalid_args for a pull on a driving line
+ * (fixture_gpio.cpp init); fixture_ws2812_rx returns invalid_args unless it is decode ws2812, drive none and
+ * no pull (ws2812_rx.cpp init). Each problem names the config key it is about.
+ */
+function fixtureLineProblems(driver: string, config: Record<string, JsonScalar>): [key: 'drive' | 'decode' | 'pull', message: string][] {
+  const drive = String(config.drive ?? 'none');
+  const decode = String(config.decode ?? 'level');
+  const pull = String(config.pull ?? 'none');
+  const out: [key: 'drive' | 'decode' | 'pull', message: string][] = [];
+  if (driver === FIXTURE_RMT_DRIVER) {
+    if (decode !== 'ws2812') {
+      out.push(['decode', `${driver} decodes WS2812 only: it needs decode: ws2812, not ${decode}`]);
+    }
+    if (drive !== 'none') {
+      out.push(['drive', `${driver} is input only: it needs drive: none, not ${drive}`]);
+    }
+    if (pull !== 'none') {
+      out.push(['pull', `${driver} takes no pull: the DUT drives its WS2812 data line push-pull`]);
+    }
+    return out;
+  }
+  if (decode === 'ws2812') {
+    out.push(['decode', `decode: ws2812 needs driver ${FIXTURE_RMT_DRIVER} (RMT RX); ${driver} refuses it at init`]);
+  }
+  if (pull !== 'none' && drive !== 'none') {
+    out.push(['pull', `pull: ${pull} is only for an input line (drive: none); a line with drive ${drive} has no pulls`]);
+  }
+  return out;
+}
 
 /** Board resource budgets drivers draw from (04 §4.3). `gpio` is checked pin by pin instead. */
 const PIN_RESOURCE = 'gpio';
+
+/** The board "section" of a bare-pin bind, `gpio.<n>` (design m2-c1-hil D5): no board entry, just the pin. */
+const PIN_SECTION = 'gpio';
+const PIN_BIND = /^gpio\.(\d{1,2})$/;
+
+/** fr_core's board instance table (`kMaxInstances`, fr_core/include/fr/core.hpp): it leaves out and logs the rest. */
+export const MAX_INSTANCES = 16;
+
+/** HELLO roles a profile may set (schema/protocol.yaml Role), rendered as CONFIG_FR_ROLE (design m2-c1-hil D6). */
+export const PROFILE_ROLES = ['node', 'gateway', 'fixture'] as const;
+export type ProfileRole = (typeof PROFILE_ROLES)[number];
+const ROLE_IDS: Readonly<Record<ProfileRole, number>> = { node: 0, gateway: 1, fixture: 2 };
 
 /**
  * fr_core's static pools (EspCore: 24 timers, 8 input slots), budgeted like board resources: `timer`
@@ -93,21 +156,38 @@ const RawProfile = z.strictObject({
   profile: z.string(),
   board: z.string(),
   app: z.string(),
-  net: z.record(z.string(), z.unknown()).optional(),
+  /** The HELLO role (design m2-c1-hil D6): CONFIG_FR_ROLE. Without it a node, and nothing is rendered. */
+  role: z.enum(PROFILE_ROLES).optional(),
+  /** `radio: off` (design m2-c1-hil D6): CONFIG_FR_NET_RADIO=n, so the node talks over its serial session only. */
+  net: z.looseObject({ radio: z.enum(['on', 'off']).optional() }).optional(),
+  /** `none` (design m2-c1-hil D5): no CONFIG_FR_TEST_PIN and a null manifest test_pin, whatever the board has. */
+  test_pin: z.literal('none').optional(),
   caps: z.record(
     z.string(),
     z.strictObject({
       cap: z.string(),
       driver: z.string(),
-      bind: z.string().regex(/^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/, 'expected <section>.<entry>, e.g. leds.status'),
+      // A board entry, or a bare pin for a driver that binds `gpio` (design m2-c1-hil D5: the fixture lines).
+      bind: z.string().regex(/^([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|gpio\.\d{1,2})$/, 'expected <section>.<entry>, e.g. leds.status, or gpio.<n>'),
       config: z.record(z.string(), jsonScalar).optional(),
     }),
   ),
 });
 type RawProfile = z.infer<typeof RawProfile>;
+export type ProfileManifest = RawProfile;
 
 const STRAP_LEVELS = ['high', 'low', 'none'] as const;
 type StrapLevel = (typeof STRAP_LEVELS)[number];
+
+const gpioNum = int.min(0).max(48);
+
+/**
+ * Header positions, pin 1 first (design m2-c1-hil D5): a GPIO number or a pin name (3V3, 5V, GND, EN), plus an
+ * optional `confidence` for the whole set when the source is not the maker's (H, M, L as for board entries).
+ */
+const RawHeaders = z
+  .object({ confidence: z.enum(['H', 'M', 'L']).optional() })
+  .catchall(z.array(z.union([gpioNum, z.string().regex(/^(?=.*[A-Z])[0-9A-Z_]+$/, 'expected a GPIO number or a pin name, e.g. GND')])).min(1));
 
 // Boards hold more than the generator reads (detection, rf, sources); only these parts are checked.
 const RawBoard = z.looseObject({
@@ -121,20 +201,37 @@ const RawBoard = z.looseObject({
     strapping: z.array(int).optional(),
     strapping_levels: z.record(numKey, z.enum(STRAP_LEVELS)).optional(),
     free: z.array(int).optional(),
+    /** Pins that drive a level for about 60 µs at chip power-up (design m2-c1-hil D5, D11): no open_drain or nfet_gate line. */
+    power_up_glitch: z.array(int).optional(),
   }),
+  headers: RawHeaders.optional(),
+  /** The UART TX the ROM log prints on at every boot (design m2-c1-hil D5); the bench never wires it. */
+  boot_uart_tx: gpioNum.optional(),
+  /** Where the chip's EN reaches a header, `<header>-<pin>`; null when it does not (design m2-c1-hil D5). */
+  en_access: z.string().regex(/^[A-Za-z][A-Za-z0-9_]*-\d+$/, 'expected <header>-<pin>, e.g. J1-3').nullable().optional(),
   resources: z.record(z.string(), int).optional(),
   rf: z.looseObject({ max_tx_power_qdbm: int.min(8).max(84).nullable().optional() }).optional(),
   /** The T-LAT loopback pin (04 §4.3, design c6 D24): CONFIG_FR_TEST_PIN; none without it. */
-  test_pin: int.min(0).max(48).nullable().optional(),
+  test_pin: gpioNum.nullable().optional(),
 });
 type RawBoard = z.infer<typeof RawBoard>;
+export type BoardManifest = RawBoard;
+
+/** A board's header positions as `<header>-<pin>` for a GPIO or pin name, e.g. J1-3 for EN; empty when it has none there. */
+export function headerPositions(board: BoardManifest, pin: number | string): string[] {
+  return Object.entries(board.headers ?? {}).flatMap(([name, list]) =>
+    Array.isArray(list) ? list.flatMap((p, i) => (p === pin ? [`${name}-${i + 1}`] : [])) : [],
+  );
+}
 
 const DRIVER_SCALARS = ['bool', 'u8', 'u16', 'u32', 'i8', 'i16', 'i32'] as const;
 
 const RawDriverField = z.strictObject({
   type: z.enum(['gpio', 'enum', ...DRIVER_SCALARS] as const),
   values: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'enum values must be C++ identifiers')).optional(),
-  from: z.string().regex(/^board\.[a-z_][a-z0-9_]*$/, 'expected board.<key>').optional(),
+  // board.<key>: that field of the bound board entry. bind: the pin of a bare `gpio.<n>` bind (design
+  // m2-c1-hil D5: the fixture drivers).
+  from: z.string().regex(/^(board\.[a-z_][a-z0-9_]*|bind)$/, 'expected board.<key> or bind').optional(),
   default: jsonScalar.optional(),
   doc: z.string().optional(),
 });
@@ -154,6 +251,8 @@ const RawDriver = z.strictObject({
   /** Capability traits this driver gives its service (design c6 D13), e.g. fr.led color/dimmable from features(). */
   traits: z.record(ident, jsonScalar).optional(),
   resources: z.record(z.string(), int).optional(),
+  /** Kconfig lines for sdkconfig.board of every profile that binds the driver (design m2-c1-hil D5). */
+  sdkconfig: z.array(z.string().regex(/^CONFIG_[A-Z0-9_]+=\S.*$/, 'expected CONFIG_<NAME>=<value>')).optional(),
   dependencies: z.record(z.string(), z.string()).optional(),
 });
 export type DriverManifest = z.infer<typeof RawDriver>;
@@ -217,15 +316,30 @@ export interface FirmwareManifest {
   app: string;
   target: string;
   catalog_hash: number;
-  /** The board's T-LAT test pin (04 §4.3, design c6 D24); null without one. */
+  /**
+   * The T-LAT test pin (04 §4.3, design c6 D24): the board's, or null without one or when the profile sets
+   * `test_pin: none` (design m2-c1-hil D5).
+   */
   test_pin: number | null;
   caps: ManifestCap[];
+}
+
+/** Where an instance is wired: what the bench check compares a bench line with (design m2-c1-hil D7). */
+export interface BoundInstance {
+  /** The profile's bind, e.g. buttons.boot or gpio.42. */
+  bind: string;
+  /** Its GPIOs, from the driver's `gpio` fields. */
+  pins: number[];
+  /** The effective driver Config (board entry, bind, profile, driver.yaml defaults), e.g. active_level. */
+  driverConfig: Record<string, JsonScalar>;
 }
 
 export interface FirmwareResult {
   /** Paths relative to outDir. */
   files: GeneratedFile[];
   manifest: FirmwareManifest;
+  /** Every instance by name: its bind, pins and driver config. In no generated file. */
+  instances: Record<string, BoundInstance>;
   /** Strapping-pin and similar advisories; generation still succeeded. */
   warnings: string[];
   /** The slots.lock gains an instance (or is new); with write it has been written. */
@@ -295,8 +409,8 @@ function parseYaml<T>(file: string, text: string, schema: z.ZodType<T>, issues: 
   return parsed.data;
 }
 
-const profileFile = (name: string) => `firmware/profiles/${name}.profile.yaml`;
-const boardFile = (id: string) => `hardware/boards/${id}.board.yaml`;
+export const profileFile = (name: string) => `firmware/profiles/${name}.profile.yaml`;
+export const boardFile = (id: string) => `hardware/boards/${id}.board.yaml`;
 const driverFile = (id: string) => `hardware/drivers/${id}/driver.yaml`;
 export const slotsLockFile = (profile: string) => `firmware/profiles/${profile}.slots.lock`;
 
@@ -336,9 +450,18 @@ function loadInputs(sourceDir: string, name: string, issues: Issues): Inputs | n
   return { profile, board, csv: join(sourceDir, csvRel) };
 }
 
-/** sdkconfig.board (layer 3, spec 03 §3.7): target, flash, partition CSV, console, identity strings. */
-function renderFragment(inp: Inputs): string {
+/** The test pin the image gets: the board's, unless the profile says `test_pin: none` (design m2-c1-hil D5). */
+function effectiveTestPin(inp: Inputs): number | null {
+  return inp.profile.test_pin === 'none' ? null : (inp.board.test_pin ?? null);
+}
+
+/**
+ * sdkconfig.board (layer 3, spec 03 §3.7): target, flash, partition CSV, console, identity strings, then what
+ * the profile's role and radio say and the bound drivers' own `sdkconfig` lines (design m2-c1-hil D5).
+ */
+function renderFragment(inp: Inputs, driverLines: readonly string[]): string {
   const { board, profile } = inp;
+  const testPin = effectiveTestPin(inp);
   return [
     `# ${GENERATED} from the profile and board manifest. Do not edit.`,
     `CONFIG_IDF_TARGET="${board.idf_target}"`,
@@ -348,22 +471,74 @@ function renderFragment(inp: Inputs): string {
     `CONFIG_FR_BOARD="${board.id}"`,
     `CONFIG_FR_PROFILE="${profile.profile}"`,
     `CONFIG_FR_PART_PROFILE="${board.flash.part_profile}"`,
+    // Design m2-c1-hil D6: the HELLO role, and a serial-only node (no Wi-Fi, no ESP-NOW) with the radio off.
+    ...(profile.role !== undefined ? [`CONFIG_FR_ROLE=${ROLE_IDS[profile.role]}`] : []),
+    ...(profile.net?.radio === 'off' ? ['CONFIG_FR_NET_RADIO=n'] : []),
     // 05 §5.3: some boards' antennas only associate with the TX power capped (C3 minis at 8.5 dBm).
     ...(board.rf?.max_tx_power_qdbm != null ? [`CONFIG_FR_WIFI_MAX_TX_POWER_QDBM=${board.rf.max_tx_power_qdbm}`] : []),
-    // Design c6 D24: debug builds drive it open-drain for diag pin_pulse (fr_core's test_pin.cpp).
-    ...(board.test_pin != null ? [`CONFIG_FR_TEST_PIN=${board.test_pin}`] : []),
+    // Design c6 D24: debug builds drive it open-drain for diag pin_pulse (fr_core's test_pin.cpp). A profile's
+    // `test_pin: none` leaves it unset, so it stays -1 (design m2-c1-hil D5).
+    ...(testPin != null ? [`CONFIG_FR_TEST_PIN=${testPin}`] : []),
+    ...(driverLines.length > 0 ? ["# From the bound drivers' driver.yaml `sdkconfig` (design m2-c1-hil D5).", ...driverLines] : []),
     '',
   ].join('\n');
 }
 
-/** Resolves a profile's board and target and renders its sdkconfig.board, without driver validation. */
+/**
+ * The bound drivers' `sdkconfig` lines, in driver id order and each once. Two drivers that set one symbol to
+ * different values are an error: which one the build would take depends on the order.
+ */
+function driverSdkconfig(drivers: readonly DriverManifest[], issues: Issues): string[] {
+  const set = new Map<string, { line: string; driver: string }>();
+  for (const d of [...drivers].sort((a, b) => (a.id < b.id ? -1 : 1))) {
+    for (const [n, line] of (d.sdkconfig ?? []).entries()) {
+      const name = line.slice(0, line.indexOf('='));
+      const prev = set.get(name);
+      if (prev && prev.line !== line) {
+        issues.add(driverFile(d.id), ['sdkconfig', n], `${line} conflicts with ${prev.line} from driver ${prev.driver}`);
+      } else if (!prev) {
+        set.set(name, { line, driver: d.id });
+      }
+    }
+  }
+  return [...set.values()].map((s) => s.line);
+}
+
+/**
+ * Resolves a profile's board and target and renders its sdkconfig.board, without driver validation; the
+ * bound drivers' driver.yaml is read only for its `sdkconfig` lines.
+ */
 export function resolveProfile(sourceDir: string, name: string): ResolvedProfile {
   const src = resolve(sourceDir);
   const issues = new Issues();
   const inp = loadInputs(src, name, issues);
   issues.throwIfAny();
   const { profile, board } = inp!;
-  return { profile: profile.profile, app: profile.app, board: board.id, target: board.idf_target, partProfile: board.flash.part_profile, fragment: renderFragment(inp!) };
+  const ids = [...new Set(Object.values(profile.caps).map((c) => c.driver))];
+  const drivers = ids.flatMap((id) => loadDriverInto(src, id, issues) ?? []);
+  const lines = driverSdkconfig(drivers, issues);
+  issues.throwIfAny();
+  return { profile: profile.profile, app: profile.app, board: board.id, target: board.idf_target, partProfile: board.flash.part_profile, fragment: renderFragment(inp!, lines) };
+}
+
+/** A board manifest, checked as `fr gen firmware` reads it; throws SchemaError when it is missing or invalid. */
+export function loadBoardManifest(sourceDir: string, id: string): BoardManifest {
+  const issues = new Issues();
+  const bf = boardFile(id);
+  const text = readSource(resolve(sourceDir), bf, `board ${id}`, issues);
+  const board = text === null ? null : parseYaml(bf, text, RawBoard, issues);
+  issues.throwIfAny();
+  return board!;
+}
+
+/** A profile, checked as `fr gen firmware` reads it (its shape only); throws SchemaError when it is missing or invalid. */
+export function loadProfileManifest(sourceDir: string, name: string): ProfileManifest {
+  const issues = new Issues();
+  const pf = profileFile(name);
+  const text = readSource(resolve(sourceDir), pf, `profile ${name}`, issues);
+  const profile = text === null ? null : parseYaml(pf, text, RawProfile, issues);
+  issues.throwIfAny();
+  return profile!;
 }
 
 // ---- drivers ----
@@ -418,6 +593,21 @@ function loadDriverInto(sourceDir: string, id: string, issues: Issues): DriverMa
         bad(['config', name, 'default'], p);
       }
     }
+    if (f.from === 'bind' && (d.binds !== PIN_SECTION || f.type !== 'gpio')) {
+      bad(['config', name, 'from'], `from: bind is the pin of a gpio.<n> bind: it needs binds: ${PIN_SECTION} and type: gpio`);
+    }
+  }
+  const symbols = new Set<string>();
+  for (const [n, line] of (d.sdkconfig ?? []).entries()) {
+    const name = line.slice(0, line.indexOf('='));
+    // fr gen renders the CONFIG_FR_* symbols from the profile and board itself.
+    if (name.startsWith('CONFIG_FR_')) {
+      bad(['sdkconfig', n], `${name} comes from the profile and board manifest, not a driver`);
+    }
+    if (symbols.has(name)) {
+      bad(['sdkconfig', n], `${name} is listed twice`);
+    }
+    symbols.add(name);
   }
   for (const [k, n] of Object.entries(d.resources ?? {})) {
     if (n < 0) {
@@ -627,10 +817,13 @@ function lookupEntry(data: Record<string, unknown>, section: string, entry: stri
 
 /**
  * Design c6 D24: the board's test_pin must be one of its pins.free, never reserved and never claimed by an
- * instance of this profile, since debug builds drive it; a strapping pin gets the usual warning.
+ * instance of this profile, since debug builds drive it; a strapping pin gets the usual warning, and one that
+ * must be low at reset is refused, since a test pin's line pulls it up (design m2-c1-hil D7, D12). A profile
+ * with `test_pin: none` drives no test pin, so its instances may use the board's (design m2-c1-hil D5).
  */
-function checkTestPin(board: RawBoard, insts: ResolvedInstance[], reserved: Map<number, string>, strapping: Set<number>, issues: Issues): void {
-  const pin = board.test_pin;
+function checkTestPin(inp: Inputs, insts: ResolvedInstance[], reserved: Map<number, string>, strapping: Set<number>, issues: Issues): void {
+  const { board } = inp;
+  const pin = effectiveTestPin(inp);
   if (pin == null) {
     return;
   }
@@ -646,8 +839,63 @@ function checkTestPin(board: RawBoard, insts: ResolvedInstance[], reserved: Map<
   if (!(board.pins.free ?? []).includes(pin)) {
     issues.add(bf, ['test_pin'], `test_pin GPIO${pin} is not in pins.free of ${board.id}`);
   }
-  if (strapping.has(pin)) {
-    issues.warnings.push(strapWarning('test_pin', pin, 'board test_pin', board.pins.strapping_levels?.[String(pin)]));
+  const level = board.pins.strapping_levels?.[String(pin)];
+  if (strapping.has(pin) && level === 'low') {
+    // Whatever reaches a test pin pulls it up: the bench's test_pin line has the fixture's pull-up (design m2-c1-hil D7, D12).
+    issues.add(bf, ['test_pin'], `test_pin GPIO${pin} is a strapping pin that must be low at reset, and a test pin's line pulls it up`);
+  } else if (strapping.has(pin)) {
+    issues.warnings.push(strapWarning('test_pin', pin, 'board test_pin', level));
+  }
+}
+
+/**
+ * Profile-level rules: fr_core runs at most MAX_INSTANCES instances (it would leave the rest out), and a
+ * fixture is serial only and drives no test pin (design m2-c1-hil D5, D6). The converse holds too: only a
+ * fixture has its radio off, since the hub knows a radio-off device by its HELLO role alone (no join stage,
+ * no OTA over Wi-Fi) and the build manifest does not carry `net`.
+ */
+function checkProfile(inp: Inputs, issues: Issues): void {
+  const { profile } = inp;
+  const pf = profileFile(profile.profile);
+  const n = Object.keys(profile.caps).length;
+  if (n > MAX_INSTANCES) {
+    issues.add(pf, ['caps'], `${n} instances, but fr_core runs at most ${MAX_INSTANCES} (kMaxInstances)`);
+  }
+  if (profile.role === 'fixture') {
+    if (profile.test_pin !== 'none') {
+      issues.add(pf, ['test_pin'], 'a role: fixture profile needs test_pin: none');
+    }
+    if (profile.net?.radio !== 'off') {
+      issues.add(pf, ['net', 'radio'], 'a role: fixture profile needs net: { radio: off }');
+    }
+  } else if (profile.net?.radio === 'off') {
+    issues.add(pf, ['net', 'radio'], `net: { radio: off } is only for a role: fixture profile, not role ${profile.role ?? 'node'}: the hub knows a radio-off device by its HELLO role`);
+  }
+}
+
+/** The header facts (design m2-c1-hil D5): each GPIO on one header position at most, and en_access names an EN. */
+function checkBoardFacts(board: RawBoard, issues: Issues): void {
+  const bf = boardFile(board.id);
+  const seen = new Map<number, string>();
+  for (const [name, list] of Object.entries(board.headers ?? {})) {
+    if (!Array.isArray(list)) {
+      continue; // confidence
+    }
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) {
+      issues.add(bf, ['headers', name], `header name '${name}' must start with a letter, e.g. J1`);
+    }
+    list.forEach((p, i) => {
+      const other = typeof p === 'number' ? seen.get(p) : undefined;
+      if (other !== undefined) {
+        issues.add(bf, ['headers', name, i], `GPIO${p} is already at ${other}`);
+      }
+      if (typeof p === 'number') {
+        seen.set(p, `${name}-${i + 1}`);
+      }
+    });
+  }
+  if (board.en_access != null && !headerPositions(board, 'EN').includes(board.en_access)) {
+    issues.add(bf, ['en_access'], `${board.en_access} is not an EN position in headers`);
   }
 }
 
@@ -705,7 +953,10 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     if (section !== driver.binds) {
       bad([...at, 'bind'], `driver ${driver.id} binds board ${driver.binds} entries, not ${section}`);
     }
-    const entry = lookupEntry(board, section, entryName);
+    // A bare pin (design m2-c1-hil D5) has no board entry: it is just its GPIO, checked with the pins below.
+    const pinBind = PIN_BIND.exec(c.bind);
+    const bindPin = pinBind ? Number(pinBind[1]) : undefined;
+    const entry = bindPin !== undefined ? { gpio: bindPin } : lookupEntry(board, section, entryName);
     if (!entry) {
       bad([...at, 'bind'], `board ${board.id} has no entry ${c.bind}`);
       continue;
@@ -734,7 +985,19 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     const driverConfig: ResolvedInstance['driverConfig'] = [];
     const pins: number[] = [];
     for (const [fname, field] of Object.entries(driverFields)) {
-      const fromKey = field.from?.slice('board.'.length);
+      // `from: bind` is the pin of the gpio.<n> bind, which the profile cannot override (design m2-c1-hil D5).
+      if (field.from === 'bind') {
+        if (settings[fname] !== undefined) {
+          bad([...at, 'config', fname], `'${fname}' is the pin of the bind (${c.bind}) and cannot be set`);
+        } else if (bindPin === undefined) {
+          bad([...at, 'bind'], `driver ${driver.id} takes '${fname}' from a gpio.<n> bind`);
+        } else {
+          driverConfig.push({ name: fname, field, value: bindPin });
+          pins.push(bindPin);
+        }
+        continue;
+      }
+      const fromKey = field.from?.startsWith('board.') ? field.from.slice('board.'.length) : undefined;
       let value: unknown = settings[fname];
       let origin = fromProfile(fname);
       if (value === undefined && fromKey !== undefined && entry[fromKey] !== undefined) {
@@ -813,13 +1076,22 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     if (service?.traits) {
       Object.assign(traits, service.traits(Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value]))));
     }
+    // A fixture line's drive, decode and pull must be ones its driver takes (design m2-c1-hil D4). The
+    // instance is still well formed, so its pins are checked below as well.
+    if (c.cap === FIXTURE_CAP && cap && driver.implements === service?.implements) {
+      for (const [key, message] of fixtureLineProblems(driver.id, Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value])))) {
+        issues.add(pf, settings[key] !== undefined ? [...at, 'config', key] : [...at, 'driver'], message);
+      }
+    }
 
     if (ok && cap && service) {
       out.push({ name, port: 0, bind: c.bind, cap, service, driver, driverConfig, capConfig, traits, pins });
     }
   }
 
-  // Pins: never a reserved pin, never two instances on one pin, a warning for strapping pins.
+  // Pins: never a reserved pin, never two instances on one pin, a warning for strapping pins. A bare-pin bind
+  // (design m2-c1-hil D5) must be in pins.free and is refused on a strapping pin, and a fixture line that
+  // drives (open_drain, nfet_gate) never sits on a pin that glitches at power-up (D11 item 7).
   const reserved = new Map<number, string>();
   for (const [group, list] of Object.entries(board.pins.reserved ?? {})) {
     for (const p of list) {
@@ -827,25 +1099,39 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     }
   }
   const strapping = new Set(board.pins.strapping ?? []);
+  const glitch = new Set(board.pins.power_up_glitch ?? []);
   const claimed = new Map<number, string>();
   for (const inst of out) {
+    const bare = PIN_BIND.test(inst.bind);
+    const drive = inst.cap.name === FIXTURE_CAP ? inst.capConfig.find((c) => c.entry.name === 'drive')?.value : undefined;
     for (const pin of inst.pins) {
+      const where = ['caps', inst.name, 'bind'];
       const group = reserved.get(pin);
       if (group !== undefined) {
-        issues.add(pf, ['caps', inst.name, 'bind'], `GPIO${pin} (${inst.bind}) is reserved for ${group} on ${board.id}`);
+        issues.add(pf, where, `GPIO${pin} (${inst.bind}) is reserved for ${group} on ${board.id}`);
       }
       const other = claimed.get(pin);
       if (other !== undefined) {
-        issues.add(pf, ['caps', inst.name, 'bind'], `GPIO${pin} (${inst.bind}) is already claimed by '${other}'`);
+        issues.add(pf, where, `GPIO${pin} (${inst.bind}) is already claimed by '${other}'`);
       }
       claimed.set(pin, inst.name);
-      if (strapping.has(pin)) {
+      if (bare && strapping.has(pin)) {
+        issues.add(pf, where, `GPIO${pin} (${inst.bind}) is a strapping pin; a gpio.<n> bind may not use one`);
+      } else if (strapping.has(pin)) {
         issues.warnings.push(strapWarning(inst.name, pin, inst.bind, board.pins.strapping_levels?.[String(pin)]));
+      }
+      if (bare && group === undefined && !strapping.has(pin) && !(board.pins.free ?? []).includes(pin)) {
+        issues.add(pf, where, `GPIO${pin} (${inst.bind}) is not in pins.free of ${board.id}`);
+      }
+      if (typeof drive === 'string' && DRIVING.includes(drive) && glitch.has(pin)) {
+        issues.add(pf, where, `GPIO${pin} (${inst.bind}) drives a level at power-up (pins.power_up_glitch), so no line with drive ${drive} may use it`);
       }
     }
   }
 
-  checkTestPin(board, out, reserved, strapping, issues);
+  checkTestPin(inp, out, reserved, strapping, issues);
+  checkProfile(inp, issues);
+  checkBoardFacts(board, issues);
 
   // Peripheral budgets (RMT, LEDC, ...) against the board's resources, fr_core's pools against CORE_POOLS.
   const need = new Map<string, { total: number; users: string[] }>();
@@ -1054,7 +1340,7 @@ function buildManifest(inp: Inputs, model: Model, insts: ResolvedInstance[]): Fi
     app: inp.profile.app,
     target: inp.board.idf_target,
     catalog_hash: catalogHash(model),
-    test_pin: inp.board.test_pin ?? null,
+    test_pin: effectiveTestPin(inp),
     caps: insts.map((i) => ({
       name: i.name,
       port: i.port,
@@ -1095,6 +1381,7 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
   // Capability ports from protocol.yaml (05 §5.5: 1..239); 0 and 240+ are system endpoints.
   const ports = model.protocol.ports.capabilities;
   const locked = readSlots(sourceDir, opts.profile, ports, issues);
+  const driverLines = driverSdkconfig([...new Map(insts.map((i) => [i.driver.id, i.driver])).values()], issues);
   issues.throwIfAny();
 
   const { slots, changed, full } = allocateSlots(Object.keys(inp!.profile.caps), locked, ports);
@@ -1114,7 +1401,7 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
     { path: 'fr_board/include/fr/board.hpp', content: emitBoardHpp(inp!, insts) },
     { path: 'fr_board/fr_board.cpp', content: emitBoardCpp(inp!, insts, driverIds) },
     { path: 'components.cmake', content: emitComponentsCmake(opts.profile, sourceDir, driverIds) },
-    { path: 'sdkconfig.board', content: renderFragment(inp!) },
+    { path: 'sdkconfig.board', content: renderFragment(inp!, driverLines) },
     ...(opts.fault ? [{ path: FAULT_LAYER, content: renderFaultLayer(opts.fault) }] : []),
     { path: 'fr_manifest.json', content: `${JSON.stringify(manifest, null, 2)}\n` },
   ];
@@ -1132,5 +1419,8 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
       writeFileSync(join(sourceDir, slotsLock.path), slotsLock.content);
     }
   }
-  return { files, manifest, warnings: issues.warnings, slotsLockChanged: changed, slotsLock };
+  const instances = Object.fromEntries(
+    insts.map((i) => [i.name, { bind: i.bind, pins: i.pins, driverConfig: Object.fromEntries(i.driverConfig.map((f) => [f.name, f.value])) }]),
+  );
+  return { files, manifest, instances, warnings: issues.warnings, slotsLockChanged: changed, slotsLock };
 }

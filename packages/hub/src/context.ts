@@ -11,6 +11,9 @@ import type { z } from 'zod';
 import type { IdfStatus, PytoolsStatus } from '@fractonica/host';
 import type {
   ADVERT_STATES,
+  Bench,
+  BenchStatus,
+  DeviceRole,
   Header,
   HubEvent as ProtocolHubEvent,
   Job,
@@ -53,7 +56,8 @@ export interface Device {
   /** `esp32c3`, `esp32c6`, `esp32s3`. */
   chip: string | null;
   tags: string[];
-  role: 'node' | 'gateway';
+  /** HELLO role (protocol DEVICE_ROLES); `fixture` is the HIL fixture node (design m2-c1-hil D6). */
+  role: DeviceRole;
   /** Full fw_id (64 hex) when known from an artifact, else the HELLO prefix. */
   fw_id: string | null;
   /** false for a device seen only through HELLO (no fr_ident from this hub). */
@@ -82,7 +86,7 @@ export interface HelloSeen {
   fw_id_prefix: string;
   descriptor_hash: number;
   board_hash: number;
-  role: 'node' | 'gateway';
+  role: DeviceRole;
   /** HELLO `caps` bits (b5 provisioned). */
   caps: number;
   alias: string;
@@ -122,7 +126,7 @@ export interface Events {
   publish(e: Omit<HubEvent, 'cursor' | 'seq'>): HubEvent;
   subscribe(fn: (e: HubEvent) => void): () => void;
   /** Oldest first; `devices: null` is every device. */
-  query(q: { afterSeq?: number; types?: string[]; devices?: string[] | null; limit: number }): HubEvent[];
+  query(q: { afterSeq?: number; types?: string[]; devices?: string[] | null; excludeDevices?: string[]; limit: number }): HubEvent[];
 }
 
 /** An OTA-class frame from a node (05 §5.7, design c4 §3): ACCEPT, REJECT, STATUS or RESULT, on port 240. */
@@ -475,6 +479,33 @@ export interface LatencyProbe extends HubPart {
   probe(input: OpInput<'latency_probe'>): Job;
 }
 
+// ---- M2-C1: the HIL fixture (design m2-c1-hil D8-D11, D15) ----
+
+/**
+ * The hub's fixture module (stream S4, fixture/): the bench file, the fixture driver (gestures, gating, the
+ * releases, the identify blink), the fixture's readings as hil.edge and hil.frame, and the press-based
+ * fixture -> DUT clock fit. main.ts starts it after the router and stops it before. It alone sends CMDs to a
+ * role:fixture device (the fence, fixture/fence.ts).
+ */
+export interface Fixture extends HubPart {
+  /** The bench as loaded (hardware/bench/<name>.bench.yaml), null when it is missing or invalid. */
+  bench(): Bench | null;
+  /** bench_get (D9); NOT_FOUND without a bench. */
+  status(): BenchStatus;
+  /**
+   * input_simulate {layer: gpio} (D8) on the selected devices: the fixture presses each one's bench line.
+   * `gated` runs once every device has passed the gates, before anything is pressed (op.called).
+   */
+  simulate(devices: Device[], input: OpInput<'input_simulate'>, gated?: () => void): Promise<unknown>;
+  /** A DUT's diag `pin_pulse` answer (its clock at the falling edge): a sample on its own test_pin line (D10). */
+  pinPulse(deviceId: string, atUs: number): void;
+  /**
+   * Declares a power-cut window on DUTs (D11, §6 rule 3): their lines refuse presses (LOCKED) and their
+   * readings are flagged `cut` until the window ends or the returned release is called.
+   */
+  declarePowerCut(deviceIds: string[], ms: number): () => void;
+}
+
 export interface HubContext {
   db: Db;
   logs: LogStore;
@@ -511,6 +542,8 @@ export interface HubContext {
   latencyProbe: LatencyProbe;
   /** Whether the Mac is held awake (links/sleep-guard.ts): hub_status.sleep_guard. */
   sleepGuard: { active(): boolean };
+  /** The HIL fixture module (design m2-c1-hil; stream S4); absent in test contexts built for other ops. */
+  fixture?: Fixture;
 }
 
 /** An op handler (packages/protocol/src/ops.ts): the parsed input (typed per handler) and the hub. */

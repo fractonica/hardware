@@ -435,6 +435,33 @@ describe('/app queue, resume and registry', () => {
     expect(hub.registryRev).toBe(registryRev(a.hub));
   });
 
+  it('never announces a HIL fixture, and refuses a command to it as to an unknown device (design m2-c1-hil D6, D15)', async () => {
+    const a = await appRig();
+    const hub = await sdk(a);
+    const added: AnyDevice[] = [];
+    const drifts: unknown[] = [];
+    hub.devices.on('added', (d) => added.push(d));
+    hub.on('registry.drift', (d) => drifts.push(d.alias));
+    const FIX = 'e8f60a81bc48';
+    a.r.registry.add({ device_id: FIX, alias: 'fix-s3', provisioned: true, addr: 0x20, profile: 's3k-fixture', role: 'fixture' });
+    a.r.events.publish({ type: 'device.provisioned', device: FIX, alias: 'fix-s3', t_hub_us: nowUs(), fields: { addr: 0x20 } });
+    a.r.events.publish({ type: 'device.online', device: FIX, alias: 'fix-s3', t_hub_us: nowUs(), fields: {} });
+    // Then a node: its announcement arrives, and nothing of the fixture came before it.
+    a.r.registry.add({ device_id: '1cdbd416ba34', alias: 'pad-c3b', provisioned: true, addr: 3, profile: 'c3o-pad' });
+    a.r.events.publish({ type: 'device.provisioned', device: '1cdbd416ba34', alias: 'pad-c3b', t_hub_us: nowUs(), fields: { addr: 3 } });
+    await until(() => added.length === 1, 5000, 'device.added');
+    expect(added.map((d) => d.alias)).toEqual(['pad-c3b']);
+    expect(drifts).toEqual(['pad-c3b']);
+    const raw = await rawClient(a, HELLO);
+    await until(() => raw.frames.some((f) => f.t === 'welcome'), 5000, 'the welcome');
+    raw.ws.send(JSON.stringify({ t: 'cmd', req: 7, dev: 'fix-s3', inst: 'ch0', cmd: 'release', args: {}, ack: 'result' }));
+    raw.ws.send(JSON.stringify({ t: 'cmd', req: 8, dev: FIX, inst: 'ch0', cmd: 'release', args: {}, ack: 'result' }));
+    await until(() => raw.frames.filter((f) => f.t === 'result').length === 2, 5000, 'two results');
+    for (const f of raw.frames.filter((x) => x.t === 'result')) {
+      expect(f).toMatchObject({ ok: false, status: 'not_found' });
+    }
+  });
+
   it('keeps a device subscribed by alias after a rename and a reconnect: the SDK hellos with the ids its names resolved to', async () => {
     const a = await appRig();
     const hub = await sdk(a, { subscribe: { devices: ['pad-c6'] } });

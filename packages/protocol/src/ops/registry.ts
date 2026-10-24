@@ -11,9 +11,9 @@ import { deviceSel, op, portSel, waitS } from './common.ts';
 
 export { deviceSel } from './common.ts';
 
-/** The 09 §9.2 selector grammar, as agents read it in a field description. */
+/** The 09 §9.2 selector grammar, as agents read it in a field description, with the fixture rule of design m2-c1-hil D6. */
 export const SELECTOR_HELP =
-  'device selector: alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3> | profile:<p> | role:<node|gateway> | online | offline | all; "," combines (alternatives within one kind, narrowing across kinds), "!" excludes';
+  'device selector: alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3> | profile:<p> | role:<node|gateway|fixture> | online | offline | all; "," combines (alternatives within one kind, narrowing across kinds), "!" excludes; the HIL fixture is picked only by its alias, id:, mac: or role:fixture, never by all or a "!"-only selector';
 
 /** What this hub run knows of a device's link (device_get `router`; the hub's router DeviceLinkInfo). */
 export const DeviceLinkInfoSchema = z.looseObject({
@@ -92,7 +92,7 @@ export const REGISTRY_OPS = [
     kind: 'job',
     tier: 'mutate',
     summary:
-      'Provision a USB-attached board (first flash): probe it, register it (addr, alias, net), write the newest debug artifact of its profile plus fr_ident (Wi-Fi from network_set, hub host) in one write_flash, reset it, wait for its HELLO on serial, then report whether it joined over Wi-Fi (wifi: joined | not_joined). Example: --port 1cdbd416ba34 --profile c6-pad.',
+      'Provision a USB-attached board (first flash): probe it, register it (addr, alias, net), write the newest debug artifact of its profile plus fr_ident (Wi-Fi from network_set, hub host) in one write_flash, reset it, wait for its HELLO on serial, then report whether it joined over Wi-Fi (wifi: joined | not_joined; off for a radio-off profile such as the HIL fixture\'s). Example: --port 1cdbd416ba34 --profile c6-pad.',
     input: z.object({
       port: portSel,
       profile: z.string().optional().describe('profile to flash; default: the registry profile, else the only one built for the probed chip'),

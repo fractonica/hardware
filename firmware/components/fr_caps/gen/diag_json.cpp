@@ -13,6 +13,7 @@
 #include "button.hpp"
 #include "led.hpp"
 #include "analog_in.hpp"
+#include "fixture.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -25,6 +26,7 @@ namespace {
 cJSON *to_json(const ButtonTraits &v);
 cJSON *to_json(const LedTraits &v);
 cJSON *to_json(const AnalogInTraits &v);
+cJSON *to_json(const FixtureTraits &v);
 #if FR_TEST_HOOKS
 cJSON *to_json(const ButtonInjectArgs &v);
 cJSON *to_json(const ButtonDown &v);
@@ -36,6 +38,11 @@ cJSON *to_json(const LedBlinkArgs &v);
 cJSON *to_json(const LedEffectDone &v);
 cJSON *to_json(const AnalogInInjectArgs &v);
 cJSON *to_json(const AnalogInCrossed &v);
+cJSON *to_json(const FixturePressArgs &v);
+cJSON *to_json(const FixturePressResult &v);
+cJSON *to_json(const FixtureReadResult &v);
+cJSON *to_json(const FixtureEdges &v);
+cJSON *to_json(const FixtureFrame &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
 cJSON *to_json(const NodeDescribeResult &v);
 cJSON *to_json(const NodeRebootArgs &v);
@@ -364,6 +371,15 @@ cJSON *to_json(const AnalogInTraits &v)
     return finish(o, ok);
 }
 
+cJSON *to_json(const FixtureTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "drive", json_enum(v.drive));
+    ok = ok && add(o, "decode", json_enum(v.decode));
+    return finish(o, ok);
+}
+
 #if FR_TEST_HOOKS
 
 cJSON *to_json(const ButtonInjectArgs &v)
@@ -454,6 +470,54 @@ cJSON *to_json(const AnalogInCrossed &v)
     ok = ok && add(o, "index", json_number(v.index));
     ok = ok && add(o, "direction", json_enum(v.direction));
     ok = ok && add(o, "value", json_number(v.value));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const FixturePressArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "segments_us", json_array(v.segments_us, [](uint32_t e) { return json_number(e); }));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const FixturePressResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "at_us", json_number(v.at_us));
+    ok = ok && add(o, "total_us", json_number(v.total_us));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const FixtureReadResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "level", json_bool(v.level));
+    ok = ok && add(o, "edges", json_number(v.edges));
+    ok = ok && add(o, "dropped", json_number(v.dropped));
+    ok = ok && add(o, "bad_frames", json_number(v.bad_frames));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const FixtureEdges &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "n", json_number(v.n));
+    ok = ok && add(o, "levels", json_number(v.levels));
+    ok = ok && add(o, "dt_us", json_array(v.dt_us, [](uint32_t e) { return json_number(e); }));
+    ok = ok && add(o, "dropped", json_number(v.dropped));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const FixtureFrame &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "bits", json_number(v.bits));
+    ok = ok && add(o, "grb", json_number(v.grb));
     return finish(o, ok);
 }
 
@@ -695,6 +759,42 @@ Status args_analog_in_inject(const cJSON *obj, fr::wire::Writer &w)
     }
     encode(v, w);
     return encoded(w);
+}
+
+Status args_fixture_press(const cJSON *obj, fr::wire::Writer &w)
+{
+    FixturePressArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "segments_us") {
+            ok = from_json_array(it, v.segments_us,
+                [](const cJSON *e, uint32_t &out) { return from_json_uint(e, 0xFFFFFFFF, out); });
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_fixture_release(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_fixture_read(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
 }
 
 Status args_node_identify(const cJSON *obj, fr::wire::Writer &w)
@@ -1062,6 +1162,55 @@ cJSON *analog_in_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
     return nullptr;
 }
 
+cJSON *fixture_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Fixture::kCmdPress:
+            return json_of(decode_fixture_press_args(body));
+        case Fixture::kCmdRelease:
+            return json_empty(body);
+        case Fixture::kCmdRead:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Fixture::kCmdPress:
+            return json_of(decode_fixture_press_result(body));
+        case Fixture::kCmdRelease:
+            return json_empty(body);
+        case Fixture::kCmdRead:
+            return json_of(decode_fixture_read_result(body));
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Fixture::kEventEdges:
+            return json_of(decode_fixture_edges(body));
+        case Fixture::kEventFrame:
+            return json_of(decode_fixture_frame(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Fixture::kPropLevel: {
+            const auto v = decode_fixture_level_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "level", json_bool(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
 cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
 {
     switch (cls) {
@@ -1175,6 +1324,8 @@ cJSON *traits_to_json(uint16_t cap_id, std::span<const uint8_t> traits)
         return json_of(decode_led_traits(traits));
     case AnalogIn::kId:
         return json_of(decode_analog_in_traits(traits));
+    case Fixture::kId:
+        return json_of(decode_fixture_traits(traits));
     case Node::kId:
         return json_empty(traits);
     case Ota::kId:
@@ -1243,6 +1394,18 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_analog_in_inject(obj, w);
         }
         break;
+    case Fixture::kId:
+        if (name == "press") {
+            id = Fixture::kCmdPress;
+            s = args_fixture_press(obj, w);
+        } else if (name == "release") {
+            id = Fixture::kCmdRelease;
+            s = args_fixture_release(obj);
+        } else if (name == "read") {
+            id = Fixture::kCmdRead;
+            s = args_fixture_read(obj);
+        }
+        break;
     case Node::kId:
         if (name == "identify") {
             id = Node::kCmdIdentify;
@@ -1302,6 +1465,8 @@ cJSON *decode_to_json(uint16_t cap_id, uint8_t cls, uint8_t member_id, std::span
         return led_to_json(cls, member_id, body);
     case AnalogIn::kId:
         return analog_in_to_json(cls, member_id, body);
+    case Fixture::kId:
+        return fixture_to_json(cls, member_id, body);
     case Node::kId:
         return node_to_json(cls, member_id, body);
     case Ota::kId:

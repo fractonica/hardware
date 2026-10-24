@@ -20,6 +20,7 @@
 #include "button.hpp"
 #include "led.hpp"
 #include "analog_in.hpp"
+#include "fixture.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -33,7 +34,7 @@ inline std::expected<fr::wire::SerialFrame, fr::wire::DecodeErr> decode_serial(s
     return fr::wire::decode_line({reinterpret_cast<const char *>(in.data()), in.size()}, scratch);
 }
 
-inline constexpr size_t kCount = 350;
+inline constexpr size_t kCount = 380;
 
 template <class V>
 void for_each(V &&v)
@@ -1741,7 +1742,7 @@ void for_each(V &&v)
         x.fw_id_prefix = std::span<const uint8_t>(b121);
         x.descriptor_hash = 387276917;
         x.board_hash = 3041712678u;
-        x.role = Role::gateway;
+        x.role = Role::fixture;
         x.caps = 4055616904u;
         x.hb_interval_ms = 2415085369u;
         x.reset_reason = 234;
@@ -1751,7 +1752,7 @@ void for_each(V &&v)
         x.channel = 174;
         static constexpr uint8_t b122[] = {0xd2, 0xd9, 0xe0, 0xe7};
         x.bssid = std::span<const uint8_t>(b122);
-        v.value("PRESENCE.HELLO.sample", "PRESENCE.HELLO", x, enc, fr::proto::decode_presence_hello, "0a0520272e353c10621893da0122057d848b929928f5c0d5b80130a6b4b3aa0b380140889bef8d0f48b98ecdff0850ea015802620a616c6961732d3132c2b768fddbc44670ae017a04d2d9e0e7", true);
+        v.value("PRESENCE.HELLO.sample", "PRESENCE.HELLO", x, enc, fr::proto::decode_presence_hello, "0a0520272e353c10621893da0122057d848b929928f5c0d5b80130a6b4b3aa0b380240889bef8d0f48b98ecdff0850ea015802620a616c6961732d3132c2b768fddbc44670ae017a04d2d9e0e7", true);
     }
     // PRESENCE.HELLO.max (message PRESENCE.HELLO)
     {
@@ -1764,7 +1765,7 @@ void for_each(V &&v)
         x.fw_id_prefix = std::span<const uint8_t>(b124);
         x.descriptor_hash = 4294967295u;
         x.board_hash = 4294967295u;
-        x.role = Role::gateway;
+        x.role = Role::fixture;
         x.caps = 4294967295u;
         x.hb_interval_ms = 4294967295u;
         x.reset_reason = 255;
@@ -1774,7 +1775,7 @@ void for_each(V &&v)
         x.channel = 255;
         static constexpr uint8_t b125[] = {0xd2, 0xd9, 0xe0, 0xe7, 0xee, 0xf5};
         x.bssid = std::span<const uint8_t>(b125);
-        v.value("PRESENCE.HELLO.max", "PRESENCE.HELLO", x, enc, fr::proto::decode_presence_hello, "0a0620272e353c4310ff0118ffff0322087d848b9299a0a7ae28ffffffff0f30ffffffff0f380140ffffffff0f48ffffffff0f50ff0158ff01621f6d6e6f707172737475767778797a303132333435363738396162636465666768ffffffff0f70ff017a06d2d9e0e7eef5", true);
+        v.value("PRESENCE.HELLO.max", "PRESENCE.HELLO", x, enc, fr::proto::decode_presence_hello, "0a0620272e353c4310ff0118ffff0322087d848b9299a0a7ae28ffffffff0f30ffffffff0f380240ffffffff0f48ffffffff0f50ff0158ff01621f6d6e6f707172737475767778797a303132333435363738396162636465666768ffffffff0f70ff017a06d2d9e0e7eef5", true);
     }
     // PRESENCE.HEARTBEAT.defaults (message PRESENCE.HEARTBEAT)
     {
@@ -2192,7 +2193,7 @@ void for_each(V &&v)
     {
         v.error("PRESENCE.HELLO.error_alias_bad_utf8", "PRESENCE.HELLO", fr::proto::decode_presence_hello, "6201ff", fr::wire::DecodeErr::bad_utf8);
     }
-    // PRESENCE.HELLO.lenient_role_2 (message PRESENCE.HELLO)
+    // PRESENCE.HELLO.lenient_role_3 (message PRESENCE.HELLO)
     {
         fr::proto::PresenceHello x{};
         x.mac = std::span<const uint8_t>{};
@@ -2201,7 +2202,7 @@ void for_each(V &&v)
         x.fw_id_prefix = std::span<const uint8_t>{};
         x.descriptor_hash = 0;
         x.board_hash = 0;
-        x.role = static_cast<Role>(2);
+        x.role = static_cast<Role>(3);
         x.caps = 0;
         x.hb_interval_ms = 0;
         x.reset_reason = 0;
@@ -2210,7 +2211,7 @@ void for_each(V &&v)
         x.alias_rev = 0;
         x.channel = 0;
         x.bssid = std::span<const uint8_t>{};
-        v.value("PRESENCE.HELLO.lenient_role_2", "PRESENCE.HELLO", x, enc, fr::proto::decode_presence_hello, "3802", true);
+        v.value("PRESENCE.HELLO.lenient_role_3", "PRESENCE.HELLO", x, enc, fr::proto::decode_presence_hello, "3803", true);
     }
     // PRESENCE.HELLO.lenient_ota_state_5 (message PRESENCE.HELLO)
     {
@@ -2988,6 +2989,175 @@ void for_each(V &&v)
         x = 65535;
         v.value("fr.analog_in.value.state.max", "fr.analog_in.value.state", x, fr::cap::encode_analog_in_value_state, fr::cap::decode_analog_in_value_state, "08ffff03", true);
     }
+    // fr.fixture.traits.defaults (cap fr.fixture.traits)
+    {
+        fr::cap::FixtureTraits x{};
+        x.drive = FixtureDrive::none;
+        x.decode = FixtureDecode::level;
+        v.value("fr.fixture.traits.defaults", "fr.fixture.traits", x, enc, fr::cap::decode_fixture_traits, "", true);
+    }
+    // fr.fixture.traits.sample (cap fr.fixture.traits)
+    {
+        fr::cap::FixtureTraits x{};
+        x.drive = FixtureDrive::nfet_gate;
+        x.decode = FixtureDecode::ws2812;
+        v.value("fr.fixture.traits.sample", "fr.fixture.traits", x, enc, fr::cap::decode_fixture_traits, "08021001", true);
+    }
+    // fr.fixture.traits.max (cap fr.fixture.traits)
+    {
+        fr::cap::FixtureTraits x{};
+        x.drive = FixtureDrive::nfet_gate;
+        x.decode = FixtureDecode::ws2812;
+        v.value("fr.fixture.traits.max", "fr.fixture.traits", x, enc, fr::cap::decode_fixture_traits, "08021001", true);
+    }
+    // fr.fixture.press.args.defaults (cap fr.fixture.press.args)
+    {
+        fr::cap::FixturePressArgs x{};
+        x.segments_us = fr::proto::Array<uint32_t, 16>{};
+        v.value("fr.fixture.press.args.defaults", "fr.fixture.press.args", x, enc, fr::cap::decode_fixture_press_args, "", true);
+    }
+    // fr.fixture.press.args.sample (cap fr.fixture.press.args)
+    {
+        fr::cap::FixturePressArgs x{};
+        x.segments_us = fr::proto::Array<uint32_t, 16>{2654435761u, 1013904226, 3668339987u};
+        v.value("fr.fixture.press.args.sample", "fr.fixture.press.args", x, enc, fr::cap::decode_fixture_press_args, "0a0fb1f3ddf109e2e6bbe30393da99d50d", true);
+    }
+    // fr.fixture.press.args.max (cap fr.fixture.press.args)
+    {
+        fr::cap::FixturePressArgs x{};
+        x.segments_us = fr::proto::Array<uint32_t, 16>{4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u};
+        v.value("fr.fixture.press.args.max", "fr.fixture.press.args", x, enc, fr::cap::decode_fixture_press_args, "0a50ffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0f", true);
+    }
+    // fr.fixture.press.args.example_0 (cap fr.fixture.press.args)
+    {
+        fr::cap::FixturePressArgs x{};
+        x.segments_us = fr::proto::Array<uint32_t, 16>{80000};
+        v.value("fr.fixture.press.args.example_0", "fr.fixture.press.args", x, enc, fr::cap::decode_fixture_press_args, "0a0380f104", true);
+    }
+    // fr.fixture.press.result.defaults (cap fr.fixture.press.result)
+    {
+        fr::cap::FixturePressResult x{};
+        x.at_us = 0;
+        x.total_us = 0;
+        v.value("fr.fixture.press.result.defaults", "fr.fixture.press.result", x, enc, fr::cap::decode_fixture_press_result, "", true);
+    }
+    // fr.fixture.press.result.sample (cap fr.fixture.press.result)
+    {
+        fr::cap::FixturePressResult x{};
+        x.at_us = 2654435761u;
+        x.total_us = 1013904226;
+        v.value("fr.fixture.press.result.sample", "fr.fixture.press.result", x, enc, fr::cap::decode_fixture_press_result, "08b1f3ddf10910e2e6bbe303", true);
+    }
+    // fr.fixture.press.result.max (cap fr.fixture.press.result)
+    {
+        fr::cap::FixturePressResult x{};
+        x.at_us = 4294967295u;
+        x.total_us = 4294967295u;
+        v.value("fr.fixture.press.result.max", "fr.fixture.press.result", x, enc, fr::cap::decode_fixture_press_result, "08ffffffff0f10ffffffff0f", true);
+    }
+    // fr.fixture.release.args.empty (cap fr.fixture.release.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.fixture.release.args.empty", "fr.fixture.release.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.fixture.read.args.empty (cap fr.fixture.read.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.fixture.read.args.empty", "fr.fixture.read.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.fixture.read.result.defaults (cap fr.fixture.read.result)
+    {
+        fr::cap::FixtureReadResult x{};
+        x.level = false;
+        x.edges = 0;
+        x.dropped = 0;
+        x.bad_frames = 0;
+        v.value("fr.fixture.read.result.defaults", "fr.fixture.read.result", x, enc, fr::cap::decode_fixture_read_result, "", true);
+    }
+    // fr.fixture.read.result.sample (cap fr.fixture.read.result)
+    {
+        fr::cap::FixtureReadResult x{};
+        x.level = true;
+        x.edges = 1013904226;
+        x.dropped = 3668339987u;
+        x.bad_frames = 2027808452;
+        v.value("fr.fixture.read.result.sample", "fr.fixture.read.result", x, enc, fr::cap::decode_fixture_read_result, "080110e2e6bbe3031893da99d50d20c4cdf7c607", true);
+    }
+    // fr.fixture.read.result.max (cap fr.fixture.read.result)
+    {
+        fr::cap::FixtureReadResult x{};
+        x.level = true;
+        x.edges = 4294967295u;
+        x.dropped = 4294967295u;
+        x.bad_frames = 4294967295u;
+        v.value("fr.fixture.read.result.max", "fr.fixture.read.result", x, enc, fr::cap::decode_fixture_read_result, "080110ffffffff0f18ffffffff0f20ffffffff0f", true);
+    }
+    // fr.fixture.edges.event.defaults (cap fr.fixture.edges.event)
+    {
+        fr::cap::FixtureEdges x{};
+        x.n = 0;
+        x.levels = 0;
+        x.dt_us = fr::proto::Array<uint32_t, 32>{};
+        x.dropped = 0;
+        v.value("fr.fixture.edges.event.defaults", "fr.fixture.edges.event", x, enc, fr::cap::decode_fixture_edges, "", true);
+    }
+    // fr.fixture.edges.event.sample (cap fr.fixture.edges.event)
+    {
+        fr::cap::FixtureEdges x{};
+        x.n = 177;
+        x.levels = 1013904226;
+        x.dt_us = fr::proto::Array<uint32_t, 32>{3668339987u, 2027808452, 387276917};
+        x.dropped = 59076;
+        v.value("fr.fixture.edges.event.sample", "fr.fixture.edges.event", x, enc, fr::cap::decode_fixture_edges, "08b10110e2e6bbe3031a0f93da99d50dc4cdf7c607f5c0d5b80120c4cd03", true);
+    }
+    // fr.fixture.edges.event.max (cap fr.fixture.edges.event)
+    {
+        fr::cap::FixtureEdges x{};
+        x.n = 255;
+        x.levels = 4294967295u;
+        x.dt_us = fr::proto::Array<uint32_t, 32>{4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u, 4294967295u};
+        x.dropped = 65535;
+        v.value("fr.fixture.edges.event.max", "fr.fixture.edges.event", x, enc, fr::cap::decode_fixture_edges, "08ff0110ffffffff0f1aa001ffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0fffffffff0f20ffff03", true);
+    }
+    // fr.fixture.frame.event.defaults (cap fr.fixture.frame.event)
+    {
+        fr::cap::FixtureFrame x{};
+        x.bits = 0;
+        x.grb = 0;
+        v.value("fr.fixture.frame.event.defaults", "fr.fixture.frame.event", x, enc, fr::cap::decode_fixture_frame, "", true);
+    }
+    // fr.fixture.frame.event.sample (cap fr.fixture.frame.event)
+    {
+        fr::cap::FixtureFrame x{};
+        x.bits = 177;
+        x.grb = 1013904226;
+        v.value("fr.fixture.frame.event.sample", "fr.fixture.frame.event", x, enc, fr::cap::decode_fixture_frame, "08b10110e2e6bbe303", true);
+    }
+    // fr.fixture.frame.event.max (cap fr.fixture.frame.event)
+    {
+        fr::cap::FixtureFrame x{};
+        x.bits = 255;
+        x.grb = 4294967295u;
+        v.value("fr.fixture.frame.event.max", "fr.fixture.frame.event", x, enc, fr::cap::decode_fixture_frame, "08ff0110ffffffff0f", true);
+    }
+    // fr.fixture.level.state.defaults (cap fr.fixture.level.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.fixture.level.state.defaults", "fr.fixture.level.state", x, fr::cap::encode_fixture_level_state, fr::cap::decode_fixture_level_state, "", true);
+    }
+    // fr.fixture.level.state.sample (cap fr.fixture.level.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.fixture.level.state.sample", "fr.fixture.level.state", x, fr::cap::encode_fixture_level_state, fr::cap::decode_fixture_level_state, "0801", true);
+    }
+    // fr.fixture.level.state.max (cap fr.fixture.level.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.fixture.level.state.max", "fr.fixture.level.state", x, fr::cap::encode_fixture_level_state, fr::cap::decode_fixture_level_state, "0801", true);
+    }
     // fr.node.identify.args.defaults (cap fr.node.identify.args)
     {
         fr::cap::NodeIdentifyArgs x{};
@@ -3560,6 +3730,42 @@ void for_each(V &&v)
         fr::cap::DiagExecResult x{};
         x.json = std::string_view("{\"ok\":true}", 11);
         v.value("fr.diag.exec.result.ok", "fr.diag.exec.result", x, enc, fr::cap::decode_diag_exec_result, "0a0b7b226f6b223a747275657d", true);
+    }
+    // fr.fixture.press.args.double_click (cap fr.fixture.press.args)
+    {
+        fr::cap::FixturePressArgs x{};
+        x.segments_us = fr::proto::Array<uint32_t, 16>{80000, 100000, 80000};
+        v.value("fr.fixture.press.args.double_click", "fr.fixture.press.args", x, enc, fr::cap::decode_fixture_press_args, "0a0980f104a08d0680f104", true);
+    }
+    // fr.fixture.press.args.bounce (cap fr.fixture.press.args)
+    {
+        fr::cap::FixturePressArgs x{};
+        x.segments_us = fr::proto::Array<uint32_t, 16>{600, 400, 600, 400, 80000};
+        v.value("fr.fixture.press.args.bounce", "fr.fixture.press.args", x, enc, fr::cap::decode_fixture_press_args, "0a0bd8049003d804900380f104", true);
+    }
+    // fr.fixture.press.args.error_too_many_segments (cap fr.fixture.press.args, too_long)
+    {
+        v.error("fr.fixture.press.args.error_too_many_segments", "fr.fixture.press.args", fr::cap::decode_fixture_press_args, "0a110101010101010101010101010101010101", fr::wire::DecodeErr::too_long);
+    }
+    // fr.fixture.edges.event.full_batch (cap fr.fixture.edges.event)
+    {
+        fr::cap::FixtureEdges x{};
+        x.n = 32;
+        x.levels = 1431655765;
+        x.dt_us = fr::proto::Array<uint32_t, 32>{0, 625, 1250, 1875, 2500, 3125, 3750, 4375, 5000, 5625, 6250, 6875, 7500, 8125, 8750, 9375, 10000, 10625, 11250, 11875, 12500, 13125, 13750, 14375, 15000, 15625, 16250, 16875, 17500, 18125, 18750, 19375};
+        x.dropped = 3;
+        v.value("fr.fixture.edges.event.full_batch", "fr.fixture.edges.event", x, enc, fr::cap::decode_fixture_edges, "082010d5aad5aa051a4400f104e209d30ec413b518a61d97228827f92bea30db35cc3abd3fae449f49904e8153f257e35cd461c566b66ba7709875897afa7eeb8301dc8801cd8d01be9201af97012003", true);
+    }
+    // fr.fixture.edges.event.error_too_many_edges (cap fr.fixture.edges.event, too_long)
+    {
+        v.error("fr.fixture.edges.event.error_too_many_edges", "fr.fixture.edges.event", fr::cap::decode_fixture_edges, "1a21010101010101010101010101010101010101010101010101010101010101010101", fr::wire::DecodeErr::too_long);
+    }
+    // fr.fixture.frame.event.green_24_bits (cap fr.fixture.frame.event)
+    {
+        fr::cap::FixtureFrame x{};
+        x.bits = 24;
+        x.grb = 4194304;
+        v.value("fr.fixture.frame.event.green_24_bits", "fr.fixture.frame.event", x, enc, fr::cap::decode_fixture_frame, "08181080808002", true);
     }
     // serial.env.node_to_host.event_button_down (serial serial.ENV)
     {

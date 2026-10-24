@@ -24,6 +24,8 @@ const h = vi.hoisted(() => ({
   firmware: [] as { sourceDir: string; profile: string; outDir: string; fault?: string }[],
   stale: [] as string[],
   fail: null as Error | null,
+  benches: [] as { sourceDir: string; profile: string }[],
+  benchFail: null as Error | null,
 }));
 
 vi.mock('@fractonica/codegen', async (importOriginal) => ({
@@ -35,6 +37,13 @@ vi.mock('@fractonica/codegen', async (importOriginal) => ({
       throw h.fail;
     }
     return { files: [{ path: 'a', content: '' }, { path: 'b', content: '' }], written: opts.check ? [] : ['a'], stale: opts.check ? h.stale : [], warnings: [] };
+  },
+  checkProfileBenches: (sourceDir: string, profile: string) => {
+    h.benches.push({ sourceDir, profile });
+    if (h.benchFail) {
+      throw h.benchFail;
+    }
+    return { benches: ['hardware/bench/lab.bench.yaml'], notes: [] };
   },
   generateFirmware: (opts: { sourceDir: string; profile: string; outDir: string }) => {
     h.firmware.push(opts);
@@ -56,6 +65,8 @@ beforeEach(() => {
   h.firmware = [];
   h.stale = [];
   h.fail = null;
+  h.benches = [];
+  h.benchFail = null;
 });
 
 describe('fr gen', () => {
@@ -117,8 +128,10 @@ describe('fr gen', () => {
         manifest: { schema: 'fractonica/fr-manifest@1', profile: 'c6-pad', board: 'b', app: 'node', target: 'esp32c6', catalog_hash: 1, caps: [] },
         part_profile: 'fr-4mb-v1',
         fault: null,
+        benches: ['hardware/bench/lab.bench.yaml'],
       },
     });
+    expect(h.benches).toEqual([{ sourceDir: REPO, profile: 'c6-pad' }]);
     await genFirmware({ profile: 'c6-pad', out: 'tmp/gen', cwd });
     expect(h.firmware[1].outDir).toBe(join(cwd, 'tmp/gen'));
   });
@@ -128,6 +141,14 @@ describe('fr gen', () => {
     const outDir = join(REPO, 'firmware/apps/node/build/c6-pad-debug-fault/fr_gen');
     expect(h.firmware).toEqual([{ sourceDir: REPO, profile: 'c6-pad', outDir, fault: 'health' }]);
     expect(r).toMatchObject({ ok: true, data: { out_dir: outDir, fault: 'health' } });
+  });
+
+  it('firmware: a bench naming the profile that fails its check is INVALID_SOURCE, and nothing is generated (D7)', async () => {
+    h.benchFail = new SchemaError([{ file: 'hardware/bench/lab.bench.yaml', path: 'duts.1cdbd4175cc4.lines.boot.fixture_gpio', message: 'ch0 of s3k-fixture is bound to gpio.41' }]);
+    const r = await genFirmware({ profile: 's3k-fixture', cwd });
+    expect(r).toMatchObject({ ok: false, error: { code: 'INVALID_SOURCE', details: { issues: [expect.stringContaining('ch0 of s3k-fixture is bound to gpio.41')] } } });
+    expect(h.benches).toEqual([{ sourceDir: REPO, profile: 's3k-fixture' }]);
+    expect(h.firmware).toEqual([]);
   });
 
   it('firmware: an unknown profile is NOT_FOUND with the known ones', async () => {

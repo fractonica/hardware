@@ -381,6 +381,7 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
             return;
         }
         sess(from).last_rx = rx_at_;  // it came from the hub's end of this link: the hub is alive
+        hub_heard_at_ = rx_at_;
         on_node_frame(from, *e, envelope, nullptr);
         return;
     }
@@ -405,6 +406,7 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
     }
     // Any frame of this hub run proves the hub alive on this link, a DUP included (05 §5.11).
     sess(from).last_rx = rx_at_;
+    hub_heard_at_ = rx_at_;
 
     const bool unicast = h.dst == addr_;
     const bool broadcast = h.dst == fr::proto::kAddrBroadcast;
@@ -553,6 +555,7 @@ void Net::on_welcome(LinkKind from, std::span<const uint8_t> body)
     s.session = true;
     s.time_synced = false;  // the handshake's TIME burst follows
     sess(from).last_rx = rx_at_;
+    hub_heard_at_ = rx_at_;
     sess(from).hello_due = kNever;
     // Heartbeats start with the first session, and one follows every WELCOME: on TCP it probes UDP at once
     // instead of an interval later, so inputs get the fast path sooner.

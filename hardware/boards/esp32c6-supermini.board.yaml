@@ -19,9 +19,17 @@ pins:
   strapping_levels: { 4: none, 5: none, 8: high, 9: high, 15: none }
   free: [0, 1, 2, 3, 14, 18, 19, 20, 21, 22, 23]
   adc1: [0, 1, 2, 3, 4, 5, 6]
+# espboards.dev and mischianti.org: component side up, USB-C at the top, pin 1 at the USB end of each row
+# (silkscreen "G" is GND). GPIO9 and 20 were bench-verified at T-LAT.
+headers:
+  confidence: M
+  left: [16, 17, 0, 1, 2, 3, 4, 5, 6, 7]       # TX, RX, 0-7
+  right: [5V, GND, 3V3, 20, 19, 18, 15, 14, 9, 8]
+boot_uart_tx: 16              # U0TXD: the ROM log prints on it at every boot
+en_access: null               # EN is on no header
 rf: { max_tx_power_qdbm: null, antenna: ceramic }
 test_pin: 20
-resources: { rmt_tx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
+resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
 defaults:
   boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb }
@@ -32,3 +40,4 @@ detection:
 sources:
   - https://documentation.espressif.com/esp32-c6_datasheet_en.pdf
   - https://mischianti.org/esp32-c6-supermini-high-resolution-pinout-datasheet-schema-and-specs/
+  - https://www.espboards.dev/esp32/esp32-c6-super-mini/   # headers (left and right rows)

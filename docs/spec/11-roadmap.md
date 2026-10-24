@@ -6,7 +6,7 @@
 |---|---|---|
 | **M0 — Toolchain + spikes** | Install IDF v6.1, ccache, Node ≥ 24.12 and uv Python 3.12. Run spikes S0–S5 (§11.2) | Each spike has a one-page result in `docs/spikes/`. The **router-mode go/no-go** is decided and recorded in README D2/D3. The spec is updated wherever reality differed |
 | **M1 — PoC (router mode)** | Your three PoC items plus the framework spine (§11.3), built as integration checkpoints (§11.4) | T-CODEC, T-LAT (router), T-FLOOD, T-FLOOD-B, T-NN, T-PRES, T-PROV, T-OTA, T-INPUT, T-LED, T-PORTS and T-AGENT pass on the **C3 and C6**. The S3 joins once identified. **Met 2026-10-23** (§11.4 "M1 final re-run"): ten gates re-run at step 7, with the S3 in five of them; T-LAT and T-AGENT carried forward from C6 |
-| **M2 — Fixture, inputs, gateway, scale** | **HIL fixture rig first** (a spare ESP32 wired to DUT BOOT pins, LED pins and `test_pin`; `input_simulate {layer: gpio}`; `hil` test tier); **`fr.analog_in`** and **`fr.display`** (the C3 boards' 0.42" OLED) capabilities; `gateway` app (any board) on USB; ESP-NOW-only nodes; channel ownership, beacons, discovery; node → node `exec_at` on BEACON hub time; ESP-NOW relay OTA; gateway + router dual-homing (link preference and failover; cross-link dedupe itself is already M1); groups; adoption over the link; T2 virtual fleet; destructive operations with human confirmation; idempotency keys; capability multicast decision | T-HIL (real BOOT presses and LED readback driven by the fixture, no human), T-CHAN, T-FAIL, T-LAT (gateway) and T2 scenarios at 30+ nodes pass; latency comparison published |
+| **M2 — Fixture, inputs, gateway, scale** | **HIL fixture rig first** (a spare ESP32 wired to DUT BOOT pins, LED pins and `test_pin`; `input_simulate {layer: gpio}`; `hil` test tier); **`fr.analog_in`** and **`fr.display`** (the C3 boards' 0.42" OLED) capabilities; `gateway` app (any board) on USB; ESP-NOW-only nodes; channel ownership, beacons, discovery; node → node `exec_at` on BEACON hub time; ESP-NOW relay OTA; gateway + router dual-homing (link preference and failover; cross-link dedupe itself is already M1); groups; adoption over the link; T2 virtual fleet; destructive operations with human confirmation; idempotency keys; capability multicast decision | T-HIL (real BOOT presses and LED readback driven by the fixture, no human), T-CHAN, T-FAIL, T-LAT (gateway) and T2 scenarios at 30+ nodes pass; latency comparison published. **M2-C1 done 2026-10-24** (§11.6 "M2-C1 result"): the HIL fixture, with T-HIL passed twice in a row on the four DUTs; the other M2 gates are open |
 | **M3 — Grow** | Canary/wave rollouts; HTTP MCP and resources; more capabilities (`fr.audio_out`, `fr.haptic`, `fr.encoder`); battery profile; delta OTA; optional binary SDK mode. Envelope security stays unplanned ([05 §5.13](05-network.md) keeps the notes) | Each new capability has a driver on ≥ 1 board, a host test and an on-target smoke test |
 
 ## 11.2 Spikes (M0): answer the risky unknowns first
@@ -42,7 +42,7 @@
 
 **M1 boards:** your two `esp32c3-oled042` boards plus the C6 Super Mini (all USB-Serial/JTAG, RISC-V, 4 MB, `fr-4mb-v1`).
 - Profiles: `c3o-pad` (button GPIO9 + `led_gpio` GPIO8 active-low; the OLED stays unbound until `fr.display` lands in M2), `c6-pad` (`led_ws2812`), `c6-pad-mono` (`led_gpio` on GPIO15, which shows D9: same board, swapped driver, no code change), and since step 7 `s3l-pad` (the S3 below).
-- The demo's `pad-c3`/`pad-c6` aliases map to one C3 OLED board and the C6. The second C3 OLED board is the node ↔ node partner and, in M2, a fixture candidate.
+- The demo's `pad-c3`/`pad-c6` aliases map to one C3 OLED board and the C6. The second C3 OLED board (`pad-c3b`) is the node ↔ node partner. In M2 both C3 OLED boards stay DUTs: the HIL fixture is a dedicated ESP32-S3-DevKitC-1-style board (WROOM-1-N16R8, device `e8f60a81bc48`, alias `fix-s3`; §11.6).
 - The S3 builds in CI compile-only. It joins as the last M1 step, as a board manifest plus profile with zero `fr_*` changes. Any framework change it needs is M2 work.
   - Done at step 7. The board is a Waveshare ESP32-S3-LCD-1.9 (`waveshare-esp32s3-lcd19`, S3R8: 8 MB octal PSRAM, 16 MB flash). Its profile is `s3l-pad`: BOOT on GPIO0, `led_ws2812` on GPIO15, PSRAM off, the LCD unbound. Alias `pad-s3`, addr 4 ([04 §4.2](04-boards.md)).
   - Its manifest and profile needed zero `fr_*` changes to build, provision and run.
@@ -64,7 +64,7 @@
 - WS RPC;
 - battery profile;
 - delta OTA;
-- the HIL fixture (first item of M2);
+- the HIL fixture (first item of M2; done at M2-C1, §11.6);
 - `fr.analog_in` and `fr.display` (M2);
 - binary SDK mode;
 - node proxying.
@@ -211,6 +211,7 @@ The C2 items carried into C3 are resolved: `describe` returns the encoded `Descr
   - Node-broadcast fan-out on every session; send callbacks later than 1 s; BSSID-named credentials.
   - SQL NULL MSG data rows; a hub restart during a router outage.
   - Node → node `exec_at` (M2); `fr::net::send_cmd`; the fast rate profile.
+- **Closed at M2-C1** (§11.6 "M2-C1 result"): client origin for non-job ops (`op.called`); FakeRegistry selector semantics (it now selects as `SqliteRegistry` does); a per-run `args` for `test_run`; cancel grace vs cleanup (10 s per test spawn and in the runner). The powered data hub is in place; the M1 USB phases have not been re-run on it yet.
 
 ## 11.5 M1 demo script (definition of done)
 
@@ -237,3 +238,312 @@ The C2 items carried into C3 are resolved: `describe` returns the encoded `Descr
    - (a) do step 6 itself, verify it with `input_simulate` + `wait_for_event status.effect_done --since`, and report latencies from `latency_stats`;
    - (b) change a log line, run `deploy all --via wifi --expect-log <line>` (each board on a USB port the hub holds open, since Wi-Fi nodes send no LOG frames in M1; otherwise `--expect-event node.boot`), and report per-device results;
    - (c) build `c6-pad-mono`, flash pad-c6 with `flash_start --plan full`, and show that `status.blink` now drives the GPIO15 LED with no code change.
+
+## 11.6 M2 work order: checkpoints
+
+M2 covers the M2 row of §11.1 and the "Open after M1" items in §11.4, including the C3–C6 items listed there. There are two exceptions:
+- A few items that the spec labels M2 are proposed for M3, under "Proposed deferrals" below. Approving that list changes the scope. Until you approve it, those items stay open and the spec still says M2.
+- Items labelled "M2+" or "an M2 option" are placed in a checkpoint or deferred one at a time, each with a reason.
+
+As in M1, each gate runs when its checkpoint lands, and each checkpoint gets a design note `docs/design/m2-c<N>-*.md`. M2-C1's note is [m2-c1-hil](../design/m2-c1-hil.md); its bench round is in the [spike note](../spikes/2026-10-24-m2-c1-hil.md).
+
+**Board roles** (decided with you, 2026-10-23)
+- **`fix-s3`** is the HIL fixture: a dedicated spare ESP32-S3-DevKitC-1-style board (ESP32-S3-WROOM-1-N16R8, device id `e8f60a81bc48`), board `esp32s3-devkitc1-n16r8`, profile `s3k-fixture`.
+  - From C1 it runs serial only with the radio off, sits on the powered data hub permanently (native USB port), is never a DUT, and is kept out of `all` and out of what apps see.
+  - Its 23 usable header GPIOs carry 12 wired lines and 3 reserved ones (M2-C3's two analog setpoints, a later pad-s3 EN), with 8 spare ([design m2-c1-hil §2.2](../design/m2-c1-hil.md)). The spares alone do not make room for another wired DUT (below).
+  - USB and esptool cannot tell it from pad-s3, so it is provisioned with `--profile s3k-fixture`.
+- **DUTs, from C1 to the M2 exit: all four existing boards, with their aliases and profiles.**
+  - `pad-c3` (`1cdbd4175cc4`): C3, `led_gpio`, active-low. RF-weak: it is the board behind the 8.5 dBm cap ([04 §4.6](04-boards.md)) and read −80 dBm at step 7. T-HIL accounts its losses and warns (`rf_weak` in the bench).
+  - `pad-c3b` (`1cdbd416ba34`): C3, `led_gpio`, active-low.
+  - `pad-c6` (`58e6c5d55e64`): C6, WS2812.
+  - `pad-s3` (`94a99015cecc`): S3, WS2812, EN on a header.
+  - All four keep their radios, so S2's TX-cap question runs at C4 on both C3s.
+- **Gateway (from C4): a spare C6, the fifth radio board.** It is available now. §11.1 allows any board that runs app `gateway` on USB. pad-s3 should not be the gateway:
+  - As the gateway, pad-s3 would run app `gateway` instead of `s3l-pad`. C5 needs `s3l-pad` (`st7789_spi`, and T-DISPLAY on the S3 LCD). So do C7's S3 parity runs and the four-DUT T-HIL.
+- **More spare C6 and S3 boards** can become DUTs or radio nodes later. The classic WROOM ESP32 boards are not used. A wired one needs its own bench entry, three fixture lines and three fixture instances (BOOT, LED, test_pin), and two limits apply:
+  - **Instances:** fr_core runs at most 16 (`kMaxInstances`). The fixture runs 13 at C1 and 15 after C3, so after C3 only one more fits.
+  - **A glitch-free BOOT pin:** of the 8 spare pins only GPIO47 has no power-up glitch.
+
+  So a fifth wired DUT after C3 needs a raised `kMaxInstances` (an fr_core change, with codegen's check moving to match) and GPIO47, or the non-LED pin of GPIO38/48 once its `rgb_alt` reservation is freed, for BOOT. Otherwise a further spare joins as an unwired radio node, or takes over an existing DUT's lines.
+- **No alias changes.** The gate defaults (T-NN `--pair`, T-FLOOD `--cut`, T-FLOOD-B `--isolate`), the device lists of T-PROV, T-OTA and T-AGENT, T-AGENT's prompt (a), and the §11.5 demo (`web/demo`) all stay as they are.
+
+**Gateway-mode roles (from C4; the minimum each gate needs)**
+
+| Gate | Nodes | Roles |
+|---|---|---|
+| T-GW-LINK | 1 | pad-c6 under `net wifi_down`, reaching the hub through the gateway |
+| T-CHAN | 3 | pad-c3b associated with the router; pad-c6 ESP-NOW-only behind the gateway; pad-s3 dual-homed |
+| T-FAIL | 2 | pad-c6 and pad-s3, both dual-homed |
+| T-LAT (gateway), T-EXEC | 2 | pad-c6 and pad-s3 gated. pad-c3b's and pad-c3's figures are published but not gated, because of their RF (proposed) |
+| T-GROUP | 3 | two members, one of them with its hub link dropped; one non-member |
+| T-OTA-RELAY | 2 | pad-c6 as the ESP-NOW-only target; a second node floods, to show the busy target does not relay |
+
+**USB data ports** (only two Mac ports carry data; the powered data hub is in place)
+- **Mac port A: the powered data hub.** It carries:
+  - the fixture, permanently, from C1;
+  - any DUT that a USB phase needs (from C1, several at once);
+  - the gateway from C4;
+  - at C8, the USB-C Ethernet adapter (inferred to work through a hub).
+- **Mac port B:** free, for a board that a phase wants on its own port, or for the Ethernet adapter if it does not work through the hub.
+- **What the hub fixes:** the M1 USB phases (T-PRES unplug, T-INPUT loss, T-PORTS, T-OTA cut, T-PROV) no longer run one DUT at a time, and T-FLOOD-B can isolate one USB node while another keeps the hub link ([10 §10.5](10-testing.md), "Isolation needs USB"). `deploy --expect-log` still needs USB until LOG frames go over TCP (C2).
+- **The hub is also the fixture's supply.** A hub power cut or replug, a Mac reboot, or a Mac sleep that cuts the hub's ports is a fixture power loss. With direct BOOT wiring, `fr bench` then runs before anyone touches a DUT ([design m2-c1-hil D11](../design/m2-c1-hil.md)). A DUT on the hub powers up together with the fixture.
+
+```
+ 0. Before C1 (you): headers on pad-c3 and pad-s3; the parts in design m2-c1-hil §6; the T-LAT cross-jumpers, then their GND jumper, off (c6 D25)
+ 1. M2-C1 HIL fixture: fr.fixture node, bench file, input_simulate {layer: gpio}, hil tier          ← first (D17)
+ 2. Radio and scale stream                           3. Capability and agent stream
+    2a M2-C2 T2 virtual fleet (router mode),            3a M2-C3 inputs: fr.analog_in, reorder buffer
+       carry-over fixes, LOG over TCP                      [T2-ANALOG-30 after 2a; default report_hz and the
+    2b M2-C4 gateway link + full spike S2                   arrival-order T-HIL re-run after 2b's S2]
+    2c M2-C6 channels, BEACON, ESP-NOW-only nodes       3b M2-C5 fr.display (C3 OLED, S3 LCD)
+    2d M2-C8 dual-homing, T-FAIL, T-LAT (gateway),      3c M2-C7 destructive ops, idempotency, residuals,
+       node → node exec_at                                 S3 parity [gateway OTA confirmation after 2b]
+    2e M2-C10 ESP-NOW relay OTA                         3d M2-C9 groups, adoption, multicast decision [after 2c]
+ 4. M2 exit on one tree: T-HIL, T-CHAN, T-FAIL, T-LAT (gateway) and the T2 scenarios at 30+ nodes pass;
+    router vs gateway comparison published
+```
+
+**Order rules**
+- **C1 comes first (README D17).** T-ANALOG, the latency check in T-DISPLAY, the presses in T-FAIL, T-LAT (gateway) and T-EXEC all read real edges through the fixture.
+- **C2 needs no hardware and starts alongside C1.** It gives the gateway and channel work a 30-node test bed before any bench run ([10 §10.3](10-testing.md), "M2 (T2)").
+- **The two streams are not independent.** These edges hold:
+  - **C2 → C3:** T2-ANALOG-30 runs on C2's fleet.
+  - **C4 (S2) → C3 default `report_hz`:** S2 measures the analog load first ([07 §7.3](07-capabilities-sdk.md), "Spike S2 measures this"). C3's code can land earlier, with the default marked provisional.
+  - **C4 (S2) → C3's arrival-order T-HIL re-run:** arrival order depends on the radio. In M1, the reorders came from a lost UDP frame's retry ([§11.4](11-roadmap.md), Open after M1).
+  - **C4 → C7:** the "OTA to a `role:gateway` device" confirmation needs C4's gateway app.
+  - **C6 → C9:** the multicast decision uses C6's BEACON clock. It also uses C2's fan-out skew, and C2 lands first anyway.
+- **Spike S2 runs whole at C4,** the TX-cap question included, on both C3s. It must finish before any gate whose verdict depends on the radio.
+  - Only the timing verdicts of T-HIL and T-ANALOG are computed in fixture and DUT clocks and are RF-independent.
+  - Their completeness and arrival-order verdicts count events that reach the hub over Wi-Fi, so they do depend on RF. At −74 to −78 dBm the C3s lost and reordered events ([04 §4.6](04-boards.md)); at step 7 pad-c3b sat at −70…−76 dBm and pad-c3 at about −80.
+  - T-HIL therefore accounts for losses with the DUT's own counters (design §5.2) and warns below −70 dBm. For pad-c3 (`rf_weak`), an accounted loss above 1 % warns instead of failing; an unaccounted one still fails.
+- **Power cuts on wired DUTs.** These gates cut a bench DUT's power:
+  - the M1 USB phases that unplug a DUT (T-PRES unplug, T-OTA cut) when re-run from C1;
+  - T-PRES unplug and T-OTA cut on pad-s3 (C7);
+  - T-OTA-RELAY on pad-c6 (C10).
+
+  For each one, the harness names the board and declares a cut window to the hub. During that window:
+  - the hub refuses gpio presses on the board's lines;
+  - it stops judging the board's LED and test_pin lines;
+  - every other DUT's fit is unaffected, because the fit comes from presses and each DUT has its own lines (design D10).
+
+  Cutting a DUT while the fixture stays powered is safe. The gateway unplug in C8 is not a bench DUT.
+- **One hub restart per checkpoint.** Each checkpoint batches its op and schema changes into one REGISTRY_HASH bump: one `fr hub restart`, then a reconnect of `fr mcp`, and one T-CODEC re-run.
+
+| Checkpoint | Contents | Gates |
+|---|---|---|
+| **M2-C1 HIL fixture** ✅ 2026-10-24 on pad-c3, pad-c3b, pad-c6 and pad-s3 | **Fixture.** The fixture is a Fractonica node on a dedicated ESP32-S3-DevKitC-1-style board: app `node`, profile `s3k-fixture`, HELLO role `fixture` (`schema/protocol.yaml` Role += 2), radio off (serial only). It has 12 channels of a new `fr.fixture` (0x0006, marked `test_only`) on drivers `fixture_gpio` and `fixture_ws2812_rx`: 4 BOOT, 4 LED and 4 test_pin lines, one set per DUT. Three more lines are reserved in the bench (C3's two analog setpoints, a later pad-s3 EN).<br>**Driver.** Presses are open-drain (direct wiring, with series resistors); an N-MOSFET gate mode stays as a documented upgrade. Each press is ended by an ISR-dispatched esp_timer. Edges go into an IRAM edge ring (level lines only), and WS2812 lines are decoded with RMT RX (2 of the S3's 4 channels).<br>**Codegen** (`packages/codegen/src/board.ts`):<br>• board manifest `esp32s3-devkitc1-n16r8`;<br>• a pin-level `bind: gpio.<n>`;<br>• profile `role`, `net.radio` and `test_pin: none`, taken into `renderFragment` and the manifest;<br>• `rmt_rx` under each board's `resources`, plus `headers`, `boot_uart_tx`, `en_access` and `pins.power_up_glitch` (BOOT and EN lines only on glitch-free pins);<br>• a driver `sdkconfig` list and a 16-instance check.<br>**Bench file.** `hardware/bench/lab.bench.yaml` (`fractonica/bench@1`, keyed by MAC, four DUTs, reserved lines marked `wired: false`) is validated against manifests and profiles in `fr gen --check` and by the hub.<br>**Hub** (`packages/hub/src/fixture/`):<br>• `bench_get`, which also publishes the fixture ↔ hub clock uncertainty;<br>• `input_simulate {layer: gpio}` (default `inject`), plus `bounce`, working on release DUT builds;<br>• `hil.edge` and `hil.frame`;<br>• a wired clock fit computed from presses, with per-DUT `pin_pulse` samples as a second source on debug DUTs;<br>• a fence: client `command_send`, `diag_exec` (except info/stats/selftest), OTA, and flashing or provisioning any profile but the fixture's to `role:fixture` are refused, and a fixture build goes only to the bench's fixture device;<br>• node → node forwards to a fixture are dropped.<br>**Selectors and apps.** `role:fixture` stays out of the candidate set unless a selector names it ([09 §9.2](09-agent-api.md)), with FakeRegistry aligned. Apps never see the fixture, so `registry_rev` and `web/demo`'s `devices.ts` are unchanged.<br>**From the open items:**<br>• `op.called` on `command_send`, `input_simulate` and `binding_set`, with T-AGENT (a) judged by `op.called {client: mcp}` (`t-agent.ts`, `lib/agent-evidence.ts`);<br>• `test_run` tier `hil` (`sim` reserved) and a per-run `args`;<br>• `test_report`;<br>• a cancel grace of 10 s for each test spawn.<br>**Harness and agents.** `tests/e2e/t-hil.ts` over pad-c3, pad-c3b, pad-c6 and pad-s3; T-INPUT `--press-by fixture`; T-LED `--verify fixture`; `t-lat.ts` skipped while the bench wires the T-LAT pins; the plugin `hil-rig` skill ([design m2-c1-hil](../design/m2-c1-hil.md)) | T-HIL on the four DUTs. T-INPUT's human phase and T-LED pass with no person. T-AGENT (a) re-run on `op.called`, at C1 or at the M2 exit. T-CODEC re-run. **Passed 2026-10-24:** T-HIL, T-INPUT human (fixture), T-LED (fixture), T-CODEC; T-AGENT (a) not run, carried to the M2 exit as this row allows ("M2-C1 result" below) |
+| **M2-C2 T2 virtual fleet** (router mode) | **One medium for both time domains.** `firmware/test/host/tests/net_air_medium.hpp` grows to N nodes. It gains:<br>• per-pair reach, loss, RSSI, duplication and latency;<br>• airtime at 1 and 6 Mbps, a channel per node and channel-use stats;<br>• the real `air_sched.hpp` scheduler;<br>• all behind an executor that runs on FakeCore or on the wall clock.<br>`fr_net_node`'s `FakeAir` stays for the 3-node interop suites.<br>**Fleet process.** One process hosts N nodes, with classes extracted from `net_node.cpp` into a shared kit. SimTcp/SimUdp connect to a **private** hub on port 0 with a temporary FR_HOME (the `real-hub.ts` pattern). It never uses the lab hub, because `registry.addr_hwm` never reuses addrs.<br>**Also:** an AP model; YAML scenarios plus a runner plus `test_run` tier `sim`; a virtual-time scale suite at 10 and 30 nodes inside `pnpm test:host`.<br>**Hub and dashboard fixes the fleet finds at 30+:** the handshake storm, DIRECTORY, the O(N) node-broadcast fan-out, and 30 tiles.<br>**Carry-overs that T2 measures:**<br>• the flood-rate token is refunded on a refused send (`peer.cpp`, `air.cpp`);<br>• node broadcasts fan out on every session (`router/index.ts #fanOut`);<br>• router mode adopts a newer hub epoch heard in a seeded broadcast while no session is up (`air.cpp on_hub_air`).<br>**LOG frames over TCP** (router mode), fed to the log store, so `expect_log` no longer needs USB for Wi-Fi nodes ([09 §9.4](09-agent-api.md)); LOG over the gateway stays in C6.<br>Laptop runs only, until a CI target exists (none in the repo) | T2-SCALE; T2-FLOOD-30, T2-FLOOD-B-30, T2-NN-30, T2-CHURN-30, T2-INPUT-30, T2-OTA-30 |
+| **M2-C3 inputs** | **`fr.analog_in` 1.0** (README D18; [07 §7.3](07-capabilities-sdk.md)):<br>• hysteresis, the input range in calibrated mV, and `examples`;<br>• a fleet-safe default `report_hz` and deadband, decided after S2 (C4) and per topology (T2-ANALOG-30);<br>• `AnalogInService` over `hal::AnalogSource`, with driver `adc_oneshot` (ADC1 only, curve-fitting calibration);<br>• codegen array config and a `SERVICES` entry;<br>• an opt-in profile for the C3s (`c3o-analog`: boot, status, analog on GPIO3), never the pad profiles.<br>**Fixture PWM setpoints.** `fr.fixture` gains a `pwm` drive mode (LEDC) on the two lines the C1 bench already reserves: ch12 (fixture GPIO11 → pad-c3 GPIO3) and ch13 (fixture GPIO12 → pad-c3b GPIO3), each through 10 kΩ into 1 µF. `s3k-fixture` gains the two instances (its `fw_id` is re-pinned), and `lab.bench.yaml` flips them to `wired: true`. No existing line moves: no second bench file and no fixture profile variant. The bench validator refuses a push-pull or PWM fixture line that maps to a DUT button line or to any strapping pin (the C3's GPIO3 is neither).<br>**Streaming STATE:**<br>• a pending UDP repeat is dropped when a newer value supersedes it (`net.cpp schedule_repeat`);<br>• STATE stops flooding the event store and the dashboard's 2,000-event ring.<br>**Analog input gets its own path:** `input_simulate {value}`, plus an inject form on the dashboard and a value form for diag `inject`. The gesture row and the gesture form become button-only.<br>**Reorder buffer** for `ordered` ports ([05 §5.8](05-network.md)):<br>• it holds only when a predecessor is known to be missing, which needs a per-port counter or a previous-seq TLV;<br>• then decide whether `fr.button` is `ordered`. That decision is a precondition of the M2-exit T-HIL ordering rule (below);<br>• the read root cause: `up` (URGENT) goes over UDP while `click` (normal) goes over TCP (`net.cpp wifi_route`).<br>**S3 BAT_ADC → HEARTBEAT `vbat_mv`** (field in [05 §5.7](05-network.md)) | T-ANALOG; T2-ANALOG-30 (after C2 and S2); the `vbat_mv` check. T-HIL and T-INPUT sim re-run, now also judged by arrival order (after S2) |
+| **M2-C4 gateway link** | **Prerequisites:** the spare C6 as the gateway (available) and the powered data hub (in place).<br>**Spike S2, every question in [§11.2](#112-spikes-m0-answer-the-risky-unknowns-first), each with a recorded result:**<br>• (a) the C3 TX cap at 8.5/11/13 dBm, on both C3 units (pad-c3 and pad-c3b, both still radio nodes);<br>• (b) 10k-frame ESP-NOW unicast and broadcast delivery and latency with the STA associated, on C3, C6 and S3. Pass: the M0 go/no-go rule, broadcast ≥ 99 % and unicast ≥ 99.9 % after retries;<br>• (c) the 6 Mbps per-peer rate (with `phymode`) on C3, C6 and S3 and on the broadcast peer, through a debug hook;<br>• (d) the cost of peer add/del churn;<br>• (e) C6 11ax vs 11b/g/n, A/B ([05 §5.3](05-network.md));<br>• (f) the CPU cost of lwIP `TCP_TMR_INTERVAL=50` / `RTO_TIME=300` ([05 §5.12.1](05-network.md));<br>• (g) the analog load: the bench nodes at `report_hz` 200 through the AP (800 frames/s with four; the 1,500 frames/s of 30 × 50 Hz is reached in T2, inferred);<br>• (h) `guard`/`lost` under load;<br>• (i) a CSA check: change the router channel once and watch for `WIFI_EVENT_HOME_CHANNEL_CHANGE` on an associated node.<br>**From (c), decide whether the `game` rate profile joins M2** (at C6, for ESP-NOW-only nodes; [05 §5.15](05-network.md)).<br>**From here on, gate reports collect `stats` `tcp_close_*` and `espnow`.** TCP reconnects are closed when the C4–C10 gate reports show no `tcp_close_*` without a cause. Each unexplained one gets a note before the M2 exit.<br>**Hub loop delay:** explain the quiet-Mac p99 of 15–36 ms ([08 §8.2](08-hub.md), [08 §8.11](08-hub.md)) before a p99 ≤ 20 ms gate depends on it.<br>**Wire contract in `schema/protocol.yaml`:**<br>• bodies of BEACON, DISCOVER, JOIN_*, CHANNEL_SWITCH, NEIGHBORS, OTA CHUNK and GW_*, with an id that matches GW_TX_DONE to its GW_TX;<br>• `net_mode` values;<br>• a hub-time exec TLV (0x81 stays the destination's clock);<br>• golden vectors.<br>**Host gateway rig:** `fr_net_node --gateway` on C2's medium, with channels.<br>**Firmware:** `firmware/apps/gateway` and gateway profiles. Net's hub session over the gateway (a third session link).<br>**Hub gateway link:**<br>• GW_* in `links/serial.ts`;<br>• LINK_PING every 250 ms, down after 1 s;<br>• per-(gateway, MAC) endpoints;<br>• one GW_TX per hub broadcast;<br>• `device_get` links | T-GW-LINK; T-CODEC re-run; S2 spike note |
+| **M2-C5 display** | **`fr.display` (0x0003):**<br>• `text`, `clear` and `fill_rect` (reliable, idempotent), plus `set_brightness`;<br>• geometry traits ≤ 16 B ([07 §7.4](07-capabilities-sdk.md)).<br>**`DisplayService` over `hal::Display`:** a mono shadow framebuffer, an asynchronous flush coalesced by a timer and never inside dispatch, and a full-ASCII 5×7 font.<br>**`ssd1306_i2c`.** It has its own SSD1306B init, taken from `firmware/apps/hwprobe/main/hwprobe.c` (COM 0x12, IREF 0xAD 0x30, A1/C8); IDF v6.1's `esp_lcd_panel_ssd1306.c` sends none of these. It is bound in `c3o-pad` (`oled`, port 3), so both C3s get it; pad-c3b is the display DUT.<br>**`st7789_spi`** with an LEDC backlight is bound in `s3l-pad` (`lcd`, port 3; orientation to decide).<br>**Codegen** lets a driver claim the pins its own board entry reserves, and takes traits from the board entry.<br>**Test support:** a test-only framebuffer `snapshot` (CRC), and a host renderer that shares the font.<br>**Plugin skill** `write-capability` (M2+, [09 §9.8](09-agent-api.md)), with two new capabilities to copy from | T-DISPLAY |
+| **M2-C6 channels, ESP-NOW-only nodes** | **Before C6 starts:** if S2 (i) showed that the router sends no CSA, you choose between the lab router (README D3) and rescoping T-CHAN.<br>**Channel ownership** ([05 §5.2, §5.4, §5.11](05-network.md)):<br>• where the gateway's channel comes from (decision);<br>• BEACON stamped by the gateway;<br>• CHANNEL_SWITCH through `esp_now_switch_channel_tx` (untested with the STA connected, so bench it first);<br>• discovery as an IDF-free state machine like `sta_rules.hpp`.<br>**ESP-NOW-only nodes:**<br>• the Wi-Fi sidecar `off\|on_demand` (where it is set: decision);<br>• a NET health bit per mode. `fr_ota` `defs.hpp` reads "Wi-Fi up", which would roll back every ESP-NOW-only image; C1 already handles radio-off;<br>• provisioning that waits for a gateway session;<br>• a receive stamp in the driver callback (`air.cpp` stamps on the core task);<br>• `game` if C4 decided so.<br>**LOG frames over the gateway** (LOG over TCP landed in C2), so `expect_log` no longer needs USB ([09 §9.4](09-agent-api.md)).<br>**Also:**<br>• a node adopts a newer hub epoch from BEACON;<br>• the BSSID-named sweep becomes bounded (`sta_rules.hpp search()`);<br>• T2 gateway topologies;<br>• plugin skill `debug-device`, now that logs flow over every link | T-CHAN; T-FLOOD-B with the router off and a node isolated; T2-GW-FLOOD-30, T2-GW-CHAN-30, T2-GW-DISCOVERY, T2-GW-HB-LOAD |
+| **M2-C7 agent safety, residuals** | **Destructive tier** ([09 §9.2–9.3](09-agent-api.md), README D13): CONFIRMATION_REQUIRED (exit 9).<br>**Approval comes only from outside the agent API:** a native macOS dialog, or a real 3 s BOOT long-press on the target. These are not approval:<br>• injected input;<br>• any BOOT edge on a bench line while the fixture drives it, by any path;<br>• a press while the fixture does not report that line released, or within the window after any fixture `press` on it.<br>The C1 fence already refuses client commands to `role:fixture`; this guards against accidents, not attacks ([09 §9.2](09-agent-api.md)).<br>**Also:** `confirm.resolved`, `requiresUserInteraction`, and the Agents page's pending confirmations ([08 §8.9](08-hub.md)). `idempotency_key` (24 h) is checked before the confirmation, so a retry gets the same `confirm_id`.<br>**Destructive ops:**<br>• `flash_erase` (pytools `erase`; `fr_ident` located per part profile);<br>• `device_forget` (with a tombstone, because without it the node's next HELLO brings it back), plus SDK `device.removed` ([07 §7.9](07-capabilities-sdk.md));<br>• OTA to a `role:gateway` device (needs C4).<br>**Policy:** the policy file and POLICY_DENIED (exit 11); the plugin's advisory PreToolUse guard. Optional: an example in each `fr mcp` tool description.<br>**Residuals:**<br>• drop stale mirror members on a manifest or descriptor change;<br>• the Ports page's first render;<br>• wizard progress during the flash;<br>• `/ws` snapshot backpressure;<br>• a `SerialPort.list` timeout;<br>• a one-time warning for SQL NULL MSG rows;<br>• the chip-revision check at provisioning.<br>**S3 parity on the powered hub:** T-NN `--pair pad-s3:pad-c3b`, T-OTA, T-PROV's erase through `flash_erase`, T-INPUT loss, T-PRES unplug, T-PORTS. Unplug and cut runs on pad-s3 declare their cut windows | T-CONFIRM; T-PROV `--allow-erase` via `flash_erase`; the S3 in every M1 gate |
+| **M2-C8 dual-homing, latency** | **Link preference** ([05 §5.10–5.11](05-network.md)):<br>• node side: gateway first for input; a unicast that fails its MAC ACK goes over UDP/TCP at once; Q1 seqs are kept;<br>• hub side: gateway first for hub → node, with failover on LINK_PING loss or per-node silence;<br>• one seed per hub broadcast in mixed mode;<br>• the same link-health signal closes uplink-only Wi-Fi loss.<br>**Node → node `exec_at` on BEACON hub time:** a hub-clock estimate on each node, the C4 TLV, node → node `expire_at`, and a binding `lead_ms`.<br>**T-LAT, one method for both modes.** It moves to the fixture, for the router baseline and for gateway mode alike (gate line below). The router baseline runs with the hub wired (`--hub-link wired`, Ethernet adapter on the powered hub or on Mac port B).<br>**Spec change to approve.** The test_pin → BOOT loop is retired, because the bench wires every DUT's BOOT and test_pin to the fixture. The C6 figures stay in [05 §5.14](05-network.md) as the M1 baseline but are not compared directly. This is recorded as a 05 §5.18 and 10 §10.5 edit for you to approve.<br>**Published:** the router vs gateway comparison in [05 §5.14](05-network.md), with both modes measured the same way | T-FAIL, T-LAT (router baseline and gateway), T-EXEC, T2-GW-FAIL-30 |
+| **M2-C9 groups, adoption** | **Groups 0xF000–0xFEFF** ([05 §5.5, §5.8](05-network.md)):<br>• a registry entity or a tag mapping (decision), with ops and a `group:` atom;<br>• `fr.node.set_groups` made real (`core.cpp` answers `unsupported` today);<br>• membership checked on both receive paths (`net.cpp`, `air.cpp`), while non-members still record the seq;<br>• group dst in hub broadcasts, and group targets in `message_send`, the SDK, `devices.ts` and bindings;<br>• `set_groups` pushed at every handshake.<br>**Adoption** ([06 §6.4](06-identity-ota.md)):<br>• `device_adopt`, plus an `fr.node` command that writes addr, net, alias and epoch floor to `fr_ovr`;<br>• `device.adopted`;<br>• board and profile pushed, so the node can take OTA.<br>**Plugin skill** `provision`.<br>**The capability-multicast decision,** recorded in README and [05 §5.8](05-network.md). It uses C2's fan-out skew and C6's BEACON clock (needs C6) | T-GROUP, T-ADOPT |
+| **M2-C10 relay OTA** | **ESP-NOW relay OTA** ([06 §6.5–6.7](06-identity-ota.md)):<br>• CHUNK/SACK with a bitmap and 64 KB resume strides (05 §5.1 N7);<br>• a node ESP-NOW `Fetch` on `fr_worker`;<br>• a driver bulk lane: a few 1,470 B v2 slots, `espnow_v2` peers only, sent only while URGENT is empty;<br>• the gateway streams the image from the hub over USB (staging in a `relay` partition needs fr-16mb-v1, which no bench board has);<br>• `via: espnow`, with its own deadlines and GW_TX_DONE pacing;<br>• transport `auto` gains the relay as its third choice, and a USB gateway is flashed over serial, always last ([06 §6.7](06-identity-ota.md)).<br>**Power cut:** the cut on pad-c6 declares its cut window.<br>**Then:** the M2 exit re-run on one tree | T-OTA-RELAY, T2-OTA-RELAY; every M2 gate re-run |
+
+**M2-C1 result** (2026-10-24, on the lab hub; [design note](../design/m2-c1-hil.md), [spike note](../spikes/2026-10-24-m2-c1-hil.md)). The fixture and every DUT ran debug builds.
+- **Fixture:** `fix-s3` (`e8f60a81bc48`) provisioned with nothing wired, `--profile s3k-fixture --alias fix-s3`: 7.7 s, addr 5, HELLO over serial, `wifi: off`. Build `262d9a55caf4` (554,656 B, 28.2 % of the slot), pinned as `fixture.fw_id` in `lab.bench.yaml`. Its RGB LED is on GPIO48 (the identify blink, seen on the second try). The fixture ↔ hub clock uncertainty was 263–371 µs at the first `fr bench`, and 315 µs (RTT_min 629 µs, one burst) at run 3's preflight (318 µs, RTT_min 636 µs, at run 4's).
+- **DUTs:** the four M1 boards, on chargers, on Wi-Fi; the M2-C1 builds deployed over Wi-Fi in 11.7–23.6 s each. 12 lines wired direct, open-drain, with 1 kΩ (10 kΩ on the two C3 LED taps) and a GND star. At power-up some lines counted edges while their DUT was still unpowered and floating (one BOOT line 1,019, two test_pin lines 717 and 122); the counts stayed flat afterwards, with no ongoing noise at idle.
+- **Hub surface:** `HUB_EVENT_TYPES` 17 → 20 (`op.called`, `hil.edge`, `hil.frame`; [09 §9.2](09-agent-api.md)); ops `bench_get` and `test_report`; `input_simulate.layer`; `test_run` tiers `sim` (reserved) and `hil`, and `args` ([09 §9.4](09-agent-api.md)).
+
+| Gate | DUTs | Result |
+|---|---|---|
+| Cap release on target (design §5.3 step 6) | the DUT on ch0 (pad-c3b, as wired) | ✅ a gpio `press` with no release held ch0 low for 15.000022 s, then the fixture released it at `cap_ms` by itself. The DUT reported `boot.down`, `long_press` at 600 ms, and `up` with `held_ms` 15000 |
+| T-HIL | all four | ✅ twice in a row, full gate, after two failed runs (below). Run 3 through `fr test run --tier hil` (job `j_22f022fb0d23`, 113.4 s, 4/4, no prompt); run 4 standalone, 4/4. **wiring:** all 12 lines reach their own DUT only. **delivery:** 65 commands per DUT, 0 expired, 0 timed out (both runs). **fit** (11 samples each, 0 rejected, both runs): run 3 residual p99 1/1/1/7 µs; skew +24.0/+17.9/−51.8/−3.8 ppm; ISR latency 1/1/30/0 µs; wired − hub-path p50 −165/634/251/887 µs (pad-c3/pad-c3b/pad-c6/pad-s3). **buttons:** 50/50 trials and 170/170 events on every DUT, 0 missing, 0 extra, 0 out of order, 0 late, 0 loss (both runs); `down` p50 3 µs and p99 4–5 µs after the fixture's edge (run 3; run 4: p99 17/7/5/8 µs). **leds** (run 3): STATE → fixture-seen change p50/p99 21/56, 50/2,456, 346/1,325 and 399/462 µs (the WS2812 refresh adds about 0.3 ms); blink on-phases p50/p99 100.11/100.16, 100.11/100.17, 100.46/100.58 and 100.62/100.70 ms; 0 lost, 0 bad frames, 0 resync. Run 4's blink p99 were 100.17/102.66/100.51/102.37 ms: the two above 102 ms would have failed the first proposal of ± 2 ms. **test_pin:** `pin_pulse 1000` widths p50 1,038/1,038/1,046/1,102 µs (p99 ≤ 1,197 µs) in run 3, p50 1,037/1,037/1,224/1,130 µs (p99 ≤ 1,802 µs) in run 4, within the p90 1,000 ± 500 µs gate; 0 lows across a reboot (both runs). RSSI at preflight −61/−67/−61/−86 dBm (run 3), −61/−68/−60/−82 dBm (run 4) |
+| T-INPUT `--phase human --press-by fixture` | all four | ✅ 2.8 s; `down`, `up`, `click` on every DUT, no person |
+| T-LED `--verify fixture` | all four | ✅ 11.8 s; blink, set and toggle read back by the fixture on every DUT |
+| T-INPUT sim (regression) | all four | ✅ 170/170 per DUT, 0 late, 32.1 s |
+| T-CODEC | host | ✅ 502.7 s. `gen --check` clean; 358 golden vectors (header 24, envelope 29, messages 123, caps 164, serial 18); 10⁶ fuzz cases per target, 76 targets each side, 74 common, all with equal digests (C++ only: `gen.args_json`, `gen.serial_path`; TS only: `gen.envelope`, `gen.serial_frame`) |
+| T-AGENT (a) on `op.called` | — | not run on the bench: it needs a fresh plugin-only Claude Code session. Its verdict code is covered by `e2e-gates-e`. Carried to the M2 exit, as the C1 row allows |
+
+**Failed runs on the way, and the fixes they led to:**
+1. **The wiring swap.** The cap release pressed pad-c3's bench line (ch0), and pad-c3b reported the events. A probe of every line showed all three lines of both C3 boards exchanged (each got the other's jumper set); pad-c6 and pad-s3 were as designed. Fixed in the bench file, as wired, with no rewire (pad-c3 on ch1/ch5/ch9, pad-c3b on ch0/ch4/ch8; design §2.4); the re-probe mapped all 12 lines. T-HIL gained its `wiring` phase ([10 §10.5](10-testing.md)), since `bench_get` cannot see two exchanged lines.
+2. **T-HIL run 1 failed** (pad-c3b passed). The fit passed on all four. pad-c6's double_click failed 10/10: the fixture saw each release on its BOOT line as 2–3 rising edges 11–19 µs apart, and the harness paired press and release edges by ordinal; the DUT was right (`held_ms` 80/80). pad-c3's LED phase showed 4-pulse blinks and a 100 ms on-phase split 27.69 + 72.38 ms (and 3 STATEs lost to RF); pad-s3 failed one blink at 102.03 ms against ± 2 ms. **The cause:** on level lines (fixture inputs and open-drain readbacks; not the RMT WS2812 lines, which have a 100 ns filter) each transition came as a burst of edges about 7–15 µs apart whose levels repeat, now and then with a short opposite pulse: the any-edge ISR re-fires while the input chatters near its threshold (likely ground bounce over the long GND jumpers; the S3's inputs have no hysteresis). **The fix:** the hub timeline's glitch filter (`packages/hub/src/fixture/timeline.ts`, `GLITCH_US` = 50): repeats and pulses under 50 µs dropped, each transition stamped at its burst's first edge, reconciled with the fixture's `level` STATE (corrected transitions marked `corrected: true`, never fit samples), counted in `bench_get` `glitches {repeats, pulses, corrections}`. The harness pairs press and release by level transition, and the blink on-phase gate is the spec's 5 ms LED rule, 100 ± 5 ms p99.
+3. **T-HIL run 2 failed on all four, one shared cause.** Fit, buttons (down p99 4–5 µs, 0 out of order) and test_pin passed everywhere. The LED phase's first `status.set` to the four DUTs, sent within 40 ms of each other, answered `expired`: hub CMDs carry `expire_at` = now + 1,000 ms in node time, and all four Wi-Fi DUTs got it more than 1 s late at once (a ~1 s Wi-Fi gap on the Mac or AP side, with no hub `loop_delay` warning). **The fix:** T-HIL re-sends an `expired` command once (a timed-out one only when the fixture and the STATE show it did not run) and counts it in the DUT's network-loss figure (one lost send per phase tolerated; above 1 % fails, warns on `rf_weak`), with `measured.delivery` per DUT.
+
+**Not run on target:**
+- The fixture's `esp_restart` and panic release paths, and the task-watchdog reboot: covered by the host shim tests on the real `fixture_gpio.cpp` and by the ELF check (`__wrap_esp_panic_handler` in IRAM); not triggerable through the fenced hub.
+- RMT frame-start calibration: frames decoded correctly (24 bits, the expected GRB), but the frame-start offset was not calibrated on its own; STATE → frame p50 of about 0.35–0.40 ms includes the ~0.3 ms refresh.
+- `device_reset fix-s3 hard` releasing every line (design §4 S1): not recorded in the bench round.
+
+**Open after M2-C1** (for later checkpoints; [spike note](../spikes/2026-10-24-m2-c1-hil.md) "Findings and open items"):
+- **T-AGENT (a) on `op.called`** (above): at the M2 exit. `--prepare` refuses while the M1 binding `pad-c6.boot.down → pad-c3.status.blink` exists; remove it first.
+- **The fixture's reset releases on target** (above), and the `device_reset fix-s3 hard` check of design §4 S1, which the bench round did not record. After a CPU reset that neither hook saw, the ROM and the bootloader run for about 0.1–0.3 s with a line held (inferred).
+- **RMT frame-start calibration** (above), before a figure depends on the frame start (inferred: T-LAT's **out** figure at C8).
+- **Level-line chatter is filtered, not removed.** The glitch filter takes it out; shorter GND returns might reduce the bursts (inferred, untested). Watch `bench_get` `glitches` per line.
+- **A held press against hub stalls.** The fixture lets go 2 s after the hub's last frame, and the hub's keepalive comes about every 1 s, so a hub stall of more than about 1 s cuts a held press on the fixture. That is safe, but the trial then fails on its hold time, and the hub does not report the press as interrupted.
+- **The ~1 s Wi-Fi gap** of run 2: handled by the one re-send; its cause on the Mac or AP side is not found. RSSI swung from run to run on pad-c3b (−67…−82 dBm; −67/−68 in runs 3 and 4) and pad-s3 (−72…−86 dBm), across the `--phase fit` run, runs 1–4 and T-LED ([spike note](../spikes/2026-10-24-m2-c1-hil.md) "RSSI"), with no delivery cost in runs 3 and 4. C4's spike S2 still owns the radio questions.
+- **A power-cut op** (`bench_power_cut {selector, duration_s: 1..600}`, design §7 "Still open"): in C1 only the hub's in-process API declares a cut window. Needed by the first gate that cuts a wired DUT's power outside a locking job (the power-cut list above).
+- **Schema names.** `bench_get`'s newer fields (`lines[].state/drive/edges/dropped/frames/bad_frames/glitches`, `duts[].rf_weak`, `clock.offset_us/skew_ppm/samples`, `fixture.fw_pinned`, `stale`) and `hil.edge`'s `corrected` are not named in the protocol schemas. Outputs are not hashed, so naming them costs no REGISTRY_HASH bump.
+- **Fixture leaks into two `all` reads:** `logs_read {selector: all}` still includes the fixture's logs, and `device_list all` includes a bench fixture whose registry row still says `node` until its HELLO says `fixture` (provisioning now writes the role with the row, so older rows only).
+- **Fixture-sourced bindings** are blocked by the hub only: the fixture image still runs a binding table, which the hub refuses to set and clears at every handshake; the firmware has no guard of its own.
+- **The pinned fixture build is the debug one** (`CONFIG_FR_TEST_HOOKS=y`); the release build (`024f191b5018`) is not pinned. With `CONFIG_ESP_TASK_WDT_PANIC=y`, a core-task callback that blocks for more than 5 s reboots the fixture, its lines let go first; not seen.
+- **The fixture shares the desk hub's power.** The bench round has no record of a fixture power loss, so the power-order rule ([04 §4.6](04-boards.md)) was not exercised.
+- **Still open from the design** (§7): for any further fixture board, a clone's silkscreen against Espressif's J1/J3 order (on this unit every fixture pin was as planned, design §2.4); and whether M2-C3 wires one C3's analog line or both.
+
+**New gates (one-line pass criteria; thresholds marked "proposed" are not in the spec yet)**
+- **T-HIL** ([10 §10.5](10-testing.md)), on the four DUTs (pad-c3, pad-c3b, pad-c6, pad-s3):
+  - Every fixture gesture yields `boot.down`/`up`/`click`/`long_press` in DUT-time order, with none extra.
+  - None is missing, except losses that the DUT's own `events_dropped`/`delivery_failed` deltas account for. Those are published as an RF figure, and they fail the gate above 1 % (proposed). For pad-c3 (`rf_weak`) they warn instead; an unaccounted loss fails on every DUT.
+  - Every `status.on` change has a fixture LED edge, or a WS2812 frame of the same level, within 5 ms on the wired clock fit; blink on-phases within 100 ± 5 ms p99 (the same 5 ms rule).
+  - No `prompt_human`. Passed at M2-C1 ("M2-C1 result" above); the procedure is in [10 §10.5](10-testing.md).
+  - **M2-exit ordering rule:** in arrival order as well, with zero `late` on `boot` events, once C3 builds the reorder buffer and makes `fr.button` `ordered`. If C3 decides it is not `ordered`, the exit rule is device-time order, with every out-of-order arrival flagged `late` (the T-INPUT loss rule).
+- **T2-SCALE** (FakeCore time, `pnpm test:host`):
+  - At 10 nodes: ≥ 99.9 % delivery to cut-off nodes, and mean transmissions per broadcast ≤ K + 3 ([05 §5.18](05-network.md)).
+  - At 30 nodes: ≥ 99.9 % delivery and ≤ 8 transmissions per broadcast (proposed; 05 §5.9 simulates 6–7). This needs a 05 §5.18 edit.
+- **T2-FLOOD-30, T2-FLOOD-B-30, T2-NN-30, T2-CHURN-30, T2-INPUT-30, T2-OTA-30:**
+  - Each runs the bench gate's own verdict code at 30 nodes against a private hub: the `t-*.ts` run functions with an injected diag, as `e2e-gates-c` does.
+  - Count verdicts do not depend on wall time. Timing figures are wall-clock.
+  - A run whose hub-loop p99, or the simulator's own lag, exceeds 100 ms is inconclusive. It is re-run once at half the time scale, and a second inconclusive run is a fail (proposed).
+- **T-ANALOG:**
+  - Setup: fixture ch13 (GPIO12) LEDC PWM at 5 kHz (inferred) feeds pad-c3b's ADC1 GPIO3 through 10 kΩ/1 µF, at 10–70 % duty (0.33–2.31 V). ch12 does the same for pad-c3, if wired.
+  - Why 70 %: the C3's ADC1 reads up to about 2.5 V at 12 dB attenuation (inferred from the datasheet), so 90 % would saturate.
+  - `value` stays within ±5 % of span in calibrated mV (rail tolerances included) and is monotonic.
+  - Each threshold `crossed` fires once per direction, with no chatter.
+  - `inject` takes the same path (proposed).
+- **T2-ANALOG-30:** 30 fleet nodes stream at the decided default `report_hz` and deadband (64) in two topologies, published per topology:
+  - router UDP through the AP;
+  - ESP-NOW-only nodes behind the gateway, at 1 Mbps unless `game` is in. At 1 Mbps the planning capacity is about 240 frames/s, so roughly 7 Hz per node after heartbeats (calc, [05 §5.15](05-network.md)).
+
+  In both: channel use ≤ 35 %, and the T-INPUT order and `late` rules hold on those nodes.
+- **`vbat_mv` check (S3):**
+  - With no battery, HEARTBEAT carries what BAT_ADC reads, and it is recorded.
+  - With a battery, if you attach one, it reads within ±100 mV of a multimeter (proposed).
+- **T-GW-LINK:** pad-c6, under `net wifi_down`, reaches the hub through the gateway (proposed counts):
+  - HELLO/WELCOME once;
+  - 3 TIME bursts, with uncertainty published;
+  - 100 `command_send` with every RESULT ok;
+  - 100 hub broadcasts, ≥ 99.9 % delivered over GW_*.
+
+  An unplugged gateway shows as down within 1.25 s: the 1 s timeout plus one 250 ms LINK_PING period ([05 §5.12.3](05-network.md)).
+- **T-DISPLAY:**
+  - A scripted page's framebuffer CRC equals the host renderer's, on the C3 OLED and on the S3 LCD.
+  - The driver selftest passes. For SSD1306, that is an I2C ACK at 0x3C and the init accepted. For ST7789, the init is sent and the LEDC backlight is running; the board has no readback line (inferred).
+  - You, or a photo, confirm the glass once.
+  - With text redrawn at 10 Hz, the fixture-pressed `boot.down` → hub p50 moves by ≤ 1 ms.
+- **T-CHAN** ([05 §5.18](05-network.md); topology in the roles table): after a router channel change, all within 5 s:
+  - the router-associated node has its TCP session back;
+  - the ESP-NOW-only node has its gateway session back after CHANNEL_SWITCH;
+  - the dual-homed node has either link back;
+  - a binding fires on each class.
+
+  Router mode meets this only if the router announces the switch (CSA). Without it, a node waits 60 s or 5 min before it sweeps ([05 §5.4](05-network.md)). S2 (i) checks this.
+- **T-FAIL** ([05 §5.18](05-network.md)): from the gateway's `port.detached`, the next fixture-pressed event of each dual-homed node arrives over UDP/TCP within 3 s, and an SDK client sees no event twice.
+- **T-LAT (router baseline and gateway)**, both measured by the fixture method (proposed; a 05 §5.18 and 10 §10.5 edit):
+  - **in:** the fixture presses a node's BOOT; the figure is hub arrival of `down` minus the press, mapped to hub time through TIME over the fixture's serial session.
+  - **out:** the hub sends `status.toggle` immediately and at `exec_at` (lead 250 ms); the figure is the fixture-read LED edge minus the send time, or minus the `exec_at` target.
+  - 10,000 samples per node and mode, at 10 Hz; ≥ 90 % matched per mode.
+  - The gate is on **in**: gateway p50 ≤ 5 ms and p99 ≤ 20 ms; router with a wired hub p50 ≤ 10 ms and p99 ≤ 30 ms. **out** is published.
+  - The fixture ↔ hub uncertainty is published beside it and must be ≤ 1 ms (proposed; measured at C1, with the fixture behind the USB hub).
+- **T-EXEC:** a binding with `lead_ms 50` lands the target's LED edge at the trigger's hub time + 50 ms, on the fixture's clock:
+  - p50 ≤ 1 ms and p99 ≤ 5 ms (proposed). The node already ran scheduled pulses late by p99 2.0–3.7 ms at C6 (`a_late`, [c6 spike](../spikes/2026-10-23-c6-apps-agents.md)).
+  - `a_late` and the BEACON sync uncertainty are published beside it.
+  - A late one answers LATE.
+- **T-CONFIRM:**
+  - `flash_erase` and `device_forget` answer CONFIRMATION_REQUIRED, and run only after the dialog or a real 3 s BOOT press by you.
+  - Refused as approval: an injected press, `input_simulate {layer: gpio}`, and a direct `command_send fix-s3 ch3.press {segments_us:[3000000]}` on pad-s3's BOOT line (which the fence also refuses).
+  - A retry with the same key returns the same `confirm_id`.
+  - A denial leaves nothing behind.
+- **T-GROUP:** a group MSG reaches every member, including the one with its hub link dropped (through the flood), and no non-member. Non-members' watermarks advance with no repair traffic.
+- **T-ADOPT:** a board flashed with plain `idf.py flash` is adopted without USB and is back after a reboot with its addr and alias. `device.adopted` fires once.
+- **T-OTA-RELAY and T2-OTA-RELAY:** an ESP-NOW-only node updates through the gateway.
+  - An uninterrupted transfer of a ≤ 1.3 MB image takes ≤ 90 s at 1 Mbps (proposed; the top of the [06 §6.5](06-identity-ota.md) estimate).
+  - After a power cut it resumes from its last 64 KB stride.
+  - Binding p50 stays ≤ 10 ms during the transfer, and no `ota_busy` node relays.
+
+**What you provide or wire, per checkpoint**
+
+| Checkpoint | You |
+|---|---|
+| C1 | **Before wiring:** headers on pad-c3 (`1cdbd4175cc4`, JP1 and JP2) and on pad-s3 (J5; J6 only if EN may be wired later); check that the DevKitC fixture has its headers and that its silkscreen matches the pin plan; the two T-LAT cross-jumpers off, then their GND jumper (it links pad-c6 and pad-c3b directly, outside the star).<br>**Parts:** 24 signal and 5 GND jumpers, a mini breadboard for the GND star, 10 × 1 kΩ and 2 × 10 kΩ ([design m2-c1-hil §6](../design/m2-c1-hil.md)). No MOSFETs for now; the optional upgrade needs 4 logic-level N-MOSFETs, 4 × 1 kΩ, 3 × 10 kΩ and 1 × 4.7 kΩ (the gate pull-down on pad-s3's BOOT line, whose fixture pin GPIO39 is weakly pulled up after reset).<br>**Fixture:** on the powered data hub permanently. Watch its RGB LED once: it blinks 3 times when its hub session comes up, which confirms GPIO48 (v1.0) against GPIO38 (v1.1).<br>**Wiring:** with every board unplugged, GND first.<br>**Power order, from then on:** the fixture (the hub) first and unplugged last. After any hub power loss, hub replug, Mac reboot or Mac sleep, `fr bench` runs before anyone touches a DUT. A DUT that comes back in download mode needs a power cycle |
+| C2 | Nothing. Above about 60 fleet nodes, raise `ulimit -n` (256 on macOS) |
+| C3 | 2 × 10 kΩ, 2 × 1 µF and 4 jumpers (half of that for one C3), wired with every board unplugged onto the reserved fixture lines ch12/ch13 and the C3s' GPIO3; the RC filters on the breadboard, each filtered node jumpered to the C3's GPIO3. A potentiometer for a human phase. No existing line moves, and the fixture is reflashed once (its `fw_id` re-pinned) |
+| C4 | The spare C6 for the gateway, on the powered hub (tell us which unit). pad-c3 and pad-c3b at marked spots (about −65 and −75 dBm) for S2 (a)/(b)/(c). Router admin access for the S2 (i) channel change. A quiet Mac |
+| C5 | Nothing wired. You, or a phone camera, for one glass check |
+| C6 | Router admin access and consent to change its channel and to power it off for 2–3 min. Nodes on chargers |
+| C7 | You at the Mac for the dialog, and for a real 3 s BOOT press on the target. One board on USB for `flash_erase`. Chrome for T-PORTS. pad-s3 on the powered hub |
+| C8 | A USB-C Ethernet adapter for the wired baseline (your D2 call), on the powered data hub or on Mac port B. You, or a switchable hub port, to unplug the gateway |
+| C9 | One board flashed once with plain `idf.py flash` (Wi-Fi in `sdkconfig.local`) |
+| C10 | pad-c6's power lead, pulled mid-transfer |
+
+**Open after M1, placed**
+- **C1** (done at M2-C1, except T-AGENT (a)'s bench re-run, carried to the M2 exit):
+  - `op.called`, with T-AGENT (a) using it;
+  - per-run `args` for `test_run`;
+  - cancel grace vs cleanup;
+  - FakeRegistry selector semantics;
+  - T-INPUT's human phase and T-LED without a person;
+  - USB data on the bench: the powered data hub, in place.
+- **C2:**
+  - the flood-rate token on a refused send;
+  - node-broadcast fan-out on every session;
+  - hub restart during a router outage (router mode);
+  - hub scaling at 30+;
+  - LOG frames from Wi-Fi nodes over TCP.
+- **C3:**
+  - the reorder buffer for `fr.button`;
+  - S3 BAT_ADC.
+- **C4:**
+  - C3 RF and the TX cap (S2 (a), on both C3s);
+  - the rest of S2;
+  - send callbacks later than 1 s;
+  - TCP reconnects (closing rule in C4);
+  - hub stalls under host load;
+  - the `game` rate decision.
+- **C5:**
+  - the S3's ST7789.
+- **C6:**
+  - T-FLOOD-B with the router off and a node isolated;
+  - BSSID-named credentials;
+  - LOG frames over the gateway;
+  - hub restart during an outage (the BEACON half).
+- **C7:**
+  - `flash_erase`;
+  - stale properties after a profile change;
+  - the Ports page's first visit;
+  - wizard progress;
+  - `/ws` backpressure;
+  - lease `port_gone`;
+  - SQL NULL MSG rows;
+  - the chip-revision provisioning check;
+  - the S3's remaining gates.
+- **C8:**
+  - node → node `exec_at` and expiry;
+  - uplink-only Wi-Fi loss;
+  - T-LAT p99 with a wired hub.
+- **Resolved at M1:** demo steps 1–2 from blank boards (the fresh-hub run, §11.5).
+
+**Other spec M2 items, placed**
+- C1: `test_report` ([09 §9.4](09-agent-api.md)); done.
+- C5: plugin skill `write-capability`.
+- C6: plugin skill `debug-device`.
+- C7:
+  - the Agents page's pending confirmations ([08 §8.9](08-hub.md));
+  - SDK `device.removed` ([07 §7.9](07-capabilities-sdk.md));
+  - optionally, an example in each `fr mcp` tool description.
+- C9: plugin skill `provision`.
+- C10: `auto` → relay, and the gateway flashed last ([06 §6.7](06-identity-ota.md)).
+
+**Proposed deferrals to M3 (a scope change: your decision)**
+
+The spec labels some of these M2: the §11.4 S3 bullet, the README "Still open" line ("Its PSRAM, LCD and IMU wait for M2"), and 04 §4.5 stage E. If you approve, the spec edits are:
+- §11.4: the S3 bullet's "(M2)";
+- README: "Still open";
+- §11.1: the M3 row gains the IMU capability, stage E and the items below, or names where each goes.
+
+The items:
+- **SPIRAM on the S3, and the provisioning PSRAM mode/voltage check:** no M2 feature needs PSRAM, because `fr.display` uses DMA line buffers. Both S3 boards (pad-s3 and the fixture) run with SPIRAM off.
+- **QMI8658 IMU capability:** M3 is where new capabilities go, and raw motion streams have analog's STATE-volume problem.
+- **TF card:** no storage capability is planned.
+- **Detection stage E (LED probe, [04 §4.5](04-boards.md)):** each DUT is matched by its manifest's detection block. The fixture and pad-s3 match the same USB and esptool rules; provisioning already asks for `--profile` when a new S3 could be either, the registry remembers each device's profile afterwards, and the hub refuses a fixture build on any device but the bench's fixture, and any other profile on the fixture. Inferred: enough without stage E in M2.
+- **The `set_boot` ABORT window:** DEFER_COMMIT/COMMIT, an M3 rollout feature, closes it.
+- **`fr::net::send_cmd`:** decision #11 says runtime bindings are enough, and C8 schedules through a binding field.
+- **Crash reports and core-dump upload:** nothing consumes them yet. Pull them forward at the first unexplained panic.
+- **SDK packaging with tsdown:** no `file:` consumer outside the repo in M2.
+- **Dashboard on another machine (`t_wall_ms`), `--listen-app`/`--listen-api`:** the hub stays loopback-only.
+- **Resource-style REST routes:** no client needs them.
+- **Proxying through a neighbour** ("an M2 option", [05 §5.10](05-network.md)): C8's dual-homing covers hub-link loss.
+- **Plugin skills `mesh-protocol` and `client-codegen`** (M2+): no M2 checkpoint needs them.
+- **T2 in PR CI** ([10 §10.6](10-testing.md)): the repo has no CI. T2 runs on the laptop until there is one.
+- **Not deferred:** the `game` rate profile is a C4 decision, made after S2 measures the 6 Mbps per-peer rate ([05 §5.15](05-network.md)).

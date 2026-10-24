@@ -272,6 +272,31 @@ describe('selectors (09 §9.2)', () => {
       expect(() => parseSelector(bad), bad).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }));
     }
   });
+
+  it('keeps a HELLO role fixture, and selects that device only when named (design m2-c1-hil D6)', async () => {
+    const FIX = 'e8f60a81bc48';
+    const db = openDb(':memory:');
+    provisioned(db, C6, 'c6-pad', 'esp32c6', 'pad-red-1');
+    provisioned(db, FIX, 's3k-fixture', 'esp32s3', 'fix-s3');
+    const reg = new SqliteRegistry(db);
+    reg.touchHello(FIX, hello({ device_id: FIX, chip: 9, role: 'fixture' }));
+    expect(reg.get(FIX)).toMatchObject({ role: 'fixture', profile: 's3k-fixture', provisioned: true });
+    const online = (id: string): Presence => (id === FIX ? 'online' : 'offline');
+    const aliases = (s: string) => reg.resolve(s, online).map((d) => d.alias);
+    // Out of every selector that does not name it: all, negative-only ones, the other facets.
+    expect(aliases('all')).toEqual(['pad-red-1']);
+    expect(aliases('!pad-red-1')).toEqual([]);
+    expect(aliases('online')).toEqual([]);
+    expect(aliases('chip:esp32s3')).toEqual([]);
+    // In by alias, id or role:fixture, then filtered as usual.
+    expect(aliases('fix-s3')).toEqual(['fix-s3']);
+    expect(aliases(`id:${FIX}`)).toEqual(['fix-s3']);
+    expect(aliases('role:fixture,online')).toEqual(['fix-s3']);
+    expect(aliases('role:fixture,offline')).toEqual([]);
+    const hub = { db, serial: { list: () => [] }, registry: reg, router: { presence: online }, events: createEvents(db, new CursorSeq(db), 1) } as unknown as HubContext;
+    const listed = (await HANDLERS.device_list({ selector: 'role:fixture,online' }, hub)) as { devices: Array<{ alias: string; role: string; presence: string }> };
+    expect(listed.devices).toEqual([expect.objectContaining({ alias: 'fix-s3', role: 'fixture', presence: 'online' })]);
+  });
 });
 
 describe('device ops', () => {

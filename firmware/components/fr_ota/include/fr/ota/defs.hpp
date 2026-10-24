@@ -43,7 +43,7 @@ static_assert(kResumeStride % kChunk == 0 && kCheckBytes <= kChunk);
 
 inline constexpr uint32_t kHealthCore = 1u << 0;    // boot complete
 inline constexpr uint32_t kHealthCaps = 1u << 1;    // every bound capability's init succeeded (never in a fault build)
-inline constexpr uint32_t kHealthNet = 1u << 2;     // Wi-Fi up
+inline constexpr uint32_t kHealthNet = 1u << 2;     // Wi-Fi up, or the serial session's WELCOME with the radio off (m2-c1-hil D6)
 inline constexpr uint32_t kHealthHubAck = 1u << 3;  // WELCOME received; required only with nvs:fr_ota hub_seen
 
 // ---- OTA/OFFER flags (schema/protocol.yaml, wire) ----

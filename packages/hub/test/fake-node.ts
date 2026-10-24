@@ -4,7 +4,7 @@
 // (a DUP CMD gets the cached RESULT byte-identical and is not executed again), SYNC_RES, PONG, heartbeats
 // over UDP and TCP until a hub echo proves UDP (udp_ok; no UDP at all while UNASSIGNED), BYE, and optional
 // UDP blocking. Also a fake
-// registry (the Registry contract of context.ts with a small selector grammar) and a router rig.
+// registry (the Registry contract of context.ts, selecting as SqliteRegistry does) and a router rig.
 // OTA (design c4 §3-5, stream H1): a FakeNode with `ota` set answers OFFER with ACCEPT or REJECT, pulls the
 // image over real HTTP from the hub's node HTTP port with Range (resuming after a power cut from its stored
 // offset), sends STATUS, checks the digest, says BYE ota and comes back on the new fw_id PENDING_VERIFY,
@@ -93,6 +93,7 @@ import { EventStore } from '../src/events/index.ts';
 import { JobRunner } from '../src/jobs.ts';
 import { LogStore } from '../src/logstore.ts';
 import { createOta, type OtaConfig, type OtaDeps, type OtaOrchestrator } from '../src/ota/index.ts';
+import { selectDevices } from '../src/registry/selector.ts';
 import { createRouter, type HubRouter, type RouterClock, type RouterConfig } from '../src/router/index.ts';
 import { CursorSeq } from '../src/seq.ts';
 
@@ -147,6 +148,8 @@ export interface FakeNodeOptions {
   serial?: FakeSerial;
   /** HELLO `caps` (default: wifi + inject_enabled; + provisioned when addr is set). */
   caps?: number;
+  /** HELLO `role` (default node; `fixture`: the HIL fixture, design m2-c1-hil D6). */
+  role?: 'node' | 'gateway' | 'fixture';
   /** The last seq of the ordinary space already used (a reconnect within one boot continues it). */
   seqStart?: number;
 }
@@ -360,6 +363,7 @@ export class FakeNode {
       autoHeartbeat: true,
       clockOffsetUs: 5_000_000,
       caps: (1 << 1) | (1 << 4) | (addr !== ADDR.UNASSIGNED ? 1 << 5 : 0),
+      role: 'node',
       seqStart: 0,
       ...opts,
     };
@@ -372,7 +376,15 @@ export class FakeNode {
 
   /** µs since this node "booted" (esp_timer), plus the configured offset. */
   nodeNowUs(): number {
-    return Math.round((performance.now() - this.#bootAt) * 1000) + this.opts.clockOffsetUs;
+    return this.nodeUsAt(performance.now());
+  }
+
+  /**
+   * This node's clock at a performance.now() reading: two FakeNodes read at one reading differ by exactly their
+   * clocks' difference (two nodeNowUs() calls also differ by whatever ran, or was preempted, between them).
+   */
+  nodeUsAt(perfMs: number): number {
+    return Math.round((perfMs - this.#bootAt) * 1000) + this.opts.clockOffsetUs;
   }
 
   get udpOk(): boolean {
@@ -436,7 +448,7 @@ export class FakeNode {
       fw_id_prefix: Buffer.from(o.fwPrefix, 'hex'),
       descriptor_hash: o.descriptorHash,
       board_hash: 0x4088f3ce,
-      role: 'node',
+      role: o.role,
       caps: o.caps,
       hb_interval_ms: o.hbMs,
       reset_reason: 1,
@@ -1436,35 +1448,26 @@ export class FakeRegistry implements Registry {
     return [...this.devices.values()];
   }
 
+  /**
+   * SqliteRegistry's selector semantics (registry/selector.ts): alternatives within a kind, kinds narrowing
+   * each other, `!` terms taken away, NOT_FOUND for a name that matches nothing, and the fixture rule (a
+   * role:fixture device only when its alias, id:, mac: or role:fixture names it; design m2-c1-hil D6).
+   */
   resolve(selector: string, presence: (id: string) => Presence): Device[] {
-    const all = this.list();
-    const match = (atom: string, d: Device) =>
-      atom === 'all' ||
-      (atom === 'online' && (presence(d.device_id) === 'online' || presence(d.device_id) === 'suspect')) ||
-      (atom === 'offline' && !(presence(d.device_id) === 'online' || presence(d.device_id) === 'suspect')) ||
-      atom === `id:${d.device_id}` ||
-      (atom.startsWith('tag:') && d.tags.includes(atom.slice(4))) ||
-      atom.toLowerCase() === d.alias.toLowerCase();
-    const terms = selector.split(',').map((t) => t.trim()).filter(Boolean);
-    const pos = terms.filter((t) => !t.startsWith('!'));
-    const neg = terms.filter((t) => t.startsWith('!')).map((t) => t.slice(1));
-    for (const t of pos) {
-      if (!['all', 'online', 'offline'].includes(t) && !t.includes(':') && !this.byAlias(t)) {
-        throw new FrError('NOT_FOUND', `no device ${t}`);
-      }
-    }
-    return all.filter((d) => (pos.length ? pos.every((t) => match(t, d)) : true) && !neg.some((t) => match(t, d)));
+    return selectDevices(this.list(), selector, presence);
   }
 
   /**
    * Like SqliteRegistry: a device first seen through HELLO is a row with addr null and provisioned false,
-   * whatever addr its HELLO carries (design c3 §4); only provisioning (add() here) gives it an addr.
+   * whatever addr its HELLO carries (design c3 §4); only provisioning (add() here) gives it an addr. Every
+   * HELLO sets the role it reports (a fixture says `fixture`).
    */
   touchHello(id: string, hello: HelloSeen): Device {
     this.hellos.push(hello);
     const known = this.devices.get(id);
     const dev = known ?? this.add({ device_id: id, alias: hello.alias || `node-${id.slice(-6)}`, alias_rev: hello.alias_rev });
     Object.assign(dev, {
+      role: hello.role,
       fw_id: dev.fw_id ?? hello.fw_id_prefix,
       last_epoch: hello.epoch,
       last_seen: new Date().toISOString(),
@@ -1750,7 +1753,8 @@ export const PAD_CAPS = [
 export async function netRig(opts: { config?: Partial<RouterConfig>; registry?: FakeRegistry; pushTimeoutMs?: number } = {}): Promise<NetRig> {
   const r = await rig({ config: opts.config, registry: opts.registry });
   const jobs = new JobRunner(r.db);
-  const bindings = createBindings({ db: r.db, registry: r.registry, router: r.router, events: r.events, pushTimeoutMs: opts.pushTimeoutMs ?? 1000 });
+  // The fixture fence on resolved ends and stored rows (D15): here a role:fixture registry row.
+  const bindings = createBindings({ db: r.db, registry: r.registry, router: r.router, events: r.events, pushTimeoutMs: opts.pushTimeoutMs ?? 1000, isFixture: (id) => r.registry.get(id)?.role === 'fixture' });
   bindings.start();
   const hub = { ...r.hub, jobs, broadcast: r.router, bindings } as HubContext;
   const close = r.close;

@@ -120,6 +120,18 @@ menu "Fractonica network"
         range 1 65535
         default 7421
 
+    # The radio (design m2-c1-hil D5, D6): off on the HIL fixture's profile (`net: {radio: off}`).
+
+    config FR_NET_RADIO
+        bool "Wi-Fi and ESP-NOW"
+        default y
+        help
+            Set from the profile's net.radio by `fr gen firmware` (n for `radio: off`). Off, fr_core never
+            starts Wi-Fi or ESP-NOW and attaches only the serial link: the hub is reached over USB alone, the
+            serial session's WELCOME sets the NET health bit of an image on probation (spec 06 §6.6) in place
+            of Wi-Fi, HELLO never says `wifi` or `espnow_v2`, and fr.node.net_set and `net wifi_down` answer
+            UNSUPPORTED. The image is updated over USB only (flash_start).
+
     config FR_WIFI_MAX_TX_POWER_QDBM
         int "Wi-Fi TX power cap, 0.25 dBm units (0 = driver default)"
         default 0

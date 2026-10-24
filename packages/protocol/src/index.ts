@@ -1,3 +1,4 @@
+export * from './bench.ts';
 export * from './cursor.ts';
 export * from './events.ts';
 export * from './names.ts';

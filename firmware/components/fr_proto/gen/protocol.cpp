@@ -40,6 +40,8 @@ const char *to_name(Role v)
         return "node";
     case Role::gateway:
         return "gateway";
+    case Role::fixture:
+        return "fixture";
     }
     return nullptr;
 }
@@ -52,6 +54,10 @@ bool from_name(std::string_view s, Role &out)
     }
     if (s == "gateway") {
         out = Role::gateway;
+        return true;
+    }
+    if (s == "fixture") {
+        out = Role::fixture;
         return true;
     }
     return false;

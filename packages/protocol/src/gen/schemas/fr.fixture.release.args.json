@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.fixture.release.args",
+  "title": "fr.fixture.release arguments",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

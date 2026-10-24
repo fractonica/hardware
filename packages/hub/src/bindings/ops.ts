@@ -1,16 +1,21 @@
 // Handlers of the node <-> node ops (packages/protocol/src/ops/net.ts; design c5 §4, spec 09 §9.4):
 // message_send over HubContext.broadcast (one hub broadcast, or one reliable unicast per selected device;
 // count > 1 repeats it as a job of kind msg), binding_set|list|clear over HubContext.bindings, and
-// latency_stats from the router's samples. Spread into HANDLERS (packages/hub/src/ops.ts).
+// latency_stats from the router's samples. Spread into HANDLERS (packages/hub/src/ops.ts). M2-C1 (design
+// m2-c1-hil D9, D15; stream S4): binding_set publishes op.called on its source device with the caller's
+// X-Fr-Client (a command, not a job, so nothing else records who set it), and refuses a fixture at either end;
+// message_send refuses a unicast to a fixture (D15: it takes no MSG either, so no stored binding can fire on one).
 
 import { BROADCAST_ALIAS, CLS, FrError, MAX_WAIT_S, type NetOpName } from '@fractonica/protocol';
 import { decodeBinding, encodeMsgMsg, KIND, PORT, statusName } from '@fractonica/protocol/gen';
 
 import type { BindingRow, Device, Handler, HubContext, Presence } from '../context.ts';
+import { fenceBinding, fenceCommand } from '../fixture/fence.ts';
 import type { JobCtx } from '../jobs.ts';
 import { resolveOne } from '../registry/hub.ts';
 import { routerLatency, routerLoopDelay } from '../router/index.ts';
 import { percentiles } from '../router/latency.ts';
+import { publishOpCalled } from '../router/ops.ts';
 import { bindingJson, jsonText } from './index.ts';
 
 const isUp = (p: Presence) => p === 'online' || p === 'suspect';
@@ -128,7 +133,12 @@ function messagePlan(hub: HubContext, msg: { to: string; topic: string; data?: u
   } catch (e) {
     throw new FrError('INVALID_ARGS', `the MSG does not fit: ${(e as Error).message} (data is at most 168 bytes of JSON)`);
   }
-  return { data, devices: msg.to.toLowerCase() === BROADCAST_ALIAS ? null : selectDevices(hub, msg.to) };
+  const devices = msg.to.toLowerCase() === BROADCAST_ALIAS ? null : selectDevices(hub, msg.to);
+  if (devices) {
+    // D15: no client MSG reaches the fixture (count 1, the repeat job and the /app bridge's msg alike).
+    fenceCommand(hub, devices, 'message_send');
+  }
+  return { data, devices };
 }
 
 /**
@@ -265,7 +275,11 @@ export const NET_HANDLERS: Record<NetOpName, Handler> = {
   },
 
   binding_set: async (input: { from: string; to: string; args?: unknown }, hub) => {
+    fenceBinding(hub, input);
     const r = await hub.bindings.set(input);
+    // Once the hub has taken it (stored, pushed now or at the next handshake): on the source, which keeps and fires it.
+    const source = hub.registry.get(r.row.device_id);
+    publishOpCalled(hub, [{ device_id: r.row.device_id, alias: source?.alias ?? r.row.device_id }], { op: 'binding_set', from: input.from, to: input.to });
     return { ...rowView(hub, r.row), replaced: r.replaced, ...(r.pending ? { pending: r.pending } : {}) };
   },
 

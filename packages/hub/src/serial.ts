@@ -12,6 +12,7 @@ import { SerialPort } from 'serialport';
 
 import type { PortHolders } from './context.ts';
 import type { Db } from './db.ts';
+import type { SerialBinding } from './links/serial-bridge.ts';
 import type { LogStore } from './logstore.ts';
 import { busyExternal, holderText, LsofHolders, portLeased } from './ports/holders.ts';
 
@@ -116,12 +117,18 @@ export class SerialPortManager {
   #holders: PortHolders;
   /** Every lease asks #holders (D5); without a probe of the hub's, only a port that failed to open busy is asked about. */
   #askEveryLease: boolean;
+  /**
+   * Where ports are listed and opened: the Mac's USB (serialport's own binding), or a test's virtual USB hub on
+   * loopback (`--serial-bridge`, links/serial-bridge.ts, design m2-c1-hil §5.1).
+   */
+  #binding: SerialBinding | null;
 
-  constructor(logs: LogStore, db: Db, opts: { holders?: PortHolders } = {}) {
+  constructor(logs: LogStore, db: Db, opts: { holders?: PortHolders; binding?: SerialBinding } = {}) {
     this.#logs = logs;
     this.#db = db;
     this.#holders = opts.holders ?? new LsofHolders();
     this.#askEveryLease = opts.holders !== undefined;
+    this.#binding = opts.binding ?? null;
   }
 
   /**
@@ -205,7 +212,7 @@ export class SerialPortManager {
         await this.#reopenAfterResume(gap);
       }
       this.#lastPoll = now;
-      const listed = (await SerialPort.list()).filter((p) => p.vendorId?.toLowerCase() === ESPRESSIF_VID);
+      const listed = (await (this.#binding ? this.#binding.list() : SerialPort.list())).filter((p) => p.vendorId?.toLowerCase() === ESPRESSIF_VID);
       const present = new Set<string>();
       for (const p of listed) {
         const key = p.serialNumber ? normalizeMac(p.serialNumber) : cuPath(p.path);
@@ -254,7 +261,8 @@ export class SerialPortManager {
 
   #open(e: Entry): void {
     e.state = 'open';
-    const port = new SerialPort({ path: e.path, baudRate: 115200, autoOpen: false, hupcl: false });
+    // serialport takes a `binding` beside the open options (its constructor spreads them over its own).
+    const port = new SerialPort({ path: e.path, baudRate: 115200, autoOpen: false, hupcl: false, ...(this.#binding ? ({ binding: this.#binding } as object) : {}) });
     e.port = port;
     e.opening = new Promise<void>((done) =>
       port.open((err) => {

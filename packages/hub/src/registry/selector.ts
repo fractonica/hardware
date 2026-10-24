@@ -1,7 +1,7 @@
 // Device selectors (spec 09 §9.2):
 //   selector := term ("," term)*      term := ["!"] atom
 //   atom := <alias> | id:<12hex> | mac:<..> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3>
-//         | profile:<p> | role:<node|gateway> | online | offline | all
+//         | profile:<p> | role:<node|gateway|fixture> | online | offline | all
 // The grammar leaves how terms combine open; the registry decides it the way faceted filters work, so
 // every example in the spec reads as meant: positive atoms of one facet are alternatives (union), facets
 // narrow each other (intersection), and `!` terms are taken away at the end. A selector of `!` terms
@@ -9,15 +9,23 @@
 //   "pad-red-1,pad-blue-2"   either device (one facet: names)
 //   "chip:esp32c6,online"    C6 devices that are online
 //   "tag:poc,!pad-blue-2"    the poc devices except pad-blue-2
+// The HIL fixture (role fixture, design m2-c1-hil D6) is an instrument, never a target by accident: it is a
+// candidate only when a positive alias, id:, mac: or role:fixture atom names it, and the other facets then
+// filter it as usual ("role:fixture,online" is an online fixture). So `all`, a selector of `!` terms only
+// and every other facet ("chip:esp32s3", "tag:poc", "profile:s3k-fixture") leave it out.
 // Names (alias, id, mac) that match no device are NOT_FOUND, so a typo never turns into an empty fan-out
 // or a silently wider `!` term; the facets may match nothing.
 
-import { FrError } from '@fractonica/protocol';
+import { DEVICE_ROLES, FrError } from '@fractonica/protocol';
 
 import type { Device, Presence } from '../context.ts';
 
 export const CHIPS = ['esp32c3', 'esp32c6', 'esp32s3'] as const;
-const ROLES = ['node', 'gateway'];
+/** The `role:` values: 05 §5.7 Role, as protocol DEVICE_ROLES lists them (`fixture`: design m2-c1-hil D6). */
+const ROLES: readonly string[] = DEVICE_ROLES;
+
+/** The fixture candidate-set rule (D6), as the selector hint states it. */
+export const FIXTURE_RULE = 'a fixture (role:fixture) is selected only by its alias, id:, mac: or role:fixture; all and !-only selectors leave it out';
 
 type Facet = 'name' | 'tag' | 'board' | 'chip' | 'profile' | 'role' | 'presence' | 'all';
 
@@ -35,7 +43,7 @@ const HEX12 = /^[0-9a-f]{12}$/;
 
 function bad(term: string, why: string): FrError {
   return new FrError('INVALID_ARGS', `bad selector term ${JSON.stringify(term)}: ${why}`, {
-    hint: 'selector := term ("," term)*, term := ["!"] alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3> | profile:<p> | role:<node|gateway> | online | offline | all',
+    hint: `selector := term ("," term)*, term := ["!"] alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3> | profile:<p> | role:<${ROLES.join('|')}> | online | offline | all; ${FIXTURE_RULE}`,
   });
 }
 
@@ -95,7 +103,7 @@ export function parseSelector(selector: string): Atom[] {
         return { neg, facet: 'chip', value: value.toLowerCase(), text };
       case 'role':
         if (!ROLES.includes(value.toLowerCase())) {
-          throw bad(text, 'role: is node or gateway');
+          throw bad(text, `role: is one of ${ROLES.join(', ')}`);
         }
         return { neg, facet: 'role', value: value.toLowerCase(), text };
       case 'tag':
@@ -134,6 +142,11 @@ function matches(atom: Atom, d: Device, presence: (id: string) => Presence): boo
   }
 }
 
+/** Whether a positive atom brings a fixture into the candidate set (D6): it names the device, or is role:fixture. */
+function namesFixture(atom: Atom, d: Device): boolean {
+  return (atom.facet === 'name' || (atom.facet === 'role' && atom.value === 'fixture')) && matches(atom, d, () => 'unknown');
+}
+
 /** The devices `selector` picks out of `devices`, in the order given. */
 export function selectDevices(devices: readonly Device[], selector: string, presence: (id: string) => Presence): Device[] {
   const atoms = parseSelector(selector);
@@ -160,8 +173,10 @@ export function selectDevices(devices: readonly Device[], selector: string, pres
     }
     return p;
   };
+  // The candidate set: every device except a fixture that no positive alias, id:, mac: or role:fixture names.
   return devices.filter(
     (d) =>
+      (d.role !== 'fixture' || positive.some((a) => namesFixture(a, d))) &&
       [...facets.values()].every((alts) => alts.some((a) => matches(a, d, presenceOnce))) &&
       !negative.some((a) => matches(a, d, presenceOnce)),
   );

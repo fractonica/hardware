@@ -83,7 +83,7 @@ export const MTU = { REALTIME: 250, BULK: 1470, REALTIME_PAYLOAD_BUDGET: 200 } a
 export const ChipId = { esp32c3: 5, esp32s3: 9, esp32c6: 13 } as const;
 export type ChipId = keyof typeof ChipId;
 
-export const Role = { node: 0, gateway: 1 } as const;
+export const Role = { node: 0, gateway: 1, fixture: 2 } as const;
 export type Role = keyof typeof Role;
 
 export const OtaState = { new: 0, pending_verify: 1, valid: 2, invalid: 3, aborted: 4, undefined: 255 } as const;

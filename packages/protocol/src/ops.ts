@@ -4,13 +4,15 @@
 // and ops/links.ts (node links, router, events), C4 its OTA group from ops/ota.ts, C5 its node <-> node
 // group from ops/net.ts (messages, bindings, latency), and C6 (design c6 §3.2) its groups from ops/hub.ts,
 // ops/registry.ts (inventory), ops/net.ts (probe), ops/ports.ts, ops/logs.ts, ops/apps.ts and
-// ops/tests.ts, all spread in at the end of OPS.
+// ops/tests.ts, all spread in at the end of OPS. M2-C1 (design m2-c1-hil §3 item 7) adds ops/bench.ts
+// (bench_get), test_report in ops/tests.ts and input_simulate's layer.
 // This module loads no Node builtin: the browser entry (browser.ts) exports it, and REGISTRY_HASH,
 // which hashes it with node:crypto, lives in registry-hash.ts.
 
 import { z } from 'zod';
 
 import { APPS_OPS } from './ops/apps.ts';
+import { BENCH_OPS } from './ops/bench.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
 import { HUB_OPS, HubStatusSchema } from './ops/hub.ts';
 import { LINKS_OPS } from './ops/links.ts';
@@ -23,15 +25,16 @@ import { TESTS_OPS } from './ops/tests.ts';
 import { JOB_ORIGINS, JobSchema, PortInfoSchema } from './types.ts';
 
 export { GeneratedFileSchema, type AppsOpName, type GeneratedFile } from './ops/apps.ts';
+export { BenchStatusSchema, type BenchOpName, type BenchStatus } from './ops/bench.ts';
 export { cliFlag, MAX_WAIT_S, type OpDef, type OpKind, type OpTier } from './ops/common.ts';
 export { ADVERT_STATES, CheckSchema, HubStatusSchema, LNP_STATES, type Check, type HubOpName, type HubStatus, type LnpState } from './ops/hub.ts';
-export type { LinksOpName } from './ops/links.ts';
+export { INPUT_GESTURES, INPUT_LAYERS, type InputGesture, type InputLayer, type LinksOpName } from './ops/links.ts';
 export type { LogsOpName } from './ops/logs.ts';
 export { BROADCAST_ALIAS, LatencyStatsSchema, PROBE_MODES, type NetOpName, type ProbeOpName } from './ops/net.ts';
 export type { OtaOpName } from './ops/ota.ts';
 export { LeaseSchema, type Lease, type PortsOpName } from './ops/ports.ts';
 export { CapInstanceSchema, DeviceLinkInfoSchema, type InventoryOpName, type RegistryOpName } from './ops/registry.ts';
-export { TEST_TIERS, type TestsOpName } from './ops/tests.ts';
+export { TEST_TIERS, TestReportSchema, type TestsOpName, type TestTier } from './ops/tests.ts';
 
 export const OPS = [
   op({
@@ -250,6 +253,8 @@ export const OPS = [
   ...LOGS_OPS,
   ...APPS_OPS,
   ...TESTS_OPS,
+  // M2-C1 (design m2-c1-hil D9): the HIL bench.
+  ...BENCH_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

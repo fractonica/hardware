@@ -27,13 +27,21 @@ pins:
     battery_adc: [4]          # BAT_ADC through a divider (ADC1 channel 3)
   strapping: [0, 3, 45, 46]
   # Level each strapping pin needs at reset (spec 04 §4.1): GPIO0 low selects download mode; GPIO45 high
-  # selects 1.8 V VDD_SPI, which this 3.3 V flash cannot use; 3 (JTAG source) and 46 (ROM log) are harmless.
-  strapping_levels: { 0: high, 3: none, 45: low, 46: none }
+  # selects 1.8 V VDD_SPI, which this 3.3 V flash cannot use; download mode needs GPIO46 low (Table 3-3: high
+  # with GPIO0 low is an invalid combination), as the C3s record GPIO8 high; 3 (JTAG source) is harmless.
+  strapping_levels: { 0: high, 3: none, 45: low, 46: low }
   free: [1, 2, 5, 6, 16, 17, 18, 21, 38, 42, 43, 44]
   adc1: [1, 2, 5, 6]
+  # S3 datasheet Table 2-2 (the same chip as the fixture): these glitch for about 60 us at chip power-up.
+  power_up_glitch: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+headers:                      # the schematic's J5 and J6; pin 1 first (J5-19/20 are USB D-/D+, J6-11 is CHP_UP)
+  J5: [43, 44, GND, 0, 1, 2, 3, GND, 4, 5, 6, 7, GND, 15, 16, 17, 18, GND, 19, 20]
+  J6: [5V, VSYS, GND, 3V3_EN, 3V3, ADC_VREF, 48, GND, 47, 46, EN, 45, GND, 42, 41, 40, 39, GND, 38, 21]
+boot_uart_tx: 43              # U0TXD (J5-1): the ROM log prints on it at every boot
+en_access: J6-11              # CHP_UP
 rf: { max_tx_power_qdbm: null, antenna: ceramic }
 test_pin: 16
-resources: { rmt_tx: 4, ledc_timers: 4, ledc_channels: 8, i2c: 2 }
+resources: { rmt_tx: 4, rmt_rx: 4, ledc_timers: 4, ledc_channels: 8, i2c: 2 }
 defaults:
   boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb }

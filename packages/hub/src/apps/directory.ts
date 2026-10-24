@@ -41,11 +41,20 @@ export class ManifestCache {
   }
 }
 
-/** The provisioned devices (apps see no others), by device id. */
+/** A device apps may see, name and command: provisioned, and never a HIL fixture (design m2-c1-hil D6, D15). */
+export function appVisible(d: Device | null | undefined): d is Device {
+  return d?.provisioned === true && d.role !== 'fixture';
+}
+
+/**
+ * The provisioned devices (apps see no others), by device id. Never a HIL fixture (role fixture, design
+ * m2-c1-hil D6): it is a test instrument, so provisioning one leaves `/app` WELCOME, `fr codegen client`
+ * and registry_rev as they were.
+ */
 export function provisionedDevices(hub: Pick<HubContext, 'registry'>): Device[] {
   return hub.registry
     .list()
-    .filter((d) => d.provisioned)
+    .filter(appVisible)
     .sort((a, b) => (a.device_id < b.device_id ? -1 : a.device_id > b.device_id ? 1 : 0));
 }
 

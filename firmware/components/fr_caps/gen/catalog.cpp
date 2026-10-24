@@ -14,6 +14,9 @@ constexpr MemberInfo kLedProperties[] = {{1, "on"}, {2, "brightness"}, {3, "colo
 constexpr MemberInfo kAnalogInCommands[] = {{1, "inject"}};
 constexpr MemberInfo kAnalogInEvents[] = {{1, "crossed"}};
 constexpr MemberInfo kAnalogInProperties[] = {{1, "value"}};
+constexpr MemberInfo kFixtureCommands[] = {{1, "press"}, {2, "release"}, {3, "read"}};
+constexpr MemberInfo kFixtureEvents[] = {{1, "edges"}, {2, "frame"}};
+constexpr MemberInfo kFixtureProperties[] = {{1, "level"}};
 constexpr MemberInfo kNodeCommands[] = {
     {1, "identify"},
     {2, "describe"},
@@ -34,6 +37,7 @@ constexpr CapInfo kCaps[] = {
     {0x0001, "fr.button", {1, 0}, kButtonCommands, kButtonEvents, kButtonProperties},
     {0x0002, "fr.led", {1, 0}, kLedCommands, kLedEvents, kLedProperties},
     {0x0005, "fr.analog_in", {0, 1}, kAnalogInCommands, kAnalogInEvents, kAnalogInProperties},
+    {0x0006, "fr.fixture", {0, 1}, kFixtureCommands, kFixtureEvents, kFixtureProperties},
     {0x00F0, "fr.node", {1, 0}, kNodeCommands, kNodeEvents, {}},
     {0x00F1, "fr.ota", {1, 0}, {}, {}, {}},
     {0x00F2, "fr.diag", {1, 0}, kDiagCommands, kDiagEvents, {}},

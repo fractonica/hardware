@@ -20,7 +20,8 @@
 // OTA-class frames (TCP, else serial); ACCEPT, REJECT, STATUS and RESULT come back through router.onOta;
 // device.online / device.offline on the event bus drive REBOOTING and VERIFYING. Transport `serial` (and
 // `auto` for a device whose USB port the hub holds open and idle) runs the existing flash_start `app` plan
-// instead, then waits for the new fw_id online.
+// instead, then waits for the new fw_id online. A radio-off device (the HIL fixture, design m2-c1-hil D6)
+// takes neither a Wi-Fi OTA nor a fault build, and `auto` never picks Wi-Fi for it.
 //
 // Everything here runs on the hub's event loop: frame and event handlers are synchronous; a child's job
 // awaits one attempt at a time, which those handlers and its deadline timers end.
@@ -36,6 +37,7 @@ import type { Db } from '../db.ts';
 import type { JobCtx, JobRunner } from '../jobs.ts';
 import { startFlash } from '../registry/flashing.ts';
 import { presenceOf, registryOf } from '../registry/hub.ts';
+import { radioOff } from '../registry/provision.ts';
 import { CHIP_IDS, markImageFlashed } from '../registry/store.ts';
 import { nowUs } from '../ring.ts';
 import { routerInfo } from '../router/index.ts';
@@ -400,6 +402,31 @@ function faultOverSerial(buildId: string): FrError {
   });
 }
 
+/**
+ * A device whose firmware has its radio off (registry/provision.ts radioOff: its HELLO role, the HIL
+ * fixture's) cannot pull an image over Wi-Fi, so neither a Wi-Fi OTA nor a fault build (which only an OTA
+ * exercises) can reach it (design m2-c1-hil D6). It is updated over USB.
+ */
+function radioOffDevice(d: Device, what: 'wifi' | 'fault' | 'auto', buildId: string): FrError {
+  const why =
+    what === 'fault'
+      ? `${buildId} is a fault build, which only an OTA over Wi-Fi exercises, and ${d.alias} has its radio off (role ${d.role})`
+      : what === 'wifi'
+        ? `${d.alias} has its radio off (role ${d.role}): it cannot take an OTA over Wi-Fi`
+        : `${d.alias} has its radio off (role ${d.role}) and its USB port is not open on this hub: no transport reaches it`;
+  return new FrError('INVALID_ARGS', why, {
+    hint: 'a radio-off device (the HIL fixture) is updated over USB only: via serial with its port attached, or flash_start with the build the bench pins',
+    remediation:
+      what === 'fault'
+        ? [{ tool: 'bench_get', cli: 'fr bench' }]
+        : [
+            { tool: 'ota_deploy', args: { selector: d.alias, via: 'serial' } },
+            { tool: 'flash_start', args: { device: d.alias, build: buildId } },
+          ],
+    details: { device_id: d.device_id, role: d.role, radio: 'off' },
+  });
+}
+
 export class OtaOrchestrator implements OtaService {
   readonly config: OtaConfig;
   #deps: OtaDeps;
@@ -544,7 +571,11 @@ export class OtaOrchestrator implements OtaService {
       return { ...base, action: 'already_current', ...target, current_fw: current, image: img };
     }
     const port = this.#port(hub, d.device_id);
+    const noRadio = radioOff(d.role);
     let via: OtaVia;
+    if (noRadio && m.fault) {
+      return skip('radio_off', radioOffDevice(d, 'fault', img.buildId));
+    }
     if (m.fault && input.via === 'serial') {
       return skip('fault_needs_wifi', faultOverSerial(img.buildId)); // a `builds` entry (deploy refuses this itself)
     }
@@ -560,12 +591,19 @@ export class OtaOrchestrator implements OtaService {
       }
       via = 'serial';
     } else if (input.via === 'wifi') {
+      if (noRadio) {
+        return skip('radio_off', radioOffDevice(d, 'wifi', img.buildId));
+      }
       via = 'wifi';
     } else {
       // auto (06 §6.7): serial when the hub holds the device's USB port open (not leased, not held by
       // another program), else Wi-Fi. A fault build always goes over Wi-Fi: only an OTA leaves the image
-      // PENDING_VERIFY, so only then does its health gate run and roll it back.
+      // PENDING_VERIFY, so only then does its health gate run and roll it back. A radio-off device never
+      // goes over Wi-Fi (its fault builds are refused above).
       via = port?.state === 'open' && !m.fault ? 'serial' : 'wifi';
+      if (noRadio && via === 'wifi') {
+        return skip('radio_off', radioOffDevice(d, 'auto', img.buildId));
+      }
     }
     const warnings: string[] = [];
     if (!input.force && d.profile && m.profile !== d.profile) {

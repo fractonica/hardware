@@ -3,11 +3,12 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { checkBenches } from './bench.ts';
 import { emitCpp } from './emit/cpp.ts';
 import { emitSdk } from './emit/sdk.ts';
 import { emitTs } from './emit/ts.ts';
 import { emitVectors } from './emit/vectors.ts';
-import { catalogHash, loadModel, type GeneratedFile } from './model.ts';
+import { catalogHash, loadModel, type GeneratedFile, type Model } from './model.ts';
 
 export * from './model.ts';
 
@@ -19,6 +20,8 @@ export { emitTs, TS_GEN_DIR } from './emit/ts.ts';
 export { emitVectors, VECTORS_DIR, type GoldenVector } from './emit/vectors.ts';
 // fr gen firmware: the board composition root (packages/codegen/src/board.ts).
 export * from './board.ts';
+// The HIL bench check `fr gen` runs (packages/codegen/src/bench.ts, design m2-c1-hil D7).
+export * from './bench.ts';
 
 /**
  * Directories `fr gen` owns entirely (design c2 §2). A file in one of them that no emitter produced is an
@@ -50,13 +53,14 @@ export interface GenerateResult {
   removed: string[];
   /** With check: missing, differing and orphaned paths. Empty when everything is current. */
   stale: string[];
-  /** Non-fatal notes for the user (the CLI prints them). */
+  /** The bench files validated against the boards and profiles (design m2-c1-hil D7). */
+  benches: string[];
+  /** Non-fatal notes for the user (the CLI prints them), e.g. the bench's documented exceptions. */
   warnings: string[];
 }
 
 /** Every committed output of `fr gen` for a checkout, without touching the disk. Throws SchemaError. */
-export function generateFiles(sourceDir: string): GeneratedFile[] {
-  const model = loadModel(sourceDir);
+export function generateFiles(sourceDir: string, model: Model = loadModel(sourceDir)): GeneratedFile[] {
   const vectors = emitVectors(model);
   // Both suites check every case (decode-only and error cases included) and fuzz with them as corpora.
   const files = [...emitTs(model), ...emitSdk(model, catalogHash(model)), ...vectors.files, ...emitCpp(model, vectors.cases)];
@@ -103,15 +107,19 @@ function orphans(sourceDir: string, files: readonly GeneratedFile[]): string[] {
 /**
  * `fr gen` (design c2 §7): regenerates every committed output, writing only files whose content
  * changed and deleting orphans; with `check`, writes nothing and lists what is stale (`fr gen --check`).
+ * Either way it first validates every hardware/bench/*.bench.yaml against the board manifests and profiles
+ * (design m2-c1-hil D7): a bad bench throws SchemaError, as a bad schema does, and nothing is written.
  */
 export function generateAll(opts: GenerateOptions): GenerateResult {
-  const files = generateFiles(opts.sourceDir);
+  const model = loadModel(opts.sourceDir);
+  const files = generateFiles(opts.sourceDir, model);
+  const bench = checkBenches(opts.sourceDir, model);
   const changed = files.filter((f) => {
     const abs = join(opts.sourceDir, f.path);
     return !existsSync(abs) || readFileSync(abs, 'utf8') !== f.content;
   });
   const extra = orphans(opts.sourceDir, files);
-  const result: GenerateResult = { files: files.map((f) => f.path), written: [], removed: [], stale: [], warnings: [] };
+  const result: GenerateResult = { files: files.map((f) => f.path), written: [], removed: [], stale: [], benches: bench.benches, warnings: bench.notes };
   if (opts.check) {
     result.stale = [...changed.map((f) => f.path), ...extra].sort();
     return result;

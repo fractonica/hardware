@@ -14,6 +14,7 @@ import { CATALOG_HASH } from '@fractonica/protocol/gen';
 import { CAP_META, CATALOG_HASH as SDK_CATALOG_HASH } from '@fractonica/sdk';
 
 import {
+  appCapabilities,
   buildModel,
   catalogHash,
   emitSdk,
@@ -65,8 +66,10 @@ describe('emitSdk', () => {
 
   it('CAP_META and CATALOG_HASH mirror the model', () => {
     expect(SDK_CATALOG_HASH).toBe(CATALOG_HASH);
-    expect(Object.keys(CAP_META)).toEqual(model.capabilities.map((c) => c.name));
-    for (const cap of model.capabilities) {
+    // A test_only capability (fr.fixture, design m2-c1-hil D3) is not part of the client SDK.
+    expect(Object.keys(CAP_META)).toEqual(appCapabilities(model).map((c) => c.name));
+    expect(Object.keys(CAP_META)).not.toContain('fr.fixture');
+    for (const cap of appCapabilities(model)) {
       const m = CAP_META[cap.name];
       expect(m.events).toEqual(cap.events.map((e) => e.name));
       expect(m.props).toEqual(cap.properties.map((p) => p.name));

@@ -7,6 +7,7 @@ import * as $ from '../support.ts';
 import { BUTTON_CAP } from './button.ts';
 import { LED_CAP } from './led.ts';
 import { ANALOG_IN_CAP } from './analog_in.ts';
+import { FIXTURE_CAP } from './fixture.ts';
 import { NODE_CAP } from './node.ts';
 import { OTA_CAP } from './ota.ts';
 import { DIAG_CAP } from './diag.ts';
@@ -14,12 +15,13 @@ import { DIAG_CAP } from './diag.ts';
 export * from './button.ts';
 export * from './led.ts';
 export * from './analog_in.ts';
+export * from './fixture.ts';
 export * from './node.ts';
 export * from './ota.ts';
 export * from './diag.ts';
 
-/** Every capability in the catalog, by id. */
-export const CAPS: readonly $.CapInfo[] = [BUTTON_CAP, LED_CAP, ANALOG_IN_CAP, NODE_CAP, OTA_CAP, DIAG_CAP];
+/** Every capability, by id: the catalog's (CATALOG) and the test_only ones it leaves out (testOnly). */
+export const CAPS: readonly $.CapInfo[] = [BUTTON_CAP, LED_CAP, ANALOG_IN_CAP, FIXTURE_CAP, NODE_CAP, OTA_CAP, DIAG_CAP];
 
 /** By id (0x0002) or name ('fr.led'). */
 export function findCap(cap: number | string): $.CapInfo | undefined {

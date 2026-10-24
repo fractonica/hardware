@@ -92,14 +92,31 @@ function killGroup(pgid: number, sig: NodeJS.Signals | 0): boolean {
   }
 }
 
-/** Waits until no process is left in the group (SIGKILL after 5 s, give up after 10 s). */
-async function waitGroupGone(pgid: number): Promise<void> {
-  for (let i = 0; i < 100 && killGroup(pgid, 0); i++) {
-    if (i === 50) {
+/** How long a cancelled build's group has between SIGTERM and SIGKILL (ninja stopping its compilers). */
+export const BUILD_CANCEL_GRACE_MS = 5_000;
+
+/**
+ * Waits until no process is left in the group: SIGKILL once `graceMs` have passed since the cancel at
+ * `since`, giving up `graceMs` after that.
+ */
+async function waitGroupGone(pgid: number, graceMs: number, since: number): Promise<void> {
+  let killed = false;
+  while (killGroup(pgid, 0) && Date.now() - since < 2 * graceMs) {
+    if (!killed && Date.now() - since >= graceMs) {
       killGroup(pgid, 'SIGKILL');
+      killed = true;
     }
     await sleep(100);
   }
+}
+
+/** spawnLogged options. */
+export interface SpawnOptions {
+  /**
+   * A cancel sends the group SIGTERM, then SIGKILL after this (default BUILD_CANCEL_GRACE_MS). A test run
+   * gives its scenarios longer to release fixture lines and restore LEDs and bindings (design m2-c1-hil D13).
+   */
+  graceMs?: number;
 }
 
 /** Resolves with the exit code; 130 without spawning if the job was cancelled already. */
@@ -110,7 +127,9 @@ export function spawnLogged(
   cwd: string,
   ctx: JobCtx,
   onLine: (l: string, stream: 'out' | 'err') => void,
+  opts: SpawnOptions = {},
 ): Promise<number> {
+  const graceMs = opts.graceMs ?? BUILD_CANCEL_GRACE_MS;
   return new Promise((resolve) => {
     // An 'abort' listener added after the abort never fires: a cancel during idf_env lands here.
     if (ctx.signal.aborted) {
@@ -129,7 +148,16 @@ export function spawnLogged(
         process.on('exit', () => liveGroups.forEach((g) => killGroup(g, 'SIGTERM')));
       }
     }
-    const abort = () => pgid && killGroup(pgid, 'SIGTERM');
+    // The grace runs from the cancel: a leader still cleaning up when it ends is killed with its group.
+    let cancelledAt = 0;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => {
+      if (pgid) {
+        cancelledAt = Date.now();
+        killGroup(pgid, 'SIGTERM');
+        killTimer = setTimeout(() => killGroup(pgid, 'SIGKILL'), graceMs);
+      }
+    };
     ctx.signal.addEventListener('abort', abort, { once: true });
     const pump = (stream: NodeJS.ReadableStream, name: 'out' | 'err') => {
       let buf = '';
@@ -151,7 +179,8 @@ export function spawnLogged(
       ctx.signal.removeEventListener('abort', abort);
       // On cancel idf.py exits at once while ninja is still stopping its compilers; the build-dir
       // lock must not pass to the next build before they are gone.
-      void (ctx.signal.aborted && pgid ? waitGroupGone(pgid) : Promise.resolve()).then(() => {
+      void (cancelledAt && pgid ? waitGroupGone(pgid, graceMs, cancelledAt) : Promise.resolve()).then(() => {
+        clearTimeout(killTimer);
         if (pgid) {
           liveGroups.delete(pgid);
         }

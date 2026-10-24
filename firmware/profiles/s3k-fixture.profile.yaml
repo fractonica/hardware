@@ -1,0 +1,22 @@
+profile: s3k-fixture
+board: esp32s3-devkitc1-n16r8
+app: node
+role: fixture                      # HELLO role 2 (CONFIG_FR_ROLE): out of `all`, fenced, invisible to apps (D6, D15)
+net: { link_profile: default, radio: off }   # serial only: no Wi-Fi, no ESP-NOW
+test_pin: none                     # no CONFIG_FR_TEST_PIN; diag info reports -1
+# SPIRAM stays off, as in every M1 profile. Channel -> DUT line: hardware/bench/lab.bench.yaml.
+caps:
+  status: { cap: fr.led,     driver: led_ws2812,        bind: leds.rgb, config: { max_brightness: 32 } }  # identify blink; lit while a press runs
+  ch0:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.42, config: { drive: open_drain } }
+  ch1:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.41, config: { drive: open_drain } }
+  ch2:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.40, config: { drive: open_drain } }
+  ch3:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.39, config: { drive: open_drain } }
+  ch4:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.4 }
+  ch5:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.5 }
+  ch6:    { cap: fr.fixture, driver: fixture_ws2812_rx, bind: gpio.6,  config: { decode: ws2812 } }
+  ch7:    { cap: fr.fixture, driver: fixture_ws2812_rx, bind: gpio.7,  config: { decode: ws2812 } }
+  ch8:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.15, config: { pull: up } }
+  ch9:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.16, config: { pull: up } }
+  ch10:   { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.17, config: { pull: up } }
+  ch11:   { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.18, config: { pull: up } }
+  # Reserved in the bench, with no instance yet: ch12 gpio.11 and ch13 gpio.12 (M2-C3, drive: pwm), ch14 gpio.21 (EN, nfet_gate only).

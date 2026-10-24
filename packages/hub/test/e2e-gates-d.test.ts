@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import { CLS, matchType } from '@fractonica/protocol';
+import { CLS, matchType, REGISTRY_HASH } from '@fractonica/protocol';
 import {
   decodeButtonInjectArgs,
   decodeLedBlinkArgs,
@@ -465,12 +465,28 @@ describe('tests/e2e/t-agent.ts against a scripted hub', () => {
     // ota jobs are counted, not fetched.
     expect(hub.calls.filter((c) => c.op === 'job_get').map((c) => c.input.job_id).sort()).toEqual(['j_b1', 'j_ceb4e549f157', 'j_flash01', 'j_mono01']);
     expect(hub.calls.filter((c) => c.op === 'diag_exec').map((c) => c.input)).toEqual([{ port: DEV['pad-c6'], line: 'selftest status', timeout_s: 10 }]);
-    const mutating = hub.calls.map((c) => c.op).filter((op) => !['events_read', 'job_get', 'binding_list', 'latency_stats', 'device_get', 'capability_list', 'diag_exec', 'hub_status', 'job_list'].includes(op));
+    const mutating = hub.calls.map((c) => c.op).filter((op) => !['events_read', 'job_get', 'binding_list', 'latency_stats', 'device_get', 'capability_list', 'diag_exec', 'hub_status', 'job_list', 'bench_get'].includes(op));
     expect(mutating).toEqual([]);
+    // This hub has no bench_get op (the C6 session ran before M2-C1): (a) on its effects, said so.
+    expect(out.measured.a).toMatchObject({ op_called_support: 'the hub has no bench_get op: a hub before M2-C1, which publishes no op.called', origin_of_commands: expect.stringContaining('proven by its effects alone') });
     expect(logs.find((l) => l.startsWith('(a) PASS'))).toBe(`(a) PASS "${PROMPTS.a}"`);
     expect(logs).toContain('after the run, restore the bench (the harness runs none of this):');
     expect(logs.some((l) => l.includes('fr flash pad-c6 --profile c6-pad --plan full'))).toBe(true);
     expect((out.evidence as { reference: string }).reference).toMatch(/^C6 2026-10-23/);
+  });
+
+  it('the same session on an M2-C1 hub (its registry is this checkout\'s) fails (a): no op.called, so no effects-only fallback', async () => {
+    const s = c6Session();
+    const on = sessionHub(s);
+    on.hub_status = () => ok({ warnings: [], registry_hash: REGISTRY_HASH }, 'c:7.6000');
+    const hub = await fakeHub(on);
+    const { ctx } = ctxOn(hub.url, ['--since', 'c:7.100']);
+    const out = await tAgent.run(ctx);
+    expect(out.pass).toBe(false);
+    // The session's presses followed its prompt_human (real presses: the press half holds); its binding was
+    // never set by the agent (the M1 row): before, this passed on the effects as "a hub before M2-C1".
+    expect(out.measured.a).toMatchObject({ pass: false, proven: 11, op_called: {}, press_by: 'a person (prompt_human)', real_presses: 11, op_called_support: `the hub's registry is this checkout's (${REGISTRY_HASH})` });
+    expect((out.measured.problems as { a: string[] }).a).toEqual(['no op.called {op: binding_set, client: mcp} on pad-c6 or pad-c3 after the cursor']);
   });
 
   it('a hub restarted since the cursor: reads from the same seq in the new run, says so', async () => {
@@ -586,6 +602,12 @@ describe('tests/e2e/t-agent.ts against a scripted hub', () => {
     expect(text).toContain(`tests/e2e/t-agent.ts --since c:9.4242 --devices pad-c3,pad-c3b,pad-c6,pad-s3 --hub ${hub.url}`);
     expect(text).toMatch(/warn {2}pad-c3b: USB port \/dev\/cu\.pad-c3b closed \(expect_log needs it open/);
     expect(text).toContain('warn  registered but not provisioned: esp32s3-a1b2c3; a deploy to all fails on it');
+    // (a)'s binding already there: an ERROR, since (a) must show the agent's own binding_set.
+    on.binding_list = () => ok({ bindings: ROWS });
+    const bound = ctxOn(hub.url, ['--prepare']);
+    expect((await tAgent.run(bound.ctx)).pass).toBe(false);
+    expect(bound.logs.join('\n')).toContain("ERROR pad-c6.boot.down -> pad-c3.status.blink is already bound (slot 1): (a) must show the agent's own binding_set, so remove it first: fr bind rm pad-c6 1");
+    on.binding_list = () => ok({ bindings: [ROWS[0]] });
     // A pad offline is an ERROR line, and the preparation fails.
     listed[1].presence = 'offline';
     const again = ctxOn(hub.url, ['--prepare']);

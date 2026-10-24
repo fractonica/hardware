@@ -2,7 +2,7 @@
 // from the op registry (`@fractonica/protocol/browser`, design c6 D17); the ops that declare no output
 // schema get a hand-written view here, read defensively (the hub may add fields).
 
-import type { DeviceView, HubEvent, Job, LatencyStatsSchema, LogLine, OPS, OpName } from '@fractonica/protocol/browser';
+import type { DeviceView, HubEvent, Job, LatencyStatsSchema, LogLine, OPS, OpName, ProvisionWifi } from '@fractonica/protocol/browser';
 
 export type { DeviceView, HubEvent, Job, LogLine, OpName };
 export type JobStatus = Job['status'];
@@ -117,7 +117,8 @@ export interface ProvisionResult {
   profile: string;
   build_id: string;
   fw_id: string;
-  wifi: 'joined' | 'not_joined';
+  /** `off`: a radio-off profile (the HIL fixture), which has no join stage. */
+  wifi: ProvisionWifi;
   duration_ms?: number;
   warnings?: string[];
 }

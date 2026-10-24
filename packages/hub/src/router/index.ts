@@ -11,14 +11,20 @@
 // C6 (design c6 §6 S7, D22, D28) adds what T-LAT's probe drives (src/latency): commands that execute at a
 // hub time (EXT exec_at_us through the TIME offset) or go over a chosen link, PING round trips on demand,
 // a faster TIME resync while a probe runs, and every capability event with its link and arrival µs; plus
-// the late/resync counters and the resync rule T-INPUT checks.
+// the late/resync counters and the resync rule T-INPUT checks. M2-C1 (design m2-c1-hil D6, D9; stream S4):
+// a HIL fixture's session (HELLO role fixture) gets no hub broadcast, fan-out, repair or DIRECTORY (it has
+// no radio to seed with), node -> node frames addressed to it are dropped (forward_fixture), and a STATE
+// that a get_state brought is marked `resync` (its time is the get_state's, not the change's): judged by what
+// it carries (a seq above what the node had sent before the get_state, a stamp from after its send), not only
+// by when it arrives, so a real change in flight behind the heartbeat stays unmarked and a re-send that comes
+// after the get_state timed out is still marked (GetStateWindow).
 //
 // Everything on the receive path runs synchronously in the tick the envelope arrived in (spec 08 §8.2
 // rule 2); only the handshake and commands await answers.
 
 import { performance } from 'node:perf_hooks';
 
-import { CLS, EXT, type Envelope, extTlv, type ExtTlv, FLAG, FrError, fnv1a32, type Header, packEnvelope } from '@fractonica/protocol';
+import { CLS, type DeviceRole, EXT, type Envelope, extTlv, type ExtTlv, FLAG, FrError, fnv1a32, type Header, packEnvelope } from '@fractonica/protocol';
 import {
   ADDR,
   decodeEnvelope,
@@ -48,6 +54,7 @@ import {
   MTU,
   type PresenceHeartbeat,
   PORT,
+  Role,
   STATUS,
   statusName,
 } from '@fractonica/protocol/gen';
@@ -332,6 +339,8 @@ interface Peer {
   /** Clock ms of the last get_state (handshake or resync), and whether a resync's is still unanswered (D28). */
   resyncAt: number;
   resyncing: boolean;
+  /** The get_states whose re-sends may still come (m2-c1-hil D9): what tells a re-send from a real change. */
+  getStates: GetStateWindow[];
   clock: NodeClock;
   syncing: boolean;
   nextSyncAt: number;
@@ -415,9 +424,55 @@ const NODE_DESCRIBE = commandId('fr.node', 'describe');
 /** A resync's get_state waits half a heartbeat interval, at least this long (design c6 D28). */
 const RESYNC_MIN_TIMEOUT_MS = 100;
 
+/**
+ * One get_state's re-sends (m2-c1-hil D9): the node answers it by re-sending every property, stamped when it
+ * does, with fresh seqs, before its RESULT. A STATE is one of those (`resync`) when it comes while the window
+ * is open and
+ *   - its seq is above `floorSeq`, the newest STATE the node could have sent before the get_state (the
+ *     heartbeat's state_seq for a resync): a real change still in flight behind that heartbeat is not one;
+ *   - with the node's clock known, it is stamped no earlier than the send and no later than the RESULT's
+ *     arrival (each widened by the clock's uncertainty), and within RESYNC_BURST_US of the first re-send: a
+ *     change made before the get_state, or after the node answered it, is not one.
+ * With the clock known the window stays open RESYNC_RESULT_GRACE_US past the RESULT (a re-send on another link
+ * may land just behind it) and, after a timeout, for the handshake command timeout more: a get_state that is
+ * late is not lost, and its re-sends still carry its time. Without a clock, arrival alone decides: open until
+ * the get_state settles.
+ */
+interface GetStateWindow {
+  floorSeq: number;
+  /** Node µs bounds of a re-send's stamp; null without a clock. */
+  fromNodeUs: number | null;
+  toNodeUs: number;
+  /** Node µs of the first re-send it brought. */
+  firstUs: number | null;
+  /** Hub µs it closes at (Infinity while unanswered). */
+  untilUs: number;
+}
+/** How far apart a get_state's re-sends are stamped at most (the node sends them in one go). */
+const RESYNC_BURST_US = 100_000;
+const RESYNC_RESULT_GRACE_US = 250_000;
+/** Allowance beyond the clock's uncertainty for a re-send's stamp against the send and the RESULT. */
+const RESYNC_CLOCK_MARGIN_US = 1000;
+
 const hex = (b: Uint8Array) => Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('hex');
+
+/**
+ * The registry role of a HELLO `role` (05 §5.7 Role): gateway (1) and fixture (2, the HIL fixture; design
+ * m2-c1-hil D6) by name or value; every other value, including one this hub does not know, is a node.
+ */
+export function helloRole(role: Role | number): DeviceRole {
+  if (role === 'gateway' || role === Role.gateway) {
+    return 'gateway';
+  }
+  if (role === 'fixture' || role === Role.fixture) {
+    return 'fixture';
+  }
+  return 'node';
+}
 const low32 = (n: number) => ((Math.round(n) % 2 ** 32) + 2 ** 32) % 2 ** 32;
 const isUp = (p: Presence) => p === 'online' || p === 'suspect';
+/** A HIL fixture's peer: its HELLO (or its registry row) says role fixture (design m2-c1-hil D6). */
+const isFixture = (peer: Peer) => peer.hello?.role === 'fixture' || peer.device?.role === 'fixture';
 
 export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   readonly hubEpoch: number;
@@ -493,6 +548,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     forwarded: 0,
     forward_no_route: 0,
     forward_ttl: 0,
+    /** Node -> node frames addressed to a HIL fixture, dropped (design m2-c1-hil D6, 05 §5.10). */
+    forward_fixture: 0,
     /** DIRECTORY rounds sent to every session after a registry change. */
     directory_pushes: 0,
     // Ordering (design c6 D28; 05 §5.8, T-INPUT).
@@ -810,7 +867,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     this.#bcast = rec.seq;
     let sessions = 0;
     for (const peer of this.#peers.values()) {
-      if (this.#sendEvery(peer, this.#bcastBytes(rec, peer.net))) {
+      // A fixture has no radio to seed with (design m2-c1-hil D6): T-FLOOD's sessions stay the nodes'.
+      if (!isFixture(peer) && this.#sendEvery(peer, this.#bcastBytes(rec, peer.net))) {
         sessions++;
       }
     }
@@ -923,7 +981,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
    * times, half an interval apart.
    */
   #repair(peer: Peer, watermark: number): void {
-    if (!this.#bcastLog.length || !this.#sessionsOf(peer).some((s) => s.welcomed)) {
+    if (!this.#bcastLog.length || isFixture(peer) || !this.#sessionsOf(peer).some((s) => s.welcomed)) {
       return;
     }
     const now = this.#clock.now();
@@ -951,7 +1009,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   #fanOut(from: Peer, bytes: Uint8Array): void {
     const out = withRemaining(bytes, 1);
     for (const peer of this.#peers.values()) {
-      if (peer === from) {
+      if (peer === from || isFixture(peer)) {
         continue;
       }
       const s = this.#best(peer);
@@ -974,6 +1032,11 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       return false;
     }
     const target = this.#byAddr.get(h.dst);
+    if (target && isFixture(target)) {
+      // The fence refuses bindings to a fixture (design m2-c1-hil D15); this covers a stale or hand-made one.
+      this.#counters.forward_fixture++;
+      return false;
+    }
     const s = target && target !== from ? this.#best(target) : undefined;
     if (!s?.welcomed || !this.#send(s, withRemaining(bytes, remaining - 1))) {
       this.#counters.forward_no_route++;
@@ -1006,7 +1069,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     }
     let sent = 0;
     for (const s of this.#sessions.values()) {
-      if (s.welcomed && !s.closed) {
+      if (s.welcomed && !s.closed && !isFixture(s.peer)) {
         for (const page of pages) {
           this.#sendFrame(s, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, page);
         }
@@ -1318,7 +1381,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       fw_id_prefix: hex(hello.fw_id_prefix),
       descriptor_hash: hello.descriptor_hash,
       board_hash: hello.board_hash,
-      role: hello.role === 'gateway' || hello.role === 1 ? 'gateway' : 'node',
+      role: helloRole(hello.role),
       caps: hello.caps,
       alias: hello.alias,
       alias_rev: hello.alias_rev,
@@ -1586,7 +1649,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
             this.#counters.resync_failed++;
           };
           const timeoutMs = Math.min(this.#cfg.handshakeCmdTimeoutMs, Math.max(RESYNC_MIN_TIMEOUT_MS, peer.hbMs / 2));
-          void this.#request(peer, best, PORT.NODE, NODE_GET_STATE, EMPTY, { ack: 'result', timeoutMs })
+          void this.#getState(peer, best, timeoutMs, hb.value.state_seq)
             .then((r) => r.status !== STATUS.OK && failed(), failed)
             .finally(() => {
               peer.resyncing = false;
@@ -1719,7 +1782,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       this.#counters.registry_errors++;
     }
     const s = this.#best(peer);
-    if (s && dev?.provisioned && dev.addr === d.value.addr) {
+    if (s && !isFixture(peer) && dev?.provisioned && dev.addr === d.value.addr) {
       const entries = [{ addr: dev.addr, mac: Buffer.from(dev.device_id, 'hex') }];
       this.#sendFrame(s, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, encodeNetDirectory({ page: 0, pages: 1, entries }));
     }
@@ -1786,6 +1849,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       member: name,
       ...(late ? { late: true } : {}),
       ...(replayed ? { replayed: true } : {}),
+      ...(part === 'state' && this.#resyncBrought(peer, h.seq, tUs, now) ? { resync: true } : {}),
     });
     // After the bus (D7: /app and /ws first), with what it does not carry: the link and the arrival µs.
     if (this.#capListeners.size) {
@@ -1859,8 +1923,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     session.welcomed = true;
     // The node's BCAST window restarts here (05 §5.9: a late joiner never gets older broadcasts).
     peer.bcastBase = this.#bcast;
-    // 2. DIRECTORY (paged; 05 §5.10).
-    for (const page of this.#directoryPages()) {
+    // 2. DIRECTORY (paged; 05 §5.10); none for a fixture (design m2-c1-hil D6).
+    for (const page of isFixture(peer) ? [] : this.#directoryPages()) {
       this.#sendFrame(session, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, page);
     }
     // 3. TIME burst.
@@ -1877,7 +1941,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     }
     // 4. get_state: every property again, so the mirror is current before apps hear device.online.
     peer.resyncAt = this.#clock.now();
-    await this.#request(peer, session, PORT.NODE, NODE_GET_STATE, EMPTY, { ack: 'result', timeoutMs: this.#cfg.handshakeCmdTimeoutMs }).catch(() => undefined);
+    await this.#getState(peer, session, this.#cfg.handshakeCmdTimeoutMs, peer.latestMax).catch(() => undefined);
     if (!live()) {
       return;
     }
@@ -1968,6 +2032,64 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     } finally {
       peer.syncing = false;
     }
+  }
+
+  /**
+   * fr.node.get_state (handshake or resync): the node re-sends every property before its RESULT, stamped when
+   * it answers, so those STATEs carry the get_state's time, not their change's, and are published with
+   * `resync: true` (design m2-c1-hil D9; GetStateWindow says which they are). `floorSeq`: the newest STATE seq
+   * the node may have sent before this get_state.
+   */
+  #getState(peer: Peer, session: Session, timeoutMs: number, floorSeq: number): Promise<CommandResult> {
+    const slack = () => (peer.clock.info()?.uncertainty_us ?? 0) + RESYNC_CLOCK_MARGIN_US;
+    const timed = peer.clock.synced();
+    const w: GetStateWindow = {
+      floorSeq,
+      fromNodeUs: timed ? peer.clock.toNode(this.#clock.nowUs()) - slack() : null,
+      toNodeUs: Infinity,
+      firstUs: null,
+      untilUs: Infinity,
+    };
+    peer.getStates.push(w);
+    return this.#request(peer, session, PORT.NODE, NODE_GET_STATE, EMPTY, { ack: 'result', timeoutMs }).then(
+      (r) => {
+        const rx = r.rx_us ?? this.#clock.nowUs();
+        if (timed && peer.clock.synced()) {
+          w.toNodeUs = peer.clock.toNode(rx) + slack();
+          w.untilUs = rx + RESYNC_RESULT_GRACE_US;
+        } else {
+          w.untilUs = rx;
+        }
+        return r;
+      },
+      (e: unknown) => {
+        const now = this.#clock.nowUs();
+        w.untilUs = timed && peer.clock.synced() ? now + this.#cfg.handshakeCmdTimeoutMs * 1000 : now;
+        throw e;
+      },
+    );
+  }
+
+  /** A STATE (its header seq, its u32 stamp, arrived at hub µs `atUs`) is one a get_state brought (GetStateWindow). */
+  #resyncBrought(peer: Peer, seq: number, tUs: number, atUs: number): boolean {
+    if (!peer.getStates.length) {
+      return false;
+    }
+    peer.getStates = peer.getStates.filter((w) => w.untilUs > atUs);
+    for (const w of peer.getStates) {
+      if (cmp32(seq, w.floorSeq) <= 0) {
+        continue;
+      }
+      if (w.fromNodeUs !== null && peer.clock.synced()) {
+        const t = peer.clock.unwrap(tUs, atUs);
+        if (t < w.fromNodeUs || t > w.toNodeUs || (w.firstUs !== null && t > w.firstUs + RESYNC_BURST_US)) {
+          continue;
+        }
+        w.firstUs ??= t;
+      }
+      return true;
+    }
+    return false;
   }
 
   async #describe(peer: Peer, session: Session): Promise<void> {
@@ -2193,6 +2315,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     peer.clock.reset();
     peer.lastEvent.clear();
     peer.nextSyncAt = 0;
+    peer.getStates = [];
   }
 
   #sessionsChanged(): void {
@@ -2226,6 +2349,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         latestMax: 0,
         resyncAt: 0,
         resyncing: false,
+        getStates: [],
         clock: new NodeClock(),
         syncing: false,
         nextSyncAt: 0,

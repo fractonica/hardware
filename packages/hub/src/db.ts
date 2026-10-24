@@ -2,6 +2,28 @@ import Database from 'better-sqlite3';
 
 export type Db = Database.Database;
 
+/**
+ * The registry table (spec 08 §8.8, design c3 §4): columns as context.ts Device, tags a JSON array, provision
+ * the JSON provision record (never a secret). addr is NULL until provisioned and never reused; alias and addr
+ * are unique. `role` takes protocol DEVICE_ROLES; `fixture` came with M2-C1 (design m2-c1-hil D6), and an
+ * older database's CHECK is widened by rebuilding the table (migrateRoleCheck).
+ */
+function devicesTable(name: string): string {
+  return `CREATE TABLE IF NOT EXISTS ${name} (
+     device_id TEXT PRIMARY KEY, addr INTEGER UNIQUE CHECK (addr BETWEEN 1 AND 61439),
+     alias TEXT NOT NULL UNIQUE COLLATE NOCASE, alias_rev INTEGER NOT NULL DEFAULT 0,
+     net INTEGER, board TEXT, profile TEXT, chip TEXT, tags TEXT NOT NULL DEFAULT '[]',
+     role TEXT NOT NULL DEFAULT 'node' CHECK (role IN ('node', 'gateway', 'fixture')), fw_id TEXT,
+     provisioned INTEGER NOT NULL DEFAULT 0, last_seen TEXT, last_epoch INTEGER, created_at TEXT NOT NULL,
+     provision TEXT)`;
+}
+
+/**
+ * PRAGMA user_version: the schema changes ADD COLUMN cannot make, done once each. 0 is every database before
+ * M2-C1; 1 has the `fixture` role (migrateRoleCheck).
+ */
+export const DB_SCHEMA_VERSION = 1;
+
 const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS logs (
@@ -21,16 +43,8 @@ const MIGRATIONS = [
      net_id INTEGER CHECK (net_id BETWEEN 1 AND 65535), hub_host TEXT)`,
   `CREATE TABLE IF NOT EXISTS ports_seen (
      usb_serial TEXT PRIMARY KEY, last_path TEXT NOT NULL, vid TEXT, pid TEXT, last_seen TEXT NOT NULL)`,
-  // The registry (spec 08 §8.8, design c3 §4): columns as context.ts Device, tags a JSON array, provision
-  // the JSON provision record (never a secret). addr is NULL until provisioned and never reused; alias
-  // and addr are unique.
-  `CREATE TABLE IF NOT EXISTS devices (
-     device_id TEXT PRIMARY KEY, addr INTEGER UNIQUE CHECK (addr BETWEEN 1 AND 61439),
-     alias TEXT NOT NULL UNIQUE COLLATE NOCASE, alias_rev INTEGER NOT NULL DEFAULT 0,
-     net INTEGER, board TEXT, profile TEXT, chip TEXT, tags TEXT NOT NULL DEFAULT '[]',
-     role TEXT NOT NULL DEFAULT 'node' CHECK (role IN ('node', 'gateway')), fw_id TEXT,
-     provisioned INTEGER NOT NULL DEFAULT 0, last_seen TEXT, last_epoch INTEGER, created_at TEXT NOT NULL,
-     provision TEXT)`,
+  // The registry (devicesTable).
+  devicesTable('devices'),
   // Hub events (spec 08 §8.7): a ring in the cursor space it shares with logs (seq.ts, ring.ts).
   `CREATE TABLE IF NOT EXISTS events (
      seq INTEGER PRIMARY KEY, run INTEGER NOT NULL, ts_us INTEGER NOT NULL, t_hub_us INTEGER NOT NULL,
@@ -68,6 +82,29 @@ const ADDED_COLUMNS: { table: string; column: string; decl: string }[] = [
   { table: 'jobs', column: 'origin', decl: 'TEXT' },
 ];
 
+/**
+ * Version 1 (design m2-c1-hil D6): the devices CHECK gains `fixture`. SQLite cannot alter a CHECK, so a table
+ * created before it is rebuilt (create the new table, copy every row, drop the old one, rename) in one
+ * transaction; rows, the unique alias and addr, and their values are kept. A database whose table already
+ * has the new CHECK (a fresh one) is only stamped.
+ */
+function migrateRoleCheck(db: Db): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'devices'").get() as { sql: string } | undefined;
+  if (!row || row.sql.includes("'fixture'")) {
+    return;
+  }
+  const old = (db.prepare('PRAGMA table_info(devices)').all() as { name: string }[]).map((c) => c.name);
+  db.exec(devicesTable('devices_v1'));
+  const fresh = new Set((db.prepare('PRAGMA table_info(devices_v1)').all() as { name: string }[]).map((c) => c.name));
+  const cols = old.filter((c) => fresh.has(c)).join(', ');
+  db.exec(`INSERT INTO devices_v1 (${cols}) SELECT ${cols} FROM devices`);
+  db.exec('DROP TABLE devices');
+  db.exec('ALTER TABLE devices_v1 RENAME TO devices');
+}
+
+/** The user_version steps, in order: step i takes a database from version i to i + 1. */
+const VERSION_STEPS: ((db: Db) => void)[] = [migrateRoleCheck];
+
 export function openDb(file: string): Db {
   const db = new Database(file);
   db.pragma('journal_mode = WAL');
@@ -80,6 +117,13 @@ export function openDb(file: string): Db {
     if (!columns.some((c) => c.name === column)) {
       db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
     }
+  }
+  const version = db.pragma('user_version', { simple: true }) as number;
+  for (let v = version; v < DB_SCHEMA_VERSION; v++) {
+    db.transaction(() => {
+      VERSION_STEPS[v](db);
+      db.pragma(`user_version = ${v + 1}`);
+    })();
   }
   return db;
 }

@@ -76,8 +76,8 @@ describe('dashboard REST client', () => {
     const ok: OpInput<'command_send'> = { selector: 'pad-c6', command: 'node.identify', args: { ms: 3000 } };
     // @ts-expect-error: command is required
     const missing: OpInput<'command_send'> = { selector: 'pad-c6' };
-    // @ts-expect-error: tier is host | target
-    const tier: OpInput<'test_run'> = { source_dir: '/x', tier: 'sim' };
+    // @ts-expect-error: tier is host | target | sim | hil
+    const tier: OpInput<'test_run'> = { source_dir: '/x', tier: 'bench' };
     // Outputs: declared schemas, and the dashboard's views for the rest.
     const read = (status: OpOutput<'hub_status'>, net: OpOutput<'network_get'>, devices: OpOutput<'device_list'>) => {
       const lnp: 'allowed' | 'denied' | 'unknown' | undefined = status.lnp;

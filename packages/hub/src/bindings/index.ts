@@ -38,6 +38,7 @@ import type {
   Router,
 } from '../context.ts';
 import type { Db } from '../db.ts';
+import { FIXTURE_INTERNAL, fixtureRefusal } from '../fixture/fence.ts';
 import { resolveOne } from '../registry/hub.ts';
 import { nowUs } from '../ring.ts';
 import { instanceNamed, type PortCap } from '../router/caps.ts';
@@ -51,6 +52,11 @@ export interface BindingDeps {
   events: Events;
   /** How long a push (bind_set, bind_clear, bind_list) waits for its RESULT. */
   pushTimeoutMs?: number;
+  /**
+   * Whether a device is a HIL fixture (fixture/fence.ts isFixtureDevice; main.ts passes it): a binding never
+   * has one at either end (design m2-c1-hil D15), and a fixture's own table is cleared at its handshake.
+   */
+  isFixture?: (deviceId: string) => boolean;
 }
 
 /** FR_BINDINGS_MAX: slots 0..15 on every node (07 §7.11). */
@@ -392,7 +398,18 @@ export class BindingService implements Bindings, Lifecycle {
     } else {
       target = resolveOne(hub, to.device);
     }
+    this.#assertNoFixture(source, 'from');
+    if (target) {
+      this.#assertNoFixture(target, 'to');
+    }
     return this.#build(source, from.rest, target, to.rest, input.args);
+  }
+
+  /** D15, on the resolved devices (binding_set's fence checks first): a binding never has the fixture at an end. */
+  #assertNoFixture(d: Device, end: 'from' | 'to'): void {
+    if (this.deps.isFixture?.(d.device_id)) {
+      throw fixtureRefusal(`binding_set with the HIL fixture ${d.alias} as its ${end} end is refused: the fixture takes no bindings`, { op: 'binding_set', end, device: d.device_id });
+    }
   }
 
   /**
@@ -408,6 +425,11 @@ export class BindingService implements Bindings, Lifecycle {
     const target = row.target_id === null ? null : this.deps.registry.get(row.target_id);
     if (row.target_id !== null && !target) {
       throw new FrError('NOT_FOUND', `the target device ${row.target_id} is no longer registered`);
+    }
+    // A row from before an end became a fixture (a reflash, a bench file naming it): #reresolve removes it.
+    this.#assertNoFixture(source, 'from');
+    if (target) {
+      this.#assertNoFixture(target, 'to');
     }
     const fromDot = row.from.indexOf('.');
     const toDot = row.to.indexOf('.');
@@ -641,6 +663,10 @@ export class BindingService implements Bindings, Lifecycle {
       try {
         r = this.#resolveRow(row, db.args);
       } catch (e) {
+        if (e instanceof FrError && e.details?.reason === FIXTURE_INTERNAL) {
+          this.#dropFixtureRow(row);
+          continue;
+        }
         if (!(e instanceof FrError && e.details?.firmware_unknown)) {
           this.#warnUnresolved(row, (e as Error).message);
         }
@@ -661,6 +687,30 @@ export class BindingService implements Bindings, Lifecycle {
       }
     }
     return due;
+  }
+
+  /**
+   * A stored row with a fixture at an end (D15): deleted, never pushed, with a hub.warning. A source that is
+   * no fixture gets its slot cleared now if it is online (else its next handshake clears it, as a slot
+   * without a row); a fixture's own table is cleared whole at its handshake (#syncNode).
+   */
+  #dropFixtureRow(row: BindingRow): void {
+    this.deps.db.prepare('DELETE FROM bindings WHERE device_id = ? AND slot = ?').run(row.device_id, row.slot);
+    const alias = this.#alias(row.device_id);
+    this.deps.events.publish({
+      type: 'hub.warning',
+      device: row.device_id,
+      alias,
+      t_hub_us: nowUs(),
+      fields: { code: 'binding_fixture_removed', slot: row.slot, from: row.from, to: row.to, hint: 'a binding with the HIL fixture at an end is removed: the fixture takes no bindings (design m2-c1-hil D15)' },
+    });
+    if (!this.deps.isFixture?.(row.device_id) && isUp(this.deps.router.presence(row.device_id))) {
+      this.#later('fixture binding clear', () =>
+        this.#withLock(row.device_id, async () => {
+          await this.#push(row.device_id, BIND_CLEAR, encodeNodeBindClearArgs({ slot: row.slot }), `clear ${row.slot}`);
+        }),
+      );
+    }
   }
 
   #warnUnresolved(row: BindingRow, message: string): void {
@@ -713,6 +763,14 @@ export class BindingService implements Bindings, Lifecycle {
    */
   async #syncNode(deviceId: string): Promise<void> {
     if (!isUp(this.deps.router.presence(deviceId))) {
+      return;
+    }
+    if (this.deps.isFixture?.(deviceId)) {
+      // D15: a fixture holds no bindings. Its rows went in #reresolve; whatever its NVS table still has (a row
+      // from before it was one, another hub's) is cleared, every handshake, whatever bind_list would say.
+      await this.#withLock(deviceId, async () => {
+        await this.#push(deviceId, BIND_CLEAR, encodeNodeBindClearArgs({ slot: SLOT_ALL }), 'clear all (fixture)');
+      });
       return;
     }
     await this.#withLock(deviceId, async () => {

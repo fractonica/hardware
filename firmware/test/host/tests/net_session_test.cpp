@@ -456,6 +456,46 @@ TEST(net_welcome_of_a_new_hub_run_ends_the_other_session)
     CHECK_EQ(r.net.state().old, 1u);
 }
 
+TEST(net_hub_heard_at_is_the_hubs_newest_frame)
+{
+    // Design m2-c1-hil D11 item 3: FixtureService lets go of a press 2 s after it, not when the session flag clears.
+    NetRig r;
+    CHECK_EQ(r.net.hub_heard_at(), 0);
+    CHECK_EQ(r.net.hub_epoch(), 0);
+    r.core.advance_ms(10);
+    r.session(LinkKind::serial);
+    const fr::TimeUs welcomed = r.core.now();
+    CHECK_EQ(r.net.hub_heard_at(), welcomed);
+    CHECK_EQ(r.net.hub_epoch(), 41);
+    CHECK(r.net.hub_link());
+    r.core.advance_ms(700);
+    r.deliver(LinkKind::serial, r.hub.heartbeat());  // a keepalive
+    const fr::TimeUs kept = r.core.now();
+    CHECK_EQ(r.net.hub_heard_at(), kept);
+    // The link task's stamp, not when the core task got to it.
+    r.core.advance_ms(5);
+    r.net.receive(LinkKind::serial, r.hub.heartbeat(), r.core.now() - 3'000);
+    CHECK_EQ(r.net.hub_heard_at(), r.core.now() - 3'000);
+    const fr::TimeUs stamped = r.net.hub_heard_at();
+    // A frame of another hub run's epoch outside a WELCOME is not the hub's.
+    r.hub.epoch = 7;
+    r.core.advance_ms(5);
+    r.deliver(LinkKind::serial, r.hub.heartbeat());
+    CHECK_EQ(r.net.hub_heard_at(), stamped);
+    r.hub.epoch = 41;
+    // Frames drop_hub_link holds never reach the node; the session stays set meanwhile.
+    r.net.drop_hub_link(30);
+    r.core.advance_ms(500);
+    r.deliver(LinkKind::serial, r.hub.heartbeat());
+    CHECK_EQ(r.net.hub_heard_at(), stamped);
+    CHECK(r.net.hub_link());
+    r.net.drop_hub_link(0);
+    // A session that ends keeps its last frame's stamp.
+    r.down(LinkKind::serial);
+    CHECK(!r.net.hub_link());
+    CHECK_EQ(r.net.hub_heard_at(), stamped);
+}
+
 TEST(net_hub_bye_ends_the_session_at_once)
 {
     NetRig r;

@@ -12,6 +12,11 @@
 //          late flag, the SDK's boot.state.pressed following each press and release.
 //   human: node.identify {ms: 3000}, then wait_for_event boot.down,boot.up,boot.click with prompt_human
 //          "Press BOOT on <alias> once" (a dashboard toast); the SDK client sees down, up, click in order.
+//          With --press-by fixture (design m2-c1-hil D14) the HIL fixture clicks instead of a person:
+//          input_simulate {layer: gpio, gesture: click} on the bench-wired BOOT line, with no prompt and no
+//          identify, and the same check at the SDK client (a real press, on any build; bench_get shows
+//          whether the line is wired). That run needs no person, so test_run runs it without allow_human
+//          (the scenario's needsFor); a board whose line is not wired fails, the others go on.
 //   loss:  `net loss 5 900` (both directions; diag over USB), then 1000 clicks injected over the serial
 //          command channel (`inject boot click`, outside the lossy hub link), 200 checkpoints (a click, then
 //          2.5 s quiet: pressed must read false), 10 forced resyncs (press; `net loss 100 1 tx`; release:
@@ -30,9 +35,10 @@ import { spawn } from 'node:child_process';
 
 import { type AnyDevice, connect, type Hub as SdkHub } from '@fractonica/sdk';
 
+import { gpio, type GpioPress } from './lib/hil.ts';
 import { type Hub, HubError } from './lib/hub.ts';
 import { runStandalone } from './lib/runner.ts';
-import { defineScenario, type Outcome, type ScenarioCtx } from './lib/scenario.ts';
+import { defineScenario, type Needs, type Outcome, type ScenarioCtx } from './lib/scenario.ts';
 import { allOrAbort, retrying, sleep } from './lib/tasks.ts';
 
 // ---- pure checks ----
@@ -172,9 +178,11 @@ export interface TInputOptions {
   forced: number;
   /** Speak each human prompt with `sk say` (and again every 10 min). */
   say: boolean;
+  /** Who presses in the human phase: a person (prompt_human), or the HIL fixture (input_simulate layer gpio). */
+  pressBy: 'person' | 'fixture';
 }
 
-export const DEFAULTS: TInputOptions = { phases: ['sim', 'human', 'loss'], presses: 10, simClicks: 50, gapMs: 400, lossPct: 5, clicks: 1000, checkpoints: 200, forced: 10, say: false };
+export const DEFAULTS: TInputOptions = { phases: ['sim', 'human', 'loss'], presses: 10, simClicks: 50, gapMs: 400, lossPct: 5, clicks: 1000, checkpoints: 200, forced: 10, say: false, pressBy: 'person' };
 
 const PHASES: readonly TInputOptions['phases'][number][] = ['sim', 'human', 'loss'];
 
@@ -230,8 +238,15 @@ export function parseArgs(argv: string[]): TInputOptions {
       case '--say':
         o.say = true;
         break;
+      case '--press-by':
+        if (v !== 'person' && v !== 'fixture') {
+          throw new Error(`t-input: --press-by takes person or fixture, not ${JSON.stringify(v)}`);
+        }
+        o.pressBy = v;
+        i++;
+        break;
       default:
-        throw new Error(`t-input: unknown option ${argv[i]} (--phase, --devices, --presses, --sim-clicks, --gap-ms, --loss, --clicks, --checkpoints, --forced, --say)`);
+        throw new Error(`t-input: unknown option ${argv[i]} (--phase, --devices, --presses, --sim-clicks, --gap-ms, --loss, --clicks, --checkpoints, --forced, --say, --press-by)`);
     }
   }
   return o;
@@ -300,7 +315,41 @@ function say(text: string): () => void {
   return () => clearInterval(t);
 }
 
-async function humanPhase(ctx: ScenarioCtx, t: Target, o: TInputOptions) {
+/**
+ * The human phase with --press-by fixture: one click by the HIL fixture on the board's wired BOOT line
+ * (input_simulate {layer: gpio}), and the SDK client must see down, up, click. The fixture does not slip, so
+ * there is one attempt; a refused press (this board's line not wired, the fixture away, a non-bench
+ * profile) fails the board. A hub that cannot press at all (no fixture module, no bench loaded) is an error.
+ */
+async function fixturePress(ctx: ScenarioCtx, t: Target) {
+  const from = t.seen.length;
+  let r: GpioPress;
+  try {
+    r = await gpio(ctx.hub, t.alias, 'click', { signal: ctx.signal });
+  } catch (e) {
+    // NOT_FOUND not_wired naming the device: this board is no bench DUT, or its BOOT line is not wired (the
+    // default `online` selector takes every online node). It fails this board only.
+    const details = e instanceof HubError && e.code === 'NOT_FOUND' ? e.result.error?.details : undefined;
+    if (details?.not_wired === true && details.device !== undefined) {
+      return { pass: false, press_by: 'fixture', error: `not wired on the bench: ${(e as HubError).result.error?.message}` };
+    }
+    throw e;
+  }
+  if (!r.ok) {
+    return { pass: false, press_by: 'fixture', error: r.error ?? r.status };
+  }
+  // The click comes multi_press_gap_ms (250) after the release.
+  await until(() => t.seen.slice(from).some((e) => e.evt === 'click'), 3000, ctx.signal);
+  await sleep(300, ctx.signal);
+  const got = t.seen.slice(from).map((e) => e.evt);
+  return { pass: firstMismatch(['down', 'up', 'click'], got) < 0, press_by: 'fixture', got, ...(r.channel ? { channel: r.channel } : {}), ...(r.press ? { press: r.press } : {}) };
+}
+
+/** The human phase on one board: a person's press (prompt_human, up to 3 prompts), or the fixture's (--press-by fixture). */
+export async function humanPhase(ctx: ScenarioCtx, t: Target, o: TInputOptions) {
+  if (o.pressBy === 'fixture') {
+    return fixturePress(ctx, t);
+  }
   const text = `Press BOOT on ${t.alias} once`;
   const stop = o.say ? say(`Please press BOOT on ${t.alias} once`) : () => {};
   let last: string[] = [];
@@ -524,7 +573,7 @@ export async function runTInput(ctx: ScenarioCtx, o: TInputOptions): Promise<Out
       results.push(sim.every((s) => s.pass));
     }
     if (o.phases.includes('human')) {
-      if (!ctx.allowHuman) {
+      if (!ctx.allowHuman && o.pressBy !== 'fixture') {
         measured.human = 'skipped: needs a person at the bench (--allow-human)';
         results.push(false);
       } else {
@@ -555,18 +604,34 @@ export async function runTInput(ctx: ScenarioCtx, o: TInputOptions): Promise<Out
   }
 }
 
+/** The flags of a run: its own (ctx.args, standalone or test_run's `args`), else FR_T_INPUT_ARGS. */
+function runArgs(args: readonly string[] | undefined): string[] {
+  return args?.length ? [...args] : (process.env.FR_T_INPUT_ARGS ?? '').split(/\s+/).filter(Boolean);
+}
+
+/**
+ * What a run needs (design m2-c1-hil D14): a person only for the human phase pressed by one (the fixture
+ * presses with no one there), the boards on the Mac's USB only for the loss phase (diag over each board's
+ * USB). So `--phase human --press-by fixture` runs under test_run without allow_human.
+ */
+export function needsFor(o: Pick<TInputOptions, 'phases' | 'pressBy'>): Needs {
+  return { human: o.phases.includes('human') && o.pressBy !== 'fixture', usb: o.phases.includes('loss') };
+}
+
 const scenario = defineScenario({
   gate: 'T-INPUT',
   title: 'BOOT input reaches an SDK client in order; under 5 % loss, late flags are exact and pressed converges',
   needs: { human: true, usb: true },
+  needsFor: (args) => needsFor(parseArgs(runArgs(args))),
   usage: `--phase sim|human|loss|all   comma-separated (default sim,human,loss)
 --devices a,b                aliases (default every online device)
 --presses 10 --sim-clicks 50 --gap-ms 400   the sim phase
 --loss 5 --clicks 1000 --checkpoints 200 --forced 10   the loss phase (diag over each board's USB)
 --say                        speak each human prompt with sk say
+--press-by person|fixture    who presses in the human phase (fixture: input_simulate layer gpio, no prompt)
 under tests/e2e/run.ts (test_run), FR_T_INPUT_ARGS holds these`,
   // Standalone, the flags the runner does not know (ctx.args); under run.ts, FR_T_INPUT_ARGS.
-  run: (ctx) => runTInput(ctx, parseArgs(ctx.args?.length ? ctx.args : (process.env.FR_T_INPUT_ARGS ?? '').split(/\s+/).filter(Boolean))),
+  run: (ctx) => runTInput(ctx, parseArgs(runArgs(ctx.args))),
 });
 export default scenario;
 

@@ -64,7 +64,7 @@ status:
 
 enums:
   ChipId: { esp32c3: 5, esp32s3: 9, esp32c6: 13 }
-  Role: { node: 0, gateway: 1 }
+  Role: { node: 0, gateway: 1, fixture: 2 }   # fixture: the HIL fixture node (design m2-c1-hil D6; CONFIG_FR_ROLE)
   OtaState: { new: 0, pending_verify: 1, valid: 2, invalid: 3, aborted: 4, undefined: 255 }
 
 classes:

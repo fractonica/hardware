@@ -1,6 +1,6 @@
-// `fr test run --tier target` (test_run, spec 09 §9.4, 10 §10.5): the gate report tests/e2e/run.ts hands the
-// job (its result, or a failed run's error details) as one line per gate instead of the YAML dump of every
-// measured value. A gate's line carries its status, duration, its `summary` when it measured one, else its
+// `fr test run --tier target|hil` (test_run, spec 09 §9.4, 10 §10.5; hil: design m2-c1-hil D13): the gate report
+// tests/e2e/run.ts hands the job (its result, or a failed run's error details) as one line per gate instead of
+// the YAML dump of every measured value. A gate's line carries its status, duration, its `summary` when it measured one, else its
 // scalar values (nested per-board objects are counted, not printed), and why it was skipped or errored.
 // `--json` keeps the whole report (measured values and evidence).
 
@@ -16,17 +16,18 @@ interface GateRow {
 }
 
 interface TargetReport {
-  tier: 'target';
+  /** The gate tiers run.ts reports (design m2-c1-hil D13: no longer always target). */
+  tier: 'target' | 'hil';
   pass: boolean;
   duration_ms?: number;
   counts?: Record<string, number>;
   gates: GateRow[];
 }
 
-/** The target-tier report in a test job's result or error details, or null (a host run, another shape). */
+/** The target- or hil-tier gate report in a test job's result or error details, or null (a host run, another shape). */
 export function targetReport(data: unknown): TargetReport | null {
   const d = data as Partial<TargetReport> | null | undefined;
-  if (!d || typeof d !== 'object' || d.tier !== 'target' || !Array.isArray(d.gates)) {
+  if (!d || typeof d !== 'object' || (d.tier !== 'target' && d.tier !== 'hil') || !Array.isArray(d.gates)) {
     return null;
   }
   return d.gates.every((g) => !!g && typeof g === 'object' && typeof (g as GateRow).gate === 'string' && typeof (g as GateRow).status === 'string') ? (d as TargetReport) : null;

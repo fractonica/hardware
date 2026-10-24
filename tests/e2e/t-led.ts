@@ -20,12 +20,19 @@
 //           <alias> if its LED is lit" (the dashboard toast, and `sk say` with --say); a press is the yes.
 // Every board's LED is put back to what status.on (and, after the visual check, status.color) read before
 // the run; a failure says the `fr send` that does it. Each board's results carry its RSSI (a C3 below -70 dBm is logged: its uplink dominates).
+//   --verify fixture (design m2-c1-hil D14): every LED change the phases made is also read back through the
+//           HIL fixture (hil.edge on a led_gpio tap, hil.frame on a WS2812 line) and matched to the board's
+//           STATEs (lib/led-pres-bench.ts verifyLedByFixture); the board must be a bench DUT on its bench
+//           profile. T-LED presses nothing, so a board's wired fit is rarely fresh: its readings then come
+//           on hub time and are judged within 5 ms + their u_us (3-7 ms on Wi-Fi), not 5 ms; the report
+//           gives `tolerance_us` and the readings per `sync`. T-HIL's phase 3 holds the 5 ms on the fit.
 //
 // Run on its own (lib/runner.ts runStandalone: --allow-human is implied; --hub URL, --json); under
 // tests/e2e/run.ts (test_run) FR_T_LED_ARGS holds the same flags. The verdicts are lib/led-pres-checks.ts.
 
-import type { HubEvent } from '@fractonica/protocol';
+import type { BenchStatus, HubEvent } from '@fractonica/protocol';
 
+import { benchGet, type LedCommand, seqOf } from './lib/hil.ts';
 import {
   asker,
   type Board,
@@ -37,6 +44,7 @@ import {
   resolveBoards,
   rssiNote,
   send,
+  verifyLedByFixture,
   waitEvent,
 } from './lib/led-pres-bench.ts';
 import { cacheCounters, toggleVerdict } from './lib/led-pres-checks.ts';
@@ -61,9 +69,11 @@ export interface TLedOptions {
   nodeStats: boolean;
   /** Speak the visual check's request with `sk say` (and again every 10 min). */
   say: boolean;
+  /** fixture: also read every LED change back through the HIL fixture (hil.edge/hil.frame). */
+  verify: 'none' | 'fixture';
 }
 
-export const DEFAULTS: TLedOptions = { phases: ['blink', 'set', 'toggle'], count: 3, onMs: 200, offMs: 200, settleMs: 1000, nodeStats: true, say: false };
+export const DEFAULTS: TLedOptions = { phases: ['blink', 'set', 'toggle'], count: 3, onMs: 200, offMs: 200, settleMs: 1000, nodeStats: true, say: false, verify: 'none' };
 
 /** The harness's own flags (the runner takes --allow-human, --hub and --json); anything else throws. */
 export function parseArgs(argv: string[]): TLedOptions {
@@ -109,8 +119,15 @@ export function parseArgs(argv: string[]): TLedOptions {
       case '--say':
         o.say = true;
         break;
+      case '--verify':
+        if (v !== 'fixture' && v !== 'none') {
+          throw new Error(`t-led: --verify takes fixture (or none), not ${JSON.stringify(v ?? '')}`);
+        }
+        o.verify = v;
+        i++;
+        break;
       default:
-        throw new Error(`t-led: unknown option ${argv[i]} (--phase, --visual, --devices, --count, --on-ms, --off-ms, --settle-ms, --no-node-stats, --say)`);
+        throw new Error(`t-led: unknown option ${argv[i]} (--phase, --visual, --devices, --count, --on-ms, --off-ms, --settle-ms, --no-node-stats, --say, --verify)`);
     }
   }
   return o;
@@ -120,9 +137,13 @@ export function parseArgs(argv: string[]): TLedOptions {
 
 const round = (v: number) => Math.round(v * 100) / 100;
 
-async function blinkPhase(ctx: ScenarioCtx, b: Board, o: TLedOptions) {
+/** The LED commands a board's phases sent, by their cursors' seq (for --verify fixture). */
+type CommandLog = LedCommand[];
+
+async function blinkPhase(ctx: ScenarioCtx, b: Board, o: TLedOptions, log: CommandLog) {
   const expectedMs = o.count * (o.onMs + o.offMs);
   const { outcome, cursor } = await send(ctx, b.alias, 'status.blink', { args: { count: o.count, on_ms: o.onMs, off_ms: o.offMs } });
+  log.push({ seq: seqOf(cursor), command: 'blink', blink: { count: o.count, on_ms: o.onMs, off_ms: o.offMs } });
   const done =
     outcome.status === 'ok'
       ? await waitEvent(ctx, { types: 'status.effect_done', selector: b.alias, where: { effect: 'blink' }, since: cursor, timeout_s: Math.ceil(expectedMs / 1000) + 5 })
@@ -141,10 +162,12 @@ async function blinkPhase(ctx: ScenarioCtx, b: Board, o: TLedOptions) {
   };
 }
 
-async function setPhase(ctx: ScenarioCtx, b: Board) {
+async function setPhase(ctx: ScenarioCtx, b: Board, log: CommandLog) {
   // Off first (reliable), so the fast set changes the LED and must produce a STATE.
   const off = await send(ctx, b.alias, 'status.set', { args: { on: false } });
+  log.push({ seq: seqOf(off.cursor), command: 'set', on: false });
   const { outcome, cursor } = await send(ctx, b.alias, 'status.set', { args: { on: true }, ack: 'none' });
+  log.push({ seq: seqOf(cursor), command: 'set', on: true });
   const st = outcome.status === 'sent' ? await waitEvent(ctx, { types: 'status.on', selector: b.alias, where: { on: true }, since: cursor, timeout_s: 3 }) : null;
   const ev = st && !('timeout' in st) ? st.events[0] : undefined;
   const mirror = (await linkInfo(ctx.hub, b.alias, ctx.signal)).properties['status.on'];
@@ -168,15 +191,17 @@ async function stats(ctx: ScenarioCtx, b: Board): Promise<Record<string, unknown
   }
 }
 
-async function togglePhase(ctx: ScenarioCtx, b: Board, o: TLedOptions) {
+async function togglePhase(ctx: ScenarioCtx, b: Board, o: TLedOptions, log: CommandLog) {
   let before = (await linkInfo(ctx.hub, b.alias, ctx.signal)).properties['status.on'];
   if (typeof before !== 'boolean') {
     // No STATE mirrored yet: give it one.
-    await send(ctx, b.alias, 'status.set', { args: { on: true } });
+    const set = await send(ctx, b.alias, 'status.set', { args: { on: true } });
+    log.push({ seq: seqOf(set.cursor), command: 'set', on: true });
     before = true;
   }
   const s0 = await stats(ctx, b);
   const { outcome, cursor } = await send(ctx, b.alias, 'status.toggle', { duplicate: true });
+  log.push({ seq: seqOf(cursor), command: 'toggle', on: !before });
   await sleep(o.settleMs, ctx.signal);
   const states: HubEvent[] = await eventsSince(ctx.hub, { selector: b.alias, types: 'status.on', since: cursor }, ctx.signal);
   const s1 = await stats(ctx, b);
@@ -193,8 +218,9 @@ async function togglePhase(ctx: ScenarioCtx, b: Board, o: TLedOptions) {
   return { ...v, result: outcome.status, rtt_ms: outcome.rtt_ms, link: outcome.link };
 }
 
-async function visualPhase(ctx: ScenarioCtx, b: Board, o: TLedOptions, rgb: boolean) {
+async function visualPhase(ctx: ScenarioCtx, b: Board, o: TLedOptions, rgb: boolean, log: CommandLog) {
   const lit = await send(ctx, b.alias, 'status.set', { args: rgb ? { on: true, color: 0x00ff00 } : { on: true } });
+  log.push({ seq: seqOf(lit.cursor), command: 'set', on: true });
   if (lit.outcome.status !== 'ok') {
     return { pass: false, error: `status.set: ${lit.outcome.status}` };
   }
@@ -229,7 +255,8 @@ async function restore(ctx: ScenarioCtx, b: Board, before: unknown, color: numbe
   }
 }
 
-export async function ledBoard(ctx: ScenarioCtx, b: Board, o: TLedOptions): Promise<{ pass: boolean; [k: string]: unknown }> {
+/** One board's phases; with --verify fixture (`bench`: bench_get's answer) also its LED read back through the fixture. */
+export async function ledBoard(ctx: ScenarioCtx, b: Board, o: TLedOptions, bench?: BenchStatus): Promise<{ pass: boolean; [k: string]: unknown }> {
   const info = await linkInfo(ctx.hub, b.alias, ctx.signal);
   const out: Record<string, unknown> = { chip: b.chip, profile: b.profile, presence: info.presence, links: info.links, ...rssiNote(ctx, b.alias, info.rssi) };
   if (info.presence !== 'online' && info.presence !== 'suspect') {
@@ -240,22 +267,24 @@ export async function ledBoard(ctx: ScenarioCtx, b: Board, o: TLedOptions): Prom
   }
   const before = info.properties['status.on'];
   const colorBefore = info.properties['status.color'];
+  const brightnessBefore = info.properties['status.brightness'];
   out.status_on_before = before ?? null;
   let recolored = false;
   const results: boolean[] = [];
+  const log: CommandLog = [];
   try {
     if (o.phases.includes('blink')) {
-      const r = await blinkPhase(ctx, b, o);
+      const r = await blinkPhase(ctx, b, o, log);
       out.blink = r;
       results.push(r.pass);
     }
     if (o.phases.includes('set')) {
-      const r = await setPhase(ctx, b);
+      const r = await setPhase(ctx, b, log);
       out.set = r;
       results.push(r.pass);
     }
     if (o.phases.includes('toggle')) {
-      const r = await togglePhase(ctx, b, o);
+      const r = await togglePhase(ctx, b, o, log);
       out.toggle = r;
       results.push(r.pass);
     }
@@ -265,10 +294,22 @@ export async function ledBoard(ctx: ScenarioCtx, b: Board, o: TLedOptions): Prom
       } else {
         const rgb = colorBefore !== undefined;
         recolored = rgb;
-        const r = await visualPhase(ctx, b, o, rgb);
+        const r = await visualPhase(ctx, b, o, rgb, log);
         out.visual = r;
         results.push(r.pass);
       }
+    }
+    if (o.verify === 'fixture' && bench) {
+      // Before the restore: what the phases did, read back by the fixture.
+      await sleep(Math.min(o.settleMs, 500), ctx.signal);
+      const initial = {
+        ...(typeof before === 'boolean' ? { on: before } : {}),
+        ...(typeof colorBefore === 'number' ? { color: colorBefore } : {}),
+        ...(typeof brightnessBefore === 'number' ? { brightness: brightnessBefore } : {}),
+      };
+      const r = await verifyLedByFixture(ctx, b, bench, { since: info.cursor, initial, commands: log });
+      out.fixture = r;
+      results.push(r.pass);
     }
   } finally {
     await restore(ctx, b, before, recolored && typeof colorBefore === 'number' ? colorBefore : undefined);
@@ -288,17 +329,19 @@ export async function runTLed(ctx: ScenarioCtx, o: TLedOptions): Promise<Outcome
   if (!boards.length && !missing.length) {
     throw new Error(`no device matches ${o.devices?.join(',') ?? 'online'}`);
   }
+  // --verify fixture reads the bench once (a hub without the fixture module answers NOT_FOUND: an error).
+  const bench = o.verify === 'fixture' ? await benchGet(ctx.hub, ctx.signal) : undefined;
   for (const b of boards) {
     ctx.signal.throwIfAborted();
-    ctx.log(`${b.alias} (${b.chip ?? '?'}, ${b.profile ?? '?'}): ${o.phases.join(', ')}`);
-    const r = await ledBoard(ctx, b, o);
+    ctx.log(`${b.alias} (${b.chip ?? '?'}, ${b.profile ?? '?'}): ${o.phases.join(', ')}${bench ? ', verified by the fixture' : ''}`);
+    const r = await ledBoard(ctx, b, o, bench);
     ctx.measure(b.alias, r);
     measured[b.alias] = r;
     results.push(r.pass);
   }
   return {
     pass: results.length > 0 && results.every(Boolean),
-    measured: { phases: o.phases, blink: { count: o.count, on_ms: o.onMs, off_ms: o.offMs }, ...measured },
+    measured: { phases: o.phases, blink: { count: o.count, on_ms: o.onMs, off_ms: o.offMs }, ...(bench ? { verify: 'fixture', bench: bench.bench.id } : {}), ...measured },
     evidence: { devices: [...boards.map((b) => b.alias), ...missing.map((m) => m.alias)] },
   };
 }
@@ -314,6 +357,7 @@ const scenario = defineScenario({
 --settle-ms 1000             after the duplicated toggle, before its STATEs are counted
 --no-node-stats              judge the toggle without diag stats dup/cached_replies (a firmware without them)
 --say                        speak the visual check's request with sk say
+--verify fixture             also read each LED change back through the HIL fixture (bench DUTs only)
 under tests/e2e/run.ts (test_run), FR_T_LED_ARGS holds these`,
   // Standalone, the flags the runner does not know (ctx.args); under run.ts, FR_T_LED_ARGS.
   run: (ctx) => runTLed(ctx, parseArgs(ctx.args?.length ? ctx.args : (process.env.FR_T_LED_ARGS ?? '').split(/\s+/).filter(Boolean))),

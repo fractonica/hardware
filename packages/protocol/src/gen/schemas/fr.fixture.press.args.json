@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.fixture.press.args",
+  "title": "fr.fixture.press arguments",
+  "description": "Drive the line by segments (press, release, press, ...); RESULT at the first press edge. BUSY while a press runs or when the line does not read released; UNSUPPORTED on drive none.",
+  "type": "object",
+  "properties": {
+    "segments_us": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 4294967295
+      },
+      "description": "(<= 16 items)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "segments_us": [
+        80000
+      ]
+    }
+  ]
+}

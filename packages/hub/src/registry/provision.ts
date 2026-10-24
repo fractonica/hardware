@@ -4,20 +4,25 @@
 //   match) -> registry upsert (addr, alias, net, epoch_floor) -> render fr_ident (0700 temp dir) -> one
 //   write_flash (full plan + fr_ident) -> hub reset (boot log captured) -> serial HELLO (<= 10 s) ->
 //   HELLO over TCP (<= 30 s; reported as wifi joined | not_joined, not a failure).
+// From M2-C1 (design m2-c1-hil D6, D15): the selected build goes through the fixture fence (S4's
+// fixture/fence.ts) before anything is written, and a radio-off image (the HIL fixture's) has no join
+// stage: its result says wifi off.
 // The Wi-Fi password goes into the temp CSV and fr_ident.bin only (ident.ts); every log line, stage,
 // result and error here is built from registry and network fields that never include it.
 
-import { FrError, MAX_WAIT_S } from '@fractonica/protocol';
+import { type DeviceRole, FrError, MAX_WAIT_S, type ProvisionWifi } from '@fractonica/protocol';
+import { decodePresenceHello } from '@fractonica/protocol/gen';
 import { z } from 'zod';
 
 import { loadManifest, newestBuildId } from '../artifacts.ts';
 import type { HubContext } from '../context.ts';
+import { assertFixtureImage, isFixtureBuild } from '../fixture/fence.ts';
 import { flashPlan, hardResetCapturing, runPytools } from '../flash.ts';
 import type { JobCtx } from '../jobs.ts';
 import { readNetwork } from '../network.ts';
 import { assertPortFree, nameBusyHolder } from '../ports/holders.ts';
 import { nowUs } from '../ring.ts';
-import { routerInfo } from '../router/index.ts';
+import { helloRole, routerInfo } from '../router/index.ts';
 import { normalizeMac } from '../serial.ts';
 import { pickArtifact, requireIdentRegion } from './flashing.ts';
 import { isDeviceId, registryOf } from './hub.ts';
@@ -66,11 +71,47 @@ export interface ProvisionInput {
   wait_s?: number;
 }
 
-/** The sidecar and the HELLO deadlines, replaceable in tests. */
+/**
+ * Whether firmware of this HELLO role has its radio off (design m2-c1-hil D6), so it never joins Wi-Fi and
+ * never takes an OTA over it. The role is the firmware's own word (CONFIG_FR_ROLE, in every HELLO, kept in
+ * the registry from the last one), and codegen refuses a `role: fixture` profile unless it sets
+ * `net.radio: off`, and `net.radio: off` on any other role (D5), so radio-off holds exactly for role fixture. Not HELLO `caps` b1 (wifi): the
+ * serial session's HELLO goes out before start_wifi() sets it. Not the build manifest: the artifact
+ * manifest does not carry the profile's `net` (ingestBuild keeps caps, catalog_hash and test_pin of
+ * fr_manifest.json).
+ */
+export function radioOff(role: DeviceRole | null | undefined): boolean {
+  return role === 'fixture';
+}
+
+/** What the D15 provisioning rules see: the probed device and the build chosen for it. */
+export interface ProvisionTarget {
+  /** The probed MAC (the device id): USB detection alone cannot tell fix-s3 from pad-s3 (D2). */
+  device_id: string;
+  /** The alias it will have, for the refusal's wording. */
+  alias?: string;
+  profile: string;
+  build_id: string;
+}
+
+/**
+ * The fixture fence's provisioning check (D15): throws when the build may not go on the device (a fixture
+ * build on any device but the bench's fixture, or any other profile on the bench's fixture). Runs after the
+ * probe and the artifact choice, before anything is written.
+ */
+export type ProvisionFence = (hub: HubContext, target: ProvisionTarget) => void;
+
+/** S4's fence (fixture/fence.ts), with the probed MAC. */
+export const PROVISION_FENCE: ProvisionFence = (hub, t) =>
+  assertFixtureImage(hub, { deviceId: t.device_id, alias: t.alias }, { profile: t.profile, build_id: t.build_id }, 'device_provision');
+
+/** The sidecar, the HELLO deadlines and the fixture fence, replaceable in tests. */
 export interface ProvisionDeps {
   pytools: PytoolsRunner;
   helloMs?: number;
   joinMs?: number;
+  /** Default PROVISION_FENCE. */
+  fence?: ProvisionFence;
 }
 
 export async function startProvision(input: ProvisionInput, hub: HubContext, deps: ProvisionDeps = { pytools: runPytools }): Promise<unknown> {
@@ -108,6 +149,8 @@ export async function startProvision(input: ProvisionInput, hub: HubContext, dep
  */
 function watchHello(hub: HubContext, deviceId: string, portKey: string) {
   const seen = { serial: false, tcp: false };
+  /** The serial HELLO's role: decoded from the frame, or the registry's once the router has taken it. */
+  let serialRole: DeviceRole | null = null;
   const waiters = new Set<() => void>();
   const mark = (link: 'serial' | 'tcp') => {
     if (!seen[link]) {
@@ -119,11 +162,16 @@ function watchHello(hub: HubContext, deviceId: string, portKey: string) {
     const link = e.fields?.link;
     const up = e.type === 'device.online' || (e.type === 'device.link' && e.fields?.up === true);
     if (e.device === deviceId && up && (link === 'serial' || link === 'tcp')) {
+      // The router records a HELLO in the registry (touchHello) before it says the device is online.
+      if (link === 'serial' && serialRole === null) {
+        serialRole = registryOf(hub).get(deviceId)?.role ?? null;
+      }
       mark(link);
     }
   });
   const offLogs = hub.logs.subscribe((l) => {
     if (l.device === portKey && l.kind === 'frame' && l.text.startsWith(HELLO_LINE)) {
+      serialRole ??= helloLineRole(l.text);
       mark('serial');
     }
   });
@@ -159,11 +207,23 @@ function watchHello(hub: HubContext, deviceId: string, portKey: string) {
         }
       });
     },
+    /** The role the serial HELLO carried, or null when it was not seen or not readable. */
+    serialRole: () => serialRole,
     stop() {
       offEvents();
       offLogs();
     },
   };
+}
+
+/** The role in a HELLO as the log store keeps it (`@fr1 PRESENCE kind=1 <body hex> (src=...)`), or null. */
+export function helloLineRole(text: string): DeviceRole | null {
+  const body = text.slice(HELLO_LINE.length).split(' ')[0];
+  if (!/^(?:[0-9a-f]{2})+$/.test(body)) {
+    return null;
+  }
+  const hello = decodePresenceHello(Buffer.from(body, 'hex'));
+  return hello.ok ? helloRole(hello.value.role) : null;
 }
 
 /** The artifact for the probed board: --build, else --profile or the registry's, else the one profile built for this chip. */
@@ -245,6 +305,8 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
     if (have !== null && need !== null && have < need) {
       throw new FrError('INCOMPATIBLE_PROFILE', `${art.buildId} needs ${m.flash.size} of flash (${m.part_profile}); the board has ${probe.flash_size}`);
     }
+    // D15: no fixture build on another device, nothing else on the bench's fixture (S4's fence).
+    (deps.fence ?? PROVISION_FENCE)(hub, { device_id: deviceId, alias: input.alias ?? known?.alias, profile: m.profile, build_id: art.buildId });
     const region = requireIdentRegion(m);
     const plan = flashPlan(m, 'full', { ident: region });
     ctx.log(`artifact ${art.buildId} (${art.from})`, 'event');
@@ -252,7 +314,9 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
     ctx.stage('registry');
     const netRecord = readNetwork(hub.db);
     const net = identNet(netRecord);
-    const prep = prepareIdentity(hub.db, { deviceId, alias: input.alias, profile: m.profile, board: m.board, chip, net: netRecord!.net_id });
+    // A fixture build's row is a fixture from here, not from its first HELLO: apps and registry_rev never count it (D6).
+    const role = isFixtureBuild(hub, { profile: m.profile }) ? ('fixture' as const) : undefined;
+    const prep = prepareIdentity(hub.db, { deviceId, alias: input.alias, profile: m.profile, board: m.board, chip, net: netRecord!.net_id, role });
     const d = prep.device;
     ctx.log(`registry: ${d.alias} addr ${d.addr} net ${d.net} alias_rev ${d.alias_rev} epoch_floor ${prep.epoch_floor}`, 'event');
 
@@ -349,11 +413,20 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
       });
     }
     ctx.log(`${device.alias}: HELLO on serial`, 'event');
-    ctx.stage('join');
-    const joined = await watch.wait('tcp', joinMs, ctx.signal);
-    ctx.log(`${device.alias}: ${joined ? 'HELLO over TCP (joined Wi-Fi)' : `no HELLO over TCP within ${joinMs / 1000} s`}`, 'event');
-    if (!joined) {
-      warnings.push(`${device.alias} did not reach the hub over Wi-Fi within ${joinMs / 1000} s; check the network (fr net get) and its serial log`);
+    let wifi: ProvisionWifi;
+    const role = watch.serialRole() ?? registryOf(hub).get(deviceId)?.role;
+    if (radioOff(role)) {
+      // A radio-off image (the HIL fixture's) has no join stage: it talks to the hub over serial only (D6).
+      ctx.log(`${device.alias}: radio-off firmware (HELLO role ${role}): no Wi-Fi join`, 'event');
+      wifi = 'off';
+    } else {
+      ctx.stage('join');
+      const joined = await watch.wait('tcp', joinMs, ctx.signal);
+      ctx.log(`${device.alias}: ${joined ? 'HELLO over TCP (joined Wi-Fi)' : `no HELLO over TCP within ${joinMs / 1000} s`}`, 'event');
+      if (!joined) {
+        warnings.push(`${device.alias} did not reach the hub over Wi-Fi within ${joinMs / 1000} s; check the network (fr net get) and its serial log`);
+      }
+      wifi = joined ? 'joined' : 'not_joined';
     }
     return {
       device_id: deviceId,
@@ -372,7 +445,7 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
       ssid: record.ssid,
       reset,
       hello: 'serial',
-      wifi: joined ? 'joined' : 'not_joined',
+      wifi,
       duration_ms: Date.now() - t0,
       ...(warnings.length ? { warnings } : {}),
     };

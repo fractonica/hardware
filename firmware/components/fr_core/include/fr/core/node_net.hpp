@@ -4,7 +4,8 @@
 //   - the MSG handler table behind fr::msg::on and Host::msg, and the MSG frame behind fr::msg::send;
 //   - the persistence of the directory (nvs:fr_dir) and the bindings (nvs:fr_bind): net::DirectoryStore and
 //     net::BindingStore over a Blob (one NVS key on target, a file or memory on the host), written on
-//     fr_worker so the core task never waits for flash.
+//     fr_worker so the core task never waits for flash;
+//   - M2-C1 (design m2-c1-hil D11): fr::core::link_info() and hub_session(), the hub link for services.
 // It includes fr_net's Net, so only code that sees fr_net includes it: fr_core's sources, the host suite.
 #pragma once
 
@@ -84,6 +85,32 @@ inline std::expected<cap::NodeBindListResult, Err> bind_list(const net::Net &net
         return std::unexpected(bytes.error());
     }
     return cap::NodeBindListResult{.bindings = *bytes};
+}
+
+// ---- the hub link, for services (design m2-c1-hil D11) ----
+
+/**
+ * What net::Host::link_info() answers now: the Wi-Fi association and the hub fields hub_link_info() fills in. The
+ * runtime defines it and hub_session() (fr_core's core.cpp on target, fr_net_node on the host); the host suite
+ * defines its own (firmware/test/host/tests/fixture_link.cpp). Core task.
+ */
+net::LinkInfo link_info();
+
+/** Whether the node has a hub session now (Net::State::hub_link(): serial or TCP), as link_info() says. Core task. */
+bool hub_session();
+
+/**
+ * `li` with the hub fields from `net`: the session flag, when the hub's newest frame arrived and its run. What
+ * FixtureService's release rule reads (design m2-c1-hil D11 item 3): it lets go of a press 2 s after the hub's last
+ * frame, or at a WELCOME of another hub run, not when the session flag clears, which outlives a dead hub by the
+ * session timeout and stays set through drop_hub_link. Both runtimes' link_info() fill it in this way.
+ */
+inline net::LinkInfo hub_link_info(net::LinkInfo li, const net::Net &net)
+{
+    li.hub_session = net.hub_link();
+    li.hub_heard_at = net.hub_heard_at();
+    li.hub_epoch = net.hub_epoch();
+    return li;
 }
 
 // ---- MSG (fr::msg) ----

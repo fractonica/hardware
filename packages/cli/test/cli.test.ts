@@ -287,7 +287,13 @@ describe('fr (subprocess)', { timeout: 20_000 }, () => {
     replies.set('logs_assert', { status: 200, body: { ok: false, cursor: 'c:1.1', error: { code: 'ASSERTION_FAILED', message: 'no line matched "fr: ready"', retryable: false } } });
     const failed = await fr(['assert', 'logs', 'pad-c3', '--since', 'c:7.120', '--expect', 'fr: ready', '--json']);
     expect(failed.code).toBe(6);
-    expect((await fr(['test', 'run', '--tier', 'sim', '--json'])).code).toBe(64);
+    expect((await fr(['test', 'run', '--tier', 'bench', '--json'])).code).toBe(64);
+    // M2-C1 (design m2-c1-hil D9, D13): fr bench, fr test report, test_run's hil tier and args.
+    await run(['bench'], { op: 'bench_get', body: {} });
+    await run(['test', 'report', 'j_0a1b2c3d4e5f'], { op: 'test_report', body: { job_id: 'j_0a1b2c3d4e5f' } });
+    const hil = await fr(['test', 'run', 't-hil', '--tier', 'hil', '--args', 'fit', '--args', '3', '--json']);
+    expect(hil.code).toBe(0);
+    expect(requests.at(-1)).toEqual({ op: 'test_run', body: { suite: 't-hil', tier: 'hil', args: ['fit', '3'], source_dir: expect.any(String), wait_s: 110 } });
     // Every op call names its client: the hub records it as a job's origin (design c6 D18).
     expect(clients.length).toBeGreaterThan(0);
     expect(new Set(clients)).toEqual(new Set(['cli']));

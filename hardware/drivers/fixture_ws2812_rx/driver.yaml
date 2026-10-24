@@ -1,0 +1,14 @@
+# Driver manifest (design m2-c1-hil D4, D5; spec 07 §7.8). `fr gen firmware` validates profiles against it
+# and fills fr::drv::FixtureWs2812Rx::Config from the instance's `bind: gpio.<n>`.
+schema: fractonica/driver@1
+id: fixture_ws2812_rx
+summary: One HIL fixture line that decodes a DUT's WS2812 data with RMT RX (24-bit frames); input only, no edge interrupt.
+implements: hal.FixtureLine
+class: fr::drv::FixtureWs2812Rx         # header: include/fr/drv/fixture_ws2812_rx.hpp
+targets: [esp32s3]                      # the fixture board (esp32s3-devkitc1-n16r8)
+binds: gpio                             # a bare pin: bind gpio.<n> (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as FixtureWs2812Rx::Config
+  gpio: { type: gpio, from: bind }
+resources: { gpio: 1, rmt_rx: 1 }       # one of the S3's 4 RMT RX channels (rmt_ll.h)
+dependencies: {}

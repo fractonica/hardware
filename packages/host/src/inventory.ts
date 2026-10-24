@@ -2,11 +2,15 @@
 // and firmware profiles (firmware/profiles/*.profile.yaml), for the hub's board_list and profile_list.
 // Read loosely and without the codegen model: a listing shows what is there, and a file that does not
 // parse is reported next to the others instead of failing the list (`fr gen firmware` validates).
+// M2-C1 (design m2-c1-hil D7) adds the HIL bench (hardware/bench/<name>.bench.yaml), which the hub's fixture
+// module loads: checked for its shape only here; `fr gen --check` (@fractonica/codegen checkBench) checks it
+// against the boards and profiles.
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { parse } from 'yaml';
+import { BenchSchema, type Bench } from '@fractonica/protocol';
+import { parseDocument, parse } from 'yaml';
 
 export interface BoardInfo {
   /** The board id (its file name). */
@@ -116,4 +120,33 @@ export function readProfiles(sourceDir: string): { profiles: ProfileInfo[]; erro
     profiles.push({ profile, board, chip: chips.get(board) ?? null, app, instances });
   }
   return { profiles, errors };
+}
+
+/** The bench the hub loads unless `--bench` or FR_BENCH names another (design m2-c1-hil D7). */
+export const DEFAULT_BENCH = 'lab';
+
+/**
+ * hardware/bench/<name>.bench.yaml (default `lab`), parsed with BenchSchema. `bench` is null when the file is
+ * missing or is not a valid bench; `errors` then says why, one entry per problem (`<yaml path>: <message>`).
+ */
+export function readBench(sourceDir: string, name: string = DEFAULT_BENCH): { bench: Bench | null; errors: InventoryError[] } {
+  const file = `hardware/bench/${name}.bench.yaml`;
+  if (!/^[a-z][a-z0-9_-]*$/.test(name)) {
+    return { bench: null, errors: [{ file, message: `'${name}' is not a bench name` }] };
+  }
+  if (!existsSync(join(sourceDir, file))) {
+    return { bench: null, errors: [{ file, message: 'not found' }] };
+  }
+  const doc = parseDocument(readFileSync(join(sourceDir, file), 'utf8'), { uniqueKeys: true });
+  if (doc.errors.length > 0) {
+    return { bench: null, errors: doc.errors.map((e) => ({ file, message: e.message.split('\n')[0] })) };
+  }
+  const parsed = BenchSchema.safeParse(doc.toJS());
+  if (!parsed.success) {
+    return { bench: null, errors: parsed.error.issues.map((i) => ({ file, message: i.path.length ? `${i.path.join('.')}: ${i.message}` : i.message })) };
+  }
+  if (parsed.data.id !== name) {
+    return { bench: null, errors: [{ file, message: `id: bench id '${parsed.data.id}' does not match its file name` }] };
+  }
+  return { bench: parsed.data, errors: [] };
 }

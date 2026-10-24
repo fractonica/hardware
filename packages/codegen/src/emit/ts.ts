@@ -769,6 +769,8 @@ export interface CapInfo {
   readonly name: string;
   readonly version: { readonly major: number; readonly minor: number };
   readonly section: 'standard' | 'system' | 'project';
+  /** A test instrument's capability (test_only: true, fr.fixture): not in CATALOG, the SDK or client output. */
+  readonly testOnly?: true;
   readonly traits: Codec<any>;
   readonly commands: readonly CapCommandInfo[];
   readonly events: readonly CapEventInfo[];
@@ -1645,6 +1647,9 @@ function emitCap(model: Model, cap: Capability, names: Names): GeneratedFile {
   c.line(`name: ${q(cap.name)},`);
   c.line(`version: { major: ${cap.version.major}, minor: ${cap.version.minor} },`);
   c.line(`section: '${cap.section}',`);
+  if (cap.testOnly) {
+    c.line('testOnly: true,');
+  }
   c.line(`traits: ${traits},`);
   for (const [key, rows] of [
     ['commands', commands],
@@ -1680,7 +1685,7 @@ function emitCapsIndex(model: Model, names: Names): GeneratedFile {
     c.line(`export * from './${cap.shortName}.ts';`);
   }
   c.line();
-  c.line('/** Every capability in the catalog, by id. */');
+  c.line('/** Every capability, by id: the catalog\'s (CATALOG) and the test_only ones it leaves out (testOnly). */');
   c.line(`export const CAPS: readonly $.CapInfo[] = [${model.capabilities.map((x) => `${upperSnake(x.shortName)}_CAP`).join(', ')}];`);
   c.line();
   c.line("/** By id (0x0002) or name ('fr.led'). */");

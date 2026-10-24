@@ -7,6 +7,9 @@
 
 #include "esp_log.h"
 #include "sdkconfig.h"
+#if CONFIG_FR_CORE_TASK_WDT
+#include "esp_task_wdt.h"
+#endif
 
 namespace fr {
 namespace {
@@ -159,6 +162,20 @@ void EspCore::notify(uint32_t bits)
 
 void EspCore::loop()
 {
+#if CONFIG_FR_CORE_TASK_WDT
+    // Design m2-c1-hil D11 item 1 (FR_CORE_TASK_WDT): a handler that never returns stops the feeding below, and the
+    // task watchdog's panic (CONFIG_ESP_TASK_WDT_PANIC) reboots the chip. The idle wait wakes once a second to feed
+    // it; a feed every 250 ms at most keeps its spinlock off the busy path.
+    constexpr TickType_t kIdleWait = pdMS_TO_TICKS(1000);
+    constexpr int64_t kFeedUs = 250'000;
+    const bool watched = esp_task_wdt_add(nullptr) == ESP_OK;
+    if (!watched) {
+        ESP_LOGE(TAG, "cannot subscribe the core task to the task watchdog: a wedge here will not reboot");
+    }
+    int64_t fed_at = esp_timer_get_time();
+#else
+    constexpr TickType_t kIdleWait = portMAX_DELAY;
+#endif
     for (;;) {
         // Inputs before timers before posted work (spec 03 §3.4); one post and one received envelope per
         // round, so a burst of either never delays an edge or a due timer by more than one handler.
@@ -166,8 +183,14 @@ void EspCore::loop()
         busy = service_timers() || busy;
         busy = run_one(posts_) || busy;
         busy = run_one(net_posts_) || busy;
+#if CONFIG_FR_CORE_TASK_WDT
+        if (watched && esp_timer_get_time() - fed_at >= kFeedUs) {
+            esp_task_wdt_reset();
+            fed_at = esp_timer_get_time();
+        }
+#endif
         if (!busy) {
-            xTaskNotifyWait(0, UINT32_MAX, nullptr, portMAX_DELAY);
+            xTaskNotifyWait(0, UINT32_MAX, nullptr, kIdleWait);
         }
     }
 }

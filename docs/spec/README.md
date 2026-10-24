@@ -1,6 +1,6 @@
 # Fractonica — framework spec (v0.3)
 
-**Status:** 2026-10-23: M1 (the PoC) is complete: its §11.5 definition-of-done demo ran end to end from a fresh hub and blank boards (11 §11.5). All twelve gates have passed on the C3s and the C6: ten re-run at step 7, T-LAT and T-AGENT carried forward from C6. The S3 joined five of them (11 §11.4 "M1 final re-run"). M2 is next. Earlier, on 2026-10-20: your answers to the v0.2 questions were folded in (see [Decisions you made](#decisions-you-made)), and the toolchain was installed (01 §1.6).
+**Status:** 2026-10-24: M2-C1, the HIL fixture, is done: the fixture board `fix-s3` presses the four DUTs' BOOT pins and reads their LED and `test_pin` lines through the hub, and T-HIL passed twice in a row on all four with no person (11 §11.6 "M2-C1 result"). The rest of M2 is open, and the proposed M3 deferrals in 11 §11.6 wait for your decision. 2026-10-23: M1 (the PoC) is complete: its §11.5 definition-of-done demo ran end to end from a fresh hub and blank boards (11 §11.5). All twelve gates have passed on the C3s and the C6: ten re-run at step 7, T-LAT and T-AGENT carried forward from C6. The S3 joined five of them (11 §11.4 "M1 final re-run"). M2 is next. Earlier, on 2026-10-20: your answers to the v0.2 questions were folded in (see [Decisions you made](#decisions-you-made)), and the toolchain was installed (01 §1.6).
 
 **What it is:** an agent-first framework for prototyping ESP32 device networks. It has four parts:
 - reusable capability modules on the nodes;
@@ -24,7 +24,7 @@
 | 04 | [Boards](04-boards.md) | Verified pins for C3/C6/S3 boards, manifests, detection, USB-Serial/JTAG rules |
 | 05 | [Network](05-network.md) | Router mode then gateway mode, the envelope, sequence spaces, flooding, node ↔ node, presence, latency |
 | 06 | [Identity & OTA](06-identity-ota.md) | MAC identity + hub-assigned alias, partition layout, HTTP OTA with rollback |
-| 07 | [Capabilities & SDK](07-capabilities-sdk.md) | YAML capability IDL → codegen; button, LED and system capabilities; drivers; bindings; JS SDK |
+| 07 | [Capabilities & SDK](07-capabilities-sdk.md) | YAML capability IDL → codegen; button, LED and system capabilities, and the test-only `fr.fixture` (0x0006, `test_only`: out of the SDK and the app catalog); drivers; bindings; JS SDK |
 | 08 | [Hub](08-hub.md) | Node/TS hub, lifecycle, serial ownership, pytools/esptool, bus, dashboard, macOS constraints |
 | 09 | [Agent API](09-agent-api.md) | One operation registry → CLI, REST, WS, MCP; jobs, cursors, leases, safety; plugin |
 | 10 | [Testing](10-testing.md) | Host core tests, golden vectors, on-target, HIL; acceptance gates |
@@ -50,7 +50,7 @@
 | D14 | **Security off in the PoC** (LAN lab); AES-CCM envelope security in M3; never secure boot or flash encryption on lab boards | You don't need security; eFuses are irreversible | **decided: no security work planned**; the envelope keeps its SEC bit reserved |
 | D15 | **SDK speaks JSON over WS in M1**; binary pass-through only if latency tests show it matters | Tens of µs vs milliseconds on the radio; readable by agents | **kept at C6**: T-LAT's hub → SDK hop is p50 0.9 ms against 3.7–4.6 ms to the hub; binary mode judged not needed (11 §11.4) |
 | D16 | **M1 boards: your two ESP32-C3 boards with the 0.42" OLED** (plus the C6 Super Mini); S3 later | You have two identical C3 OLED boards, which is ideal for node ↔ node tests | **decided**; the S3 (a Waveshare ESP32-S3-LCD-1.9, `s3l-pad`) joined at M1 step 7 (04 §4.2) |
-| D17 | **HIL fixture is required** (a spare ESP32 that presses BOOT pins and reads LEDs electronically) | Agents must be able to test real buttons without you | **decided: M2, first item** |
+| D17 | **HIL fixture is required** (a spare ESP32 that presses BOOT pins and reads LEDs electronically) | Agents must be able to test real buttons without you | **done: M2-C1, 2026-10-24**. A dedicated ESP32-S3-DevKitC-1-style board (`fix-s3`, profile `s3k-fixture`, serial only) runs 12 lines of `fr.fixture` (capability id 0x0006, `test_only`) wired to the four DUTs; agents press through `input_simulate {layer: gpio}` and read LEDs from `hil.edge`/`hil.frame`; T-HIL passed (11 §11.6) |
 | D18 | **Analog inputs** become a capability (`fr.analog_in`); scale target 20–30 nodes | Your use cases need analog inputs and dozens of nodes | **decided: M2** |
 
 ## Decisions you made
@@ -75,3 +75,5 @@
 - Router channel: **1** (measured by hwprobe; BSSID `74:9d:79:03:69:6e`).
 - First latency result: with the Mac on Wi-Fi the round-trip tail is ~100 ms (p99), so the router-mode go/no-go needs the follow-up runs in the spike note.
 - The S3 variant: identified at M1 step 7 as a Waveshare ESP32-S3-LCD-1.9 (`pad-s3`, 04 §4.2). Its PSRAM, LCD and IMU wait for M2.
+- After M2-C1: T-AGENT (a) on `op.called` is carried to the M2 exit, and the other open items are listed in 11 §11.6 "Open after M2-C1".
+- The proposed M3 deferrals (11 §11.6) are your decision; until you approve them, the items they name stay in M2.

@@ -1,0 +1,44 @@
+# A frozen copy of the lab bench AS DESIGNED (design m2-c1-hil §2.3, verbatim below this header): pad-c3 on
+# ch0/ch4/ch8 (fixture GPIO42/4/15), pad-c3b on ch1/ch5/ch9 (GPIO41/5/16), fixture.fw_id null.
+#
+# Tests that need one specific, stable bench (the validator's mutation cases, exact notes, exact error paths)
+# copy this file over hardware/bench/lab.bench.yaml in a scratch checkout. The live
+# hardware/bench/lab.bench.yaml is the rig AS WIRED and changes with the bench (2026-10-24: the two C3 boards'
+# line sets are swapped, and fw_id is pinned), so tests of the live file stay value-agnostic.
+# Never edit this copy to follow the rig; change it only with the design's §2.3 table.
+#
+schema: fractonica/bench@1
+id: lab
+fixture:
+  device: e8f60a81bc48             # fix-s3: ESP32-S3-DevKitC-1-style, WROOM-1-N16R8, on the powered desk hub
+  profile: s3k-fixture
+  fw_id: null                      # pinned after the first good build (§5.3 step 2)
+duts:
+  1cdbd4175cc4:                    # pad-c3: C3 OLED board #2 (8.5 dBm cap; -80 dBm at M1 step 7)
+    profile: c3o-pad
+    rf_weak: true                  # T-HIL: accounted RF losses warn instead of failing (§5.2)
+    lines:
+      boot:     { role: button,   dut_gpio: 9,  channel: ch0,  fixture_gpio: 42, via: direct, series_ohm: 1000 }
+      status:   { role: led,      dut_gpio: 8,  channel: ch4,  fixture_gpio: 4,  active_level: low, series_ohm: 10000 }
+      test_pin: { role: test_pin, dut_gpio: 10, channel: ch8,  fixture_gpio: 15, series_ohm: 1000 }
+      analog:   { role: analog,   dut_gpio: 3,  channel: ch12, fixture_gpio: 11, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 }, wired: false }   # M2-C3
+  1cdbd416ba34:                    # pad-c3b: C3 OLED board #1
+    profile: c3o-pad
+    lines:
+      boot:     { role: button,   dut_gpio: 9,  channel: ch1,  fixture_gpio: 41, via: direct, series_ohm: 1000 }
+      status:   { role: led,      dut_gpio: 8,  channel: ch5,  fixture_gpio: 5,  active_level: low, series_ohm: 10000 }
+      test_pin: { role: test_pin, dut_gpio: 10, channel: ch9,  fixture_gpio: 16, series_ohm: 1000 }
+      analog:   { role: analog,   dut_gpio: 3,  channel: ch13, fixture_gpio: 12, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 }, wired: false }   # M2-C3
+  58e6c5d55e64:                    # pad-c6: C6 Super Mini
+    profile: c6-pad
+    lines:
+      boot:     { role: button,   dut_gpio: 9,  channel: ch2,  fixture_gpio: 40, via: direct, series_ohm: 1000 }
+      status:   { role: led,      dut_gpio: 8,  channel: ch6,  fixture_gpio: 6,  decode: ws2812, series_ohm: 1000 }
+      test_pin: { role: test_pin, dut_gpio: 20, channel: ch10, fixture_gpio: 17, series_ohm: 1000 }
+  94a99015cecc:                    # pad-s3: Waveshare ESP32-S3-LCD-1.9
+    profile: s3l-pad
+    lines:
+      boot:     { role: button,   dut_gpio: 0,  channel: ch3,  fixture_gpio: 39, via: direct, series_ohm: 1000 }
+      status:   { role: led,      dut_gpio: 15, channel: ch7,  fixture_gpio: 7,  decode: ws2812, series_ohm: 1000 }
+      test_pin: { role: test_pin, dut_gpio: 16, channel: ch11, fixture_gpio: 18, series_ohm: 1000 }
+      en:       { role: en,       dut_pin: EN,  channel: ch14, fixture_gpio: 21, via: nfet, wired: false }   # never direct: an unpowered fixture would hold pad-s3 in reset

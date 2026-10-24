@@ -167,6 +167,12 @@ export interface Capability {
   id: number;
   section: RegistrySection;
   version: { major: number; minor: number };
+  /**
+   * `test_only: true` (design m2-c1-hil D3): a test instrument's capability (fr.fixture). Firmware codecs,
+   * the hub's decoders (CAPS) and the golden vectors carry it; everything an app or client sees leaves it
+   * out: the catalog and catalog_hash (buildCatalog), the SDK facades and `fr codegen client`.
+   */
+  testOnly: boolean;
   summary: string;
   doc?: string;
   mapsTo?: Record<string, string>;
@@ -477,6 +483,7 @@ const RawCapability = z.strictObject({
   capability: z.string(),
   id: int,
   version: z.string(),
+  test_only: z.boolean().optional(),
   summary: z.string(),
   doc: z.string().optional(),
   maps_to: z.record(z.string(), z.string()).optional(),
@@ -1158,6 +1165,11 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
   if (!v || version.major > 255 || version.minor > 255) {
     issues.add(file, ['version'], `version '${raw.version}' must be "major.minor" with u8 parts`);
   }
+  const testOnly = raw.test_only === true;
+  // System capabilities are on every node and are what the hub and apps manage it through.
+  if (testOnly && reg?.section === 'system') {
+    issues.add(file, ['test_only'], `${name} is a system capability (${hex(raw.id)}); only standard and project capabilities may be test_only`);
+  }
 
   const enums = Object.entries(raw.types ?? {}).map(([n, t]) => buildEnum(n, t.enum, name, file, ['types', n, 'enum'], issues));
   const scope: Scope = { file, enums: new Map(enums.map((e) => [e.name, e])), structs: new Map(), issues };
@@ -1286,6 +1298,7 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
     id: raw.id,
     section: reg?.section ?? 'project',
     version,
+    testOnly,
     summary: raw.summary,
     ...(raw.doc !== undefined ? { doc: raw.doc } : {}),
     ...(raw.maps_to ? { mapsTo: raw.maps_to } : {}),
@@ -1344,6 +1357,15 @@ export function loadModel(sourceDir: string): Model {
 
 // ---- catalog ----
 
+/**
+ * The capabilities apps and clients see (design m2-c1-hil D3): every capability except the test_only ones.
+ * The catalog, catalog_hash, the SDK facades and `fr codegen client` are built from these; firmware codecs,
+ * CAPS and the vectors from all of model.capabilities.
+ */
+export function appCapabilities(model: Model): Capability[] {
+  return model.capabilities.filter((c) => !c.testOnly);
+}
+
 function fieldJson(f: Field): Record<string, JsonValue> {
   return {
     name: f.name,
@@ -1363,14 +1385,15 @@ function requiresJson(r: Requires | undefined): Record<string, JsonValue> {
 }
 
 /**
- * The capability catalog (packages/protocol/src/gen/catalog.json): every capability with its types,
- * traits, config and members, as agents and the hub consume it. catalogHash() hashes its canonical form.
+ * The capability catalog (packages/protocol/src/gen/catalog.json): every app-facing capability (not the
+ * test_only ones, appCapabilities) with its types, traits, config and members, as agents, apps and the
+ * dashboard consume it. catalogHash() hashes its canonical form, so a test_only capability never changes it.
  */
 export function buildCatalog(model: Model): Record<string, JsonValue> {
   return {
     schema: 'fractonica/catalog@1',
     protocol: model.protocol.version,
-    capabilities: model.capabilities.map((c) => ({
+    capabilities: appCapabilities(model).map((c) => ({
       id: c.id,
       name: c.name,
       version: `${c.version.major}.${c.version.minor}`,

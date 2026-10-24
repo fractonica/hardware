@@ -10,7 +10,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 
-import { ArtifactManifestSchema, boardHash, FrError } from '@fractonica/protocol';
+import { ArtifactManifestSchema, boardHash, type DeviceRole, FrError } from '@fractonica/protocol';
 
 import type { Device, HelloSeen, Presence, Registry } from '../context.ts';
 import { type Db, kvGet, kvSet } from '../db.ts';
@@ -67,7 +67,7 @@ interface Row {
   profile: string | null;
   chip: string | null;
   tags: string;
-  role: 'node' | 'gateway';
+  role: DeviceRole;
   fw_id: string | null;
   provisioned: number;
   last_seen: string | null;
@@ -346,7 +346,20 @@ export interface PreparedIdentity {
  */
 export function prepareIdentity(
   db: Db,
-  p: { deviceId: string; alias?: string; profile: string | null; board: string | null; chip: string | null; net: number },
+  p: {
+    deviceId: string;
+    alias?: string;
+    profile: string | null;
+    board: string | null;
+    chip: string | null;
+    net: number;
+    /**
+     * The role the image will HELLO with, when provisioning knows it before that HELLO (a fixture build, design
+     * m2-c1-hil D6): set now, so the row is never a provisioned `node` that apps and registry_rev would count.
+     * Omitted: kept (a new row: node), until the router takes the device's HELLO.
+     */
+    role?: DeviceRole;
+  },
 ): PreparedIdentity {
   const requested = p.alias === undefined ? undefined : checkAlias(p.alias);
   let floor = 1;
@@ -370,13 +383,13 @@ export function prepareIdentity(
     floor = ((r?.last_epoch ?? 0) + 1) & 0xffff || 1;
     if (!r) {
       db.prepare(
-        `INSERT INTO devices (device_id, addr, alias, alias_rev, net, board, profile, chip, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(p.deviceId, addr, alias, rev, p.net, p.board, p.profile, p.chip, new Date().toISOString());
+        `INSERT INTO devices (device_id, addr, alias, alias_rev, net, board, profile, chip, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(p.deviceId, addr, alias, rev, p.net, p.board, p.profile, p.chip, p.role ?? 'node', new Date().toISOString());
     } else {
       db.prepare(
         `UPDATE devices SET addr = ?, alias = ?, alias_rev = ?, net = ?, profile = COALESCE(?, profile), board = COALESCE(?, board),
-           chip = COALESCE(?, chip) WHERE device_id = ?`,
-      ).run(addr, alias, rev, p.net, p.profile, p.board, p.chip, p.deviceId);
+           chip = COALESCE(?, chip), role = COALESCE(?, role) WHERE device_id = ?`,
+      ).run(addr, alias, rev, p.net, p.profile, p.board, p.chip, p.role ?? null, p.deviceId);
     }
   })();
   return { device: toDevice(mustRow(db, p.deviceId)), epoch_floor: floor };

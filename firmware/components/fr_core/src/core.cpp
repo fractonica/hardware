@@ -2,7 +2,9 @@
 // link (fr_net's Net over the serial, TCP and UDP links) and ESP-NOW (its AirLink, the directory and bindings
 // in nvs:fr_dir and nvs:fr_bind, fr.node bind_*, fr::msg), the OTA job and its health gate (fr_ota's Ota),
 // fr_serial and the diag channel, the port table with the system capabilities, HELLO's facts, the C1 banner
-// and the liveness log.
+// and the liveness log. M2-C1 (design m2-c1-hil D6, D11): the HELLO role from the profile, the radio-off build
+// (serial only, NET health from the serial session) and the hub link (session, last frame, run) in link_info() for
+// services.
 #include "fr/core.hpp"
 
 #include <array>
@@ -70,6 +72,14 @@ constexpr bool kFaultHealth = true;
 #else
 constexpr bool kFaultHealth = false;
 #endif
+// design m2-c1-hil D6: a radio-off profile (the HIL fixture) never starts Wi-Fi or ESP-NOW; the hub link is the
+// serial session alone.
+#if defined(CONFIG_FR_NET_RADIO) && CONFIG_FR_NET_RADIO
+constexpr bool kRadio = true;
+#else
+constexpr bool kRadio = false;
+#endif
+static_assert(proto::is_known(static_cast<proto::Role>(CONFIG_FR_ROLE)), "CONFIG_FR_ROLE is not a protocol.yaml Role");
 
 fr_identity_t s_identity;
 char s_fw_id[13] = "unknown";
@@ -263,7 +273,7 @@ void build_hello()
     std::memcpy(h.fw_id_prefix.data(), s_fw_prefix, h.fw_id_prefix.size());
     h.descriptor_hash = wire::descriptor_hash({s_descriptor, s_descriptor_len});
     h.board_hash = wire::board_hash(s_identity.board);
-    h.role = proto::Role::node;
+    h.role = static_cast<proto::Role>(CONFIG_FR_ROLE);  // the profile's role (design m2-c1-hil D6: fixture 2)
     h.hb_interval_ms = CONFIG_FR_HEARTBEAT_MS;
     h.reset_reason = static_cast<uint8_t>(esp_reset_reason());
     h.ota_state = ota_state();  // as the boot found it; hello_info() follows Ota's mark-valid
@@ -371,9 +381,11 @@ void on_envelope(LinkKind kind, RxBuf *b)
     }
     s_net->receive(kind, env, b->at);
     // HUB_ACK (06 §6.6): a WELCOME that gave this link its session. Ota also sends a RESULT it holds for
-    // the hub from here (design c4 §3: after the first WELCOME).
+    // the hub from here (design c4 §3: after the first WELCOME). With the radio off (design m2-c1-hil D6) the
+    // serial session is the network, so its WELCOME also sets NET, which Wi-Fi builds take from the
+    // association: a radio-off image on probation would roll back otherwise.
     if (h && h->cls == wire::kClsNet && h->kind == proto::kKindNetWelcome && s_net->state().link(kind).session) {
-        s_ota.health_set(ota::kHealthHubAck);
+        s_ota.health_set(ota::kHealthHubAck | (!kRadio && kind == LinkKind::serial ? ota::kHealthNet : 0));
     }
     release_rx(b);
 }
@@ -513,6 +525,9 @@ public:
 
     Status net_set(const cap::NodeNetSetArgs &args) override
     {
+        if (!kRadio) {
+            return std::unexpected(Err::unsupported);  // radio off (design m2-c1-hil D6): no Wi-Fi to join
+        }
         if (args.ssid.empty() || has_nul(args.ssid) || has_nul(args.pass) || !passphrase_ok(args.pass) ||
             (args.has_bssid && args.bssid.size() != 6) ||
             (args.has_hub_host && (args.hub_host.empty() || has_nul(args.hub_host)))) {
@@ -627,7 +642,7 @@ public:
         return id;
     }
 
-    net::LinkInfo link_info() override { return net::esp::link_info(); }
+    net::LinkInfo link_info() override { return fr::core::link_info(); }
 
     net::Vitals vitals() override
     {
@@ -1018,6 +1033,9 @@ public:
             s_net->ip_block(seconds);
             break;
         case diag::NetHook::wifi_down:
+            if (!kRadio) {
+                return std::unexpected(Err::unsupported);  // radio off: no Wi-Fi to hold down
+            }
             // fr_net applies it ~300 ms later, so this request's RESULT leaves over TCP first.
             if (Status st = net::esp::wifi_down(seconds); !st) {
                 return st;
@@ -1263,7 +1281,7 @@ Core &start()
                 s_stores->retry();  // a store write a full fr_worker queue refused
             }
             // NET for an image on probation even when the hub's address never resolves (no link comes up).
-            if ((s_ota.required() & ~s_ota.health() & ota::kHealthNet) != 0 && net::esp::link_info().wifi_up) {
+            if (kRadio && (s_ota.required() & ~s_ota.health() & ota::kHealthNet) != 0 && net::esp::link_info().wifi_up) {
                 s_ota.health_set(ota::kHealthNet);
             }
             s_serial_timer->start(kSerialPollUs);
@@ -1274,11 +1292,15 @@ Core &start()
     // before the core task runs (Net's timer sends the first HELLO, once run_ports has the HELLO facts).
     s_serial.sample();
     s_net->attach(s_serial);
-    s_net->attach(net::esp::tcp_link());
-    s_net->attach(net::esp::udp_link());
     // C5 (design c5 §3): ESP-NOW (down until run() starts Wi-Fi and channel C is known), and the directory
-    // and bindings from NVS, loaded now: before any capability can emit an event a binding fires on.
-    s_net->attach_air(net::esp::air_link());
+    // and bindings from NVS, loaded now: before any capability can emit an event a binding fires on. With the
+    // radio off (design m2-c1-hil D6) only the serial link is attached: Net routes nothing towards links that
+    // could never come up, and diag `stats` lists none.
+    if (kRadio) {
+        s_net->attach(net::esp::tcp_link());
+        s_net->attach(net::esp::udp_link());
+        s_net->attach_air(net::esp::air_link());
+    }
     s_stores.emplace(s_core, worker::get(), s_dir_blob, s_bind_blob);
     s_net->attach_stores(s_stores->directory(), s_stores->bindings());
     size_t bindings = 0;
@@ -1367,9 +1389,25 @@ void run_ports(std::span<const PortEntry> instances, SelftestFn selftest, size_t
     if (!s_core.run()) {
         ESP_LOGE(TAG, "no core task: capabilities will not run");
     }
-    // 03 §3.5 step 5: the TCP and UDP links come up from here.
-    start_wifi();
+    // 03 §3.5 step 5: the TCP and UDP links come up from here, unless the radio is off (design m2-c1-hil D6).
+    if (kRadio) {
+        start_wifi();
+    } else {
+        ESP_LOGI(TAG, "radio off: no Wi-Fi or ESP-NOW, the hub is reached over serial only");
+    }
     alive_loop();
+}
+
+net::LinkInfo link_info()
+{
+    // Radio off, net::esp::link_info() stays all zero (Wi-Fi never starts): wifi_up false, no channel or RSSI.
+    const net::LinkInfo li = net::esp::link_info();
+    return s_net ? hub_link_info(li, *s_net) : li;
+}
+
+bool hub_session()
+{
+    return s_net && s_net->hub_link();
 }
 
 const fr_identity_t &identity()

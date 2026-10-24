@@ -20,9 +20,15 @@ pins:
   strapping_levels: { 2: high, 8: high, 9: high }
   free: [0, 1, 2, 3, 4, 7, 10, 20, 21]
   adc1: [0, 1, 2, 3, 4]
+headers:                      # espboards.dev; pin 1 first (the square pad). GPIO9 and 10 were bench-verified at T-LAT
+  confidence: M
+  JP1: [10, 9, 8, 7, 6, 5, 4, 3]
+  JP2: [5V, GND, 3V3, 20, 21, 2, 1, 0]
+boot_uart_tx: 21              # U0TXD: the ROM log prints on it at every boot
+en_access: null               # EN is on no header
 rf: { max_tx_power_qdbm: 34, antenna: ceramic }   # 8.5 dBm: board #2 never finished WPA2 auth at full power (C3 checkpoint)
 test_pin: 10
-resources: { rmt_tx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
+resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
 defaults:
   boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,    driver: led_gpio,    bind: leds.status }
@@ -34,3 +40,4 @@ sources:
   - docs/spikes/2026-10-20-hwprobe-c3-oled.md
   - https://docs.zephyrproject.org/latest/boards/01space/esp32c3_042_oled/doc/index.html
   - https://www.otronic.nl/en/esp32-c3-ontwikkelbord-met-mini-042-inch-midi-oled.html
+  - https://www.espboards.dev/esp32/esp32-c3-oled-042/   # headers (JP1, JP2)

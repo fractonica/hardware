@@ -2,13 +2,14 @@
 // registry for @fractonica/sdk, from the live registry and the hub's catalog (no checkout needed). The
 // files come back in the result and the caller writes them (`fr codegen client --out <dir>`):
 // - devices.ts: each provisioned device's id, profile, board and capability instances, by alias, with the
-//   hub's registry_rev and catalog_hash. No secrets: commit it. Deterministic (sorted, no timestamp), so
-//   regenerating an unchanged registry changes nothing.
+//   hub's registry_rev and catalog_hash; a test_only capability's instances (fr.fixture) are left out.
+//   No secrets: commit it. Deterministic (sorted, no timestamp), so regenerating an unchanged registry
+//   changes nothing.
 // - token.ts: the /app token (secret: written 0600, git-ignored, never printed; `fr mcp` redacts it).
 // - .gitignore: token.ts.
 
 import { FrError, type GeneratedFile } from '@fractonica/protocol';
-import { CATALOG_HASH } from '@fractonica/protocol/gen';
+import { CATALOG_HASH, findCap } from '@fractonica/protocol/gen';
 
 import type { Device, HubContext, OpInput } from '../context.ts';
 import { boardInstances, provisionedDevices, registryRev } from './directory.ts';
@@ -72,9 +73,14 @@ export function renderTokenTs(token: string): string {
   ].join('\n');
 }
 
+/** The instances an app may use: a test_only capability's (fr.fixture; design m2-c1-hil D3) are left out. */
+export function clientCaps(caps: readonly { name: string; cap: string }[]): { name: string; cap: string }[] {
+  return caps.filter((c) => findCap(c.cap)?.testOnly !== true).map((c) => ({ name: c.name, cap: c.cap }));
+}
+
 function clientDevice(hub: HubContext, d: Device): ClientDevice {
   const caps = boardInstances(hub, d);
-  return { alias: d.alias, id: d.device_id, profile: d.profile, board: d.board, caps: caps && caps.map((c) => ({ name: c.name, cap: c.cap })) };
+  return { alias: d.alias, id: d.device_id, profile: d.profile, board: d.board, caps: caps && clientCaps(caps) };
 }
 
 export function clientGenerate(hub: HubContext, input: OpInput<'client_generate'>) {

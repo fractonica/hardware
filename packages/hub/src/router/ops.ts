@@ -1,17 +1,22 @@
 // Op handlers of the node links, router and events (packages/protocol/src/ops/links.ts; stream H2), spread
 // into HANDLERS (packages/hub/src/ops.ts): events_read, wait_for_event, wait_for_device, command_send,
 // input_simulate. Devices are picked by selector (registry, 09 §9.2); waits follow the cursor rules of
-// 09 §9.2 (since required, no stale or replayed matches, count and per_device).
+// 09 §9.2 (since required, no stale or replayed matches, count and per_device). M2-C1 (design m2-c1-hil D8,
+// D9, D15; stream S4): input_simulate's layer (inject here, gpio through the fixture module), op.called on
+// command_send and input_simulate, and the fixture fence on both.
 
 import { z } from 'zod';
 
-import { formatCursor, FrError, type LinksOpName, parseCursor } from '@fractonica/protocol';
+import { formatCursor, FrError, type JobOrigin, type LinksOpName, OP_CALLED_OPS, parseCursor } from '@fractonica/protocol';
 import { decodeMember, encodeMember, findCap, jsonSchema, statusName } from '@fractonica/protocol/gen';
 
-import type { Device, Handler, HubContext, HubEvent, Presence } from '../context.ts';
+import type { Device, Handler, HubContext, HubEvent, OpInput, Presence } from '../context.ts';
 import type { Db } from '../db.ts';
-import { EventStore, matchTypes, matchWhere, mintCursor, mintTimeUs, parseTypes, tailEvents } from '../events/index.ts';
+import { type EventQuery, EventStore, matchTypes, matchWhere, mintCursor, mintTimeUs, parseTypes, tailEvents } from '../events/index.ts';
+import { fenceCommand, fixtureIds } from '../fixture/fence.ts';
+import { requestClient } from '../jobs.ts';
 import { humanPrompt, type WaitPrompt } from '../prompts.ts';
+import { nowUs } from '../ring.ts';
 import { CapDirectory, instanceNamed, type PortCap } from './caps.ts';
 import { routerInfo, routerInstances } from './index.ts';
 
@@ -68,9 +73,20 @@ function selectDevices(hub: HubContext, selector: string): Device[] {
   return devices;
 }
 
-/** Device ids a filter covers; null: every device (no selector, or `all`). */
-function selectIds(hub: HubContext, selector: string | undefined): string[] | null {
-  return !selector || selector === 'all' ? null : selectDevices(hub, selector).map((d) => d.device_id);
+/**
+ * The devices an event read covers. `devices` null: no device filter, so device-less hub events are in.
+ * `exclude`: the fixture's own events, left out for `all` (design m2-c1-hil D6: `all` never includes a
+ * fixture, as in device_list); no selector filters nothing. Any other selector names its devices, which
+ * leaves a fixture out unless it names one (registry/selector.ts).
+ */
+function selectIds(hub: HubContext, selector: string | undefined): { devices: string[] | null; exclude: string[] } {
+  if (!selector) {
+    return { devices: null, exclude: [] };
+  }
+  if (selector.trim().toLowerCase() === 'all') {
+    return { devices: null, exclude: fixtureIds(hub) };
+  }
+  return { devices: selectDevices(hub, selector).map((d) => d.device_id), exclude: [] };
 }
 
 /** Makes queued events visible to SQL (a wait's cursor time reads the tables). */
@@ -221,7 +237,10 @@ export function sendCommandTo(
   return sendPlanned(hub, planCommand(hub, dev, instance, command, args), opts);
 }
 
-/** One unicast per device (05 §5.8), in parallel; per-device failures are results, not errors. */
+/**
+ * One unicast per device (05 §5.8), in parallel; per-device failures are results, not errors. `called`: the
+ * op.called each device gets once every plan is checked, before anything is sent.
+ */
 async function sendToAll(
   hub: HubContext,
   devices: Device[],
@@ -229,10 +248,36 @@ async function sendToAll(
   command: string,
   args: Record<string, unknown>,
   opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate: boolean },
+  called?: OpCalled,
 ): Promise<CommandOutcome[]> {
   // Encode (and validate) once per capability before anything is sent: invalid args fail the whole op.
   const plans = devices.map((dev) => planCommand(hub, dev, instance, command, args));
+  if (called) {
+    publishOpCalled(hub, devices, called);
+  }
   return Promise.all(plans.map((p) => sendPlanned(hub, p, opts)));
+}
+
+/** op.called's fields but the client (D9): the op and what it was asked to do. */
+export interface OpCalled {
+  op: (typeof OP_CALLED_OPS)[number];
+  instance?: string;
+  command?: string;
+  gesture?: string;
+  layer?: 'inject' | 'gpio';
+  [k: string]: unknown;
+}
+
+/**
+ * op.called (design m2-c1-hil D9): one per device on every command_send, input_simulate and binding_set,
+ * published on that device with the call's X-Fr-Client (null without one), so what an agent did is recorded
+ * rather than proven by its effects (T-AGENT (a)).
+ */
+export function publishOpCalled(hub: Pick<HubContext, 'events'>, devices: readonly Pick<Device, 'device_id' | 'alias'>[], called: OpCalled): void {
+  const client: JobOrigin | null = requestClient.getStore() ?? null;
+  for (const d of devices) {
+    hub.events.publish({ type: 'op.called', device: d.device_id, alias: d.alias, t_hub_us: nowUs(), fields: { ...called, client } });
+  }
 }
 
 /**
@@ -271,7 +316,8 @@ function splitCommand(instance: string | undefined, command: string): { instance
 export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
   events_read: (input: { selector?: string; types?: string; since?: string; max_events: number }, hub) => {
     const after = sinceSeq(input.since, hub);
-    const q = { afterSeq: after, types: parseTypes(input.types), devices: selectIds(hub, input.selector), limit: input.max_events + 1 };
+    const sel = selectIds(hub, input.selector);
+    const q: EventQuery = { afterSeq: after, types: parseTypes(input.types), devices: sel.devices, excludeDevices: sel.exclude, limit: input.max_events + 1 };
     const found = after !== undefined ? hub.events.query(q) : tailEvents(hub.events, q);
     const truncated = found.length > input.max_events;
     const events = after !== undefined ? found.slice(0, input.max_events) : found.slice(-input.max_events);
@@ -290,11 +336,15 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
       throw new FrError('INVALID_ARGS', 'types names no event type');
     }
     const where = jsonObject(input.where, 'where');
-    // per_device needs the device list even for `all`, which otherwise means "no device filter".
-    const ids = input.per_device && input.selector === 'all' ? selectDevices(hub, 'all').map((d) => d.device_id) : selectIds(hub, input.selector);
+    // per_device needs the device list even for `all`, which otherwise means "no device filter" (less the
+    // fixture's own events, D6); both leave the fixture out.
+    const sel = selectIds(hub, input.selector);
+    const all = input.selector !== undefined && input.selector.trim().toLowerCase() === 'all';
+    const ids = input.per_device && all ? selectDevices(hub, 'all').map((d) => d.device_id) : sel.devices;
     if (input.per_device && !ids) {
       throw new FrError('INVALID_ARGS', 'per_device needs a selector (the devices that must each emit the event)');
     }
+    const exclude = new Set(sel.exclude);
     flushAll(hub);
     // No stale matches (09 §9.2): nothing stamped before the cursor was minted, nothing replayed.
     const mintUs = mintTimeUs(hub, after) - MINT_SLACK_US;
@@ -302,6 +352,7 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
       e.seq > after &&
       matchTypes(globs, e.type) &&
       (!ids || (e.device !== undefined && ids.includes(e.device))) &&
+      (e.device === undefined || !exclude.has(e.device)) &&
       (input.include_replayed || !e.replayed) &&
       e.t_hub_us >= mintUs &&
       matchWhere(where, e);
@@ -338,7 +389,8 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     try {
       let last = after;
       for (;;) {
-        const rows = hub.events.query({ afterSeq: last, types: globs, devices: ids, limit: 1000 });
+        const page: EventQuery = { afterSeq: last, types: globs, devices: ids, excludeDevices: sel.exclude, limit: 1000 };
+        const rows = hub.events.query(page);
         for (const e of rows) {
           last = Math.max(last, e.seq);
           take(e);
@@ -460,7 +512,17 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     const { instance, command } = splitCommand(input.instance, input.command);
     const args = jsonObject(input.args, 'args') ?? {};
     const devices = selectDevices(hub, input.selector);
-    const results = await sendToAll(hub, devices, instance, command, args, { ack: input.ack, timeoutMs: input.timeout_s * 1000, duplicate: input.duplicate });
+    // The fixture takes CMDs from the hub's fixture module only (D15).
+    fenceCommand(hub, devices, 'command_send');
+    const results = await sendToAll(
+      hub,
+      devices,
+      instance,
+      command,
+      args,
+      { ack: input.ack, timeoutMs: input.timeout_s * 1000, duplicate: input.duplicate },
+      { op: 'command_send', instance, command },
+    );
     const refused = allRefused(results);
     if (refused) {
       throw refused;
@@ -468,9 +530,29 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     return { results };
   },
 
-  input_simulate: async (input: { selector: string; instance: string; gesture: string; timeout_s: number }, hub) => {
+  // Two layers (design m2-c1-hil D8): inject (the default) runs the instance's inject command, where press is
+  // a raw hold; gpio has the HIL fixture press the bench-wired line, where press is a real hold and bounce
+  // (gpio only) a click with contact bounce. The gpio result adds layer, fixture, channel and press, and the
+  // cursor before the presses.
+  input_simulate: async (input: OpInput<'input_simulate'>, hub) => {
+    if (input.layer !== 'gpio' && input.gesture === 'bounce') {
+      throw new FrError('INVALID_ARGS', 'gesture bounce is gpio-only (a click with contact bounce by the HIL fixture)', {
+        remediation: [{ tool: 'input_simulate', args: { selector: input.selector, instance: input.instance, gesture: 'bounce', layer: 'gpio' } }],
+      });
+    }
+    if (input.layer === 'gpio' && !hub.fixture) {
+      throw new FrError('NOT_FOUND', 'this hub runs no fixture module, so layer gpio has nothing to press with', {
+        remediation: [{ tool: 'bench_get' }, { tool: 'input_simulate', args: { ...input, layer: 'inject' } }],
+      });
+    }
     const devices = selectDevices(hub, input.selector);
-    const results = await sendToAll(hub, devices, input.instance, 'inject', { gesture: input.gesture }, { ack: 'result', timeoutMs: input.timeout_s * 1000, duplicate: false });
+    fenceCommand(hub, devices, 'input_simulate');
+    const called: OpCalled = { op: 'input_simulate', instance: input.instance, gesture: input.gesture, layer: input.layer };
+    if (input.layer === 'gpio') {
+      // op.called once the fixture module has gated every device, before it presses.
+      return hub.fixture!.simulate(devices, input, () => publishOpCalled(hub, devices, called));
+    }
+    const results = await sendToAll(hub, devices, input.instance, 'inject', { gesture: input.gesture }, { ack: 'result', timeoutMs: input.timeout_s * 1000, duplicate: false }, called);
     const refused = allRefused(results);
     if (refused) {
       throw refused;

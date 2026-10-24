@@ -33,6 +33,7 @@ import { matchTypes } from '../events/index.ts';
 import { nowUs } from '../ring.ts';
 import { type CommandOutcome, sendCommandTo } from '../router/ops.ts';
 import { type AppEventFrame, frameBytes } from './bridge.ts';
+import { appVisible } from './directory.ts';
 import { tokenMatches } from './token.ts';
 
 export interface AppLimits {
@@ -202,7 +203,7 @@ export class AppSocket {
     if (this.#allowed.has(dev.device_id)) {
       return true;
     }
-    if (dev.provisioned && (this.#names === null || this.#names.has(dev.device_id) || this.#names.has(dev.alias))) {
+    if (appVisible(dev) && (this.#names === null || this.#names.has(dev.device_id) || this.#names.has(dev.alias))) {
       this.#allowed.add(dev.device_id);
       return true;
     }
@@ -357,14 +358,14 @@ export class AppSocket {
     }
   }
 
-  /** The device a frame names by id or alias; apps see provisioned devices only. */
+  /** The device a frame names by id or alias; apps see provisioned devices only, never a fixture (D6, D15). */
   #device(ref: unknown): Device | null {
     if (typeof ref !== 'string' || !ref) {
       return null;
     }
     const reg = this.#host.hub().registry;
     const d = DEVICE_ID.test(ref) ? reg.get(ref) : reg.byAlias(ref);
-    return d?.provisioned ? d : null;
+    return appVisible(d) ? d : null;
   }
 
   #result(r: Omit<ResultFrame, 't'>): void {

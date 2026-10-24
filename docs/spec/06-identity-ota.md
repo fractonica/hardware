@@ -255,7 +255,7 @@ ROLLED BACK (old image): the record names the invalid image → RESULT rolled_ba
 |---|---|
 | `CORE` | boot complete (`fr_core`'s `run_ports`) |
 | `CAPS` | every bound capability's `init()` succeeded. Never in a fault build ([03 §3.8](03-firmware.md)) |
-| `NET` | Wi-Fi is up (on link changes, plus a 250 ms poll while it is still required) |
+| `NET` | Wi-Fi is up (on link changes, plus a 250 ms poll while it is still required); on a radio-off image (`CONFIG_FR_NET_RADIO=n`, the HIL fixture, since M2-C1) its serial session's WELCOME ([design m2-c1-hil](../design/m2-c1-hil.md) D6; `fr_core` `core.cpp`) |
 | `HUB_ACK` | a WELCOME gave a link its session. Required only when the installing job's record has `hub_seen`, which an OFFER over a hub session sets (the hub was reachable before the update); otherwise a hub outage would roll back every node |
 
 - All required bits → mark valid; RESULT success goes once a WELCOME has arrived, and the hub marks the image `valid` from it (the node HELLOs only on a new session). A mark-valid already on the worker when the deadline fires decides; one that fails is not retried, and the deadline rolls the image back.

@@ -65,6 +65,13 @@ export type PortInfo = z.infer<typeof PortInfoSchema>;
 export const PRESENCES = ['online', 'suspect', 'offline', 'unknown'] as const;
 export type Presence = (typeof PRESENCES)[number];
 
+/**
+ * A device's HELLO role (schema/protocol.yaml Role, 05 §5.7): `fixture` is the HIL fixture node (design
+ * m2-c1-hil D6), which `all` never selects, apps never see and only the hub's fixture module commands.
+ */
+export const DEVICE_ROLES = ['node', 'gateway', 'fixture'] as const;
+export type DeviceRole = (typeof DEVICE_ROLES)[number];
+
 /** A registry row (spec 08 §8.8 `devices`; the hub's context.ts Device). */
 export const DeviceSchema = z.looseObject({
   device_id: z.string(),
@@ -76,7 +83,7 @@ export const DeviceSchema = z.looseObject({
   profile: z.string().nullable(),
   chip: z.string().nullable(),
   tags: z.array(z.string()),
-  role: z.enum(['node', 'gateway']),
+  role: z.enum(DEVICE_ROLES),
   fw_id: z.string().nullable(),
   provisioned: z.boolean(),
   last_seen: z.string().nullable(),
@@ -91,6 +98,26 @@ export const DeviceViewSchema = DeviceSchema.extend({
   port_state: z.enum(PORT_STATES).optional(),
 });
 export type DeviceView = z.infer<typeof DeviceViewSchema>;
+
+/**
+ * device_provision's `wifi` (06 §6.4): whether the node then said HELLO over Wi-Fi (joined, not_joined), or
+ * `off` for a radio-off profile, which has no join stage (design m2-c1-hil D6: the fixture).
+ */
+export const PROVISION_WIFI = ['joined', 'not_joined', 'off'] as const;
+export type ProvisionWifi = (typeof PROVISION_WIFI)[number];
+
+/** device_provision's job result (hub registry/provision.ts); loose, the hub may add fields. */
+export const ProvisionResultSchema = z.looseObject({
+  device_id: z.string(),
+  alias: z.string(),
+  profile: z.string(),
+  build_id: z.string(),
+  fw_id: z.string(),
+  wifi: z.enum(PROVISION_WIFI),
+  duration_ms: z.number().optional(),
+  warnings: z.array(z.string()).optional(),
+});
+export type ProvisionResult = z.infer<typeof ProvisionResultSchema>;
 
 /** Log levels, most severe first (ESP_LOG letters); a minimum level keeps itself and those before it. */
 export const LOG_LEVELS = ['E', 'W', 'I', 'D', 'V'] as const;

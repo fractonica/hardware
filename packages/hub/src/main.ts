@@ -14,12 +14,15 @@ import { createBindings } from './bindings/index.ts';
 import type { HubContext, HubRunOptions } from './context.ts';
 import { nextHubEpoch, nextHubRun, openDb } from './db.ts';
 import { createEvents } from './events/index.ts';
+import { isFixtureDevice } from './fixture/fence.ts';
+import { createFixture, DEFAULT_BENCH } from './fixture/index.ts';
 import { buildServer } from './http.ts';
 import { JobRunner } from './jobs.ts';
 import { createAdvert } from './lan/advert.ts';
 import { createLnp } from './lan/lnp.ts';
 import { createLatencyProbe } from './latency/probe.ts';
 import { NODE_LINK_PORT, SerialFrameTap, SleepGuard } from './links/index.ts';
+import { bridgeBinding, serialBridgeArg } from './links/serial-bridge.ts';
 import { holdPort, runningHubPid, writePidfile } from './lock.ts';
 import { LogStore } from './logstore.ts';
 import { createOta, NODE_HTTP_PORT } from './ota/index.ts';
@@ -52,7 +55,13 @@ async function main(): Promise<void> {
   // The node HTTP listener (OTA images, spec 08 §8.10) binds where the node links do; a test hub passes
   // its own port (0: ephemeral), never the running hub's 7422.
   const nodeHttpPort = Number(arg('--node-http-port', String(NODE_HTTP_PORT)));
-  const useSerial = !process.argv.includes('--no-serial');
+  // `--serial-bridge 127.0.0.1:<port>` (design m2-c1-hil §5.1, tests only): the serial ports are a test's virtual
+  // USB hub on loopback (packages/hub/test/virtual-usb.ts), never the Mac's; it implies leaving those alone. A
+  // malformed flag (no value, `=` with nothing, not loopback) stops the start, before any port is opened.
+  const serialBridge = serialBridgeArg(process.argv.slice(2));
+  const useSerial = serialBridge !== null || !process.argv.includes('--no-serial');
+  // The HIL bench (design m2-c1-hil D7): hardware/bench/<name>.bench.yaml of this checkout.
+  const benchName = arg('--bench', process.env.FR_BENCH || DEFAULT_BENCH);
   // How this hub runs, for the C6 parts (design c6 §3.3); --no-advert keeps it out of mDNS.
   const runOpts: HubRunOptions = {
     apiHost: HOST,
@@ -91,7 +100,7 @@ async function main(): Promise<void> {
   // Every `@fr1:` line passes the log store's frame decoder: the tap there feeds the serial node link.
   const frames = new SerialFrameTap(db);
   const logs = new LogStore(db, run, { frames, seq });
-  const serial = new SerialPortManager(logs, db);
+  const serial = new SerialPortManager(logs, db, serialBridge ? { binding: bridgeBinding(serialBridge) } : {});
   const jobs = new JobRunner(db);
   const registry = createRegistry(db);
   const events = createEvents(db, seq, run);
@@ -118,7 +127,8 @@ async function main(): Promise<void> {
   });
   frames.attach((device, line) => router.serialLine(device, line));
   // Node <-> node (design c5 §4): the router carries hub broadcasts; bindings resolve, push and re-push.
-  const bindings = createBindings({ db, registry, router, events });
+  // The fixture fence on resolved ends and stored rows (design m2-c1-hil D15): `hub` exists by the first call.
+  const bindings = createBindings({ db, registry, router, events, isFixture: (id) => isFixtureDevice(hub, id) });
   const ota = createOta({
     db,
     router,
@@ -176,6 +186,7 @@ async function main(): Promise<void> {
     staticSite: createStaticSite(ctx, runOpts),
     latencyProbe: createLatencyProbe(ctx, runOpts),
     sleepGuard,
+    fixture: createFixture(ctx, runOpts, { benchName }),
   };
   const app = buildServer(hub, port);
   await new Promise<void>((r) => guard.close(() => r()));
@@ -194,6 +205,7 @@ async function main(): Promise<void> {
   eventsRing.start();
   await router.start(); // node links (TCP/UDP :7421) once the API is up
   bindings.start(); // its router hooks and event subscriptions, once the router runs
+  hub.fixture!.start(); // the HIL fixture module (design m2-c1-hil): its bus subscription, once the router runs
   await ota.start(); // the node HTTP listener (:7422) serves only nodes with a session, so after the router
   // The rest of C6: prompts, the lease sweeper, the LAN self-test, the advert (of :7421, so after the
   // router), the latency probe and the dashboard's staleness check.
@@ -215,6 +227,7 @@ async function main(): Promise<void> {
       // A node HTTP port that is taken leaves the hub up; OTA over Wi-Fi fails with no_http_listener.
       ...(ota.listenError() ? { node_http_error: ota.listenError() } : {}),
       ...(useSerial ? {} : { serial: false }),
+      ...(serialBridge ? { serial_bridge: `${serialBridge.host}:${serialBridge.port}` } : {}),
       ...(v6.error ? { v6_error: v6.error } : {}),
       run,
       hub_epoch: hubEpoch,
@@ -242,6 +255,8 @@ async function main(): Promise<void> {
     }
     await app.close().catch(() => undefined);
     await Promise.resolve(ota.stop()).catch(() => undefined);
+    // Before the router: it releases every driven line over the fixture's session.
+    await Promise.resolve(hub.fixture?.stop()).catch(() => undefined);
     bindings.stop();
     await Promise.resolve(router.stop()).catch(() => undefined);
     frames.attach(null);

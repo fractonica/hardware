@@ -1,11 +1,15 @@
 #!/usr/bin/env node
-// Host C++ suite runner (design c2 §8): configures firmware/test/host into build/host-tests, builds it,
+// Host C++ suite runner (design c2 §8): configures firmware/test/host into its build directory, builds it,
 // then runs the test binary (extra args are a test-name filter) or, with --fuzz N, the fuzz binary
 // with N cases per target (extra args filter targets). With --expect <file> (digest lines the TS fuzz
 // suites wrote through FR_FUZZ_DIGESTS), every target both sides ran with N cases must reach the same
 // digest: the T-CODEC evidence that both decoders accept and reject exactly the same inputs.
 //   node tools/host-test.mjs [filter]
 //   node tools/host-test.mjs --fuzz 1000000 [--expect build/fuzz-digests.ts.txt] [filter]
+// The build directory is build/host-tests, or FR_HOST_BUILD_DIR (relative to the checkout, or absolute),
+// so two streams working in one checkout can build and run the suite at once:
+//   FR_HOST_BUILD_DIR=build/host-tests-s1 node tools/host-test.mjs
+// The interop tests (packages/hub/test/cpp-node.ts) still run build/host-tests/fr_net_node.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -14,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const source = join(root, 'firmware', 'test', 'host');
-const build = join(root, 'build', 'host-tests');
+const build = resolve(root, process.env.FR_HOST_BUILD_DIR || join('build', 'host-tests'));
 
 function pick(envName, candidates) {
   if (process.env[envName]) {

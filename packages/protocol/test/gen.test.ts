@@ -424,7 +424,9 @@ describe('JSON accessors', () => {
     expect(encodeMessage('TIME.SYNC_REQ', { t1: 5 })).toEqual({ ok: true, value: bytes('0805') });
     expect(encodeMessage('TIME.SYNC_REQ', { t1: '18446744073709551616' })).toMatchObject({ ok: false, error: 'invalid_args' });
     expect(decodeMessage('PRESENCE.HELLO', bytes('0a06a0b1c2d3e4f5'))).toMatchObject({ ok: true, value: { mac: 'a0b1c2d3e4f5', role: 'node', ota_state: 'new' } });
-    expect(decodeMessage('PRESENCE.HELLO', bytes('3802'))).toEqual({ ok: false, error: 'out_of_range' });
+    // Role 2 is fixture (M2-C1); 3 is no Role.
+    expect(decodeMessage('PRESENCE.HELLO', bytes('3802'))).toMatchObject({ ok: true, value: { role: 'fixture' } });
+    expect(decodeMessage('PRESENCE.HELLO', bytes('3803'))).toEqual({ ok: false, error: 'out_of_range' });
     expect(decodeMessage('NOPE.NOPE', bytes(''))).toEqual({ ok: false, error: 'not_found' });
     const dir = encodeMessage('NET.DIRECTORY', { pages: 1, entries: [{ addr: 0x12, mac: 'a0b1c2d3e4f5' }] });
     expect(dir.ok && hex(dir.value)).toBe('10011a0a08121206a0b1c2d3e4f5');
@@ -432,7 +434,7 @@ describe('JSON accessors', () => {
     expect(encodeMessage('NET.DIRECTORY', { entries: [null] })).toMatchObject({ ok: false, detail: expect.stringMatching(/^entries\[0\]: expected an object/) });
     expect(encodeMessage('PRESENCE.HELLO', { role: 1 })).toMatchObject({ ok: false, error: 'invalid_args', detail: expect.stringMatching(/^role: expected one of /) });
     // Without validation (the golden vectors' lenient cases) the codec takes any number of the enum's type.
-    expect(encodeJson(findMessage('PRESENCE.HELLO')!.codec, { role: 2 }, false)).toEqual({ ok: true, value: bytes('3802') });
+    expect(encodeJson(findMessage('PRESENCE.HELLO')!.codec, { role: 3 }, false)).toEqual({ ok: true, value: bytes('3803') });
   });
 });
 

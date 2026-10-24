@@ -1,14 +1,17 @@
 // Runs gate scenarios (lib/scenario.ts) against a hub and reports per gate (lib/report.ts): the engine of
-// tests/e2e/run.ts (every gate module, or the chosen suites) and of runStandalone (one module run as a
-// script). Progress goes to stderr; stdout carries the report only.
+// tests/e2e/run.ts (every gate module of a tier, or the chosen suites) and of runStandalone (one module run
+// as a script). Progress goes to stderr; stdout carries the report only. A hil run (--tier hil, design
+// m2-c1-hil D13) starts with the bench_get preflight (lib/hil.ts hilPreflight): a fatal problem fails every
+// gate before anything is pressed.
 
 import { readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { hilPreflight } from './hil.ts';
 import { defaultHubUrl, Hub, HubError } from './hub.ts';
-import { countStatuses, type E2eReport, EXIT, exitCodeFor, type GateReport, PROGRESS_PREFIX, renderReport } from './report.ts';
-import { type Scenario, type ScenarioCtx, scenarioOf, skipReason } from './scenario.ts';
+import { countStatuses, type E2eReport, EXIT, exitCodeFor, type GateReport, type PreflightReport, PROGRESS_PREFIX, renderReport } from './report.ts';
+import { needsOf, type Scenario, SCENARIO_TIERS, type ScenarioCtx, scenarioOf, type ScenarioTier, skipReason, tierOf } from './scenario.ts';
 
 /** A gate module: tests/e2e/t-<name>.ts. */
 const GATE_FILE = /^t-[a-z0-9][a-z0-9-]*\.ts$/;
@@ -44,16 +47,23 @@ function names(f: Found): string[] {
   return [f.file.replace(/\.ts$/, ''), f.scenario?.gate ?? ''].filter(Boolean).map((n) => n.toLowerCase());
 }
 
-/** The modules the suites name (all without suites), and the suites that name none. */
-export function select(found: Found[], suites: string[]): { chosen: Found[]; unknown: string[] } {
+/**
+ * The modules the suites name (all without suites), and the suites that name none. With `tier`, only that
+ * tier's modules (a module that fails to load counts as target); a suite that names another tier's module
+ * is unknown here and listed in `otherTier` with its tier.
+ */
+export function select(found: Found[], suites: string[], tier?: ScenarioTier): { chosen: Found[]; unknown: string[]; otherTier: { suite: string; tier: ScenarioTier }[] } {
+  const inTier = tier ? found.filter((f) => (f.scenario ? tierOf(f.scenario) : 'target') === tier) : found;
   if (!suites.length) {
-    return { chosen: found, unknown: [] };
+    return { chosen: inTier, unknown: [], otherTier: [] };
   }
   const wanted = suites.map((s) => s.toLowerCase());
-  return {
-    chosen: found.filter((f) => names(f).some((n) => wanted.includes(n))),
-    unknown: suites.filter((s) => !found.some((f) => names(f).includes(s.toLowerCase()))),
-  };
+  const unknown = suites.filter((s) => !inTier.some((f) => names(f).includes(s.toLowerCase())));
+  const otherTier = unknown.flatMap((s) => {
+    const f = found.find((x) => names(x).includes(s.toLowerCase()));
+    return f?.scenario ? [{ suite: s, tier: tierOf(f.scenario) }] : [];
+  });
+  return { chosen: inTier.filter((f) => names(f).some((n) => wanted.includes(n))), unknown, otherTier };
 }
 
 export interface RunOptions {
@@ -61,7 +71,9 @@ export interface RunOptions {
   sourceDir: string;
   allowHuman: boolean;
   signal: AbortSignal;
-  /** Extra arguments for the scenarios (a module run on its own); empty under run.ts. */
+  /** The run's tier (default target); hil runs the bench_get preflight first. */
+  tier?: ScenarioTier;
+  /** Arguments for the one scenario: a module run on its own, or run.ts's after `--` (test_run's args). */
   args?: string[];
   /** One stderr line. */
   err(line: string): void;
@@ -78,12 +90,12 @@ async function runOne(f: Found, opts: RunOptions, hub: Hub): Promise<GateReport>
   if (!f.scenario) {
     return { ...base, status: 'error', reason: f.problem, measured: {}, duration_ms: 0 };
   }
-  const skip = skipReason(f.scenario.needs, opts.allowHuman);
+  // The needs of this run: its args may narrow them (T-INPUT's human phase pressed by the fixture needs no person).
+  const skip = skipReason(needsOf(f.scenario, opts.args ?? []), opts.allowHuman);
   if (skip) {
     progress(opts, gate, 'skipped');
     return { ...base, status: 'skipped', reason: skip, measured: {}, duration_ms: 0 };
   }
-  progress(opts, gate, 'running');
   const measured: Record<string, unknown> = {};
   const ctx: ScenarioCtx = {
     hub,
@@ -100,6 +112,13 @@ async function runOne(f: Found, opts: RunOptions, hub: Hub): Promise<GateReport>
   };
   let report: GateReport;
   try {
+    // The bench may rule the gate out (T-LAT while the HIL bench wires its rig's pins).
+    const benchSkip = f.scenario.skip ? await f.scenario.skip(ctx) : null;
+    if (benchSkip) {
+      progress(opts, gate, 'skipped');
+      return { ...base, status: 'skipped', reason: benchSkip, measured: {}, duration_ms: Date.now() - started };
+    }
+    progress(opts, gate, 'running');
     const out = await f.scenario.run(ctx);
     report = { ...base, status: out.pass ? 'pass' : 'fail', measured: { ...measured, ...out.measured }, evidence: out.evidence, duration_ms: Date.now() - started };
   } catch (e) {
@@ -116,20 +135,37 @@ async function runOne(f: Found, opts: RunOptions, hub: Hub): Promise<GateReport>
   return report;
 }
 
-/** Runs the modules one after another (they share the boards); a cancel stops before the next one. */
+/**
+ * Runs the modules one after another (they share the boards); a cancel stops before the next one. A hil
+ * run asks bench_get first: with a fatal problem every gate is an error with it as the reason, unrun.
+ */
 export async function runScenarios(found: Found[], opts: RunOptions): Promise<E2eReport> {
   const started = new Date();
   const hub = new Hub(opts.hubUrl);
+  const tier = opts.tier ?? 'target';
   const gates: GateReport[] = [];
+  let preflight: PreflightReport | undefined;
+  if (tier === 'hil' && found.some((f) => f.scenario)) {
+    preflight = await hilPreflight(hub, opts.signal).catch((e: unknown) => ({ ok: false, fatal: [`bench_get: ${(e as Error).message}`], notes: [] }));
+    for (const n of [...preflight.fatal, ...preflight.notes.map((x) => `note: ${x}`)]) {
+      opts.err(`[preflight] ${n}`);
+    }
+  }
   for (const f of found) {
     if (opts.signal.aborted) {
       break;
+    }
+    if (preflight && !preflight.ok) {
+      const gate = f.scenario?.gate ?? f.file;
+      progress(opts, gate, 'error');
+      gates.push({ gate, file: f.file, ...(f.scenario?.title ? { title: f.scenario.title } : {}), status: 'error', needs: f.scenario?.needs ?? {}, reason: `bench preflight: ${preflight.fatal.join('; ')}`, measured: {}, duration_ms: 0 });
+      continue;
     }
     gates.push(await runOne(f, opts, hub));
   }
   const counts = countStatuses(gates);
   return {
-    tier: 'target',
+    tier,
     pass: counts.fail === 0 && counts.error === 0,
     hub: hub.url,
     allow_human: opts.allowHuman,
@@ -137,6 +173,7 @@ export async function runScenarios(found: Found[], opts: RunOptions): Promise<E2
     duration_ms: Date.now() - started.getTime(),
     counts,
     gates,
+    ...(preflight ? { preflight } : {}),
   };
 }
 
@@ -147,15 +184,27 @@ export interface Args {
   hubUrl: string;
   list: boolean;
   help: boolean;
+  /** --tier target|hil|sim (run.ts; default target). */
+  tier: string;
   /** Arguments run.ts does not know: a standalone module's own. */
   rest: string[];
+  /** After `--`: the one suite's own arguments (test_run's `args`). */
+  suiteArgs: string[];
 }
 
+/** run.ts's tiers: the scenario tiers, and sim (reserved for M2-C2: no modules yet). */
+const RUN_TIERS = [...SCENARIO_TIERS, 'sim'] as const;
+
 export function parseArgs(argv: string[], defaults: { allowHuman: boolean } = { allowHuman: false }): Args {
-  const a: Args = { suites: [], allowHuman: defaults.allowHuman, json: false, hubUrl: defaultHubUrl(), list: false, help: false, rest: [] };
+  const a: Args = { suites: [], allowHuman: defaults.allowHuman, json: false, hubUrl: defaultHubUrl(), list: false, help: false, tier: 'target', rest: [], suiteArgs: [] };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
-    if (v === '--suite' && argv[i + 1]) {
+    if (v === '--') {
+      a.suiteArgs = argv.slice(i + 1);
+      break;
+    } else if (v === '--tier' && argv[i + 1]) {
+      a.tier = argv[++i];
+    } else if (v === '--suite' && argv[i + 1]) {
       a.suites.push(...argv[++i].split(',').filter(Boolean));
     } else if (v === '--hub' && argv[i + 1]) {
       a.hubUrl = argv[++i];
@@ -174,13 +223,19 @@ export function parseArgs(argv: string[], defaults: { allowHuman: boolean } = { 
   return a;
 }
 
-const USAGE = `usage: node --conditions=@fractonica/source tests/e2e/run.ts [suite…] [--suite a,b] [--allow-human] [--hub URL] [--json] [--list]
-  suite: a gate module's stem or gate id (t-lat, T-LAT); default every tests/e2e/t-*.ts
-  --allow-human  also run the scenarios that need a person at the bench or wiring
+const USAGE = `usage: node --conditions=@fractonica/source tests/e2e/run.ts [suite…] [--suite a,b] [--tier target|hil] [--allow-human] [--hub URL] [--json] [--list] [-- args…]
+  suite: a gate module's stem or gate id (t-lat, T-LAT); default every tests/e2e/t-*.ts of the tier
+  --tier target  the gates on the hub's boards (default); hil: the HIL fixture gates (T-HIL), after a bench_get
+                 preflight that fails fast with the faulty line; sim: reserved (M2-C2)
+  --allow-human  also run the scenarios that need a person at the bench or wiring (hil gates never do)
   --hub URL      the hub (default FR_HUB or http://127.0.0.1:7420)
-  --json         print the report as one JSON line (what test_run reads)`;
+  --json         print the report as one JSON line (what test_run reads)
+  -- args…       the one suite's own flags (test_run's args), e.g. --tier hil t-hil -- --phase fit`;
 
-/** Cancels on SIGTERM (test_run's job_cancel) and SIGINT; a second signal, or 5 s, ends the process. */
+/** After a cancel, how long the scenario has to clean up before the process ends (design m2-c1-hil D13: release, LED and binding restores). */
+export const CANCEL_GRACE_MS = 10_000;
+
+/** Cancels on SIGTERM (test_run's job_cancel) and SIGINT; a second signal, or CANCEL_GRACE_MS, ends the process. */
 function cancelOnSignals(): AbortController {
   const ac = new AbortController();
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
@@ -189,7 +244,7 @@ function cancelOnSignals(): AbortController {
         process.exit(130);
       }
       ac.abort(new Error(`cancelled (${sig})`));
-      setTimeout(() => process.exit(130), 5000).unref();
+      setTimeout(() => process.exit(130), CANCEL_GRACE_MS).unref();
     });
   }
   return ac;
@@ -212,21 +267,46 @@ export async function main(argv: string[], dir: string): Promise<number> {
     err(`e2e: unknown option ${unknownFlag}\n${USAGE}`);
     return EXIT.usage;
   }
+  if (!(RUN_TIERS as readonly string[]).includes(args.tier)) {
+    err(`e2e: --tier takes ${RUN_TIERS.join(', ')}, not ${args.tier}\n${USAGE}`);
+    return EXIT.usage;
+  }
   const found = await discover(dir);
+  // sim is a run tier with no modules yet: it selects none.
+  const tier = args.tier as ScenarioTier;
+  // --list shows the tier's modules (target by default, so a target listing reads as before M2-C1).
+  const { chosen: inTier } = select(found, [], tier);
   if (args.list) {
-    for (const f of found) {
+    for (const f of inTier) {
       process.stdout.write(`${f.file}\t${f.scenario?.gate ?? '-'}\t${f.problem ?? JSON.stringify(f.scenario?.needs ?? {})}\n`);
     }
     return EXIT.ok;
   }
-  const { chosen, unknown } = select(found, [...args.suites, ...args.rest]);
+  const { chosen, unknown, otherTier } = select(found, [...args.suites, ...args.rest], tier);
   if (unknown.length || !chosen.length) {
-    const have = found.map((f) => names(f)[0]).join(', ') || 'none';
-    err(unknown.length ? `e2e: no gate scenario ${unknown.join(', ')} in ${dir} (have: ${have})` : `e2e: no gate scenarios (tests/e2e/t-*.ts) in ${dir}`);
+    const have = inTier.map((f) => names(f)[0]).join(', ') || 'none';
+    const moved = otherTier.map((o) => `${o.suite} is a ${o.tier} gate: run it with --tier ${o.tier}`).join('; ');
+    err(
+      unknown.length
+        ? `e2e: no gate scenario ${unknown.join(', ')} in ${dir} (tier ${tier}; have: ${have})${moved ? `; ${moved}` : ''}`
+        : `e2e: no gate scenarios (tests/e2e/t-*.ts) of tier ${tier} in ${dir}${args.tier === 'sim' ? ' (the sim tier comes with M2-C2)' : ''}`,
+    );
     return EXIT.notFound;
   }
+  if (args.suiteArgs.length && chosen.length !== 1) {
+    err(`e2e: arguments after -- go to one suite; ${chosen.length} are chosen (name one with --suite)`);
+    return EXIT.usage;
+  }
   const ac = cancelOnSignals();
-  const report = await runScenarios(chosen, { hubUrl: args.hubUrl, sourceDir: resolve(dir, '..', '..'), allowHuman: args.allowHuman, signal: ac.signal, err });
+  const report = await runScenarios(chosen, {
+    hubUrl: args.hubUrl,
+    sourceDir: resolve(dir, '..', '..'),
+    allowHuman: args.allowHuman,
+    signal: ac.signal,
+    tier,
+    ...(args.suiteArgs.length ? { args: args.suiteArgs } : {}),
+    err,
+  });
   print(report, args.json);
   return ac.signal.aborted ? 130 : exitCodeFor(report);
 }
@@ -240,7 +320,7 @@ export function standaloneUsage(scenario: Scenario, file: string): string {
   return [
     `usage: node --conditions=@fractonica/source tests/e2e/${file} [options] [--hub URL] [--json]`,
     `  ${scenario.gate}${scenario.title ? `: ${scenario.title}` : ''}`,
-    `  needs ${JSON.stringify(scenario.needs)}; run on its own, a person is at the bench (--allow-human is implied)`,
+    `  needs ${JSON.stringify(scenario.needs)}; run on its own, a person is at the bench (--allow-human is implied)${tierOf(scenario) === 'hil' ? '; a hil gate: bench_get is checked first' : ''}`,
     '  --hub URL      the hub (default FR_HUB or http://127.0.0.1:7420)',
     '  --json         print the report as one JSON line',
     '  --list         print the gate and what it needs, run nothing',
@@ -278,7 +358,8 @@ export async function runStandalone(scenario: Scenario, dir: string, argv: strin
     sourceDir: resolve(dir, '..', '..'),
     allowHuman: args.allowHuman,
     signal: ac.signal,
-    args: args.rest,
+    tier: tierOf(scenario),
+    args: [...args.rest, ...args.suiteArgs],
     err,
   });
   print(report, args.json);

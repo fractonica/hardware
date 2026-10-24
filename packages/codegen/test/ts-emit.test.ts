@@ -78,6 +78,12 @@ describe('emitTs', () => {
     expect(fnv1a32(canonicalJson(CATALOG))).toBe(CATALOG_HASH);
   });
 
+  it('keeps a test_only capability in CAPS (the hub decodes it) and out of CATALOG (design m2-c1-hil D3)', () => {
+    expect(CAPS.find((c) => c.name === 'fr.fixture')).toMatchObject({ id: 0x0006, testOnly: true });
+    expect(CAPS.filter((c) => c.testOnly).map((c) => c.name)).toEqual(['fr.fixture']);
+    expect(CATALOG.capabilities.map((c) => c.name)).toEqual(CAPS.filter((c) => !c.testOnly).map((c) => c.name));
+  });
+
   it('the generated tables mirror the model', () => {
     expect(CAPS.map((c) => [c.id, c.name, c.version])).toEqual(model.capabilities.map((c) => [c.id, c.name, c.version]));
     for (const cap of model.capabilities) {

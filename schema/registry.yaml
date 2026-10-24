@@ -5,6 +5,7 @@ standard:
   0x0003: fr.display
   0x0004: fr.audio_out
   0x0005: fr.analog_in
+  0x0006: fr.fixture       # test_only: the HIL fixture's lines (design m2-c1-hil D3)
 system:
   0x00F0: fr.node
   0x00F1: fr.ota

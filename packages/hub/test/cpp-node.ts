@@ -3,9 +3,12 @@
 // one board across boots: with --ota-dir an exited process (an OTA restart, a rollback, a crash) is power
 // cycled into the next boot, which reads what the last one left in its flash and nvs. C6 (design c6 §6 S6) adds
 // fr.diag on port 241, the `net loss` hook and the T-LAT wire between two nodes (--pin-target, --pin-listen).
+// M2-C1 (design m2-c1-hil §4 S2) adds the serial-only node, the pads' taps and the virtual fixture.
 // `pnpm test:host` builds the binary (run it again after changing C++); without it the suites are skipped.
+// FR_NET_NODE_BIN runs another build of it (a stream's own FR_HOST_BUILD_DIR) instead.
 
 import { type ChildProcessWithoutNullStreams, spawn, spawnSync } from 'node:child_process';
+import { createSocket, type Socket as UdpSocket } from 'node:dgram';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { until } from './fake-node.ts';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-export const BIN = resolve(REPO, 'build', 'host-tests', 'fr_net_node');
+export const BIN = process.env.FR_NET_NODE_BIN ? resolve(process.env.FR_NET_NODE_BIN) : resolve(REPO, 'build', 'host-tests', 'fr_net_node');
 
 export type Line = { ev: string; [k: string]: unknown };
 
@@ -40,12 +43,41 @@ export type Line = { ev: string; [k: string]: unknown };
  * the real debounce (line `pin_in` {us, at_us}; boot.down, boot.up and boot.click follow). `state` adds loss_pct,
  * loss_dir, loss_tx, loss_rx, cmds_refused, cmds_scheduled, exec_late, exec_cancelled, exec_late_us_max and
  * rx_queue_us_max.
+ *
+ * M2-C1 (design m2-c1-hil §4 S2):
+ * - Serial only: `--serial 1` without --hub-tcp/--hub-udp is a radio-off node (the HIL fixture's build): no TCP or
+ *   UDP link, HELLO without `wifi`, the serial session's WELCOME sets NET (`state` health bit 4). Its USB line goes
+ *   to an in-process router with serialToRouter(), or to a real hub process through virtual-usb.ts (I1). `state`
+ *   adds `health` (fr_ota's bits) and `hub_session`. Stdin `#<id> <line>` is fr_diag's serial command channel
+ *   (the hub's diag_exec on a port it holds open): the answer `#<id> {json}` goes out on the USB line (onSerial).
+ * - `--role node|gateway|fixture` (or 0-2), `--board <b>`, `--profile <p>`, `--chip <n>`: what HELLO, the descriptor and the
+ *   OTA CHECK say (default esp32c6-supermini, c6-pad, 13). The board picks the test pin pin_pulse and `info` report
+ *   (esp32c3-oled042 10, esp32c6-supermini 20, waveshare-esp32s3-lcd19 16, esp32s3-devkitc1-n16r8 none: -1).
+ * - The wires are text datagrams on loopback: `level 0|1`, `<us>` (a pulse: low now, released `us` later),
+ *   `frame <grb> <bits>` (a WS2812 refresh). WireTap receives them in a test. A node stamps a datagram it takes
+ *   (pin_in, a fixture line's capture) at its arrival, the kernel's SO_TIMESTAMP, as a GPIO ISR stamps the pin's
+ *   edge: a process poll() wakes late on a loaded host stamps no later for it.
+ * - Pads: `--led-kind mono|gpio_low|ws2812` is what drives the status LED's pin (mono active high, the default;
+ *   gpio_low the C3 pads' led_gpio; ws2812 the C6/S3 pads', RGB and dimmable, max_brightness 64), and
+ *   `--led-tap <port>` gets every LedService write as that pin carries it: a `level` (sent again every 250 ms)
+ *   or a `frame` (the `led` line then adds `grb`); line `led_sent` {at_us} says when each write's datagram went
+ *   (the pin's change on the pad's clock), printed after its STATE was stamped. `--test-pin-tap <port>` gets each
+ *   pin_pulse as `<us>`, beside
+ *   --pin-target. `--pin-listen` also takes `level 0|1`, a fixture's open-drain line holding the boot button down
+ *   (line `pin_in` {level, at_us}; wired-AND with a pulse).
+ * - `--fixture 1`: the virtual fixture (role fixture, board esp32s3-devkitc1-n16r8, profile s3k-fixture, chip 9):
+ *   status (fr.led) on port 1 and fr.fixture ch0-ch11 on 2-13 (ch0-ch3 open-drain BOOT lines, ch4-ch5 LED level
+ *   taps, ch6-ch7 WS2812 taps, ch8-ch11 test_pin taps), each FixtureService on a fake line, no boot button.
+ *   `--line <ch>=<port>` wires a channel: a driving line sends its wire's `level` to a pad's --pin-listen port, an
+ *   input line listens on it (0: any free one) for a pad's taps. Lines `line` {name, port, drive, decode, pull}
+ *   (linePort()); stdin `line <ch> <port>` rewires a driving line (line `line` {name, port, ok}), `lines` prints
+ *   `lines` {items: [{name, level, pressing, port}]}.
  */
 export class CppNode {
   readonly lines: Line[] = [];
   readonly proc: ChildProcessWithoutNullStreams;
   exited: number | null = null;
-  /** With --serial: the node's `@fr1:` lines, as its USB port would print them. */
+  /** With --serial: the node's `@fr1:` lines (and serial command-channel answers), as its USB port would print them. */
   onSerial: (line: string) => void = () => undefined;
   #buf = '';
   #onExit: Array<(code: number) => void> = [];
@@ -59,7 +91,8 @@ export class CppNode {
       while ((nl = this.#buf.indexOf('\n')) >= 0) {
         const text = this.#buf.slice(0, nl);
         this.#buf = this.#buf.slice(nl + 1);
-        if (text.startsWith('@fr1:')) {
+        // The USB line's own output: `@fr1:` envelopes, and the serial command channel's `#<id> {json}` answers.
+        if (text.startsWith('@fr1:') || /^#\d{1,8} [{]/.test(text)) {
           this.onSerial(text);
           continue;
         }
@@ -105,6 +138,12 @@ export class CppNode {
   async pinListenPort(timeoutMs = 5000): Promise<number> {
     await until(() => this.of('pin_listen').length > 0, timeoutMs, 'the pin_listen line');
     return Number(this.of('pin_listen')[0].port);
+  }
+
+  /** With --fixture: the UDP port of channel `name` (`--line <name>=0` gets a free one), from its `line` line. */
+  async linePort(name: string, timeoutMs = 5000): Promise<number> {
+    await until(() => this.of('line').some((l) => l.name === name && l.drive !== undefined), timeoutMs, `the ${name} line`);
+    return Number(this.of('line').find((l) => l.name === name && l.drive !== undefined)!.port);
   }
 
   /** Calls `fn` once the process has exited (at once if it has). */
@@ -186,6 +225,68 @@ export class CppBoard {
         }
       }, this.#bootMs);
     });
+  }
+}
+
+/**
+ * The USB line of a `--serial 1` node to an in-process router (fake-node.ts rig): its `@fr1:` lines reach the
+ * router as the log store's frame tap hands them over, and the hub's writeLine to `mac` goes to its stdin.
+ */
+export function serialToRouter(
+  node: CppNode,
+  mac: string,
+  r: { router: { serialLine(device: string, line: string): void }; serial: { writeLine(selector: string, line: string): Promise<unknown> } },
+): void {
+  node.onSerial = (line) => queueMicrotask(() => r.router.serialLine(mac, line));
+  const next = r.serial.writeLine.bind(r.serial);
+  r.serial.writeLine = async (selector: string, line: string) => {
+    if (selector !== mac) {
+      return next(selector, line);
+    }
+    node.send(line);
+    return { path: `/dev/cu.fake-${mac}`, key: mac };
+  };
+}
+
+/** One wire's far end in a test: the datagrams a node sends to `port` (`level 0|1`, `<us>`, `frame <grb> <bits>`). */
+export class WireTap {
+  readonly messages: { text: string; at: number }[] = [];
+  readonly #sock: UdpSocket;
+  #port = 0;
+
+  private constructor() {
+    this.#sock = createSocket('udp4');
+    this.#sock.on('message', (msg) => this.messages.push({ text: msg.toString('utf8'), at: Date.now() }));
+  }
+
+  static async open(): Promise<WireTap> {
+    const t = new WireTap();
+    await new Promise<void>((r) => t.#sock.bind(0, '127.0.0.1', () => r()));
+    t.#port = t.#sock.address().port;
+    return t;
+  }
+
+  get port(): number {
+    return this.#port;
+  }
+
+  /** The texts so far, repeats of a held level included. */
+  texts(): string[] {
+    return this.messages.map((m) => m.text);
+  }
+
+  /** The texts with consecutive repeats folded: what changed on the wire. */
+  changes(): string[] {
+    return this.texts().filter((t, i, all) => i === 0 || t !== all[i - 1]);
+  }
+
+  /** Sends `text` to a node's port (a pad's --pin-listen, a fixture's input line). */
+  send(port: number, text: string): void {
+    this.#sock.send(text, port, '127.0.0.1');
+  }
+
+  close(): void {
+    this.#sock.close();
   }
 }
 

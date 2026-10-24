@@ -46,8 +46,10 @@ describe('fr test run --tier target', () => {
     expect(host).toContain('tier: host');
   });
 
-  it('reads only a target report; a gate line shows its summary, else its first scalar values', () => {
+  it('reads only a target or hil report; a gate line shows its summary, else its first scalar values', () => {
     expect(targetReport({ tier: 'host' })).toBeNull();
+    expect(targetReport({ tier: 'sim', gates: [] })).toBeNull();
+    expect(targetReport({ tier: 'hil', pass: true, gates: [{ gate: 'T-HIL', status: 'pass' }] })).toMatchObject({ tier: 'hil' });
     expect(targetReport({ tier: 'target', gates: [{ gate: 'T-LED' }] })).toBeNull();
     expect(targetReport(null)).toBeNull();
     expect(measuredText(undefined)).toBe('');

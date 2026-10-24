@@ -15,15 +15,28 @@
 // tests/e2e/run.ts loads every such module (`fr test run --tier target [suite]`, test_run). A module that
 // also runs on its own (`node --conditions=@fractonica/source tests/e2e/t-lat.ts …`) does so under
 // `if (import.meta.main)` with runStandalone (lib/runner.ts), so loading it runs nothing.
+//
+// From M2-C1 (design m2-c1-hil D13) a scenario names its tier: `target` (the default: the gates on the
+// hub's boards) or `hil` (the gates that need the HIL fixture, `needs.fixture`). `run.ts --tier hil` runs
+// only hil modules, after a bench_get preflight (lib/hil.ts hilPreflight); hil gates never need
+// allow_human. A scenario may also say, before it runs, why it is skipped on this bench (`skip`): T-LAT
+// while the bench file wires its rig's pins to the fixture; and what a run with given args needs
+// (`needsFor`): T-INPUT's human phase pressed by the fixture needs no person.
 
 import type { Hub } from './hub.ts';
 
-/** What a scenario needs from the bench: a person (a real press), wiring (jumpers) or boards on the Mac's USB. */
+/** What a scenario needs from the bench: a person (a real press), wiring (jumpers), boards on the Mac's USB, or the HIL fixture. */
 export interface Needs {
   human?: boolean;
   wiring?: boolean;
   usb?: boolean;
+  /** The HIL fixture and its bench file (a hil-tier gate): checked by run.ts's bench_get preflight, never a person. */
+  fixture?: boolean;
 }
+
+/** The tiers a gate module belongs to (test_run's target and hil; host is vitest and the C++ suite, sim is M2-C2). */
+export const SCENARIO_TIERS = ['target', 'hil'] as const;
+export type ScenarioTier = (typeof SCENARIO_TIERS)[number];
 
 /** A scenario's verdict: the gate passed or not, what it measured, and the evidence a gate note records. */
 export interface Outcome {
@@ -60,10 +73,28 @@ export interface Scenario {
   gate: string;
   /** One line on what it checks. */
   title?: string;
+  /** target (default) or hil (design m2-c1-hil D13): run.ts --tier picks the modules of one tier. */
+  tier?: ScenarioTier;
   needs: Needs;
+  /**
+   * The needs of a run with these arguments (ctx.args as `run` reads them, its FR_T_<GATE>_ARGS fallback
+   * included), where they are narrower than `needs`: T-INPUT `--phase human --press-by fixture` needs no
+   * person. The runner asks it before skipReason; arguments it cannot parse leave `needs`.
+   */
+  needsFor?(args: readonly string[]): Needs;
   /** The module's own flags (ctx.args), one per line, for `--help` when it runs on its own. */
   usage?: string;
+  /**
+   * Why the gate cannot run on this bench, asked right before run (after the needs): a reason makes it
+   * `skipped`, null runs it. It reads, never changes, the bench; a failure to ask is the gate's error.
+   */
+  skip?(ctx: ScenarioCtx): Promise<string | null>;
   run(ctx: ScenarioCtx): Promise<Outcome>;
+}
+
+/** A scenario's tier: target unless it says hil. */
+export function tierOf(s: Pick<Scenario, 'tier'>): ScenarioTier {
+  return s.tier ?? 'target';
 }
 
 /** Types a scenario module's export. */
@@ -80,10 +111,37 @@ export function scenarioOf(mod: Record<string, unknown>): Scenario | string {
   if (typeof s.run !== 'function') {
     return `${s.gate} exports no run(ctx)`;
   }
-  return { gate: s.gate, ...(s.title ? { title: s.title } : {}), needs: s.needs ?? {}, ...(s.usage ? { usage: s.usage } : {}), run: s.run.bind(s) };
+  if (s.tier !== undefined && !(SCENARIO_TIERS as readonly string[]).includes(s.tier)) {
+    return `${s.gate} names tier ${String(s.tier)}, not ${SCENARIO_TIERS.join(' or ')}`;
+  }
+  return {
+    gate: s.gate,
+    ...(s.title ? { title: s.title } : {}),
+    ...(s.tier ? { tier: s.tier } : {}),
+    needs: s.needs ?? {},
+    ...(typeof s.needsFor === 'function' ? { needsFor: s.needsFor.bind(s) } : {}),
+    ...(s.usage ? { usage: s.usage } : {}),
+    ...(typeof s.skip === 'function' ? { skip: s.skip.bind(s) } : {}),
+    run: s.run.bind(s),
+  };
 }
 
-/** Why a scenario is skipped without a person at the bench (D20: human or wiring), or null to run it. */
+/** A scenario's needs for a run with `args` (its needsFor), else its declared needs. */
+export function needsOf(s: Pick<Scenario, 'needs' | 'needsFor'>, args: readonly string[]): Needs {
+  if (!s.needsFor) {
+    return s.needs;
+  }
+  try {
+    return s.needsFor(args);
+  } catch {
+    return s.needs; // the run's own parse says what is wrong with them
+  }
+}
+
+/**
+ * Why a scenario is skipped without a person at the bench (D20: human or wiring), or null to run it. The
+ * fixture is not a person: hil gates never need allow_human (m2-c1-hil D13).
+ */
 export function skipReason(needs: Needs, allowHuman: boolean): string | null {
   if (allowHuman) {
     return null;

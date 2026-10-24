@@ -161,7 +161,7 @@ constexpr bool is_known(ChipId v)
     return false;
 }
 
-enum class Role : uint8_t { node = 0, gateway = 1 };
+enum class Role : uint8_t { node = 0, gateway = 1, fixture = 2 };
 /** The YAML member name; nullptr for a value this build does not know. */
 const char *to_name(Role v);
 bool from_name(std::string_view s, Role &out);
@@ -170,6 +170,7 @@ constexpr bool is_known(Role v)
     switch (v) {
     case Role::node:
     case Role::gateway:
+    case Role::fixture:
         return true;
     }
     return false;

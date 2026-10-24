@@ -14,6 +14,8 @@ import { runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
 import { HUB_HANDLERS } from './doctor/ops.ts';
 import { mintCursor } from './events/index.ts';
+import { fenceDiag, fenceDiagDevice, portDevice } from './fixture/fence.ts';
+import { FIXTURE_HANDLERS } from './fixture/ops.ts';
 import { hardResetCapturing, runPytools } from './flash.ts';
 import { PROBE_HANDLERS } from './latency/ops.ts';
 import { LOGS_HANDLERS } from './logs/ops.ts';
@@ -250,7 +252,7 @@ export const HANDLERS: Record<OpName, Handler> = {
       // a registry that cannot list yet: the count is unknown, not an error of hub_status
     }
     // C6 parts (design c6 §3.3): each may add warnings (LNP_DENIED, the advert, a stale dashboard, ...).
-    for (const part of [hub.prompts, hub.leases, hub.lnp, hub.advert, hub.appServer, hub.wsServer, hub.staticSite, hub.latencyProbe]) {
+    for (const part of [hub.prompts, hub.leases, hub.lnp, hub.advert, hub.appServer, hub.wsServer, hub.staticSite, hub.latencyProbe, hub.fixture]) {
       warnings.push(...(part?.warnings?.() ?? []));
     }
     const lnp = hub.lnp?.status();
@@ -446,12 +448,16 @@ export const HANDLERS: Record<OpName, Handler> = {
     if (/[\r\n]/.test(input.line)) {
       throw new FrError('INVALID_ARGS', 'line must be one line (no CR or LF)');
     }
+    // On the HIL fixture only the read-only lines (design m2-c1-hil D15): on the port text first, and again
+    // on the device it resolves to, since a /dev path of a port that is re-enumerating names none until then.
+    fenceDiag(hub, input.port, input.line);
     // A device whose USB port the hub does not hold open (on a charger, leased) but that has a hub link
     // gets the same line as fr.diag.exec over its session (design c3 §4); otherwise the serial channel.
     const linked = diagLinkTarget(hub, input.port);
     let via = 'serial';
     let request: (line: string) => Promise<unknown>;
     if (linked) {
+      fenceDiagDevice(hub, linked, input.line);
       request = async (line) => {
         const r = await diagOverLink(hub, linked, line, input.timeout_s);
         via = r.link;
@@ -459,12 +465,21 @@ export const HANDLERS: Record<OpName, Handler> = {
       };
     } else {
       const { key } = await hub.serial.resolveWait(input.port);
+      fenceDiagDevice(hub, isDeviceId(key) ? key : null, input.line);
       request = (line) => diagRequest(hub, key, line, input.timeout_s);
     }
     const cursor = mintCursor(hub);
     let response = await request(input.line);
     if (input.line.trim() === 'caps' && response !== null && typeof response === 'object') {
       response = await diagCapsAll(request, response as CapsPage);
+    }
+    // A DUT's pin_pulse on its own test_pin line: a clock sample for the fixture module (design m2-c1-hil D10).
+    const pulse = response as { ok?: unknown; at_us?: unknown } | null;
+    if (hub.fixture && /^pin_pulse\b/.test(input.line.trim()) && pulse?.ok === true && typeof pulse.at_us === 'number') {
+      const id = linked ?? portDevice(hub, input.port);
+      if (id) {
+        hub.fixture.pinPulse(id, pulse.at_us);
+      }
     }
     // The head before the write, not the response line: the device emits the frames a command causes
     // (`inject` -> down/up/click, `mark` -> diag.mark) before it answers, so `since` must precede them.
@@ -490,7 +505,9 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...HUB_HANDLERS, // hub_doctor (S2)
   ...INVENTORY_HANDLERS, // board_list, profile_list, capability_list (S2)
   ...LOGS_HANDLERS, // logs_assert (S4)
-  ...TESTS_HANDLERS, // test_run (S4)
+  ...TESTS_HANDLERS, // test_run (C6 S4); M2-C1: tiers sim (NOT_FOUND) and hil, args, test_report (S5)
   ...PORTS_HANDLERS, // serial_lease, serial_lease_renew, serial_release (S5)
   ...PROBE_HANDLERS, // latency_probe (S7)
+  // M2-C1 (design m2-c1-hil): bench_get (S4; input_simulate's gpio layer is in LINKS_HANDLERS).
+  ...FIXTURE_HANDLERS,
 };

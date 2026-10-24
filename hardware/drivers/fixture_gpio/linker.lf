@@ -1,0 +1,9 @@
+# fixture_gpio (design m2-c1-hil D4): its edge ISR runs on the ESP_INTR_FLAG_IRAM GPIO ISR service and its press
+# timers from the IRAM systimer alarm (ESP_TIMER_ISR, CONFIG_ESP_TIMER_IN_IRAM), both while flash is busy, and its
+# panic hook (__wrap_esp_panic_handler) with the cache in any state.
+# `noflash` puts the object's text in IRAM and its rodata in DRAM, so the inlined gpio_ll, edge ring and Plan
+# code, and anything the compiler leaves out of line at -Og, stays reachable then (spec 03 §3.4).
+[mapping:fixture_gpio]
+archive: libfixture_gpio.a
+entries:
+    fixture_gpio (noflash)

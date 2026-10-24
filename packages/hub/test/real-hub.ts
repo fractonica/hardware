@@ -6,6 +6,9 @@
 // (prepareIdentity, then markIdentWritten), so nodes that HELLO with that addr and alias are known at once.
 // restart() is `fr hub restart` on the same ports, for clients and nodes that must come back to it. REST goes
 // through tests/e2e/lib/hub.ts, the client the gate harnesses use.
+// M2-C1 (design m2-c1-hil §5.1, I1): `serialBridge` (a VirtualUsb's address, virtual-usb.ts) gives the hub serial
+// ports from that virtual USB hub (`--serial-bridge`) instead of none, so a serial-only fr_net_node (the virtual
+// fixture) reaches it; devices may carry the profile, board, chip and role they are provisioned with.
 
 import { type ChildProcessWithoutNullStreams, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -26,6 +29,12 @@ export interface RealHubDevice {
   alias: string;
   /** The hub has no network record, so it takes any net a node says (default 42, as the air rig). */
   net?: number;
+  /** As device_provision records them (the hub built no image for a C++ node, so HELLO cannot tell it). */
+  profile?: string;
+  board?: string;
+  chip?: string;
+  /** A fixture's row is provisioned as one (design m2-c1-hil D6). */
+  role?: 'node' | 'gateway' | 'fixture';
 }
 
 export interface RealHub {
@@ -67,14 +76,22 @@ function provision(home: string, devices: readonly RealHubDevice[]): Map<string,
   try {
     for (const d of devices) {
       const net = d.net ?? 42;
-      const { device, epoch_floor } = prepareIdentity(db, { deviceId: d.mac, alias: d.alias, profile: null, board: null, chip: null, net });
+      const { device, epoch_floor } = prepareIdentity(db, {
+        deviceId: d.mac,
+        alias: d.alias,
+        profile: d.profile ?? null,
+        board: d.board ?? null,
+        chip: d.chip ?? null,
+        net,
+        ...(d.role ? { role: d.role } : {}),
+      });
       markIdentWritten(db, d.mac, {
         at: new Date().toISOString(),
         via: 'provision',
         build_id: null,
         fw_id: null,
-        profile: null,
-        board: null,
+        profile: d.profile ?? null,
+        board: d.board ?? null,
         part_profile: null,
         ident: { offset: 0, size: 0 },
         addr: device.addr!,
@@ -102,7 +119,9 @@ interface Proc {
 }
 
 /** Starts the hub and resolves once it listens and its node links are up. */
-export async function startRealHub(opts: { devices?: readonly RealHubDevice[]; env?: Record<string, string>; timeoutMs?: number } = {}): Promise<RealHub> {
+export async function startRealHub(
+  opts: { devices?: readonly RealHubDevice[]; env?: Record<string, string>; timeoutMs?: number; serialBridge?: string } = {},
+): Promise<RealHub> {
   const dir = mkdtempSync(join(tmpdir(), 'fr-real-hub-'));
   const home = join(dir, 'home');
   const tmp = join(dir, 'tmp');
@@ -127,7 +146,7 @@ export async function startRealHub(opts: { devices?: readonly RealHubDevice[]; e
         '--node-host', '127.0.0.1',
         '--node-port', String(ports.node),
         '--node-http-port', String(ports.http),
-        '--no-serial',
+        ...(opts.serialBridge ? ['--serial-bridge', opts.serialBridge] : ['--no-serial']),
         '--no-advert',
       ],
       { env, stdio: ['pipe', 'pipe', 'pipe'] },

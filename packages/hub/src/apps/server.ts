@@ -18,7 +18,7 @@ import type { AppServer, Device, HubContext, HubEvent, HubRunOptions } from '../
 import { mintCursor } from '../events/index.ts';
 import { nowUs } from '../ring.ts';
 import { appFrame, frameBytes } from './bridge.ts';
-import { capsSignature, ManifestCache, provisionedDevices, registryRev, welcomeDevice } from './directory.ts';
+import { appVisible, capsSignature, ManifestCache, provisionedDevices, registryRev, welcomeDevice } from './directory.ts';
 import { AppSocket, type AppLimits, resumeSeq } from './socket.ts';
 import { type AppTokenSource, loadAppToken } from './token.ts';
 
@@ -111,7 +111,8 @@ export function createAppServer(hub: () => HubContext, _run: HubRunOptions, opts
     }
     if (e.type === 'device.provisioned' || e.type === 'registry.drift' || e.type === 'device.online') {
       const dev = e.device ? hub().registry.get(e.device) : null;
-      if (dev?.provisioned) {
+      // A fixture is never announced: apps never hear of it (design m2-c1-hil D6).
+      if (appVisible(dev)) {
         if (e.type === 'registry.drift') {
           // A rename (device_update): apps move the handle to its new alias.
           const f = e.fields ?? {};

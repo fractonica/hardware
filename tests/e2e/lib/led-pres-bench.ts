@@ -3,13 +3,16 @@
 // hub knows of a board's links (device_get), its RSSI (the C3s' 8.5 dBm TX cap makes their uplink the weak
 // side, spike S2 and C6 finding 3: a reading below -70 dBm is logged and reported with the results), an op
 // with its cursor, a wait with a dashboard prompt (prompt_human, D3) also spoken with `sk say` and repeated
-// every 10 min, the events of a board since a cursor, and a diag line retried once on a transient error.
+// every 10 min, the events of a board since a cursor, a diag line retried once on a transient error, and
+// T-LED's --verify fixture (design m2-c1-hil D14): its LED changes read back through the HIL fixture
+// (hil.edge/hil.frame) and matched to its STATEs by lib/hil.ts's matcher.
 // Nothing here arms a hook: the gates arm and disarm theirs inside their own try/finally.
 
 import { spawn } from 'node:child_process';
 
-import type { HubEvent, Result } from '@fractonica/protocol';
+import type { BenchStatus, HubEvent, Result } from '@fractonica/protocol';
 
+import { benchDuts, type LedCommand, ledConfig, type LedState, matchLed, memberOf, onLine, readProfile } from './hil.ts';
 import { type Hub, HubError } from './hub.ts';
 import type { ScenarioCtx } from './scenario.ts';
 import { retrying } from './tasks.ts';
@@ -311,4 +314,82 @@ export function listFlag<T extends string>(gate: string, flag: string, v: string
     throw new Error(`${gate}: ${flag} takes ${allowed.join('|')} (comma-separated) or all, not ${JSON.stringify(v ?? '')}`);
   }
   return list;
+}
+
+// ---- --verify fixture (T-LED; design m2-c1-hil D14, §5.2 phase 3's matcher) ----
+
+/** What T-LED did to a board's LED, for the fixture check: the cursor before, the state then, its commands. */
+export interface LedRecord {
+  since: string;
+  initial: Partial<LedState>;
+  commands: LedCommand[];
+}
+
+/**
+ * Reads a board's LED changes back through the HIL fixture (hil.edge on a led_gpio tap, hil.frame on a
+ * WS2812 line) since `rec.since` and matches them to its STATEs (lib/hil.ts matchLed): every timed status.on
+ * change has a fixture change of the same level within the tolerance, every change is explained by a STATE
+ * or a blink, a frame shows the state at the clamped brightness, a blink has its pulses and its effect_done,
+ * every set and toggle shows by the next command. T-LED has no loss accounting, so a change whose STATE never
+ * came fails here. The board must be a bench DUT on its bench profile with a wired status line.
+ *
+ * The tolerance: T-LED presses nothing, so a DUT's press-based fit is rarely fresh (D10: ≤ 10 s) and its
+ * readings come on hub time (`sync: hub`, through the two TIME offsets), judged within 5 ms + the reading's
+ * u_us (3-7 ms for a Wi-Fi DUT) rather than 5 ms; only a reading on the wired fit is judged within 5 ms. The
+ * result publishes both (`tolerance_us`) and the readings per sync. T-HIL's phase 3 keeps the fit fresh and
+ * holds the 5 ms.
+ */
+export async function verifyLedByFixture(
+  ctx: Pick<ScenarioCtx, 'hub' | 'signal' | 'sourceDir'>,
+  board: Pick<Board, 'alias' | 'device_id'>,
+  bench: BenchStatus,
+  rec: LedRecord,
+): Promise<{ pass: boolean; [k: string]: unknown }> {
+  const dut = benchDuts(bench).find((d) => d.device === board.device_id);
+  if (!dut) {
+    return { pass: false, error: `${board.alias} is not on the bench ${bench.bench.id}` };
+  }
+  // A DUT on another profile (pad-c6 on c6-pad-mono after T-AGENT (c)) has its LED on another pin, maybe
+  // not wired: say so, not "every change missing".
+  if (dut.problem === 'profile_mismatch' || (dut.running_profile !== null && dut.running_profile !== dut.profile)) {
+    return { pass: false, error: `${board.alias} runs ${dut.running_profile ?? 'another profile'}, not its bench profile ${dut.profile}: its LED line is not known to be wired (bench_get: profile_mismatch)` };
+  }
+  const line = dut.lines.status;
+  if (!line?.wired || line.role !== 'led') {
+    return { pass: false, error: `${board.alias} has no wired status line on the bench ${bench.bench.id}` };
+  }
+  const led = ledConfig(readProfile(ctx.sourceDir, dut.profile));
+  const events = await eventsSince(ctx.hub, { selector: board.alias, types: 'status.*,hil.edge,hil.frame', since: rec.since }, ctx.signal);
+  const v = matchLed(
+    {
+      initial: { on: rec.initial.on ?? false, color: rec.initial.color ?? 0xffffff, brightness: rec.initial.brightness ?? led.max_brightness },
+      states: events.filter((e) => e.type.startsWith('status.') && e.part !== 'event' && ['on', 'color', 'brightness'].includes(memberOf(e))),
+      readings: onLine(events, 'status'),
+      effects: events.filter((e) => e.type === 'status.effect_done'),
+      commands: rec.commands,
+    },
+    { decode: line.decode, active_level: line.active_level ?? 'high', max_brightness: led.max_brightness },
+  );
+  const problems = [...v.problems, ...(v.state_lost ? [`${v.state_lost} LED change(s) whose STATE never came`] : [])];
+  return {
+    pass: problems.length === 0,
+    channel: line.channel,
+    decode: line.decode,
+    changes: v.changes,
+    resends: v.resends,
+    explained: v.explained,
+    state_lost: v.state_lost,
+    state_to_change_us: v.state_to_change_us,
+    blink: v.blink,
+    resync: { n: v.resync.n, pct: v.resync.pct },
+    sync: v.sync,
+    tolerance_us: v.tolerance_us,
+    ...(v.unexplained.length ? { unexplained: v.unexplained } : {}),
+    ...(v.missing_changes.length ? { missing_changes: v.missing_changes } : {}),
+    ...(v.wrong_value.length ? { wrong_value: v.wrong_value } : {}),
+    ...(v.not_applied.length ? { not_applied: v.not_applied } : {}),
+    // Bad frames (bits != 24) are no readings: listed, and a warning, not a failure on their own.
+    ...(v.bad_frames.n ? { bad_frames: v.bad_frames, warning: `${v.bad_frames.n} bad WS2812 frame(s) (bits ${v.bad_frames.bits.slice(0, 3).join(', ')}) left out of the matcher` } : {}),
+    ...(problems.length ? { problems } : {}),
+  };
 }

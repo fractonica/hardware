@@ -10,7 +10,7 @@
 // camelCased, a capability field named like an event's own keys, and an event and a property sharing a name
 // (both are `<inst>.<name>` events, 09 §9.2).
 
-import { pascalCase, type Capability, type ElementType, type EnumDef, type Field, type GeneratedFile, type Model, type TypeRef } from '../model.ts';
+import { appCapabilities, pascalCase, type Capability, type ElementType, type EnumDef, type Field, type GeneratedFile, type Model, type TypeRef } from '../model.ts';
 
 export const SDK_GEN_DIR = 'packages/sdk/src/gen';
 
@@ -238,11 +238,15 @@ function checkCap(cap: Capability): void {
   }
 }
 
-/** The SDK's typed facades: packages/sdk/src/gen/caps.ts. Throws on a name the SDK cannot carry. */
+/**
+ * The SDK's typed facades: packages/sdk/src/gen/caps.ts. Throws on a name the SDK cannot carry. A test_only
+ * capability (fr.fixture, design m2-c1-hil D3) is left out: the client SDK never exposes a test instrument.
+ */
 export function emitSdk(model: Model, catalogHash: number): GeneratedFile[] {
+  const caps = appCapabilities(model);
   const names = new Names();
   const enumNames = new Map<EnumDef, string>();
-  for (const cap of model.capabilities) {
+  for (const cap of caps) {
     for (const e of cap.enums) {
       enumNames.set(e, names.claim(`${cap.pascalName}${e.name}`, `${cap.file} types.${e.name}`));
     }
@@ -275,7 +279,7 @@ export function emitSdk(model: Model, catalogHash: number): GeneratedFile[] {
   const props: [string, string][] = [];
   const meta: string[] = [];
 
-  for (const cap of model.capabilities) {
+  for (const cap of caps) {
     checkCap(cap);
     const P = cap.pascalName;
     c.line(`// ---- ${cap.name} ----`);

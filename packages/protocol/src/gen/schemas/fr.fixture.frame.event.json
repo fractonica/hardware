@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.fixture.frame.event",
+  "title": "fr.fixture.frame event",
+  "type": "object",
+  "properties": {
+    "bits": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "grb": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false
+}

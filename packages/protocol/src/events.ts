@@ -1,10 +1,12 @@
-// Hub events (spec 08 §8.7, 09 §9.2; design c6 D3, D4, D19): the HubEvent that events_read returns and
-// `/ws` (fr-ws/1, ws.ts) carries, the hub's own event types and the fields of the ones C6 adds.
+// Hub events (spec 08 §8.7, 09 §9.2; design c6 D3, D4, D19; m2-c1-hil D9): the HubEvent that events_read
+// returns and `/ws` (fr-ws/1, ws.ts) carries, the hub's own event types and the fields of the ones C6 and
+// M2-C1 add.
 // Capability events and states are `<instance>.<member>`, with the fields the generated codecs decode.
 // Field schemas are loose: an emitter may add a field, and a client reads the ones it knows.
 
 import { z } from 'zod';
 
+import { INPUT_LAYERS } from './ops/links.ts';
 import { JOB_KINDS, JOB_ORIGINS, JOB_STATUSES, PORT_STATES } from './types.ts';
 
 /** Which part of a capability a `<instance>.<member>` event is: an EVENT, or a property STATE (design c6 D1). */
@@ -32,6 +34,11 @@ export const HubEventSchema = z.object({
   part: z.enum(EVENT_PARTS).optional(),
   /** The member name (`down`, `on`) of a capability event, without the instance. */
   member: z.string().optional(),
+  /**
+   * On a property STATE that a get_state resync brought rather than a change (design m2-c1-hil D9): its
+   * time is the resync's, not the change's, so a timing check skips it.
+   */
+  resync: z.boolean().optional(),
 });
 export type HubEvent = z.infer<typeof HubEventSchema>;
 
@@ -54,6 +61,10 @@ export const HUB_EVENT_TYPES = [
   'hub.warning',
   'hub.prompt',
   'hub.prompt_done',
+  // M2-C1 (design m2-c1-hil D9): client calls that act on devices, and the HIL fixture's readings.
+  'op.called',
+  'hil.edge',
+  'hil.frame',
 ] as const;
 export type HubEventType = (typeof HUB_EVENT_TYPES)[number];
 
@@ -154,7 +165,52 @@ export const PromptDoneFields = z.looseObject({ prompt_id: z.string(), outcome: 
  */
 export const HubWarningFields = z.looseObject({ code: z.string(), hint: z.string().optional() });
 
-/** The fields schema of each hub event type C6 defines, plus hub.warning. */
+/** The ops that publish op.called (D9): the client calls that act on devices without a job. */
+export const OP_CALLED_OPS = ['command_send', 'input_simulate', 'binding_set'] as const;
+/**
+ * op.called (design m2-c1-hil D9): one per device on every command_send, input_simulate and binding_set,
+ * published on that device, so an agent's actions are recorded rather than proven by their effects (T-AGENT).
+ * `client` is the call's X-Fr-Client (null without one); the rest are the call's own, when it has them.
+ */
+export const OpCalledFields = z.looseObject({
+  op: z.enum(OP_CALLED_OPS),
+  client: z.enum(JOB_ORIGINS).nullable(),
+  instance: z.string().optional(),
+  command: z.string().optional(),
+  gesture: z.string().optional(),
+  layer: z.enum(INPUT_LAYERS).optional(),
+});
+
+/**
+ * How a fixture reading's DUT time was found (D10): `wired`, the press-based fixture -> DUT fit; `hub`,
+ * through the hub's two TIME offsets (a cross-check, a few ms); `none`, neither (t_dut_us null).
+ */
+export const HIL_SYNC = ['wired', 'hub', 'none'] as const;
+export type HilSync = (typeof HIL_SYNC)[number];
+
+/** The times of a fixture reading: fixture µs, hub µs (Unix epoch), DUT µs, and their uncertainty. */
+const hilTimes = {
+  t_fix_us: z.number(),
+  t_hub_us: z.number(),
+  t_dut_us: z.number().nullable(),
+  sync: z.enum(HIL_SYNC),
+  /** The uncertainty of t_dut_us; null with sync none. */
+  u_us: z.number().nullable(),
+};
+
+/** hil.edge (D9): one per fixture edge on a bench line, published on the DUT; `line` is the bench line (boot, status, test_pin). */
+export const HilEdgeFields = z.looseObject({ line: z.string(), level: z.boolean(), ...hilTimes });
+
+/** hil.frame (D9): one decoded WS2812 refresh of a DUT's LED line; `grb` as sent, `lit` when any component is non-zero. */
+export const HilFrameFields = z.looseObject({
+  line: z.string(),
+  grb: z.number().int().min(0).max(0xffffff),
+  lit: z.boolean(),
+  bits: z.number().int().min(0).max(255),
+  ...hilTimes,
+});
+
+/** The fields schema of each hub event type C6 and M2-C1 define, plus hub.warning. */
 export const HUB_EVENT_FIELDS = {
   'port.attached': PortAttachedFields,
   'port.detached': PortDetachedFields,
@@ -165,4 +221,7 @@ export const HUB_EVENT_FIELDS = {
   'hub.prompt': PromptSchema,
   'hub.prompt_done': PromptDoneFields,
   'hub.warning': HubWarningFields,
+  'op.called': OpCalledFields,
+  'hil.edge': HilEdgeFields,
+  'hil.frame': HilFrameFields,
 } as const satisfies Partial<Record<HubEventType, z.ZodType>>;

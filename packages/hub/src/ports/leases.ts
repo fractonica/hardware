@@ -1,7 +1,8 @@
 // Serial leases (design c6 D4; stream S5): the hub lends a USB port it holds to another program (idf.py
 // monitor, a Web Serial page, `fr serial lease <dev> -- <cmd…>`) and takes it back when the lease ends.
-// Granting refuses a port a flash, provision or reset job is working on (LOCKED), one already leased
-// (PORT_LEASED) and one another program has open (PORT_BUSY_EXTERNAL, D5); then the node gets a BYE on its
+// Granting refuses the HIL fixture's port (INVALID_ARGS fixture_internal, design m2-c1-hil D15), a port a
+// flash, provision or reset job is working on (LOCKED), one already leased (PORT_LEASED) and one another
+// program has open (PORT_BUSY_EXTERNAL, D5); then the node gets a BYE on its
 // serial session (Router.endSerialSession), the hub closes its handle and publishes port.leased. A sweeper
 // runs every 1 s: past expires_at the lease ends `expired`, when holder_pid is gone `holder_gone` (T-PORTS:
 // an orphaned lease is released within 2 s), when the port has been absent from 5 s of polls `port_gone` (a
@@ -14,6 +15,7 @@ import { randomBytes } from 'node:crypto';
 import { FrError, type Job, type Lease, type LeaseEndReason, type PortLease } from '@fractonica/protocol';
 
 import type { Device, HubContext, HubRunOptions, Leases, OpInput } from '../context.ts';
+import { fenceLease } from '../fixture/fence.ts';
 import { attachedPort, isDeviceId, presenceOf, registryOf } from '../registry/hub.ts';
 import { nowUs } from '../ring.ts';
 import { holderText } from './holders.ts';
@@ -192,6 +194,8 @@ export function createLeases(hub: () => HubContext, _run: HubRunOptions, deps: L
         });
       }
       const port = await target(h, input.device);
+      // The fixture's port never goes to another program: it would own the raw diag channel and esptool (D15).
+      fenceLease(h, port);
       const job = portJob(h, [port.key, ...(port.device ? [port.device.device_id] : [])]);
       if (job) {
         throw new FrError('LOCKED', `${port.path} is in use by ${job.kind} job ${job.job_id}`, {

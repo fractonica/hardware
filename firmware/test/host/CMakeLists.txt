@@ -18,7 +18,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 cmake_path(ABSOLUTE_PATH CMAKE_CURRENT_LIST_DIR NORMALIZE OUTPUT_VARIABLE HOST_DIR)
 cmake_path(GET HOST_DIR PARENT_PATH TEST_DIR)
 cmake_path(GET TEST_DIR PARENT_PATH FW_DIR)
+cmake_path(GET FW_DIR PARENT_PATH REPO_DIR)
 set(COMPONENTS_DIR ${FW_DIR}/components)
+# The HIL fixture drivers (design m2-c1-hil D4): their public headers and fixture_gpio's private edge_ring.hpp, for
+# the fixture tests and for fr_net_node's fake fixture lines. The suite also builds their .cpp files unchanged over
+# the IDF shim in shim/ (fr_fixture_sim below), so FixtureService's tests run the drivers' own code.
+set(FR_FIXTURE_INCLUDES
+    ${REPO_DIR}/hardware/drivers/fixture_gpio/include
+    ${REPO_DIR}/hardware/drivers/fixture_gpio/src
+    ${REPO_DIR}/hardware/drivers/fixture_ws2812_rx/include)
 
 # -fno-sanitize-recover: a UBSan finding fails the run instead of scrolling past.
 set(FR_SANITIZE -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
@@ -35,7 +43,10 @@ set(FR_CXX_FLAGS "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 
 # fr_net/src/core and fr_ota/src/core are IDF-free like fr_core/src/services (design c3 §3, c4 §3); their
 # src/esp directories are not built here. fr_ota/src/http is the image GET over BSD sockets, the same source
-# on lwIP and POSIX: fr_net_node downloads with it.
+# on lwIP and POSIX: fr_net_node downloads with it. fr_core/src/services includes FixtureService (design
+# m2-c1-hil D3), so every target below links it; a target that uses it defines fr::core::link_info() (fr/core/
+# node_net.hpp), which core.cpp defines on target: fr_net_node in tools/net_node.cpp, the suite in
+# tests/fixture_link.cpp.
 file(GLOB FR_LIB_SRCS CONFIGURE_DEPENDS
     ${COMPONENTS_DIR}/fr_proto/src/*.cpp
     ${COMPONENTS_DIR}/fr_proto/gen/*.cpp
@@ -82,8 +93,20 @@ target_include_directories(fr_cjson PUBLIC ${FR_CJSON_DIR})
 target_compile_options(fr_cjson PRIVATE -w)
 target_link_libraries(fr_host_lib PUBLIC fr_cjson)
 
+# fixture_gpio.cpp and ws2812_rx.cpp as the fixture's image builds them, against shim/idf (the IDF calls they make,
+# on FakeCore's clock: shim/esp_sim.cpp). Only the test binary links it; shim/esp_sim.hpp is the tests' side.
+add_library(fr_fixture_sim STATIC
+    ${HOST_DIR}/shim/esp_sim.cpp
+    ${REPO_DIR}/hardware/drivers/fixture_gpio/src/fixture_gpio.cpp
+    ${REPO_DIR}/hardware/drivers/fixture_ws2812_rx/src/ws2812_rx.cpp)
+target_include_directories(fr_fixture_sim PRIVATE ${HOST_DIR}/shim/idf PUBLIC ${HOST_DIR}/shim ${FR_FIXTURE_INCLUDES})
+target_compile_definitions(fr_fixture_sim PRIVATE FR_HOST_SHIM=1)
+target_link_libraries(fr_fixture_sim PUBLIC fr_host_lib)
+target_compile_options(fr_fixture_sim PRIVATE ${FR_CXX_WARNINGS})
+
 add_executable(fr_host_tests ${FR_TEST_SRCS} ${FR_FUZZ_TARGET_SRCS})
-target_link_libraries(fr_host_tests PRIVATE fr_host_lib)
+target_link_libraries(fr_host_tests PRIVATE fr_fixture_sim fr_host_lib)
+target_include_directories(fr_host_tests PRIVATE ${FR_FIXTURE_INCLUDES})
 target_compile_options(fr_host_tests PRIVATE ${FR_CXX_WARNINGS})
 
 add_executable(fr_host_fuzz ${FR_FUZZ_SRCS})
@@ -96,4 +119,5 @@ target_compile_options(fr_host_fuzz PRIVATE ${FR_CXX_WARNINGS})
 # several such processes under the real driver's send discipline (interop-air.test.ts, design c5 §5).
 add_executable(fr_net_node ${HOST_DIR}/tools/net_node.cpp)
 target_link_libraries(fr_net_node PRIVATE fr_host_lib)
+target_include_directories(fr_net_node PRIVATE ${FR_FIXTURE_INCLUDES})  # --fixture's fake lines (design m2-c1-hil §4 S2)
 target_compile_options(fr_net_node PRIVATE ${FR_CXX_WARNINGS})

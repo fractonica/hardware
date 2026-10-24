@@ -4,6 +4,7 @@
 // (fr-ws/1) and the alias rules. The root entry adds REGISTRY_HASH (node:crypto) and the wire runtime;
 // generated code stays on `/gen`.
 
+export * from './bench.ts';
 export * from './cursor.ts';
 export * from './events.ts';
 export * from './names.ts';

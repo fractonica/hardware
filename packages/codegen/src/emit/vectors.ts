@@ -691,7 +691,7 @@ function messageCases(b: Builder): void {
     c.error('PRESENCE.HELLO.error_alias_bad_utf8', 'message', 'PRESENCE.HELLO', '6201ff', 'bad_utf8');
     // Enums are open: values the schema does not name decode as numbers. OtaState is sparse (0..4, 255),
     // so 5 is below the largest member and still not one.
-    b.lenient(c, 'message', 'PRESENCE.HELLO', 'role_2', { role: 2 });
+    b.lenient(c, 'message', 'PRESENCE.HELLO', 'role_3', { role: 3 });
     b.lenient(c, 'message', 'PRESENCE.HELLO', 'ota_state_5', { ota_state: 5 });
   }
   if (has(b.model, 'PRESENCE.HEARTBEAT')) {
@@ -907,6 +907,22 @@ function capEdgeCases(b: Builder, c: Cases): void {
     b.value(c, 'cap', T, 'info', { line: 'info' });
     c.error(`${T}.error_line_too_long`, 'cap', T, `0ac901${'61'.repeat(201)}`, 'too_long');
     b.value(c, 'cap', 'fr.diag.exec.result', 'ok', { json: '{"ok":true}' });
+  }
+  if (hasMember(m, 'fr.fixture', 'commands', 'press')) {
+    // The gpio-layer gestures (design m2-c1-hil §2.1); 16 segments at most.
+    const T = 'fr.fixture.press.args';
+    b.value(c, 'cap', T, 'double_click', { segments_us: [80_000, 100_000, 80_000] });
+    b.value(c, 'cap', T, 'bounce', { segments_us: [600, 400, 600, 400, 80_000] });
+    c.error(`${T}.error_too_many_segments`, 'cap', T, `0a11${'01'.repeat(17)}`, 'too_long');
+  }
+  if (hasMember(m, 'fr.fixture', 'events', 'edges')) {
+    // A full batch (32 edges, alternating levels) is the largest fr.fixture payload (D3: about 172 B).
+    const T = 'fr.fixture.edges.event';
+    b.value(c, 'cap', T, 'full_batch', { n: 32, levels: 0x55555555, dt_us: Array.from({ length: 32 }, (_, i) => i * 625), dropped: 3 });
+    c.error(`${T}.error_too_many_edges`, 'cap', T, `1a21${'01'.repeat(33)}`, 'too_long');
+  }
+  if (hasMember(m, 'fr.fixture', 'events', 'frame')) {
+    b.value(c, 'cap', 'fr.fixture.frame.event', 'green_24_bits', { bits: 24, grb: 0x400000 });
   }
 }
 

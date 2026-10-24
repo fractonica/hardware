@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.fixture.edges.event",
+  "title": "fr.fixture.edges event",
+  "type": "object",
+  "properties": {
+    "n": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "levels": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "dt_us": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 4294967295
+      },
+      "description": "(<= 32 items)"
+    },
+    "dropped": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    }
+  },
+  "additionalProperties": false
+}

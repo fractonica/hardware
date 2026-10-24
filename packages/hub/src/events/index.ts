@@ -18,6 +18,8 @@ export interface EventQuery {
   types?: string[];
   /** null (or absent) is every device, hub events included; [] matches nothing. */
   devices?: string[] | null;
+  /** Events of these devices are left out; events with no device stay (`all` without the fixture, design m2-c1-hil D6). */
+  excludeDevices?: string[];
   limit: number;
 }
 
@@ -140,6 +142,10 @@ export class EventStore implements Events, Lifecycle {
       }
       where.push(`device IN (${q.devices.map(() => '?').join(',')})`);
       args.push(...q.devices);
+    }
+    if (q.excludeDevices?.length) {
+      where.push(`(device IS NULL OR device NOT IN (${q.excludeDevices.map(() => '?').join(',')}))`);
+      args.push(...q.excludeDevices);
     }
     if (q.afterSeq !== undefined) {
       where.push('seq > ?');

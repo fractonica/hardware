@@ -28,7 +28,7 @@
 
 | Range | Use |
 |---|---|
-| `0x0001–0x00EF` | standard: `0x0001` fr.button, `0x0002` fr.led, `0x0003` fr.display, `0x0004` fr.audio_out, `0x0005` fr.analog_in (planned: haptic, encoder) |
+| `0x0001–0x00EF` | standard: `0x0001` fr.button, `0x0002` fr.led, `0x0003` fr.display, `0x0004` fr.audio_out, `0x0005` fr.analog_in, `0x0006` fr.fixture (since M2-C1, `test_only`: the HIL fixture's lines) (planned: haptic, encoder) |
 | `0x00F0–0x00FF` | system: `0x00F0` fr.node (port 0), `0x00F1` fr.ota (port 240), `0x00F2` fr.diag (port 241) |
 | `0x8000–0xFFFE` | project and experimental |
 
@@ -36,6 +36,7 @@
 
 **Top-level keys:**
 - `capability`, `id`, `version` (`"major.minor"`; minor is additive only), `summary`, `doc`, `maps_to`;
+- `test_only` (since M2-C1): a test instrument's capability (`fr.fixture`). Firmware codecs, the hub's decoders and the golden vectors carry it. Everything an app or client sees leaves it out: the app-facing catalog and `catalog_hash` (so provisioning a fixture changes neither), the SDK facades (`packages/sdk/src/gen/caps.ts`), `fr codegen client` and the dashboard's capability lists. Only standard and project capabilities may set it, not system ones;
 - `types` (enums), `traits`, `config`, `properties`, `commands`, `events`.
 
 **Members:**
@@ -341,14 +342,17 @@ Both are host-testable with a fake HAL and a fake clock.
 | `led_gpio` | `hal::LightOutput` | GPIO (LEDC when dimmable) | `active_level`-aware (the C3 Super Mini LED is active-low); lights fully whenever `on`. `selftest`: drive both levels and read the pad back |
 | `led_ws2812` | `hal::LightOutput` (rgb, dimmable) | `espressif/led_strip` `==3.1.0~1` (the first 3.x that builds on IDF 6.1), RMT, 1 pixel, GRB | `max_brightness` default 64 (`cap_config`). `selftest`: re-send the colour and check that the data line idles low |
 
+Since M2-C1 the HIL fixture adds `fixture_gpio` (open-drain or MOSFET-gate presses from ISR-dispatched esp_timers, any-edge capture in an IRAM ISR) and `fixture_ws2812_rx` (WS2812 decode on RMT RX), both `hal::FixtureLine` for `fr.fixture`, S3 only, bound to bare pins (`binds: gpio`) ([design m2-c1-hil](../design/m2-c1-hil.md) D4).
+
 Each driver ships `hardware/drivers/<driver>/driver.yaml` (`schema: fractonica/driver@1`), which declares:
 - `id`, `summary`, `implements` and `class` (the C++ class; header `include/fr/drv/<id>.hpp`);
 - supported `targets`;
 - `binds` (the board manifest section) and `accepts_kinds` (a board entry without `kind` is kind `gpio`);
-- `config` fields with `type`, `from` (a board entry key), `default` and `doc`; `type: gpio` marks a claimed pin, which the validator checks against the board;
+- `config` fields with `type`, `from` (a board entry key, or since M2-C1 `bind`: the pin of a `gpio.<n>` bind), `default` and `doc`; `type: gpio` marks a claimed pin, which the validator checks against the board;
 - `cap_config`: the driver's defaults for its service's capability config (`led_ws2812`: `max_brightness: 64`);
 - `traits` (since C6): the trait values the driver fixes, which `fr gen firmware` writes into the manifest (§7.4; `led_gpio {color: mono, dimmable: false}`, `led_ws2812 {color: rgb, dimmable: true}`);
-- the `resources` it consumes: `gpio` (equal to its `type: gpio` fields), `rmt_tx`, `ledc_*`, and `fr_core`'s `input_slot` and `timer` ([03 §3.4](03-firmware.md));
+- the `resources` it consumes: `gpio` (equal to its `type: gpio` fields), `rmt_tx`, `rmt_rx` (since M2-C1), `ledc_*`, and `fr_core`'s `input_slot` and `timer` ([03 §3.4](03-firmware.md));
+- `sdkconfig` (since M2-C1): Kconfig lines rendered into `sdkconfig.board` of every profile that binds the driver ([04 §4.3](04-boards.md));
 - its registry `dependencies`, pinned exactly.
 
 A service's capability config is the YAML defaults, then the driver's `cap_config`, then the profile's `config:`. A profile key may also override a driver config field; a key that is both is an error.
@@ -412,6 +416,7 @@ hub.devices.on('added', (d) => { if (d.has('fr.button')) d.on('*.down', () => sp
   - `ack: result` (reliable): the RESULT, with `rtt_ms` and `link`.
   - `msg`: a broadcast answers `sent` with `fields {seq, sessions, seeded}` ([08 §8.4](08-hub.md)); a unicast one, its ACK's status.
 - **Hub side** ([08 §8.7](08-hub.md)). Close codes 4400 (no valid hello within 5 s, a bad first frame, a binary frame, `subscribe.types` over 1,024 characters joined by commas), 4401 (token), 4409 (major), 4429 (queue overflow), 1001 (hub stopping). Frames are written directly up to 256 KiB buffered, then queued, with `state` frames coalescing per property in the queue; past 10,000 queued the socket closes 4429. A socket silent for 6 s is dead. At most 64 reliable commands and MSGs in flight per socket (beyond: `busy` at once); timeout 5 s by default, 30 s at most. The hub also coalesces fast commands per (device, instance, command), but only while an earlier one is still being written, which is rare: the SDK's coalescing does the work.
+- **Apps never see a HIL fixture** (since M2-C1, [design m2-c1-hil](../design/m2-c1-hil.md) D6). A `role:fixture` device is not one of the provisioned devices apps see: it is in no welcome or `device.added`, nor in `registry_rev` or `fr codegen client`, and a `cmd` or `msg` frame to it answers `not_found`. So provisioning a fixture changes neither `registry_rev` nor `web/demo`'s `devices.ts`. Its `fr.fixture` instances are `test_only` (§7.3), so they are in no catalog either.
 - **Subscriptions.** `subscribe.devices` takes ids or aliases (default: every provisioned device); `subscribe.types` takes globs over `<inst>.<member>`, plus `presence` and `msg` (default all), matched in linear time ([09 §9.2](09-agent-api.md)). The SDK notes the ids its aliases resolved to (from the welcome, `device.added`, and `registry.drift` by `alias` or `previous_alias`) and sends each later hello with the names given followed by those ids, so an alias subscription survives a rename and a reconnect; the hub admits by id or alias.
 - **Resume and gaps.** Each later hello carries `resume` = the last cursor the SDK saw. Within the same hub run the hub replays the stored matching `evt` and `msg` frames after it, marked `replayed: true`, before live frames; state and presence are not replayed, since the welcome carries them. More than 1,000 matching misses, the oldest older than 60 s, or a cursor from another hub run → `gap {lost: true}`, and the socket stays open (at most 10,000 stored events are scanned). The SDK emits `gap`. An app that acts on input skips `replayed` events (the demo's relay does).
 - **Token** (`app_token`, [08 §8.8](08-hub.md)). It opens `/app` only.

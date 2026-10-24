@@ -1,0 +1,43 @@
+capability: fr.fixture
+id: 0x0006
+version: "0.1"
+test_only: true                    # left out of fr codegen client, the SDK, the app catalog and the dashboard's capability lists
+summary: One HIL fixture line wired to a device under test; presses BOOT, captures edges, decodes WS2812.
+types:
+  Drive:  { enum: { none: 0, open_drain: 1, nfet_gate: 2 } }   # M2-C3 adds pwm: 3 (LEDC)
+  Decode: { enum: { level: 0, ws2812: 1 } }
+  Pull:   { enum: { none: 0, up: 1 } }
+traits:
+  drive:  { id: 1, type: Drive,  default: none }
+  decode: { id: 2, type: Decode, default: level }
+config:
+  drive:    { type: Drive,  default: none, doc: "nfet_gate: push-pull to a MOSFET gate only, high = press" }
+  decode:   { type: Decode, default: level }
+  pull:     { type: Pull,   default: none, doc: "up only on test_pin lines" }
+  cap_ms:   { type: u16, default: 15000, range: [100, 30000], unit: ms, doc: "longest a press may hold the line" }
+  flush_us: { type: u16, default: 2000, range: [200, 20000], unit: us, doc: "an edges batch goes this long after its last edge (20 ms at most after its first)" }
+properties:
+  level: { id: 1, type: bool, doc: "reported after a flush when it changed" }
+commands:
+  press:
+    id: 1
+    delivery: reliable
+    doc: Drive the line by segments (press, release, press, ...); RESULT at the first press edge. BUSY while a press runs or when the line does not read released; UNSUPPORTED on drive none.
+    fields: { segments_us: { id: 1, type: "array<u32>", max: 16 } }
+    result: { at_us: { id: 1, type: u32 }, total_us: { id: 2, type: u32 } }
+    examples: [ { segments_us: [80000] } ]
+  release: { id: 2, delivery: reliable, idempotent: true }
+  read:
+    id: 3
+    delivery: reliable
+    result: { level: { id: 1, type: bool }, edges: { id: 2, type: u32 }, dropped: { id: 3, type: u32 }, bad_frames: { id: 4, type: u32 } }
+events:
+  edges:
+    id: 1
+    priority: normal
+    fields:
+      n:       { id: 1, type: u8 }
+      levels:  { id: 2, type: u32 }                         # bit i = level after edge i
+      dt_us:   { id: 3, type: "array<u32>", max: 32 }       # from the event's t_us (the first edge)
+      dropped: { id: 4, type: u16 }                         # ring overflows since the last batch
+  frame: { id: 2, priority: normal, fields: { bits: { id: 1, type: u8 }, grb: { id: 2, type: u32 } } }
