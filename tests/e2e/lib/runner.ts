@@ -4,15 +4,31 @@
 // m2-c1-hil D13) starts with the bench_get preflight (lib/hil.ts hilPreflight): a fatal problem fails every
 // gate before anything is pressed. A sim run (--tier sim, design m2-c2 D14) hands over to tests/sim/lib/runner.ts,
 // which loads the T2 scenarios (tests/sim/scenarios/*.yaml), not these modules, and runs each on fr_fleet against a
-// private hub of its own; its report keeps this contract (lib/report.ts).
+// private hub of its own; its report keeps this contract (lib/report.ts). From M2-C4 (design m2-c4-gateway D22) a run
+// from run.ts or runStandalone snapshots each DUT's tcp_close_* and espnow counters right before a gate's first hub
+// call and after the gate (hubStatsSnapshot; off with --no-stats-delta) and the report carries the deltas as measured.stats_delta.
 
 import { readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import type { Result } from '@fractonica/protocol';
+
 import { hilPreflight } from './hil.ts';
 import { defaultHubUrl, Hub, HubError } from './hub.ts';
-import { countStatuses, type E2eReport, EXIT, exitCodeFor, type GateReport, type PreflightReport, PROGRESS_PREFIX, renderReport } from './report.ts';
+import {
+  countStatuses,
+  type E2eReport,
+  EXIT,
+  exitCodeFor,
+  type GateReport,
+  pickDutStats,
+  type PreflightReport,
+  PROGRESS_PREFIX,
+  renderReport,
+  type StatsSnapshot,
+  statsDelta,
+} from './report.ts';
 import { needsOf, type Scenario, SCENARIO_TIERS, type ScenarioCtx, scenarioOf, type ScenarioTier, skipReason, tierOf } from './scenario.ts';
 
 /** A gate module: tests/e2e/t-<name>.ts. */
@@ -68,6 +84,44 @@ export function select(found: Found[], suites: string[], tier?: ScenarioTier): {
   return { chosen: inTier.filter((f) => names(f).some((n) => wanted.includes(n))), unknown, otherTier };
 }
 
+/** Each DUT's D22 counters now, or null when the hub cannot say (a fake hub, no device_list): no stats_delta then. */
+export type StatsSnapshotter = (hub: Hub, signal: AbortSignal) => Promise<StatsSnapshot | null>;
+
+/**
+ * D22 over the hub: every online device but the HIL fixture (never a target), `diag stats` (tcp_close_*) and `stats
+ * espnow` each, by device id (USB first, as diag_exec routes it). A DUT that does not answer is recorded with why
+ * (over a gateway session only small answers fit: read the full stats before and after, never in between).
+ */
+export const hubStatsSnapshot: StatsSnapshotter = async (hub, signal) => {
+  const list = await hub.call<{ devices: { device_id?: string; alias?: string; presence?: string; role?: string }[] }>('device_list', { selector: 'online' }, 10_000, signal);
+  if (!list.ok || !Array.isArray(list.data?.devices)) {
+    return null;
+  }
+  const out: StatsSnapshot = {};
+  for (const d of list.data.devices) {
+    if (!d.device_id || !d.alias || d.role === 'fixture' || (d.presence !== 'online' && d.presence !== 'suspect')) {
+      continue;
+    }
+    const diag = async (line: string) => {
+      const r = await hub.call<{ response: Record<string, unknown> }>('diag_exec', { port: d.device_id, line, timeout_s: 5 }, 15_000, signal);
+      if (!r.ok) {
+        throw new Error(`${line}: ${r.error?.code ?? 'INTERNAL'} ${r.error?.message ?? ''}`.trim());
+      }
+      if (r.data?.response?.ok !== true) {
+        throw new Error(`${line}: ${String(r.data?.response?.error ?? 'not ok')}`);
+      }
+      return r.data.response;
+    };
+    try {
+      const full = await diag('stats');
+      out[d.alias] = pickDutStats(full, await diag('stats espnow').catch(() => null));
+    } catch (e) {
+      out[d.alias] = { error: (e as Error).message };
+    }
+  }
+  return Object.keys(out).length ? out : null;
+};
+
 export interface RunOptions {
   hubUrl: string;
   sourceDir: string;
@@ -79,6 +133,8 @@ export interface RunOptions {
   args?: string[];
   /** One stderr line. */
   err(line: string): void;
+  /** D22's before/after snapshots of the DUTs (run.ts and runStandalone pass hubStatsSnapshot); absent: none taken. */
+  stats?: StatsSnapshotter;
 }
 
 function progress(opts: RunOptions, gate: string, status: string): void {
@@ -99,8 +155,13 @@ async function runOne(f: Found, opts: RunOptions, hub: Hub): Promise<GateReport>
     return { ...base, status: 'skipped', reason: skip, measured: {}, duration_ms: 0 };
   }
   const measured: Record<string, unknown> = {};
+  // D22: the DUTs' counters are read right before the scenario's first hub call, so one that fails before it calls
+  // the hub (a missing flag) never reaches it, and nothing the gate changes is in the "before".
+  let before: StatsSnapshot | null = null;
+  let taking: Promise<void> | null = null;
+  const takeBefore = (): Promise<void> => (taking ??= snapshot(opts, hub, gate, 'before').then((s) => void (before = s)));
   const ctx: ScenarioCtx = {
-    hub,
+    hub: opts.stats ? new FirstCallHub(hub, takeBefore) : hub,
     hubUrl: hub.url,
     sourceDir: opts.sourceDir,
     allowHuman: opts.allowHuman,
@@ -133,8 +194,39 @@ async function runOne(f: Found, opts: RunOptions, hub: Hub): Promise<GateReport>
       duration_ms: Date.now() - started,
     };
   }
+  if (before && !opts.signal.aborted) {
+    const after = await snapshot(opts, hub, gate, 'after');
+    if (after) {
+      report.measured.stats_delta = statsDelta(before, after);
+    }
+  }
   progress(opts, gate, report.status);
   return report;
+}
+
+/** The run's hub as a scenario sees it, with `first()` awaited before its first call (D22's "before" snapshot). */
+class FirstCallHub extends Hub {
+  readonly #first: () => Promise<void>;
+
+  constructor(hub: Hub, first: () => Promise<void>) {
+    super(hub.url, hub.client);
+    this.#first = first;
+  }
+
+  override async call<T = unknown>(op: string, input: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<Result<T>> {
+    await this.#first();
+    return super.call<T>(op, input, timeoutMs, signal);
+  }
+}
+
+/** One D22 snapshot; a failure is logged, never the gate's. */
+async function snapshot(opts: RunOptions, hub: Hub, gate: string, when: string): Promise<StatsSnapshot | null> {
+  try {
+    return await opts.stats!(hub, opts.signal);
+  } catch (e) {
+    opts.err(`[${gate}] stats ${when} the gate: ${(e as Error).message}`);
+    return null;
+  }
 }
 
 /**
@@ -192,13 +284,15 @@ export interface Args {
   rest: string[];
   /** After `--`: the one suite's own arguments (test_run's `args`). */
   suiteArgs: string[];
+  /** D22's snapshots around each gate (default on; --no-stats-delta turns them off). */
+  statsDelta: boolean;
 }
 
 /** run.ts's tiers: the scenario tiers, and sim (the T2 scenarios, tests/sim/lib/runner.ts). */
 const RUN_TIERS = [...SCENARIO_TIERS, 'sim'] as const;
 
 export function parseArgs(argv: string[], defaults: { allowHuman: boolean } = { allowHuman: false }): Args {
-  const a: Args = { suites: [], allowHuman: defaults.allowHuman, json: false, hubUrl: defaultHubUrl(), list: false, help: false, tier: 'target', rest: [], suiteArgs: [] };
+  const a: Args = { suites: [], allowHuman: defaults.allowHuman, json: false, hubUrl: defaultHubUrl(), list: false, help: false, tier: 'target', rest: [], suiteArgs: [], statsDelta: true };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
     if (v === '--') {
@@ -214,6 +308,8 @@ export function parseArgs(argv: string[], defaults: { allowHuman: boolean } = { 
       a.allowHuman = true;
     } else if (v === '--json') {
       a.json = true;
+    } else if (v === '--no-stats-delta') {
+      a.statsDelta = false;
     } else if (v === '--list') {
       a.list = true;
     } else if (v === '-h' || v === '--help') {
@@ -234,6 +330,7 @@ const USAGE = `usage: node --conditions=@fractonica/source tests/e2e/run.ts [sui
   --allow-human  also run the scenarios that need a person at the bench or wiring (hil gates never do)
   --hub URL      the hub (default FR_HUB or http://127.0.0.1:7420)
   --json         print the report as one JSON line (what test_run reads)
+  --no-stats-delta  take no D22 snapshots (each DUT's tcp_close_* and espnow before and after every gate)
   -- args…       the one suite's own flags (test_run's args), e.g. --tier hil t-hil -- --phase fit`;
 
 /** After a cancel, how long the scenario has to clean up before the process ends (design m2-c1-hil D13: release, LED and binding restores). */
@@ -320,6 +417,7 @@ export async function main(argv: string[], dir: string): Promise<number> {
     tier,
     ...(args.suiteArgs.length ? { args: args.suiteArgs } : {}),
     err,
+    ...(args.statsDelta ? { stats: hubStatsSnapshot } : {}),
   });
   print(report, args.json);
   return ac.signal.aborted ? 130 : exitCodeFor(report);
@@ -337,6 +435,7 @@ export function standaloneUsage(scenario: Scenario, file: string): string {
     `  needs ${JSON.stringify(scenario.needs)}; run on its own, a person is at the bench (--allow-human is implied)${tierOf(scenario) === 'hil' ? '; a hil gate: bench_get is checked first' : ''}`,
     '  --hub URL      the hub (default FR_HUB or http://127.0.0.1:7420)',
     '  --json         print the report as one JSON line',
+    '  --no-stats-delta  no D22 snapshots of the DUTs (tcp_close_*, espnow) around the gate',
     '  --list         print the gate and what it needs, run nothing',
     ...(own.length ? ['options:', ...own] : []),
   ].join('\n');
@@ -375,6 +474,7 @@ export async function runStandalone(scenario: Scenario, dir: string, argv: strin
     tier: tierOf(scenario),
     args: [...args.rest, ...args.suiteArgs],
     err,
+    ...(args.statsDelta ? { stats: hubStatsSnapshot } : {}),
   });
   print(report, args.json);
   process.exitCode = ac.signal.aborted ? 130 : exitCodeFor(report);

@@ -26,6 +26,18 @@ size_t encode(const DirectoryEntry &v, fr::wire::Writer &w);
 std::expected<DirectoryEntry, fr::wire::DecodeErr> decode_directory_entry(std::span<const uint8_t> in);
 bool operator==(const DirectoryEntry &a, const DirectoryEntry &b);
 
+// Neighbor (protocol type).
+struct Neighbor {
+    std::span<const uint8_t> mac{};
+    int8_t rssi = 0;
+    uint8_t age_s = 0;
+
+    static constexpr size_t kMaxSize = 14;
+};
+size_t encode(const Neighbor &v, fr::wire::Writer &w);
+std::expected<Neighbor, fr::wire::DecodeErr> decode_neighbor(std::span<const uint8_t> in);
+bool operator==(const Neighbor &a, const Neighbor &b);
+
 // DescriptorCap (protocol type).
 struct DescriptorCap {
     uint8_t port = 0;
@@ -87,13 +99,156 @@ size_t encode(const BindingList &v, fr::wire::Writer &w);
 std::expected<BindingList, fr::wire::DecodeErr> decode_binding_list(std::span<const uint8_t> in);
 bool operator==(const BindingList &a, const BindingList &b);
 
+// GwStatus (protocol type).
+struct GwStatus {
+    uint8_t channel = 0;
+    NetMode mode = NetMode::router;
+    uint32_t uptime_s = 0;
+    uint8_t q_depth = 0;  // GW_TX queued now
+    uint8_t q_max = 0;  // the queue's capacity
+    uint8_t peers = 0;  // unicast peers in the driver's table
+    uint32_t tx = 0;
+    uint32_t tx_fail = 0;
+    uint32_t rx = 0;
+    uint32_t rx_drop = 0;  // received frames not forwarded (no hub, full line buffer)
+    uint32_t rx_bad = 0;  // GW_* lines from the host that did not decode
+    uint32_t beacons = 0;  // BEACONs forwarded
+    int8_t ap_rssi = 0;
+    uint8_t ap_channel = 0;
+    uint32_t last_tx_us = 0;  // the last GW_TX's queue-to-verdict time
+
+    static constexpr size_t kMaxSize = 69;
+};
+size_t encode(const GwStatus &v, fr::wire::Writer &w);
+std::expected<GwStatus, fr::wire::DecodeErr> decode_gw_status(std::span<const uint8_t> in);
+bool operator==(const GwStatus &a, const GwStatus &b);
+
+// GwCmd (protocol type).
+struct GwCmd {
+    uint16_t req = 0;
+    GwOp op = GwOp::none;
+    uint8_t channel = 0;  // set_channel
+    uint16_t net = 0;  // set_net
+    GwRate rate = GwRate::peer_default;  // set_rate: the default per-peer rate
+
+    static constexpr size_t kMaxSize = 17;
+};
+size_t encode(const GwCmd &v, fr::wire::Writer &w);
+std::expected<GwCmd, fr::wire::DecodeErr> decode_gw_cmd(std::span<const uint8_t> in);
+bool operator==(const GwCmd &a, const GwCmd &b);
+
+// GwRsp (protocol type).
+struct GwRsp {
+    uint16_t req = 0;
+    uint8_t status = 0;  // a status code: OK, or BUSY for set_channel while associated, UNSUPPORTED, INVALID_ARGS
+    uint8_t channel = 0;
+    uint16_t net = 0;
+    GwRate rate = GwRate::peer_default;
+    uint8_t peers = 0;
+
+    static constexpr size_t kMaxSize = 20;
+};
+size_t encode(const GwRsp &v, fr::wire::Writer &w);
+std::expected<GwRsp, fr::wire::DecodeErr> decode_gw_rsp(std::span<const uint8_t> in);
+bool operator==(const GwRsp &a, const GwRsp &b);
+
+// NET.DISCOVER
+struct NetDiscover {
+    uint16_t net = 0;
+    Role role = Role::node;
+    std::span<const uint8_t> mac{};
+
+    static constexpr uint8_t kCls = fr::wire::kClsNet;
+    static constexpr uint8_t kKind = kKindNetDiscover;
+    static constexpr size_t kMaxSize = 15;
+};
+size_t encode(const NetDiscover &v, fr::wire::Writer &w);
+std::expected<NetDiscover, fr::wire::DecodeErr> decode_net_discover(std::span<const uint8_t> in);
+bool operator==(const NetDiscover &a, const NetDiscover &b);
+
+// NET.BEACON
+struct NetBeacon {
+    uint8_t channel = 0;
+    uint8_t flags = 0;  // b0 gateway_mode, b1 switching
+    uint16_t hub_epoch = 0;
+    uint32_t bcast_floor = 0;
+    uint64_t hub_time_us = 0;
+    uint32_t hub_ipv4 = 0;  // a.b.c.d as a << 24 | b << 16 | c << 8 | d
+    uint16_t hub_port = 0;
+    uint16_t beacon_interval_ms = 0;
+    uint32_t bcast_watermark = 0;
+    std::span<const uint8_t> gw_mac{};  // the gateway it went out on (a node may hear several)
+
+    static constexpr uint8_t kCls = fr::wire::kClsNet;
+    static constexpr uint8_t kKind = kKindNetBeacon;
+    static constexpr size_t kMaxSize = 55;
+};
+size_t encode(const NetBeacon &v, fr::wire::Writer &w);
+std::expected<NetBeacon, fr::wire::DecodeErr> decode_net_beacon(std::span<const uint8_t> in);
+bool operator==(const NetBeacon &a, const NetBeacon &b);
+
+// NET.JOIN_REQ
+struct NetJoinReq {
+    std::span<const uint8_t> mac{};
+    std::span<const uint8_t> fw_id_prefix{};
+    Role role = Role::node;
+
+    static constexpr uint8_t kCls = fr::wire::kClsNet;
+    static constexpr uint8_t kKind = kKindNetJoinReq;
+    static constexpr size_t kMaxSize = 21;
+};
+size_t encode(const NetJoinReq &v, fr::wire::Writer &w);
+std::expected<NetJoinReq, fr::wire::DecodeErr> decode_net_join_req(std::span<const uint8_t> in);
+bool operator==(const NetJoinReq &a, const NetJoinReq &b);
+
+// NET.JOIN_ACCEPT
+struct NetJoinAccept {
+    std::span<const uint8_t> mac{};
+    uint16_t addr = 0;
+    uint16_t hub_epoch = 0;
+    uint8_t channel = 0;
+
+    static constexpr uint8_t kCls = fr::wire::kClsNet;
+    static constexpr uint8_t kKind = kKindNetJoinAccept;
+    static constexpr size_t kMaxSize = 19;
+};
+size_t encode(const NetJoinAccept &v, fr::wire::Writer &w);
+std::expected<NetJoinAccept, fr::wire::DecodeErr> decode_net_join_accept(std::span<const uint8_t> in);
+bool operator==(const NetJoinAccept &a, const NetJoinAccept &b);
+
+// NET.CHANNEL_SWITCH
+struct NetChannelSwitch {
+    uint8_t channel = 0;
+    uint64_t at_hub_us = 0;
+    uint8_t count = 0;
+
+    static constexpr uint8_t kCls = fr::wire::kClsNet;
+    static constexpr uint8_t kKind = kKindNetChannelSwitch;
+    static constexpr size_t kMaxSize = 17;
+};
+size_t encode(const NetChannelSwitch &v, fr::wire::Writer &w);
+std::expected<NetChannelSwitch, fr::wire::DecodeErr> decode_net_channel_switch(std::span<const uint8_t> in);
+bool operator==(const NetChannelSwitch &a, const NetChannelSwitch &b);
+
+// NET.NEIGHBORS
+struct NetNeighbors {
+    fr::proto::Array<Neighbor, 12> entries{};
+
+    static constexpr uint8_t kCls = fr::wire::kClsNet;
+    static constexpr uint8_t kKind = kKindNetNeighbors;
+    static constexpr size_t kMaxSize = 192;
+};
+size_t encode(const NetNeighbors &v, fr::wire::Writer &w);
+std::expected<NetNeighbors, fr::wire::DecodeErr> decode_net_neighbors(std::span<const uint8_t> in);
+bool operator==(const NetNeighbors &a, const NetNeighbors &b);
+
 // NET.WELCOME
 struct NetWelcome {
     uint16_t hub_epoch = 0;
     uint32_t ucast_floor = 0;
     uint32_t bcast_base = 0;
     uint64_t hub_time_us = 0;
-    uint8_t net_mode = 0;
+    NetMode net_mode = NetMode::router;
     uint8_t channel = 0;
 
     static constexpr uint8_t kCls = fr::wire::kClsNet;
@@ -129,6 +284,21 @@ struct NetResolve {
 size_t encode(const NetResolve &v, fr::wire::Writer &w);
 std::expected<NetResolve, fr::wire::DecodeErr> decode_net_resolve(std::span<const uint8_t> in);
 bool operator==(const NetResolve &a, const NetResolve &b);
+
+// NET.TEST
+struct NetTest {
+    uint32_t seq = 0;
+    uint32_t t_us = 0;
+    bool echo = false;  // the receiver answers with an echo
+    std::span<const uint8_t> pad{};
+
+    static constexpr uint8_t kCls = fr::wire::kClsNet;
+    static constexpr uint8_t kKind = kKindNetTest;
+    static constexpr size_t kMaxSize = 197;
+};
+size_t encode(const NetTest &v, fr::wire::Writer &w);
+std::expected<NetTest, fr::wire::DecodeErr> decode_net_test(std::span<const uint8_t> in);
+bool operator==(const NetTest &a, const NetTest &b);
 
 // PRESENCE.HELLO
 struct PresenceHello {
@@ -214,6 +384,20 @@ size_t encode(const PresencePong &v, fr::wire::Writer &w);
 std::expected<PresencePong, fr::wire::DecodeErr> decode_presence_pong(std::span<const uint8_t> in);
 bool operator==(const PresencePong &a, const PresencePong &b);
 
+// ACK.SACK
+struct AckSack {
+    uint16_t frag_id = 0;
+    uint8_t cnt = 0;
+    uint64_t received_bitmap = 0;
+
+    static constexpr uint8_t kCls = fr::wire::kClsAck;
+    static constexpr uint8_t kKind = kKindAckSack;
+    static constexpr size_t kMaxSize = 18;
+};
+size_t encode(const AckSack &v, fr::wire::Writer &w);
+std::expected<AckSack, fr::wire::DecodeErr> decode_ack_sack(std::span<const uint8_t> in);
+bool operator==(const AckSack &a, const AckSack &b);
+
 // MSG.MSG
 struct MsgMsg {
     std::string_view topic{};
@@ -280,6 +464,20 @@ struct OtaReject {
 size_t encode(const OtaReject &v, fr::wire::Writer &w);
 std::expected<OtaReject, fr::wire::DecodeErr> decode_ota_reject(std::span<const uint8_t> in);
 bool operator==(const OtaReject &a, const OtaReject &b);
+
+// OTA.CHUNK
+struct OtaChunk {
+    uint16_t job = 0;
+    uint32_t offset = 0;
+    std::span<const uint8_t> data{};
+
+    static constexpr uint8_t kCls = fr::wire::kClsOta;
+    static constexpr uint8_t kKind = kKindOtaChunk;
+    static constexpr size_t kMaxSize = 200;
+};
+size_t encode(const OtaChunk &v, fr::wire::Writer &w);
+std::expected<OtaChunk, fr::wire::DecodeErr> decode_ota_chunk(std::span<const uint8_t> in);
+bool operator==(const OtaChunk &a, const OtaChunk &b);
 
 // OTA.STATUS
 struct OtaStatus {

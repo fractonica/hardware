@@ -47,6 +47,8 @@ import {
   type Model,
   type Property,
   type ScalarName,
+  type SerialBody,
+  type SerialLayoutField,
   type StructDef,
   type TypeRef,
   type VectorCase,
@@ -1195,6 +1197,208 @@ function messagesSource(model: Model): string {
   return c.text();
 }
 
+// ---- fr_proto/gen: serial bodies ----
+
+const LAYOUT_CPP = { u8: 'uint8_t', i8: 'int8_t', u16: 'uint16_t', u32: 'uint32_t', mac: 'std::array<uint8_t, 6>' } as const;
+
+/** 'GW_TX_DONE' -> 'GwTxDone' */
+function serialStructName(b: SerialBody): string {
+  return b.kind === 'message' ? b.message!.name : pascalUpper(b.name);
+}
+
+function serialDecodeName(b: SerialBody): string {
+  return `decode_${snakeOf(serialStructName(b))}`;
+}
+
+function layoutCpp(f: SerialLayoutField): string {
+  return f.type === 'enum' ? enumCpp(f.enum!) : LAYOUT_CPP[f.type];
+}
+
+function layoutWire(b: SerialBody): string {
+  const parts = b.layout.map((f) => (f.type === 'mac' ? `${f.name}[6]` : `${f.name} ${f.type === 'enum' ? f.enum!.name : f.type}`));
+  return [...parts, ...(b.envelope ? ['envelope'] : [])].join(' | ');
+}
+
+function serialHeader(model: Model): string {
+  const p = model.protocol;
+  const c = new Code();
+  c.line(`${GENERATED} Source: ${p.file}`);
+  c.line('// Serial frame bodies (spec 05 §5.12.3, design m2-c4-gateway D1): fixed little-endian layouts, GW_RX and GW_TX');
+  c.line('// with the envelope after theirs, and the protobuf-wire GW_STATUS, GW_CMD and GW_RSP (their structs and codecs');
+  c.line('// are in messages.hpp). A decoded envelope (`env`) is a view into the body and the decoders copy nothing;');
+  c.line('// encode_line writes a whole `@fr1:` line from a struct, streaming `env` from where it lies.');
+  c.line('#pragma once').line();
+  c.lines(['#include <array>', '#include <cstddef>', '#include <cstdint>', '#include <expected>', '#include <span>']).line();
+  c.lines(['#include "fr/serial_line.hpp"', '#include "fr/wire.hpp"', '#include "messages.hpp"', '#include "protocol.hpp"']).line();
+  c.line('namespace fr::proto {').line();
+  for (const b of p.serial.bodies) {
+    const k = `fr::wire::kSerial${pascalUpper(b.name)}`;
+    if (b.kind === 'message') {
+      const n = b.message!.name;
+      c.line(`// ${b.name} (${hex(b.code, 2)}): ${n}, protobuf-wire; decode_${snakeOf(n)}() decodes the body.`);
+      c.line(`inline constexpr uint8_t kSerialTypeOf${n} = ${k};`);
+      c.line(`/** One \`@fr1:\` line without the terminator; 0 if \`out\` is too small. */`);
+      c.line(`size_t encode_line(const ${n} &v, std::span<char> out);`);
+      c.line();
+      continue;
+    }
+    const n = serialStructName(b);
+    c.line(`// ${b.name} (${hex(b.code, 2)}): ${layoutWire(b)}`);
+    c.open(`struct ${n}`, () => {
+      for (const f of b.layout) {
+        const init = f.type === 'mac' ? '{}' : f.type === 'enum' ? (f.enum!.members.some((m) => m.value === 0) ? ` = ${enumCpp(f.enum!)}::${cppIdent(f.enum!.members.find((m) => m.value === 0)!.name)}` : '{}') : ' = 0';
+        c.line(`${layoutCpp(f)} ${cppIdent(f.name)}${init};${f.doc ? `  // ${oneLine(f.doc)}` : ''}`);
+      }
+      if (b.envelope) {
+        c.line('std::span<const uint8_t> env{};  // the envelope bytes (not decoded); decoded, a view into the body');
+      }
+      c.line();
+      c.line(`static constexpr uint8_t kType = ${k};`);
+      c.line(`static constexpr size_t kPrefixSize = ${b.prefixSize};`);
+      c.line(`static constexpr bool kEnvelope = ${b.envelope};`);
+      c.line(`static constexpr size_t kMaxSize = ${b.envelope ? 'fr::wire::kMaxLineBody' : 'kPrefixSize'};`);
+    }, '};');
+    c.line(b.envelope ? '/** The prefix, then `env`. */' : '/** The kPrefixSize bytes. */');
+    c.line(`size_t encode(const ${n} &v, fr::wire::Writer &w);`);
+    c.line(
+      b.envelope
+        ? `/** Shorter than kPrefixSize is truncated; \`env\` is the rest of \`in\`. */`
+        : '/** Exactly kPrefixSize bytes: shorter is truncated, longer too_long. */',
+    );
+    c.line(`std::expected<${n}, fr::wire::DecodeErr> ${serialDecodeName(b)}(std::span<const uint8_t> in);`);
+    c.line(
+      b.envelope
+        ? '/** One `@fr1:` line without the terminator, `env` streamed, not copied; 0 if over kMaxLine or `out` is too small. */'
+        : '/** One `@fr1:` line without the terminator; 0 if `out` is too small. */',
+    );
+    c.line(`size_t encode_line(const ${n} &v, std::span<char> out);`);
+    c.line(`bool operator==(const ${n} &a, const ${n} &b);`);
+    c.line();
+  }
+  c.trim().line().line('}  // namespace fr::proto');
+  return c.text();
+}
+
+function serialSource(model: Model): string {
+  const p = model.protocol;
+  const c = new Code();
+  c.line(`${GENERATED} Source: ${p.file}`);
+  c.line('#include "serial.hpp"').line();
+  c.line('#include <algorithm>').line();
+  c.line('namespace fr::proto {');
+  c.line('namespace {').line();
+  c.fn('uint16_t le16(std::span<const uint8_t> b, size_t at)', () => c.line('return static_cast<uint16_t>(b[at] | (b[at + 1] << 8));'));
+  c.line();
+  c.fn('uint32_t le32(std::span<const uint8_t> b, size_t at)', () => c.line('return le16(b, at) | (static_cast<uint32_t>(le16(b, at + 2)) << 16);'));
+  c.line();
+  const layouts = p.serial.bodies.filter((b) => b.kind === 'layout');
+  for (const b of layouts) {
+    const n = serialStructName(b);
+    c.fn(`void write_prefix(const ${n} &v, fr::wire::Writer &w)`, () => {
+      for (const f of b.layout) {
+        const x = `v.${cppIdent(f.name)}`;
+        switch (f.type) {
+          case 'mac':
+            c.line(`w.raw(${x});`);
+            break;
+          case 'enum':
+          case 'i8':
+            c.line(`w.u8(static_cast<uint8_t>(${x}));`);
+            break;
+          case 'u8':
+            c.line(`w.u8(${x});`);
+            break;
+          case 'u16':
+            c.line(`w.u16le(${x});`);
+            break;
+          case 'u32':
+            c.line(`w.u32le(${x});`);
+            break;
+        }
+      }
+    });
+    c.line();
+  }
+  c.line('}  // namespace').line();
+  for (const b of p.serial.bodies) {
+    const n = serialStructName(b);
+    if (b.kind === 'message') {
+      c.fn(`size_t encode_line(const ${n} &v, std::span<char> out)`, () => {
+        c.line(`uint8_t body[${n}::kMaxSize];`);
+        c.line('fr::wire::Writer w(body, sizeof(body));');
+        c.line('encode(v, w);');
+        c.line(`return w.overflow() ? 0 : fr::wire::encode_line(kSerialTypeOf${n}, w.bytes(), out);`);
+      });
+      c.line();
+      continue;
+    }
+    c.fn(`size_t encode(const ${n} &v, fr::wire::Writer &w)`, () => {
+      c.line('const size_t start = w.size();');
+      c.line('write_prefix(v, w);');
+      if (b.envelope) {
+        c.line('w.raw(v.env);');
+      }
+      c.line('return w.size() - start;');
+    });
+    c.line();
+    c.fn(`std::expected<${n}, fr::wire::DecodeErr> ${serialDecodeName(b)}(std::span<const uint8_t> in)`, () => {
+      if (b.envelope) {
+        c.open(`if (in.size() < ${n}::kPrefixSize)`, () => c.line('return std::unexpected(fr::wire::DecodeErr::truncated);'));
+      } else {
+        c.open(`if (in.size() != ${n}::kPrefixSize)`, () =>
+          c.line('using fr::wire::DecodeErr;').line(`return std::unexpected(in.size() < ${n}::kPrefixSize ? DecodeErr::truncated : DecodeErr::too_long);`),
+        );
+      }
+      c.line(`${n} v{};`);
+      for (const f of b.layout) {
+        const x = `v.${cppIdent(f.name)}`;
+        switch (f.type) {
+          case 'mac':
+            c.line(`std::copy_n(in.begin() + ${f.offset}, 6, ${x}.begin());`);
+            break;
+          case 'enum':
+            c.line(`${x} = static_cast<${enumCpp(f.enum!)}>(in[${f.offset}]);`);
+            break;
+          case 'i8':
+            c.line(`${x} = static_cast<int8_t>(in[${f.offset}]);`);
+            break;
+          case 'u8':
+            c.line(`${x} = in[${f.offset}];`);
+            break;
+          case 'u16':
+            c.line(`${x} = le16(in, ${f.offset});`);
+            break;
+          case 'u32':
+            c.line(`${x} = le32(in, ${f.offset});`);
+            break;
+        }
+      }
+      if (b.envelope) {
+        c.line(`v.env = in.subspan(${n}::kPrefixSize);`);
+      }
+      c.line('return v;');
+    });
+    c.line();
+    c.fn(`size_t encode_line(const ${n} &v, std::span<char> out)`, () => {
+      c.line(`uint8_t prefix[${n}::kPrefixSize];`);
+      c.line('fr::wire::Writer w(prefix, sizeof(prefix));');
+      c.line('write_prefix(v, w);');
+      c.line(b.envelope ? `return fr::wire::encode_line(${n}::kType, w.bytes(), v.env, out);` : `return fr::wire::encode_line(${n}::kType, w.bytes(), out);`);
+    });
+    c.line();
+    c.fn(`bool operator==(const ${n} &a, const ${n} &b)`, () => {
+      const clauses = b.layout.map((f) => `a.${cppIdent(f.name)} == b.${cppIdent(f.name)}`);
+      if (b.envelope) {
+        clauses.push('equal_bytes(a.env, b.env)');
+      }
+      emitReturnAll(c, clauses);
+    });
+    c.line();
+  }
+  c.trim().line().line('}  // namespace fr::proto');
+  return c.text();
+}
+
 // ---- fr_caps/gen: one capability ----
 
 interface CapNames {
@@ -2319,6 +2523,11 @@ function decoderEntries(model: Model): DecoderEntry[] {
     const name = messageStructName(m);
     out.push({ ident: snakeOf(name), type: m.key, cpp: `fr::proto::${name}`, decode: `fr::proto::decode_${snakeOf(name)}` });
   }
+  // Layout serial bodies, under their serial type name (the protobuf ones are protocol types above).
+  for (const b of model.protocol.serial.bodies.filter((x) => x.kind === 'layout')) {
+    const name = serialStructName(b);
+    out.push({ ident: snakeOf(name), type: b.name, cpp: `fr::proto::${name}`, decode: `fr::proto::${serialDecodeName(b)}` });
+  }
   for (const cap of model.capabilities) {
     for (const s of capStructs(cap)) {
       out.push({ ident: s.decode.slice('decode_'.length), type: vectorTypeOf(cap, s), cpp: `fr::cap::${s.name}`, decode: `fr::cap::${s.decode}` });
@@ -2541,12 +2750,42 @@ function vectorsInc(model: Model, vectors: readonly Vector[]): string {
   const decoders = decoderEntries(model);
   const vw = new VectorWriter(c);
 
+  /** `x.field = ...;` for a layout serial body's JSON value (macs and env as hex, enums by name or number). */
+  const assignLayout = (b: SerialBody, value: unknown, where: string) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`${where}: expected an object, got ${JSON.stringify(value)}`);
+    }
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (b.envelope && k === 'env') {
+        c.line(`x.env = ${vw.valueExpr({ kind: 'bytes', max: 1 << 16 }, v, `${where}.env`)};`);
+        continue;
+      }
+      const f = b.layout.find((x) => x.name === k);
+      if (!f) {
+        throw new Error(`${where}: unknown field '${k}'`);
+      }
+      const x = `x.${cppIdent(f.name)}`;
+      if (f.type === 'mac') {
+        const bytes = typeof v === 'string' ? hexBytes(v) : [];
+        if (bytes.length !== 6) {
+          throw new Error(`${where}.${k}: expected 6 bytes of hex`);
+        }
+        c.line(`${x} = ${bytesInit(bytes)};`);
+      } else if (f.type === 'enum') {
+        c.line(`${x} = ${typeof v === 'number' ? `static_cast<${enumCpp(f.enum!)}>(${v})` : enumMemberLit(f.enum!, v)};`);
+      } else {
+        c.line(`${x} = ${scalarLit(f.type, v)};`);
+      }
+    }
+  };
+
   /** Builds `x` from a message/cap/state value and calls v.value. */
   const emitValue = (name: string, type: string, value: unknown, hexLit: string, encode: boolean, where: string) => {
     const d = decoders.find((x) => x.type === type);
     if (!d) {
       throw new Error(`${where}: no generated codec for type ${type}`);
     }
+    const layout = model.protocol.serial.bodies.find((x) => x.kind === 'layout' && x.name === type);
     if (d.encode) {
       const cap = model.capabilities.find((x) => type.startsWith(`${x.name}.`))!;
       const p = cap.properties.find((x) => type === `${cap.name}.${x.name}.state`)!;
@@ -2558,6 +2797,10 @@ function vectorsInc(model: Model, vectors: readonly Vector[]): string {
         c.line(`x = ${vw.valueExpr(p.type, v, `${where}.value`)};`);
       }
       c.line(`v.value(${cString(name)}, ${cString(type)}, x, ${d.encode}, ${d.decode}, ${hexLit}, ${encode});`);
+    } else if (layout) {
+      c.line(`${d.cpp} x{};`);
+      assignLayout(layout, value ?? {}, where);
+      c.line(`v.value(${cString(name)}, ${cString(type)}, x, enc, ${d.decode}, ${hexLit}, ${encode});`);
     } else {
       c.line(`${d.cpp} x{};`);
       vw.assign(fieldsOfType(model, type), value ?? {}, 'x', where);
@@ -2659,6 +2902,7 @@ function vectorsInc(model: Model, vectors: readonly Vector[]): string {
   c.line('#include "fr/envelope.hpp"');
   c.line('#include "fr/serial_line.hpp"');
   c.line('#include "messages.hpp"');
+  c.line('#include "serial.hpp"');
   c.lines(model.capabilities.map((cap) => `#include "${cap.shortName}.hpp"`)).line();
   c.line('namespace fr_vectors {').line();
   c.line('/** decode_line with its own scratch, shaped like the other decoders. */');
@@ -2761,6 +3005,8 @@ export function emitCpp(model: Model, vectors: VectorCase[]): GeneratedFile[] {
     { path: `${CPP_PROTO_GEN_DIR}/protocol.cpp`, content: protocolSource(model) },
     { path: `${CPP_PROTO_GEN_DIR}/messages.hpp`, content: messagesHeader(model) },
     { path: `${CPP_PROTO_GEN_DIR}/messages.cpp`, content: messagesSource(model) },
+    { path: `${CPP_PROTO_GEN_DIR}/serial.hpp`, content: serialHeader(model) },
+    { path: `${CPP_PROTO_GEN_DIR}/serial.cpp`, content: serialSource(model) },
   ];
   for (const cap of model.capabilities) {
     files.push({ path: `${CPP_CAPS_GEN_DIR}/${cap.shortName}.hpp`, content: capHeader(cap) });

@@ -7,10 +7,16 @@
 // TCP frames and sends UDP datagrams, so it never blocks on the network (spec 03 §3.4). Received
 // envelopes and link changes reach the core task through Hooks, which fr_core implements by posting.
 // ESP-NOW's callbacks (Wi-Fi task) and retry timers (esp_timer task) likewise only copy and post.
+//
+// M2-C4 (design m2-c4-gateway D8): a gateway (CONFIG_FR_ROLE 1) joins the AP as a STA like any node, so its ESP-NOW
+// channel is the AP's, but opens no TCP or UDP to the hub: its hub link is USB (tcp_link() and udp_link() stay down).
+// Spike S2's radio hooks (D19, FR_TEST_HOOKS builds): air_set_rate, air_churn, set_tx_power, wifi_proto.
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <optional>
 #include <span>
 
 #include "fr/base.hpp"
@@ -167,5 +173,46 @@ bool start_air(const AirSettings &settings, const AirHooks &hooks);
 
 /** Core task. */
 AirStatus air_status();
+
+// ---- spike S2's radio hooks (design m2-c4-gateway D19; diag `air ...`, `wifi proto`), core task ----
+
+/** What `air rate` set. */
+struct AirRateResult {
+    uint32_t peers = 0;   // peer entries set now (the broadcast peer counts one)
+    uint32_t failed = 0;  // ... of which esp_now_set_peer_rate_config refused (counted in rate_fail too)
+};
+
+/** `air rate <robust|fast> [bcast]`: the default rate of every unicast peer, or of the broadcast peer, set at once
+ * on the peers there are and on every later one (phymode explicit, 05 §5.3). FAILED before start_air(). */
+std::expected<AirRateResult, Err> air_set_rate(AirRate rate, bool broadcast);
+/** The default rate `air rate` set last (peer_default: never; the robust one). */
+AirRate air_rate(bool broadcast);
+
+/** What `air churn <n>` measured: µs per esp_now_add_peer (with its rate config, as the scheduler's adds) and per
+ * esp_now_del_peer, over n throwaway peers. */
+struct AirChurn {
+    uint32_t n = 0;
+    uint32_t failed = 0;  // adds refused (no free entry)
+    uint32_t add_p50_us = 0, add_p99_us = 0, add_max_us = 0;
+    uint32_t del_p50_us = 0, del_p99_us = 0, del_max_us = 0;
+};
+
+/** `air churn <n>`. FAILED before start_air(). Blocks the core task for the n add/del pairs (n <= 1000). */
+std::expected<AirChurn, Err> air_churn(uint32_t n);
+
+/** What `air txpower` left in force, and the board's own cap it can go back to. */
+struct TxPower {
+    int8_t qdbm = 0;          // esp_wifi_get_max_tx_power after the change
+    int8_t profile_qdbm = 0;  // the boot value: CONFIG_FR_WIFI_MAX_TX_POWER_QDBM, or the driver default read at start()
+};
+
+/** `air txpower <qdbm>` / `air txpower profile` (`qdbm` nullopt): esp_wifi_set_max_tx_power at run time (the driver
+ * rounds and clamps it), or the boot value back (the board manifest's rf.max_tx_power_qdbm; none: the driver default
+ * read once start() had started Wi-Fi). INVALID_ARGS when the driver refuses, FAILED before start(). */
+std::expected<TxPower, Err> set_tx_power(std::optional<int8_t> qdbm);
+
+/** `wifi proto <ax|bgn>` (ESP32-C6 only, else UNSUPPORTED): the STA's protocols (b/g/n with or without 11ax), set
+ * and rejoined on the fr_net task about 300 ms later, so the RESULT leaves first. FAILED before start(). */
+fr::Status wifi_proto(bool ax);
 
 }  // namespace fr::net::esp

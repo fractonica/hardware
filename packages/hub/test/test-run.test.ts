@@ -202,8 +202,12 @@ describe('test_run, target tier', { timeout: 60_000 }, () => {
       counts: { pass: 1, fail: 0, error: 0, skipped: 0 },
       gates: [{ gate: 'T-ALPHA', file: 't-alpha.ts', status: 'pass', measured: { devices: 1, p50_ms: 3.5 }, evidence: { client: 'mcp' }, needs: { usb: true } }],
     });
-    // The scenario's own hub calls carry the run's origin (FR_CLIENT -> X-Fr-Client).
-    expect(hubCalls.slice(before)).toEqual([{ op: 'device_list', client: 'mcp' }]);
+    // The scenario's own hub calls carry the run's origin (FR_CLIENT -> X-Fr-Client); the first is run.ts's D22
+    // snapshot (design m2-c4-gateway), which finds no DUT with a device id here, so it takes no `after` either.
+    expect(hubCalls.slice(before)).toEqual([
+      { op: 'device_list', client: 'mcp' },
+      { op: 'device_list', client: 'mcp' },
+    ]);
     const log = jobs.logs(job.job_id, 0, 200, false).lines.map((l) => l.text);
     expect(log).toContain('stage: T-ALPHA');
     expect(log).toContain('[T-ALPHA] listed');

@@ -396,6 +396,19 @@ TEST(header_ext_rejections)
     CHECK(ext("04 7f 02 aa bb").has_value());                              // unknown non-critical
 }
 
+TEST(header_ext_exec_at_hub)
+{
+    // design m2-c4-gateway D4: 0x82 is a known critical u32 (the hub clock), so it decodes; Net refuses the CMD.
+    CHECK_EQ(ext_value_size(kExtExecAtHubUs), 4u);
+    CHECK(kExtExecAtHubUs >= kExtCritical);
+    const auto in = from_hex("a1 82 04 01 07 00 00 00 02 01 00 00 12 00 09 00 22 02 06 82 04 01 00 00 80");
+    const auto h = unpack_header(in);
+    REQUIRE(h.has_value());
+    CHECK_EQ(h->ext.value(kExtExecAtHubUs).value_or(0), 0x80000001u);
+    CHECK(!h->ext.value(kExtExecAtUs).has_value());
+    CHECK_EQ(unpack_header(from_hex("a1 82 04 01 07 00 00 00 02 01 00 00 12 00 09 00 22 02 04 82 02 01 00")).error(), DecodeErr::bad_ext);
+}
+
 TEST(header_ext_port_seq)
 {
     // An ordered port's EVENT (design m2-c3-inputs D8): port_seq is a non-critical u16 that Net stamps.
@@ -515,6 +528,24 @@ TEST(serial_line_worked_example)
         CHECK_EQ(f->type, 1);
         CHECK_BYTES(f->body, env);
     }
+}
+
+TEST(serial_line_two_part_body)
+{
+    // A GW_RX/GW_TX prefix and the envelope after it, streamed from both (design m2-c4-gateway D1): the same line
+    // as the one-buffer body, for every split, and nothing over kMaxLine.
+    const auto env = example_env();
+    char one[kMaxLine];
+    const size_t n = encode_line(kSerialGwRx, env, one);
+    for (size_t cut = 0; cut <= env.size(); ++cut) {
+        char two[kMaxLine];
+        const std::span<const uint8_t> all(env);
+        CHECK_EQ(std::string_view(two, encode_line(kSerialGwRx, all.first(cut), all.subspan(cut), two)), std::string_view(one, n));
+    }
+    std::vector<uint8_t> big(kMaxLineBody + 1);
+    char out[kMaxLine];
+    CHECK_EQ(encode_line(kSerialGwRx, std::span<const uint8_t>(big).first(12), std::span<const uint8_t>(big).subspan(12), out), 0u);
+    CHECK_EQ(encode_line(kSerialGwRx, std::span<const uint8_t>(big).first(12), std::span<const uint8_t>(big).subspan(13), out), kMaxLine);
 }
 
 TEST(serial_line_error_codes)

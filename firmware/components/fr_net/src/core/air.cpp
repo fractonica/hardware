@@ -11,6 +11,11 @@
 // M2-C2 (design m2-c2 D17, D19): a flood the driver refuses gives its flood-rate token back (here for relays and
 // seeds, in peer.cpp for the node's own floods), and while no session is up a newer hub run heard over the air is
 // adopted (adopt_hub_run) instead of waiting for the next WELCOME.
+//
+// M2-C4 (design m2-c4-gateway D8, D10-D11, D19): every frame goes to the gateway's AirTap first; a hub frame over the air
+// is a BEACON (gateway.cpp), an envelope of the gateway session (a unicast from the chosen gateway), or a flood as
+// before; a node's NET.TEST is spike S2's bench frame (bench.cpp). A send's token says whose it is (kToken*), so a
+// completion reaches the gateway link, the bench, the bridge or the node <-> node chain, and only that one.
 #include <algorithm>
 #include <cstring>
 
@@ -75,6 +80,9 @@ void Net::refresh_identity()
     epoch_ = id.epoch;
     const HelloInfo hi = host_.hello_info();
     gateway_ = hi.role == fr::proto::Role::gateway;
+    if (gateway_ && air_ != nullptr) {
+        air_->bridge_peers();  // design m2-c4-gateway D8: the bridge's LRU gets all 19 unicast entries
+    }
     seed_rng(hi.mac);
 }
 
@@ -86,13 +94,16 @@ void Net::attach_air(AirLink &air)
     s.attached = true;
     s.up = false;
     refresh_identity();
+    attach(gw_link_);  // design m2-c4-gateway D10: down until a gateway's BEACON
     link_changed(LinkKind::espnow);  // up as AirLink says; the heartbeat starts with it
 }
 
 uint32_t Net::next_token()
 {
-    if (++air_token_ == 0) {
-        ++air_token_;  // 0 never names a send
+    // The low 30 bits: the top two name whose send it is (kToken*). 0 never names a send.
+    air_token_ = (air_token_ + 1) & kTokenSeqMask;
+    if (air_token_ == 0) {
+        ++air_token_;
     }
     return air_token_;
 }
@@ -117,6 +128,22 @@ void Net::air_sent(uint32_t token, bool mac_acked)
 {
     if (!mac_acked) {
         ++ls(LinkKind::espnow).tx_fail;  // a unicast without its MAC ACK after the link retries
+    }
+    switch (token & kTokenTagMask) {
+    case kTokenGateway:
+        // The gateway link's: Q1 re-sends and the hub's ACKs make up for a lost one (design m2-c4-gateway D10).
+        state_.gateway.tx_nak += mac_acked ? 0 : 1;
+        return;
+    case kTokenBench:
+        bench_sent(token, mac_acked);
+        arm();
+        return;
+    case kTokenRaw:
+        raw_sent(token, mac_acked);
+        arm();
+        return;
+    default:
+        break;
     }
     for (NodeOut &o : node_out_) {
         if (!o.used || !o.in_air || o.token != token) {
@@ -156,6 +183,10 @@ void Net::receive_air(std::span<const uint8_t> envelope, const RxMeta &meta)
 {
     ++ls(LinkKind::espnow).rx;
     rx_at_ = core_.now();
+    if (tap_ != nullptr) {
+        // Design m2-c4-gateway D8: the bridge sees every frame the driver passed, before Net's own handling.
+        tap_->on_air_frame(envelope, meta, meta.rx_at > 0 ? std::min(meta.rx_at, rx_at_) : rx_at_);
+    }
     in_receive_ = true;
     handle_air(envelope, meta);
     in_receive_ = false;
@@ -179,21 +210,48 @@ void Net::handle_air(std::span<const uint8_t> envelope, const RxMeta &meta)
         return;
     }
     const Header &h = e->header;
+    if (gateway_ && h.dst == fr::proto::kAddrHub) {
+        // A gateway (design m2-c4-gateway D8): a node's frame for the hub is the bridge's alone (the tap forwarded it
+        // as GW_RX); it teaches no neighbour, takes no window slot and is no drop here.
+        return;
+    }
     const uint8_t initial = ttl_initial(h.ttl);
     const uint8_t remaining = ttl_remaining(h.ttl);
     // Receive filter (05 §5.3; the driver checked the channel): this net, not this node's own frame coming
-    // back through a relay, a TTL within FR_TTL_MAX, never BULK (which never goes on the air).
-    if (h.net != net_ || h.src == addr_ || (h.flags & kFlagBulk) != 0 || initial > cfg_.ttl_max ||
-        remaining > initial) {
+    // back through a relay, a TTL within FR_TTL_MAX.
+    if (h.net != net_ || h.src == addr_ || initial > cfg_.ttl_max || remaining > initial) {
         ++s.rx_drop;
         return;
     }
+    const bool bulk = (h.flags & kFlagBulk) != 0;
     if (h.src == fr::proto::kAddrHub) {
+        if (!bulk && h.cls == kClsNet && h.kind == fr::proto::kKindNetBeacon) {
+            on_beacon(*e, meta);  // design m2-c4-gateway D11: outside every window, never relayed
+            return;
+        }
+        if (!meta.to_broadcast && gw_ >= 0 && meta.src_mac == gateways_[static_cast<size_t>(gw_)].mac) {
+            // Design m2-c4-gateway D10: the hub's frame over the gateway session. BULK ones too: the gateway link
+            // answers a BULK request UNSUPPORTED and counts it (net.cpp), instead of a silent drop here.
+            deliver_gateway(envelope, meta);
+            return;
+        }
+        if (bulk) {
+            ++s.rx_drop;  // never BULK on the air otherwise (design c5 §2)
+            return;
+        }
         on_hub_air(*e, envelope, meta);
+        return;
+    }
+    if (bulk) {
+        ++s.rx_drop;  // never BULK, which never goes on the air (design c5 §2)
         return;
     }
     if (!is_node_addr(h.src)) {
         ++s.rx_drop;  // an UNASSIGNED sender, or a group/broadcast src no node has
+        return;
+    }
+    if (h.cls == kClsNet && h.kind == fr::proto::kKindNetTest) {
+        on_bench(*e, meta);  // spike S2 (design m2-c4-gateway D19): its own counts, no window, never relayed
         return;
     }
     // 05 §5.10: only a frame straight from its origin says who is in radio range; a relayed one carries

@@ -274,7 +274,7 @@ public:
                                                         .ucast_floor = ucast,
                                                         .bcast_base = bcast,
                                                         .hub_time_us = 5'000'000,
-                                                        .net_mode = 0,
+                                                        .net_mode = fr::proto::NetMode::router,
                                                         .channel = 6});
         return frame(0, fr::wire::kClsNet, fr::proto::kKindNetWelcome, ++ucast, node, 0, {}, body);
     }

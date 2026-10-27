@@ -225,6 +225,33 @@ export interface Message {
   realtime: boolean;
 }
 
+/** A serial_bodies layout field: little-endian, packed; `enum` is a u8 on the wire (open: any value decodes). */
+export interface SerialLayoutField {
+  name: string;
+  type: 'u8' | 'i8' | 'u16' | 'u32' | 'mac' | 'enum';
+  enum?: EnumDef;
+  offset: number;
+  size: number;
+  doc?: string;
+}
+
+/**
+ * The body of a serial frame type other than ENV (design m2-c4-gateway D1): a fixed layout, with or without an
+ * envelope after it (GW_RX, GW_TX; the rest of the body), or a protocol type encoded protobuf-wire (GW_STATUS).
+ */
+export interface SerialBody {
+  /** The serial_framing type name: 'GW_RX'. */
+  name: string;
+  code: number;
+  kind: 'layout' | 'message';
+  /** Empty for message bodies. */
+  layout: SerialLayoutField[];
+  prefixSize: number;
+  envelope: boolean;
+  /** kind 'message': the protocol type. */
+  message?: StructDef;
+}
+
 export interface ExtTlv {
   type: number;
   name: string;
@@ -255,6 +282,8 @@ export interface Protocol {
     crc: { algo: string; poly: number; init: number; order: string; covers: string };
     maxLine: number;
     types: EnumMember[];
+    /** Every type but ENV, in code order. */
+    bodies: SerialBody[];
   };
 }
 
@@ -319,6 +348,9 @@ export function pascalCase(snake: string): string {
     .map((s) => s[0].toUpperCase() + s.slice(1))
     .join('');
 }
+
+/** Bytes of a serial_bodies layout type; enums are u8 on the wire. */
+export const SERIAL_LAYOUT_SIZE = { u8: 1, i8: 1, u16: 2, u32: 4, mac: 6, enum: 1 } as const;
 
 // Messages 05 §5.8 allows to fragment; they may exceed the realtime budget.
 function isFragmentable(cls: string, kindName: string): boolean {
@@ -545,6 +577,13 @@ type RawConfigT = z.infer<typeof RawConfig>;
 
 const RawLayout = z.strictObject({ name: z.string(), type: layoutType, value: int.optional(), doc: z.string().optional() });
 
+const RawSerialBody = z.strictObject({
+  layout: z.array(z.strictObject({ name: z.string(), type: z.string(), doc: z.string().optional() })).optional(),
+  envelope: z.boolean().optional(),
+  message: z.string().optional(),
+});
+type RawSerialBodyT = z.infer<typeof RawSerialBody>;
+
 const RawProtocol = z.strictObject({
   protocol: z.string(),
   version: int,
@@ -576,6 +615,7 @@ const RawProtocol = z.strictObject({
     max_line: int,
     types: z.record(z.string(), int),
   }),
+  serial_bodies: z.record(z.string(), RawSerialBody),
 });
 type RawProtocol = z.infer<typeof RawProtocol>;
 
@@ -1073,6 +1113,7 @@ function buildProtocol(raw: RawProtocol, file: string, issues: Issues): Protocol
     issues.add(file, ['serial_framing', 'types'], 'serial types must be unique u8 values');
   }
   serialTypes.sort((a, b) => a.value - b.value);
+  const bodies = buildSerialBodies(raw.serial_bodies, serialTypes, scope, types, file, issues);
 
   return {
     file,
@@ -1098,8 +1139,92 @@ function buildProtocol(raw: RawProtocol, file: string, issues: Issues): Protocol
     classes,
     types,
     messages,
-    serial: { prefix: sf.prefix, encoding: sf.encoding, crc: sf.crc, maxLine: sf.max_line, types: serialTypes },
+    serial: { prefix: sf.prefix, encoding: sf.encoding, crc: sf.crc, maxLine: sf.max_line, types: serialTypes, bodies },
   };
+}
+
+// The generated frame objects carry `type` (the discriminant) and, after an envelope layout, `env`.
+const SERIAL_RESERVED_FIELDS = ['type', 'code', 'env'];
+
+function buildSerialBodies(
+  raw: Record<string, RawSerialBodyT>,
+  serialTypes: EnumMember[],
+  scope: Scope,
+  types: StructDef[],
+  file: string,
+  issues: Issues,
+): SerialBody[] {
+  const path = ['serial_bodies'];
+  const out: SerialBody[] = [];
+  for (const [name, b] of Object.entries(raw)) {
+    const at = [...path, name];
+    const t = serialTypes.find((x) => x.name === name);
+    if (!t) {
+      issues.add(file, at, `${name} is not a serial_framing type`);
+      continue;
+    }
+    if (name === 'ENV') {
+      issues.add(file, at, "ENV's body is an envelope; it takes no serial_bodies entry");
+      continue;
+    }
+    if ((b.layout === undefined) === (b.message === undefined)) {
+      issues.add(file, at, 'give exactly one of layout and message');
+      continue;
+    }
+    if (b.message !== undefined) {
+      if (b.envelope !== undefined) {
+        issues.add(file, [...at, 'envelope'], 'envelope applies to layout bodies only');
+      }
+      const def = types.find((x) => x.name === b.message);
+      if (!def) {
+        issues.add(file, [...at, 'message'], `unknown protocol type '${b.message}'`);
+        continue;
+      }
+      for (const f of def.fields.filter((x) => SERIAL_RESERVED_FIELDS.includes(x.name))) {
+        issues.add(file, [...at, 'message'], `${def.name}.${f.name}: the frame objects use '${f.name}'`);
+      }
+      out.push({ name, code: t.value, kind: 'message', layout: [], prefixSize: 0, envelope: false, message: def });
+      continue;
+    }
+    const layout: SerialLayoutField[] = [];
+    let offset = 0;
+    (b.layout ?? []).forEach((f, i) => {
+      const fp = [...at, 'layout', i];
+      if (!SNAKE.test(f.name)) {
+        issues.add(file, fp, `name '${f.name}' must be snake_case`);
+      }
+      if (SERIAL_RESERVED_FIELDS.includes(f.name) || layout.some((x) => x.name === f.name)) {
+        issues.add(file, fp, `field name '${f.name}' is taken`);
+      }
+      let type: SerialLayoutField['type'];
+      let def: EnumDef | undefined;
+      if (f.type in SERIAL_LAYOUT_SIZE && f.type !== 'enum') {
+        type = f.type as SerialLayoutField['type'];
+      } else if (scope.enums.has(f.type)) {
+        def = scope.enums.get(f.type)!;
+        type = 'enum';
+        if (def.underlying !== 'u8') {
+          issues.add(file, [...fp, 'type'], `enum ${def.name} does not fit the u8 a layout enum takes`);
+        }
+      } else {
+        issues.add(file, [...fp, 'type'], `unknown layout type '${f.type}' (u8, i8, u16, u32, mac or a u8 enum)`);
+        return;
+      }
+      const size = SERIAL_LAYOUT_SIZE[type];
+      layout.push({ name: f.name, type, ...(def ? { enum: def } : {}), offset, size, ...(f.doc !== undefined ? { doc: f.doc } : {}) });
+      offset += size;
+    });
+    if (layout.length === 0) {
+      issues.add(file, [...at, 'layout'], 'a layout needs at least one field');
+    }
+    out.push({ name, code: t.value, kind: 'layout', layout, prefixSize: offset, envelope: b.envelope === true });
+  }
+  for (const t of serialTypes) {
+    if (t.name !== 'ENV' && !(t.name in raw)) {
+      issues.add(file, path, `serial type ${t.name} has no body`);
+    }
+  }
+  return out.sort((a, b) => a.code - b.code);
 }
 
 // ---- registry ----

@@ -33,7 +33,7 @@ export type { LogsOpName } from './ops/logs.ts';
 export { BROADCAST_ALIAS, LatencyStatsSchema, PROBE_MODES, type NetOpName, type ProbeOpName } from './ops/net.ts';
 export type { OtaOpName } from './ops/ota.ts';
 export { LeaseSchema, type Lease, type PortsOpName } from './ops/ports.ts';
-export { CapInstanceSchema, DeviceLinkInfoSchema, type InventoryOpName, type RegistryOpName } from './ops/registry.ts';
+export { CapInstanceSchema, DeviceLinkInfoSchema, GatewayInfoSchema, type InventoryOpName, type RegistryOpName } from './ops/registry.ts';
 export { TEST_TIERS, TestReportSchema, type TestsOpName, type TestTier } from './ops/tests.ts';
 
 export const OPS = [
@@ -86,7 +86,7 @@ export const OPS = [
       source_dir: sourceDir,
       profile: z.string().describe('profile name, e.g. c3o-pad'),
       build_type: z.enum(['debug', 'release']).default('debug'),
-      app: z.string().default('node'),
+      app: z.string().optional().describe("firmware/apps/<app>; default the profile's app: (node, or gateway for a role: gateway profile)"),
       clean: z.boolean().default(false),
       fault: z
         .enum(['health'])

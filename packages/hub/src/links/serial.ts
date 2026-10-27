@@ -4,11 +4,14 @@
 // the log text stays exactly as before. Egress: one `@fr1:` line per envelope through the hub's own
 // handle (SerialPortManager.writeLine). M2-C2 (design m2-c2 D16, D18): a line that goes to many ports is encoded
 // once (sendFramed), and an endpoint tells how full its queue is, so node-broadcast fan-out can leave room for
-// what else the line carries.
+// what else the line carries. M2-C4 (design m2-c4-gateway D13): a role:gateway device's port carries GW_* lines
+// beside its ENV ones; they go to the gateway link (gateway.ts), and those from any other port are dropped and counted.
+// The log store keeps none of them (LogStore.bridged): they are the bridge's traffic, not the node's log.
 
 import { decodeSerialLine, encodeSerialLine, SERIAL_TYPE } from '@fractonica/protocol';
 
 import { FrameDecoder, type FrameText } from '../frames.ts';
+import type { GatewayLink } from './gateway.ts';
 import type { Framed } from './index.ts';
 import { type Endpoint, type LinkSink, newCounters } from './types.ts';
 
@@ -31,6 +34,20 @@ export class SerialFrameTap extends FrameDecoder {
 
   override format(device: string, line: string): FrameText {
     const text = super.format(device, line);
+    this.#tap(device, line);
+    return text;
+  }
+
+  /** A gateway bridge's line (GW_*, LINK_*): not stored, to the link all the same, in the same order. */
+  override bridge(device: string, line: string): boolean {
+    if (!super.bridge(device, line)) {
+      return false;
+    }
+    this.#tap(device, line);
+    return true;
+  }
+
+  #tap(device: string, line: string): void {
     const onLine = this.#onLine;
     if (onLine) {
       queueMicrotask(() => {
@@ -41,7 +58,6 @@ export class SerialFrameTap extends FrameDecoder {
         }
       });
     }
-    return text;
   }
 }
 
@@ -141,6 +157,8 @@ export class SerialLink {
   readonly counters = newCounters();
   /** The most bytes of lines one port had queued, since the link was made (hub_status). */
   maxUnsent = 0;
+  /** Where GW_* and LINK_PONG lines go (NodeLinks sets it); without one they are dropped. */
+  gateways: GatewayLink | null = null;
 
   constructor(sink: LinkSink, writer: SerialWriter | null) {
     this.#sink = sink;
@@ -155,7 +173,8 @@ export class SerialLink {
       return;
     }
     if (frame.value.type !== SERIAL_TYPE.ENV) {
-      return; // gateway frames (GW_*) and LINK_PING arrive with gateway mode (M2)
+      this.gateways?.line(device, frame.value.type, frame.value.body);
+      return;
     }
     this.counters.rx++;
     this.#sink.envelope(this.endpoint(device), frame.value.body);
@@ -175,6 +194,7 @@ export class SerialLink {
    * of the session running out its presence timeout. The next line from that port starts a new endpoint.
    */
   gone(device: string, why: string): void {
+    this.gateways?.gone(device); // a gateway's port: its gateway:G/* endpoints close too, as 'gateway down'
     const ep = this.#endpoints.get(device);
     if (ep) {
       ep.close();

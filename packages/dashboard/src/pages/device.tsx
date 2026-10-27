@@ -405,7 +405,7 @@ export function DevicePage() {
           {r ? (
             <KV
               items={[
-                ['links', r.links.length ? r.links.join(', ') : '–'],
+                ['links', r.links.length ? r.links.map((l) => (l === 'gateway' && r.gw ? `gateway (${r.gw})` : l)).join(', ') : '–'],
                 ['UDP', r.udp_blocked ? <Badge key="u" tone="warn">blocked</Badge> : r.udp_ms_ago !== null ? `${span(r.udp_ms_ago)} ago` : '–'],
                 ['last heard', r.last_rx_ms_ago !== null ? `${span(r.last_rx_ms_ago)} ago` : '–'],
                 ['RSSI', hb?.rssi_ap ? `${hb.rssi_ap} dBm` : '–'],

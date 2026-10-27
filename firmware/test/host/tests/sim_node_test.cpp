@@ -5,7 +5,8 @@
 // down and its strand quiesced at once, its queued and later jobs dropped (under ASan in the suite). From the M2-C2
 // review: a unicast to a powered-off node fails over ESP-NOW (fleet-3); power-on is a fresh boot for Net's TCP hold,
 // `wifi_down` and `tcp 0` (fleet-1); a power off in a reboot's gap keeps the node off (fleet-2); `net wifi_down` is
-// applied 300 ms after its RESULT, as fr_net's WifiSta does (fleet-5).
+// applied 300 ms after its RESULT, as fr_net's WifiSta does (fleet-5). M2-C4 (design m2-c4-gateway D18): the spec's
+// role, and a gateway node's bridge behind `stats gw` (and nobody else's).
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -152,6 +153,49 @@ TEST(sim_node_spec_file_parses_with_the_schemas_defaults)
         R"({"schema":"fractonica/fleet-spec@1","seed":1,"state_dir":"/x","nodes":[{"alias":"a","mac":"02f200000001","addr":1},{"alias":"a","mac":"02f200000002","addr":2}]})",
         twice, error));
     CHECK(error.find("repeats") != std::string::npos);
+}
+
+TEST(sim_node_spec_file_parses_a_gateway_role)
+{
+    const auto spec = [](std::string_view node) {
+        return std::string(R"({"schema":"fractonica/fleet-spec@1","seed":1,"state_dir":"/x","nodes":[)") + std::string(node) + "]}";
+    };
+    frsim::FleetSpec s;
+    std::string error;
+    REQUIRE(frsim::parse_fleet_spec(spec(R"({"alias":"gw","mac":"02f200000001","addr":1,"role":"gateway","usb":true},
+                                         {"alias":"a","mac":"02f200000002","addr":2})"),
+                                    s, error));
+    REQUIRE_EQ(s.nodes.size(), 2u);
+    CHECK(s.nodes[0].role == fr::proto::Role::gateway);
+    CHECK(s.nodes[1].role == fr::proto::Role::node);  // the default
+    frsim::FleetSpec bad;
+    CHECK(!frsim::parse_fleet_spec(spec(R"({"alias":"gw","mac":"02f200000001","addr":1,"role":"gateway"})"), bad, error));
+    CHECK(error.find("usb") != std::string::npos);
+    frsim::FleetSpec other;
+    CHECK(!frsim::parse_fleet_spec(spec(R"({"alias":"gw","mac":"02f200000001","addr":1,"role":"relay","usb":true})"), other, error));
+    CHECK(error.find("role") != std::string::npos);
+}
+
+TEST(sim_node_gateway_runs_a_bridge_behind_stats_gw)
+{
+    FleetRig r(2, false, "c6-pad", 1);
+    frsim::FleetNode &gw = r.node(1);
+    frsim::FleetNode &pad = r.node(2);
+    gw.power_on();
+    pad.power_on();
+    r.run_ms(2000);
+    const std::string on = frt::answer_text(gw.command("diag stats gw"));
+    CHECK(on.find(R"("gw":{"on":true,"tx":0,)") != std::string::npos);
+    CHECK(on.find(R"("pings":0)") != std::string::npos);  // no hub here: no LINK_PING
+    CHECK(frt::answer_text(pad.command("diag stats gw")).find(R"("gw":{"on":false})") != std::string::npos);
+    // A full `stats` has gw on the gateway only, as fr_diag does (there it is the last section, so the first one
+    // left out when the answer does not fit, and named in `omitted`).
+    const std::string full = frt::answer_text(gw.command("diag stats"));
+    CHECK(full.find(R"("gw":{"on":true)") != std::string::npos || full.find(R"("gw"])") != std::string::npos);
+    const std::string pad_full = frt::answer_text(pad.command("diag stats"));
+    CHECK(pad_full.find(R"("gw":)") == std::string::npos && pad_full.find(R"("gw"])") == std::string::npos);
+    // Its HELLO says gateway; it never opens a TCP session.
+    CHECK(!gw.tcp_session());
 }
 
 TEST(sim_node_power_cycle_bumps_the_epoch_and_keeps_its_blobs)

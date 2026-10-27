@@ -330,6 +330,15 @@ public:
     void set_host(bool present);
     /** `hub_mute`: the hub's lines stop reaching the node, the USB host staying. */
     void set_mute(bool on) { muted_ = on; }
+    /**
+     * A gateway node's bridge (design m2-c4-gateway D18): the hub's other `@fr1:` frames (GW_TX, GW_CMD, LINK_PING)
+     * go to `frames` on the core task, stamped when the line arrived, as core.cpp's deliver_gw hands them to fr_gw.
+     * Null (every other node): they are dropped, as fr_core does outside role gateway.
+     */
+    using FrameFn = std::function<void(uint8_t type, std::span<const uint8_t> body, fr::TimeUs at)>;
+    void set_frames(FrameFn frames) { frames_ = std::move(frames); }
+    /** One `@fr1:` frame of `type` out on the port (fr_serial's write_frame); false while no USB host is there. */
+    bool write_frame(uint8_t type, std::span<const uint8_t> body);
     /** A line the hub wrote to the port. */
     void on_line(std::string_view line);
     /** A line of the node's own (an ESP_LOG line): out on the port as it is. */
@@ -353,6 +362,13 @@ private:
     bool host_ = false;
     bool muted_ = false;
     std::deque<std::vector<uint8_t>> ready_;
+    FrameFn frames_;
+    struct GwFrame {
+        uint8_t type;
+        fr::TimeUs at;
+        std::vector<uint8_t> body;
+    };
+    std::deque<GwFrame> gw_ready_;
 };
 
 /** The hub's `--serial-bridge` (D7): one USB-Serial/JTAG port per node a scenario puts on USB. */

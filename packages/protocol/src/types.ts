@@ -114,6 +114,8 @@ export const ProvisionResultSchema = z.looseObject({
   build_id: z.string(),
   fw_id: z.string(),
   wifi: z.enum(PROVISION_WIFI),
+  /** How a joined device showed it: its HELLO over TCP, or a gateway's GW_STATUS naming the AP (it opens no TCP). */
+  via: z.enum(['tcp', 'gateway_status']).optional(),
   duration_ms: z.number().optional(),
   warnings: z.array(z.string()).optional(),
 });

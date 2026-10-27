@@ -3,3 +3,7 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_FR_TEST_HOOKS=y
 # diag `log <tag> D` can raise a tag at runtime only up to the compiled-in maximum.
 CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
+# diag `cpu` (design m2-c4-gateway D19 (f)): the idle tasks' run time, on the esp_timer clock, 64-bit (no wrap at 71 min).
+CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+CONFIG_FREERTOS_RUN_TIME_COUNTER_TYPE_U64=y

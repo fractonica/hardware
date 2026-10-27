@@ -239,6 +239,8 @@ export interface CommandOutcome {
   /** When the RESULT arrived (µs since the Unix epoch); for ack none, when the CMD was written (design c6 §3.3). */
   t_hub_us?: number;
   error?: string;
+  /** The router's CommandResult.details (UNSUPPORTED over a gateway: `{ via: 'gateway', reason: 'too_big' }`). */
+  details?: Record<string, unknown>;
 }
 
 type Cap = NonNullable<ReturnType<typeof findCap>>;
@@ -292,6 +294,7 @@ async function sendPlanned(hub: HubContext, p: CommandPlan, opts: { ack: 'none' 
       rtt_ms: r.rtt_ms,
       link: r.link,
       t_hub_us: r.t_hub_us,
+      ...(r.details ? { details: r.details } : {}),
     };
   } catch (e) {
     if (e instanceof FrError && (e.code === 'DEVICE_OFFLINE' || e.code === 'TIMEOUT')) {

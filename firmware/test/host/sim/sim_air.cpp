@@ -51,6 +51,7 @@ void SimAir::crash()
     net_ = nullptr;
     sched_.reset();
     sched_.emplace(*this);
+    peer_rates_.clear();
 }
 
 void SimAir::set_up(bool up)
@@ -101,6 +102,43 @@ fr::Status SimAir::send(const fr::net::Mac &dst, std::span<const uint8_t> envelo
     return st;
 }
 
+fr::Status SimAir::send_at(const fr::net::Mac &dst, std::span<const uint8_t> envelope, fr::net::AirPrio prio,
+                           uint32_t token, fr::net::AirRate rate)
+{
+    if (!up_) {
+        return std::unexpected(fr::Err::failed);
+    }
+    const fr::Status st = sched_->send(dst, envelope, prio, token, core_.now(), rate);
+    if (st) {
+        ++stats_.sent_by_prio[static_cast<size_t>(prio)];
+    }
+    return st;
+}
+
+fr::net::AirDone SimAir::done_info(uint32_t token) const
+{
+    return sched_->last_done(token);
+}
+
+fr::net::air::RateChange SimAir::set_default_rate(bool broadcast, fr::net::AirRate rate)
+{
+    return sched_->set_default_rate(broadcast, rate);
+}
+
+void SimAir::churn(uint32_t n, fr::net::air::ChurnStats &out)
+{
+    fr::net::air::churn(*this, n, [this] { return core_.now(); }, out);
+}
+
+bool SimAir::set_rate(const fr::net::Mac &mac, fr::net::AirRate rate)
+{
+    std::erase_if(peer_rates_, [&mac](const auto &p) { return p.first == mac; });
+    if (rate != fr::net::AirRate::peer_default) {
+        peer_rates_.emplace_back(mac, rate == fr::net::AirRate::fast ? Rate::r6m : Rate::r1m);
+    }
+    return true;
+}
+
 bool SimAir::add_peer(const fr::net::Mac &mac)
 {
     static_cast<void>(mac);
@@ -114,7 +152,7 @@ bool SimAir::add_peer(const fr::net::Mac &mac)
 
 void SimAir::del_peer(const fr::net::Mac &mac)
 {
-    static_cast<void>(mac);
+    std::erase_if(peer_rates_, [&mac](const auto &p) { return p.first == mac; });  // a new entry takes add_peer's
     ++stats_.peer_dels;
 }
 
@@ -124,7 +162,12 @@ bool SimAir::transmit(const fr::net::Mac &dst, std::span<const uint8_t> frame)
         return false;  // esp_now_send fails while ESP-NOW is down: a failed attempt, no callback
     }
     const bool broadcast = fr::net::air::is_broadcast(dst);
-    const Rate rate = broadcast ? bcast_rate_ : ucast_rate_;
+    Rate rate = broadcast ? bcast_rate_ : ucast_rate_;
+    for (const auto &[mac, r] : peer_rates_) {
+        if (mac == dst) {
+            rate = r;  // set_rate's (design m2-c4-gateway D19)
+        }
+    }
     stats_.airtime_us += airtime::exchange_us(rate, frame.size(), !broadcast);
     medium_.transmit(radio_, dst, frame, rate);
     return true;

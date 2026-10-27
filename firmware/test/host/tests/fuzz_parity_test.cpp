@@ -15,7 +15,7 @@ struct Pin {
 
 constexpr Pin PINS[] = {
     {"wire.reader", 0xec91243a},
-    {"wire.envelope", 0x3afdb26f},  // M2-C3: EXT port_seq (0x05) and its vectors
+    {"wire.envelope", 0x5dd26f64},  // M2-C4: EXT exec_at_hub_us (0x82) became a known u32
     {"wire.serial_line", 0x2e2fabaf},
     {"wire.base64url", 0xfd98a19c},
 };

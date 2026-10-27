@@ -2,10 +2,18 @@
 // listeners (the router, which ends that device's serial session) as soon as a port is unplugged, and not
 // over a listing that merely missed a port the hub still reads from. serialport is a scripted fake.
 
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { Db } from '../src/db.ts';
-import type { LogStore } from '../src/logstore.ts';
+import { CLS } from '@fractonica/protocol';
+import { encodeEnvLine, encodeFrameLine, KIND } from '@fractonica/protocol/gen';
+
+import { type Db, openDb } from '../src/db.ts';
+import { SerialFrameTap } from '../src/links/index.ts';
+import { LogStore } from '../src/logstore.ts';
 import { SerialPortManager } from '../src/serial.ts';
 
 const h = vi.hoisted(() => {
@@ -130,5 +138,42 @@ describe('serial port manager: onPortGone', () => {
     await new Promise((r) => setTimeout(r, 20));
     await mgr.poll();
     expect(gone).toEqual([]);
+  });
+});
+
+describe('serial port manager: a gateway bridge’s lines (review: GW_* are not log lines)', () => {
+  it('hands GW_* and LINK_* lines to the frame tap without storing them, and stores ENV frames and log lines as before', async () => {
+    const db = openDb(join(mkdtempSync(join(tmpdir(), 'fr-links-usb-')), 'hub.db'));
+    const frames = new SerialFrameTap(db);
+    const tapped: string[] = [];
+    frames.attach((_device, line) => tapped.push(line));
+    const logs = new LogStore(db, 1, { retention: false, frames });
+    const mgr = new SerialPortManager(logs, db);
+    await mgr.poll();
+    h.FakePort.instances[0].finishOpen();
+    const envLine = encodeEnvLine({
+      header: { flags: 0, cls: CLS.PRESENCE, kind: KIND.PRESENCE.HEARTBEAT, seq: 3, net: 0, src: 1, dst: 0, epoch: 1, ttl: 0x22, port: 0 },
+      body: new Uint8Array(0),
+    });
+    const bridge = [
+      encodeFrameLine({ type: 'GW_RX', src_mac: Buffer.from('aabbccdd0001', 'hex'), rssi: -60, channel: 6, rx_ts_us: 1, env: new Uint8Array(18) }),
+      encodeFrameLine({ type: 'GW_STATUS', channel: 6, mode: 'router', uptime_s: 1, q_depth: 0, q_max: 32, peers: 0, tx: 0, tx_fail: 0, rx: 0, rx_drop: 0, rx_bad: 0, beacons: 0, ap_rssi: -50, ap_channel: 6, last_tx_us: 0 }),
+      encodeFrameLine({ type: 'LINK_PONG', t: 7 }),
+    ];
+    const text = ['I (100) app: hello', bridge[0], envLine, bridge[1], bridge[2], '@fr1:not-a-frame'].join('\n') + '\n';
+    h.FakePort.instances[0].emit('data', Buffer.from(text));
+    // Every `@fr1:` line reaches the link in order (one that does not decode too: the link counts it rx_bad).
+    await until(() => tapped.length === 5);
+    expect(tapped).toEqual([bridge[0], envLine, bridge[1], bridge[2], '@fr1:not-a-frame']);
+    logs.flush();
+    const stored = logs.query({ devices: [KEY], limit: 100, direction: 'forward' }).map((l) => ({ kind: l.kind, text: l.text }));
+    expect(stored).toEqual([
+      { kind: 'esp_log', text: expect.stringContaining('hello') },
+      { kind: 'frame', text: expect.stringMatching(/^@fr1 PRESENCE kind=2 /) },
+      { kind: 'raw', text: expect.stringContaining('@fr1:not-a-frame (decode error') },
+    ]);
+    expect(stored.some((l) => /GW_|LINK_/.test(l.text))).toBe(false);
+    logs.close();
+    db.close();
   });
 });

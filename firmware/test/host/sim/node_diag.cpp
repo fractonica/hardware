@@ -3,13 +3,18 @@
 // M2-C2 adds `inject <inst> <gesture>` (fr_diag's run_call: the instance's own inject through the generated
 // dispatch, answered {ok, status, fields}) and `neighbors [from]` (sorted by MAC, paged by `next`), so the bench
 // gates' fleet diag (tests/sim/lib/fleet-diag.ts) gets the shapes the boards give. M2-C3 (design m2-c3-inputs §5,
-// D6) adds the analog form `inject <inst> value=<n> [hold_ms=<n>]` and `stats`' state_repeats_superseded.
+// D6) adds the analog form `inject <inst> value=<n> [hold_ms=<n>]` and `stats`' state_repeats_superseded. M2-C4 (design
+// m2-c4-gateway D10, D19) adds the gateway link to `info` and `stats` (`stats gateway`), and spike S2's hooks in fr_diag's
+// shapes: `air bench tx|rx`, `air rate` and `air churn` over SimAir, `net stream`; `air txpower`, `wifi proto` and `cpu`
+// answer unsupported (the medium has no TX power, protocols or CPU). D18: a gateway node's `stats gw` (its bridge's
+// counters, fr_diag's shape; {"on":false} on any other node, and left out of a full `stats` there, as on target).
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 
 #include "cJSON.h"
 #include "diag_json.hpp"  // generated JSON <-> wire codecs of `call` (FR_TEST_HOOKS)
+#include "fr/gw/bridge.hpp"
 #include "sim/node.hpp"
 
 namespace frsim {
@@ -45,6 +50,12 @@ std::expected<fr::cap::DiagExecResult, fr::Err> NodeDiag::exec(const fr::cap::Di
         n = inject(line);
     } else if (cmd == "neighbors") {
         n = neighbors(line);
+    } else if (cmd == "air") {
+        n = air(line);
+    } else if (cmd == "wifi") {
+        n = fail("unsupported", "no Wi-Fi protocols in the kit");
+    } else if (cmd == "cpu") {
+        n = fail("unsupported", "no CPU in the kit");
     } else {
         n = std::snprintf(out_buf_, sizeof(out_buf_), R"({"ok":false,"error":"unknown_command"})");
     }
@@ -70,19 +81,21 @@ int NodeDiag::info()
     const auto &udp = link(LinkKind::udp);
     const auto &ser = link(LinkKind::serial);
     const auto &air = link(LinkKind::espnow);
+    const auto &gw = link(LinkKind::gateway);
     return std::snprintf(
         out_buf_, sizeof(out_buf_),
         R"({"ok":true,"id":"%s","addr":%u,"state":"%s","epoch":%u,"board":"%s","profile":"%s",)"
         R"("uptime_ms":%lld,"inject_enabled":true,"test_pin":%d,)"
         R"("links":{"serial":{"up":%s,"session":%s,"synced":%s},"tcp":{"up":%s,"session":%s,"synced":%s},)"
-        R"("udp":{"up":%s,"ok":%s},"espnow":{"up":%s,"ch":%u}},"hub":{"link":%s,"epoch":%u},)"
+        R"("udp":{"up":%s,"ok":%s},"espnow":{"up":%s,"ch":%u},"gateway":{"up":%s,"session":%s,"synced":%s}},)"
+        R"("hub":{"link":%s,"epoch":%u},)"
         R"("wifi":{"up":%s,"ch":%u,"bssid":"%s","rssi":%d}})",
         hex(spec_.mac).c_str(), unsigned{spec_.addr},
         spec_.addr != fr::proto::kAddrUnassigned ? "PROVISIONED" : "UNASSIGNED", unsigned{spec_.epoch}, spec_.board.c_str(),
         spec_.profile.c_str(), static_cast<long long>((core_.now() - boot_us_) / 1000), pin ? test_pin_ : -1,
         ser.up ? b : f, ser.session ? b : f, ser.time_synced ? b : f, tcp.up ? b : f, tcp.session ? b : f,
         tcp.time_synced ? b : f, udp.up ? b : f, udp.udp_ok ? b : f, air.up ? b : f, unsigned{spec_.radio.channel},
-        st.hub_link() ? b : f, unsigned{st.hub_epoch}, wifi.wifi_up ? b : f, unsigned{wifi.channel}, bssid, int{wifi.rssi});
+        gw.up ? b : f, gw.session ? b : f, gw.time_synced ? b : f, st.hub_link() ? b : f, unsigned{st.hub_epoch}, wifi.wifi_up ? b : f, unsigned{wifi.channel}, bssid, int{wifi.rssi});
 }
 
 int NodeDiag::fail(const char *error, const char *detail)
@@ -122,6 +135,9 @@ int NodeDiag::pin_pulse(std::string_view args)
 int NodeDiag::net_hook(std::string_view args)
 {
     const std::string_view name = next_word(args);
+    if (name == "stream") {
+        return net_stream(args);
+    }
     if (name == "loss") {
         uint32_t pct = 0;
         uint32_t secs = 0;
@@ -179,8 +195,9 @@ std::string NodeDiag::section(std::string_view name) const
 {
     const fr::net::State s = net_->state();
     if (name == "links") {
-        constexpr std::pair<LinkKind, const char *> kLinks[] = {
-            {LinkKind::serial, "serial"}, {LinkKind::tcp, "tcp"}, {LinkKind::udp, "udp"}, {LinkKind::espnow, "espnow"}};
+        constexpr std::pair<LinkKind, const char *> kLinks[] = {{LinkKind::serial, "serial"}, {LinkKind::tcp, "tcp"},
+                                                                {LinkKind::udp, "udp"},       {LinkKind::espnow, "espnow"},
+                                                                {LinkKind::gateway, "gateway"}};
         std::string out = "{";
         for (const auto &[kind, link_name] : kLinks) {
             const fr::net::LinkState &l = s.link(kind);
@@ -213,6 +230,52 @@ std::string NodeDiag::section(std::string_view name) const
                        s.nodes.delivered, s.nodes.dup, s.nodes.old, s.nodes.sent, s.nodes.via_espnow, s.nodes.via_hub,
                        s.nodes.via_flood, s.nodes.failed, s.nodes.resolves);
     }
+    if (name == "gateway") {  // the gateway session (design m2-c4-gateway D10-D12)
+        const fr::net::GatewayStats &g = s.gateway;
+        std::string out = sformat(R"({"live":%u,"beacons":%u,"lost":%u,"opened":%u,"closed":%u,"tx_nak":%u,"too_big":%u)",
+                                  unsigned{g.live}, g.beacons, g.lost, g.opened, g.closed, g.tx_nak, g.too_big);
+        if (g.chosen) {
+            out += sformat(R"(,"age_ms":%lld)", static_cast<long long>((core_.now() - g.heard_at) / 1000));
+        }
+        return out + "}";
+    }
+    if (name == "gw") {  // a gateway's bridge (design m2-c4-gateway D8, D18), in fr_diag's order
+        if (gw_ == nullptr) {
+            return R"({"on":false})";
+        }
+        const fr::gw::Stats g = gw_->stats();
+        const std::pair<const char *, uint32_t> fields[] = {
+            {"tx", g.tx},
+            {"tx_fail", g.tx_fail},
+            {"tx_nak", g.tx_nak},
+            {"tx_queue_full", g.tx_queue_full},
+            {"tx_no_peer", g.tx_no_peer},
+            {"tx_too_big", g.tx_too_big},
+            {"tx_radio_off", g.tx_radio_off},
+            {"tx_stale", g.tx_stale},
+            {"tx_dropped", g.tx_dropped},
+            {"tx_busy", g.tx_busy},
+            {"done_dropped", g.done_dropped},
+            {"tx_refused", g.tx_refused},
+            {"rx", g.rx},
+            {"rx_drop", g.rx_drop},
+            {"rx_no_hub", g.rx_no_hub},
+            {"rx_line_full", g.rx_line_full},
+            {"rx_too_big", g.rx_too_big},
+            {"rx_bad", g.rx_bad},
+            {"pings", g.pings},
+            {"hub_lost", g.hub_lost},
+            {"cmds", g.cmds},
+            {"beacons", g.beacons},
+            {"q_high", g.q_high},
+            {"last_tx_us", g.last_tx_us},
+        };
+        std::string out = R"({"on":true)";
+        for (const auto &[key, v] : fields) {
+            out += sformat(R"(,"%s":%u)", key, v);
+        }
+        return out + "}";
+    }
     if (name == "net_logs") {  // LOG frames over TCP (design m2-c2 D20)
         return sformat(R"({"sent":%u,"ring_drop":%u,"age_drop":%u,"rate_drop":%u,"cut":%u})", s.logs.sent, s.logs.ring_drop,
                        s.logs.age_drop, s.logs.rate_drop, s.logs.cut);
@@ -235,7 +298,7 @@ int NodeDiag::stats(std::string_view args)
     const std::string_view opt = next_word(args);
     const auto *it = std::find(std::begin(kSections), std::end(kSections), opt);
     if (!args.empty() || (!opt.empty() && it == std::end(kSections))) {
-        return fail("invalid_args", "usage: stats [links|bcast|relay|espnow|bindings|nodes|msgs|net_logs]");
+        return fail("invalid_args", "usage: stats [links|bcast|relay|espnow|bindings|nodes|msgs|net_logs|gateway|gw]");
     }
     std::string out;
     if (!opt.empty()) {
@@ -251,8 +314,13 @@ int NodeDiag::stats(std::string_view args)
                       s.dup, s.old, s.cached_replies, s.sessions_lost, s.events_dropped, s.delivery_failed,
                       s.state_repeats_superseded);
         std::vector<std::string> parts;
+        std::vector<std::string_view> names;
         for (const std::string_view name : kSections) {
+            if (name == "gw" && gw_ == nullptr) {
+                continue;  // only a gateway has a bridge; `stats gw` still answers {"on":false}
+            }
             parts.push_back(sformat(R"("%.*s":)", static_cast<int>(name.size()), name.data()) + section(name));
+            names.push_back(name);
         }
         std::string omitted;
         auto total = [&] {
@@ -263,7 +331,7 @@ int NodeDiag::stats(std::string_view args)
             return n;
         };
         for (size_t i = parts.size(); i-- > 0 && total() >= sizeof(out_buf_);) {
-            omitted = sformat(R"("%.*s")", static_cast<int>(kSections[i].size()), kSections[i].data()) +
+            omitted = sformat(R"("%.*s")", static_cast<int>(names[i].size()), names[i].data()) +
                       (omitted.empty() ? "" : "," + omitted);
             parts.pop_back();
         }
@@ -413,6 +481,154 @@ std::string serial_diag_answer(NodeDiag &diag, std::string_view id, std::string_
     const auto r = diag.exec({.line = rest});
     const std::string_view json = r ? r->json : std::string_view(R"({"ok":false,"error":"failed"})");
     return sformat("#%.*s %.*s", static_cast<int>(id.size()), id.data(), static_cast<int>(json.size()), json.data());
+}
+
+}  // namespace frsim
+
+// ---- spike S2's hooks (design m2-c4-gateway D19), fr_diag's shapes (diag.cpp cmd_air, cmd_net_stream) ----
+
+namespace frsim {
+
+namespace {
+
+/** A MAC as 12 hex digits, colons between the bytes allowed (fr_diag's parse_mac). */
+bool parse_mac(std::string_view s, fr::net::Mac &out)
+{
+    size_t n = 0;
+    for (const char c : s) {
+        if (c == ':') {
+            continue;
+        }
+        const int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (v < 0 || n >= 12) {
+            return false;
+        }
+        out[n / 2] = static_cast<uint8_t>(n % 2 == 0 ? v << 4 : out[n / 2] | v);
+        ++n;
+    }
+    return n == 12;
+}
+
+const char *err_text(fr::Err e)
+{
+    return fr::err_name(e);
+}
+
+}  // namespace
+
+int NodeDiag::air(std::string_view args)
+{
+    const std::string_view what = next_word(args);
+    if (what == "bench") {
+        const std::string_view dir = next_word(args);
+        if (dir == "rx") {
+            return bench_rx(args);
+        }
+        const std::string_view dst_arg = next_word(args);
+        uint32_t count = 0;
+        uint32_t len = 0;
+        uint32_t interval = 0;
+        const bool ok_count = parse_u32(next_word(args), 1, 1'000'000, count);
+        const bool ok_len = parse_u32(next_word(args), 32, 215, len);
+        const bool ok_iv = parse_u32(next_word(args), 0, 60'000, interval);
+        const std::string_view echo_arg = next_word(args);
+        fr::net::Mac mac = fr::net::kBroadcastMac;
+        const bool bcast = dst_arg == "bcast";
+        if (dir != "tx" || (!bcast && !parse_mac(dst_arg, mac)) || !ok_count || !ok_len || !ok_iv ||
+            (!echo_arg.empty() && echo_arg != "echo") || !args.empty()) {
+            return fail("invalid_args", "usage: air bench tx <mac|bcast> <count 1-1000000> <len 32-215> "
+                                        "<interval_ms 0-60000> [echo] | air bench rx [reset]");
+        }
+        const bool echo = echo_arg == "echo";
+        if (const fr::Status st = net_->bench_tx(mac, count, static_cast<uint16_t>(len), interval, echo); !st) {
+            return std::snprintf(out_buf_, sizeof(out_buf_), R"({"ok":false,"error":"%s"})", err_text(st.error()));
+        }
+        return std::snprintf(out_buf_, sizeof(out_buf_),
+                             R"({"ok":true,"dst":"%s","count":%u,"len":%u,"interval_ms":%u,"echo":%s})",
+                             bcast ? "bcast" : hex(mac).c_str(), count, len, interval, echo ? "true" : "false");
+    }
+    if (what == "rate") {
+        const std::string_view rate = next_word(args);
+        const std::string_view peer = next_word(args);
+        if ((rate != "robust" && rate != "fast") || (!peer.empty() && peer != "bcast") || !args.empty()) {
+            return fail("invalid_args", "usage: air rate <robust|fast> [bcast]");
+        }
+        uint32_t peers = 0;
+        uint32_t failed = 0;
+        if (!links_->air_rate(rate == "fast" ? fr::net::AirRate::fast : fr::net::AirRate::robust, peer == "bcast", peers,
+                              failed)) {
+            return fail("unsupported", "no per-peer rates on this radio");
+        }
+        return std::snprintf(out_buf_, sizeof(out_buf_), R"({"ok":true,"rate":"%s","peer":"%s","peers":%u,"rate_fail":%u})",
+                             rate == "fast" ? "fast" : "robust", peer == "bcast" ? "bcast" : "unicast", peers, failed);
+    }
+    if (what == "churn") {
+        uint32_t n = 0;
+        if (!parse_u32(next_word(args), 1, 1000, n) || !args.empty()) {
+            return fail("invalid_args", "usage: air churn <n 1-1000>");
+        }
+        AirChurnCounts c;
+        if (!links_->air_churn(n, c)) {
+            return fail("unsupported", "no peer table on this radio");
+        }
+        return std::snprintf(out_buf_, sizeof(out_buf_),
+                             R"({"ok":true,"n":%u,"failed":%u,"add_us":{"p50":%u,"p99":%u,"max":%u},)"
+                             R"("del_us":{"p50":%u,"p99":%u,"max":%u}})",
+                             c.n, c.failed, c.add_p50_us, c.add_p99_us, c.add_max_us, c.del_p50_us, c.del_p99_us,
+                             c.del_max_us);
+    }
+    if (what == "txpower") {
+        return fail("unsupported", "no TX power on the medium");
+    }
+    return fail("invalid_args", "usage: air bench tx|rx ... | rate <robust|fast> [bcast] | txpower <qdbm|profile> | churn <n>");
+}
+
+int NodeDiag::bench_rx(std::string_view args)
+{
+    const std::string_view opt = next_word(args);
+    if ((!opt.empty() && opt != "reset") || !args.empty()) {
+        return fail("invalid_args", "usage: air bench rx [reset]");
+    }
+    const fr::net::BenchReport r = net_->bench_report();
+    const fr::net::BenchTx &t = r.tx;
+    const char *const b = "true";
+    const char *const f = "false";
+    std::string out = sformat(
+        R"({"ok":true,"tx":{"running":%s,"dst":"%s","count":%u,"len":%u,"interval_ms":%u,"echo":%s,"sent":%u,)"
+        R"("refused":%u,"acked":%u,"failed":%u,"echoes":%u,"rtt_p50_us":%u,"rtt_p99_us":%u,"rtt_max_us":%u,)"
+        R"("elapsed_ms":%u},"rx":[)",
+        t.running ? b : f, t.broadcast ? "bcast" : hex(t.dst).c_str(), t.count, unsigned{t.len}, t.interval_ms,
+        t.echo ? b : f, t.sent, t.refused, t.acked, t.failed, t.echoes, t.rtt_p50_us, t.rtt_p99_us, t.rtt_max_us,
+        t.elapsed_ms);
+    for (size_t i = 0; i < r.rx_count; ++i) {
+        const fr::net::BenchRx &x = r.rx[i];
+        out += sformat(R"(%s{"mac":"%s","addr":%u,"received":%u,"gaps":%u,"dups":%u,"rssi_p50":%d,"echoed":%u,"age_ms":%u})",
+                       i > 0 ? "," : "", hex(x.mac).c_str(), unsigned{x.addr}, x.received, x.gaps, x.dups, int{x.rssi_p50},
+                       x.echoed, x.age_ms);
+    }
+    out += "]}";
+    if (opt == "reset") {
+        net_->bench_reset();  // the answer carries what was cleared
+    }
+    return put(out);
+}
+
+int NodeDiag::net_stream(std::string_view args)
+{
+    uint32_t hz = 0;
+    uint32_t secs = 0;
+    uint32_t len = 8;
+    const bool ok_hz = parse_u32(next_word(args), 0, 1000, hz);
+    const bool ok_s = parse_u32(next_word(args), 0, 3600, secs);
+    const std::string_view len_arg = next_word(args);
+    if (!ok_hz || !ok_s || (!len_arg.empty() && !parse_u32(len_arg, 1, 200, len)) || !args.empty()) {
+        return fail("invalid_args", "usage: net stream <hz 0-1000> <seconds 0-3600> [len 1-200] (0 ends it)");
+    }
+    if (const fr::Status st = net_->stream(hz, secs, static_cast<uint16_t>(len)); !st) {
+        return std::snprintf(out_buf_, sizeof(out_buf_), R"({"ok":false,"error":"%s"})", err_text(st.error()));
+    }
+    return std::snprintf(out_buf_, sizeof(out_buf_), R"({"ok":true,"hook":"stream","hz":%u,"s":%u,"len":%u,"port":%u,"prop":%u})",
+                         hz, secs, len, unsigned{fr::proto::kPortDiag}, unsigned{fr::net::Net::kStreamProp});
 }
 
 }  // namespace frsim

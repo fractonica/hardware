@@ -498,12 +498,17 @@ export function manifestCapsByFwPrefix(db: Db, prefix: string): ManifestCap[] | 
  * Newest artifact of (app, profile, build_type); build_id is `<app>/<profile>/<build_type>/<fw>`. Never a
  * fault build: flash, provision, ota and deploy pick one only when it is named (spec 03 §3.8).
  */
-export function newestBuildId(db: Db, q: { app: string; profile: string; buildType: string }): string | null {
-  const row = db
-    .prepare(
-      'SELECT build_id FROM artifacts WHERE profile = ? AND build_type = ? AND fault IS NULL AND substr(build_id, 1, ?) = ? ORDER BY built_at DESC LIMIT 1',
-    )
-    .get(q.profile, q.buildType, q.app.length + 1, `${q.app}/`) as { build_id: string } | undefined;
+/** The newest build of (app, profile, build type), never a fault build; of any app when `app` is not given. */
+export function newestBuildId(db: Db, q: { app?: string; profile: string; buildType: string }): string | null {
+  const row = (
+    q.app === undefined
+      ? db.prepare('SELECT build_id FROM artifacts WHERE profile = ? AND build_type = ? AND fault IS NULL ORDER BY built_at DESC LIMIT 1').get(q.profile, q.buildType)
+      : db
+          .prepare(
+            'SELECT build_id FROM artifacts WHERE profile = ? AND build_type = ? AND fault IS NULL AND substr(build_id, 1, ?) = ? ORDER BY built_at DESC LIMIT 1',
+          )
+          .get(q.profile, q.buildType, q.app.length + 1, `${q.app}/`)
+  ) as { build_id: string } | undefined;
   return row?.build_id ?? null;
 }
 

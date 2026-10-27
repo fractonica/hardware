@@ -235,13 +235,24 @@ bool parse_node(const cJSON *n, NodeSpec &out, std::string &error)
 {
     std::string mac;
     std::string udp = "shared";
+    std::string role = "node";
     if (!text(n, "alias", out.alias, error) || !text(n, "mac", mac, error) || !integer(n, "addr", out.addr, 0, 0xFFFF, error) ||
         !integer(n, "net", out.net, 0, 0xFFFF, error) || !integer(n, "epoch", out.epoch, 0, 0xFFFF, error) ||
         !integer(n, "alias_rev", out.alias_rev, 0, 4294967295.0, error) ||
         !integer(n, "rng_seed", out.rng_seed, 0, 4294967295.0, error) || !integer(n, "hb_ms", out.hb_ms, 100, 60'000, error) ||
         !integer(n, "health_ms", out.health_ms, 1000, 600'000, error) || !boolean(n, "usb", out.usb, error) ||
         !text(n, "udp", udp, error) || !boolean(n, "ota", out.ota, error) || !text(n, "profile", out.profile, error) ||
-        !boolean(n, "spare", out.spare, error)) {
+        !boolean(n, "spare", out.spare, error) || !text(n, "role", role, error)) {
+        return false;
+    }
+    // design m2-c4-gateway D18: a gateway runs fr_gw over its radio, its hub link the bridge port (USB, as on target).
+    if (role != "node" && role != "gateway") {
+        error = "role: expected node or gateway";
+        return false;
+    }
+    out.role = role == "gateway" ? fr::proto::Role::gateway : fr::proto::Role::node;
+    if (out.role == fr::proto::Role::gateway && !out.usb) {
+        error = "role gateway: needs usb (its hub link is the bridge's serial port)";
         return false;
     }
     if (out.alias.empty() || !parse_hex(mac, out.mac)) {
@@ -265,7 +276,8 @@ bool parse_node(const cJSON *n, NodeSpec &out, std::string &error)
             return false;
         }
     }
-    // Every fleet node is a pad with Wi-Fi and a log source (D20), as the C2 image is.
+    // Every fleet node is a pad with Wi-Fi and a log source (D20), as the C2 image is; a gateway associates too (its
+    // channel is the AP's), but opens no TCP or UDP to the hub (FleetNode, as fr_net's gateway role).
     out.ip = true;
     out.net_log = true;
     return true;

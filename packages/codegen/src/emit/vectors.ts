@@ -9,7 +9,9 @@
 //              body: hex, body_type?: a message or member type, body_value?: its decoded value}
 //   message   the decoded body: every non-optional field (defaults applied), optional fields only when present
 //   cap       same, for '<cap>.<member>.args|result|event|state' and '<cap>.traits'
-//   serial    {type: u8 code, body: hex, line: the full input line, t?: LINK_PING/LINK_PONG u32}
+//   serial    {type: u8 code, body: hex, line: the full input line, frame?: the body's decoded value (types but ENV)}
+// A layout serial body (serial_bodies with `layout`) is a `message` case of type GW_RX, GW_TX_DONE, ...: its
+// fields, macs and `env` (the envelope after a GW_RX/GW_TX prefix) as hex, enums by member name.
 // Field values: integers as numbers, u64 as a decimal string, bytes as lowercase hex, enums by member name.
 // `hex` is the encoded bytes (serial: the line's ASCII bytes, without '\n' unless decodeOnly).
 // decodeOnly cases only decode: `hex` is not what the encoder writes for `value` (unknown fields, field
@@ -34,7 +36,20 @@ import {
   type Header,
 } from '@fractonica/protocol/wire';
 
-import { isSigned, scalarBounds, type Capability, type ElementType, type Field, type GeneratedFile, type JsonValue, type Model, type ScalarName, type TypeRef, type VectorCase } from '../model.ts';
+import {
+  isSigned,
+  scalarBounds,
+  type Capability,
+  type ElementType,
+  type Field,
+  type GeneratedFile,
+  type JsonValue,
+  type Model,
+  type ScalarName,
+  type SerialBody,
+  type TypeRef,
+  type VectorCase,
+} from '../model.ts';
 
 export const VECTORS_DIR = 'schema/vectors';
 
@@ -606,6 +621,8 @@ function headerCases(b: Builder): void {
   add('ext_expire_at_trace_id', CMD_EXT);
   add('ext_valid_ms_broadcast', hdr({ flags: FLAG.EXT, cls: CLS.MSG, kind: 0, seq: 77, src: 0x0000, dst: 0xffff, epoch: 9, ext: [extTlv(EXT.VALID_MS, 2000)] }));
   add('ext_exec_at', hdr({ flags: FLAG.ACK_REQ | FLAG.EXT, cls: CLS.CMD, kind: 1, seq: 6, src: 0x0000, dst: 0x0012, epoch: 9, port: 2, ext: [extTlv(EXT.EXEC_AT_US, 0xffffffff)] }));
+  // The hub-clock exec TLV (design m2-c4-gateway D4): decodes everywhere; the node answers the CMD UNSUPPORTED.
+  add('ext_exec_at_hub', hdr({ flags: FLAG.ACK_REQ | FLAG.EXT, cls: CLS.CMD, kind: 1, seq: 7, src: 0x0000, dst: 0x0012, epoch: 9, port: 2, ext: [extTlv(EXT.EXEC_AT_HUB_US, 0x80000001)] }));
   add('ext_empty', { ...BUTTON_DOWN, flags: FLAG.URGENT | FLAG.EXT, ext: [] });
   add('ext_port_seq', BUTTON_DOWN_PORT_SEQ);
   add('ext_port_seq_max_trace_id', { ...BUTTON_DOWN, seq: 13, flags: FLAG.URGENT | FLAG.EXT, ext: [extTlv(EXT.PORT_SEQ, 0xffff), extTlv(EXT.TRACE_ID, 7)] });
@@ -624,6 +641,7 @@ function headerCases(b: Builder): void {
   c.error('header.error_ext_expire_at_short', 'header', 'header', ext('04 04020102'), 'bad_ext');
   c.error('header.error_ext_valid_ms_long', 'header', 'header', ext('06 030401020304'), 'bad_ext');
   c.error('header.error_ext_port_seq_short', 'header', 'header', ext('03 050101'), 'bad_ext');
+  c.error('header.error_ext_exec_at_hub_short', 'header', 'header', ext('04 82020102'), 'bad_ext');
   // TLVs are checked in order: the first refusal wins.
   c.error('header.error_ext_first_refusal_wins', 'header', 'header', ext('06 9000 04020102'), 'unsupported_ext');
 }
@@ -672,6 +690,38 @@ const BINDING_MSG: Obj = {
   to_cls: CLS.MSG,
   to_topic: 'pong',
   payload: hexOf(new TextEncoder().encode('{}')),
+};
+
+// A hub BEACON through gateway f0f5bd09fdec (the bench's nanoESP32-C6): hub 192.168.1.20:7421.
+const BEACON: Obj = {
+  channel: 6,
+  flags: 1,
+  hub_epoch: 9,
+  bcast_floor: 1200,
+  hub_time_us: '1735689600000000',
+  hub_ipv4: 0xc0a80114,
+  hub_port: 7421,
+  beacon_interval_ms: 1000,
+  bcast_watermark: 1234,
+  gw_mac: 'f0f5bd09fdec',
+};
+
+const GW_STATUS: Obj = {
+  channel: 6,
+  mode: 'router',
+  uptime_s: 3600,
+  q_depth: 2,
+  q_max: 32,
+  peers: 4,
+  tx: 1000,
+  tx_fail: 3,
+  rx: 5000,
+  rx_drop: 1,
+  rx_bad: 0,
+  beacons: 3600,
+  ap_rssi: -55,
+  ap_channel: 6,
+  last_tx_us: 2100,
 };
 
 function has(model: Model, key: string): boolean {
@@ -728,7 +778,54 @@ function messageCases(b: Builder): void {
     c.error('PRESENCE.BYE.error_u8_out_of_range', 'message', 'PRESENCE.BYE', '088002', 'out_of_range');
   }
   if (has(b.model, 'NET.WELCOME')) {
-    b.value(c, 'message', 'NET.WELCOME', 'typical', { hub_epoch: 9, ucast_floor: 1, bcast_base: 1200, hub_time_us: '1735689600000000', net_mode: 0, channel: 6 });
+    b.value(c, 'message', 'NET.WELCOME', 'typical', { hub_epoch: 9, ucast_floor: 1, bcast_base: 1200, hub_time_us: '1735689600000000', net_mode: 'router', channel: 6 });
+    b.value(c, 'message', 'NET.WELCOME', 'gateway_mode', { hub_epoch: 9, net_mode: 'gateway', channel: 1 });
+    // net_mode was a u8 before NetMode: any value still decodes (enums are open), the schema names 0..2.
+    b.lenient(c, 'message', 'NET.WELCOME', 'net_mode_3', { net_mode: 3 });
+  }
+  // Design m2-c4-gateway D2: the gateway-era NET bodies, OTA.CHUNK and ACK.SACK.
+  if (has(b.model, 'NET.BEACON')) {
+    b.value(c, 'message', 'NET.BEACON', 'typical', BEACON);
+  }
+  if (has(b.model, 'NET.DISCOVER')) {
+    b.value(c, 'message', 'NET.DISCOVER', 'typical', { net: 0x0102, role: 'node', mac: 'a0b1c2d3e4f5' });
+  }
+  if (has(b.model, 'NET.JOIN_REQ')) {
+    b.value(c, 'message', 'NET.JOIN_REQ', 'typical', { mac: 'a0b1c2d3e4f5', fw_id_prefix: bytesPattern(8, 9), role: 'node' });
+  }
+  if (has(b.model, 'NET.JOIN_ACCEPT')) {
+    b.value(c, 'message', 'NET.JOIN_ACCEPT', 'typical', { mac: 'a0b1c2d3e4f5', addr: 0x0012, hub_epoch: 9, channel: 6 });
+  }
+  if (has(b.model, 'NET.CHANNEL_SWITCH')) {
+    b.value(c, 'message', 'NET.CHANNEL_SWITCH', 'typical', { channel: 11, at_hub_us: '1735689600500000', count: 4 });
+  }
+  if (has(b.model, 'NET.NEIGHBORS')) {
+    const T = 'NET.NEIGHBORS';
+    b.value(c, 'message', T, 'two', { entries: [{ mac: 'a0b1c2d3e4f5', rssi: -61, age_s: 2 }, { mac: 'f0f5bd09fdec', rssi: -90, age_s: 200 }] });
+    // Repeated messages append: a 13th entry is too_long.
+    const entry = '0a0c 0a06a0b1c2d3e4f5 1079 1802';
+    c.error(`${T}.error_too_many_entries`, 'message', T, entry.repeat(13), 'too_long');
+    c.error(`${T}.error_entry_mac_too_long`, 'message', T, '0a09 0a07 01020304050607', 'too_long');
+  }
+  if (has(b.model, 'OTA.CHUNK')) {
+    const T = 'OTA.CHUNK';
+    b.value(c, 'message', T, 'full', { job: 7, offset: 65536, data: bytesPattern(187, 3) });
+    c.error(`${T}.error_data_too_long`, 'message', T, `1abc01${'00'.repeat(188)}`, 'too_long');
+  }
+  if (has(b.model, 'ACK.SACK')) {
+    b.value(c, 'message', 'ACK.SACK', 'typical', { frag_id: 7, cnt: 64, received_bitmap: '18446744073709551614' });
+  }
+  if (hasType(b.model, 'GwStatus')) {
+    b.value(c, 'message', 'GwStatus', 'typical', GW_STATUS);
+  }
+  if (hasType(b.model, 'GwCmd')) {
+    b.value(c, 'message', 'GwCmd', 'set_channel', { req: 1, op: 'set_channel', channel: 11 });
+    b.value(c, 'message', 'GwCmd', 'set_rate', { req: 2, op: 'set_rate', rate: 'fast' });
+    b.lenient(c, 'message', 'GwCmd', 'op_6', { req: 3, op: 6 });
+  }
+  if (hasType(b.model, 'GwRsp')) {
+    // set_channel while associated: BUSY (the AP owns the channel in router mode, design m2-c4-gateway D8).
+    b.value(c, 'message', 'GwRsp', 'busy', { req: 1, status: 3, channel: 6, rate: 'robust', peers: 4 });
   }
   if (has(b.model, 'NET.DIRECTORY')) {
     const T = 'NET.DIRECTORY';
@@ -974,6 +1071,15 @@ function envelopeSpecs(model: Model): EnvSpec[] {
       body: { type: 'NET.WELCOME', value: { hub_epoch: 9, ucast_floor: 1, bcast_base: 1200, hub_time_us: '1735689600000000', channel: 6 } },
     });
   }
+  if (has(model, 'NET.BEACON')) {
+    // A hub broadcast for one gateway's air (design m2-c4-gateway D11): written once per gateway as GW_TX FF x6.
+    out.push({
+      name: 'net.beacon',
+      header: hdr({ cls: CLS.NET, kind: kind('NET', 'BEACON'), seq: 0, src: 0x0000, dst: 0xffff, epoch: 9, ttl: 0x11 }),
+      prefix: none,
+      body: { type: 'NET.BEACON', value: BEACON },
+    });
+  }
   if (has(model, 'PRESENCE.HELLO')) {
     out.push({
       name: 'presence.hello',
@@ -987,6 +1093,14 @@ function envelopeSpecs(model: Model): EnvSpec[] {
     header: hdr({ cls: CLS.ACK, kind: kind('ACK', 'ACK'), src: 0x0000, dst: 0x0012, epoch: 9, port: 1 }),
     prefix: { type: 'result', req_epoch: 4, req_seq: 17, status: 0 },
   });
+  if (has(model, 'ACK.SACK')) {
+    out.push({
+      name: 'ack.sack',
+      header: hdr({ cls: CLS.ACK, kind: kind('ACK', 'SACK'), seq: 30, dst: 0x0000, port: model.protocol.ports.ota }),
+      prefix: { type: 'result', req_epoch: 9, req_seq: 40, status: 0 },
+      body: { type: 'ACK.SACK', value: { frag_id: 7, cnt: 8, received_bitmap: '255' } },
+    });
+  }
   out.push({ name: 'event.button_down', header: BUTTON_DOWN, prefix: { type: 'time', t_us: 1000 }, body: { type: 'fr.button.down.event', value: {} } });
   // An ordered port's EVENT (design m2-c3-inputs D8): the time prefix follows the EXT block with port_seq.
   out.push({
@@ -1016,6 +1130,12 @@ function envelopeSpecs(model: Model): EnvSpec[] {
   out.push({
     name: 'cmd.led_blink_expire_at',
     header: CMD_EXT,
+    prefix: none,
+    body: { type: 'fr.led.blink.args', value: { on_ms: 100, off_ms: 100, count: 3, color: 0xff0000 } },
+  });
+  out.push({
+    name: 'cmd.led_blink_exec_at_hub',
+    header: hdr({ flags: FLAG.ACK_REQ | FLAG.EXT, cls: CLS.CMD, kind: 3, seq: 7, src: 0x0000, dst: 0x0012, epoch: 9, port: 2, ext: [extTlv(EXT.EXEC_AT_HUB_US, 0x80000001)] }),
     prefix: none,
     body: { type: 'fr.led.blink.args', value: { on_ms: 100, off_ms: 100, count: 3, color: 0xff0000 } },
   });
@@ -1165,19 +1285,163 @@ function envelopeCases(b: Builder): Map<string, Uint8Array> {
   return bytes;
 }
 
+// ---- serial bodies (design m2-c4-gateway D1) ----
+
+/** The reference encoder of a layout serial body: [bytes, the value as decoded]. Enums by name (numbers if lenient). */
+function encodeLayout(body: SerialBody, value: Obj, where: string, mode: Mode): [Uint8Array, Obj] {
+  const w = new Writer();
+  const norm: Obj = {};
+  for (const k of Object.keys(value)) {
+    if (k !== 'env' && !body.layout.some((f) => f.name === k)) {
+      throw new Error(`${where}: unknown field ${k}`);
+    }
+  }
+  for (const f of body.layout) {
+    const v = value[f.name];
+    const at = `${where}.${f.name}`;
+    switch (f.type) {
+      case 'mac': {
+        const bytes = bytesOf(v === undefined ? '00'.repeat(6) : String(v));
+        if (bytes.length !== 6) {
+          throw new Error(`${at}: a mac is 6 bytes`);
+        }
+        w.raw(bytes);
+        norm[f.name] = hexOf(bytes);
+        break;
+      }
+      case 'enum': {
+        const t: TypeRef = { kind: 'enum', def: f.enum! };
+        const n = v === undefined ? 0 : enumOf(t, v, at, mode);
+        w.u8(n);
+        norm[f.name] = f.enum!.members.find((m) => m.value === n)?.name ?? n;
+        break;
+      }
+      case 'i8': {
+        const n = intOf('i8', undefined, v ?? 0, at);
+        w.u8(n & 0xff);
+        norm[f.name] = n;
+        break;
+      }
+      default: {
+        const n = intOf(f.type, undefined, v ?? 0, at);
+        if (f.type === 'u8') {
+          w.u8(n);
+        } else if (f.type === 'u16') {
+          w.u16le(n);
+        } else {
+          w.u32le(n);
+        }
+        norm[f.name] = n;
+      }
+    }
+  }
+  if (body.envelope) {
+    const env = bytesOf(value.env === undefined ? '' : String(value.env));
+    w.raw(env);
+    norm.env = hexOf(env);
+  } else if (value.env !== undefined) {
+    throw new Error(`${where}: ${body.name} carries no envelope`);
+  }
+  return [w.finish(), norm];
+}
+
+/** What serialCases needs of a body case: its bytes and decoded value. */
+interface BodyCase {
+  type: number;
+  body: Uint8Array;
+  frame: Obj;
+}
+
+/**
+ * Layout bodies (message cases of type GW_RX, ...): defaults, a typical value, the extremes and the length
+ * errors; the protobuf bodies (GwStatus, GwCmd, GwRsp) are protocol types with their own cases. Returns the
+ * typical body of every serial type but ENV, for the line vectors.
+ */
+function serialBodyCases(b: Builder, envelopes: Map<string, Uint8Array>): Map<string, BodyCase> {
+  const c = b.messages;
+  const out = new Map<string, BodyCase>();
+  const env = (name: string) => {
+    const e = envelopes.get(name);
+    if (!e) {
+      throw new Error(`no envelope ${name}`);
+    }
+    return hexOf(e);
+  };
+  const typical: Record<string, Obj> = {
+    GW_RX: { src_mac: 'a0b1c2d3e4f5', rssi: -61, channel: 6, rx_ts_us: 123456789, env: env('event.button_down') },
+    GW_TX: { tx_id: 513, dst_mac: 'a0b1c2d3e4f5', tx_opts: 0x05, env: env('cmd.led_blink') },
+    GW_TX_DONE: { tx_id: 513, status: 'nak', link_retries: 7, queued_us: 2100 },
+    LINK_PING: { t: 250000 },
+    LINK_PONG: { t: 0xffffffff },
+  };
+  for (const body of b.model.protocol.serial.bodies) {
+    if (body.kind === 'message') {
+      const def = body.message!;
+      const value = def.name === 'GwStatus' ? GW_STATUS : def.name === 'GwCmd' ? { req: 1, op: 'set_channel', channel: 11 } : def.name === 'GwRsp' ? { req: 1, status: 3, channel: 6, rate: 'robust', peers: 4 } : {};
+      const [hex, norm] = b.encode(def.name, value);
+      out.set(body.name, { type: body.code, body: bytesOf(hex), frame: norm });
+      continue;
+    }
+    const T = body.name;
+    const add = (suffix: string, value: Obj, mode: Mode = { lenient: false }) => {
+      const [bytes, norm] = encodeLayout(body, value, `${T}.${suffix}`, mode);
+      c.add({ name: `${T}.${suffix}`, kind: 'message', type: T, value: norm, hex: hexOf(bytes) });
+      return { type: body.code, body: bytes, frame: norm };
+    };
+    add('defaults', {});
+    const max: Obj = {};
+    for (const f of body.layout) {
+      max[f.name] = f.type === 'mac' ? 'ff'.repeat(6) : f.type === 'enum' ? f.enum!.members[f.enum!.members.length - 1].name : f.type === 'i8' ? 127 : Number(scalarBounds(f.type)!.max);
+    }
+    add('max', body.envelope ? { ...max, env: 'ff' } : max);
+    const min = body.layout.find((f) => f.type === 'i8');
+    if (min) {
+      add('min', { [min.name]: -128 });
+    }
+    const t = typical[T];
+    if (t) {
+      out.set(T, add('typical', t));
+    }
+    const zeros = '00'.repeat(body.prefixSize);
+    c.error(`${T}.error_truncated`, 'message', T, zeros.slice(2), 'truncated');
+    if (!body.envelope) {
+      c.error(`${T}.error_too_long`, 'message', T, `${zeros}00`, 'too_long');
+    }
+    for (const f of body.layout.filter((x) => x.type === 'enum')) {
+      // Enums are open: a value the schema does not name decodes as its number.
+      add(`lenient_${f.name}_${f.enum!.maxValue + 1}`, { [f.name]: f.enum!.maxValue + 1 }, { lenient: true });
+    }
+  }
+  if (out.has('GW_TX')) {
+    // A hub broadcast written once per gateway (design m2-c4-gateway D16): tx_id 0, no GW_TX_DONE wanted.
+    const body = b.model.protocol.serial.bodies.find((x) => x.name === 'GW_TX')!;
+    const [bytes, norm] = encodeLayout(body, { dst_mac: 'ff'.repeat(6), env: env('net.beacon') }, 'GW_TX.broadcast_beacon', { lenient: false });
+    c.add({ name: 'GW_TX.broadcast_beacon', kind: 'message', type: 'GW_TX', value: norm, hex: hexOf(bytes) });
+    out.set('GW_TX.broadcast', { type: body.code, body: bytes, frame: norm });
+  }
+  return out;
+}
+
 // ---- serial lines ----
 
 function ascii(s: string): string {
   return hexOf(new TextEncoder().encode(s));
 }
 
-function serialCases(b: Builder, envelopes: Map<string, Uint8Array>): void {
+function serialCases(b: Builder, envelopes: Map<string, Uint8Array>, bodies: Map<string, BodyCase>): void {
   const c = b.serial;
   const typeName = (code: number) => b.model.protocol.serial.types.find((t) => t.value === code)!.name;
   const add = (name: string, type: number, body: Uint8Array, extra: Obj = {}) => {
     const line = encodeSerialLine(type, body);
     c.add({ name: `serial.${name}`, kind: 'serial', type: `serial.${typeName(type)}`, value: { type, body: hexOf(body), line, ...extra }, hex: ascii(line) });
     return line;
+  };
+  const framed = (name: string, key: string) => {
+    const x = bodies.get(key);
+    if (!x) {
+      throw new Error(`no serial body case ${key}`);
+    }
+    return add(name, x.type, x.body, { frame: x.frame });
   };
   const env = (name: string) => {
     const e = envelopes.get(name);
@@ -1191,23 +1455,34 @@ function serialCases(b: Builder, envelopes: Map<string, Uint8Array>): void {
   const down = add('env.node_to_host.event_button_down', SERIAL_TYPE.ENV, env('event.button_down'));
   add('env.node_to_host.state_led_on', SERIAL_TYPE.ENV, env('state.led_on'));
   add('env.node_to_host.result_led_blink_ok', SERIAL_TYPE.ENV, env('result.led_blink_ok'));
-  add('link_pong.node_to_host', SERIAL_TYPE.LINK_PONG, u32(250000), { t: 250000 });
-  const ping = add('link_ping.node_to_host', SERIAL_TYPE.LINK_PING, u32(0xffffffff), { t: 0xffffffff });
+  add('link_pong.node_to_host', SERIAL_TYPE.LINK_PONG, u32(250000), { frame: { t: 250000 } });
+  const ping = add('link_ping.node_to_host', SERIAL_TYPE.LINK_PING, u32(0xffffffff), { frame: { t: 0xffffffff } });
   // host -> node
   add('env.host_to_node.cmd_led_blink', SERIAL_TYPE.ENV, env('cmd.led_blink'));
   add('env.host_to_node.cmd_led_set_fast', SERIAL_TYPE.ENV, env('cmd.led_set_fast'));
-  add('link_ping.host_to_node', SERIAL_TYPE.LINK_PING, u32(250000), { t: 250000 });
-  add('link_pong.host_to_node', SERIAL_TYPE.LINK_PONG, u32(0), { t: 0 });
-  // The longest line: 1529 body bytes give exactly 2048 characters.
+  add('link_ping.host_to_node', SERIAL_TYPE.LINK_PING, u32(250000), { frame: { t: 250000 } });
+  add('link_pong.host_to_node', SERIAL_TYPE.LINK_PONG, u32(0), { frame: { t: 0 } });
+  // gateway <-> host (design m2-c4-gateway D1)
+  if (bodies.has('GW_RX')) {
+    framed('gw_rx.gw_to_host', 'GW_RX');
+    framed('gw_tx.host_to_gw.unicast', 'GW_TX');
+    framed('gw_tx.host_to_gw.broadcast_beacon', 'GW_TX.broadcast');
+    framed('gw_tx_done.gw_to_host', 'GW_TX_DONE');
+    framed('gw_status.gw_to_host', 'GW_STATUS');
+    framed('gw_cmd.host_to_gw', 'GW_CMD');
+    framed('gw_rsp.gw_to_host', 'GW_RSP');
+  }
+  // The longest line: 1529 body bytes give exactly 2048 characters (a GW_RX with a 1517-byte envelope part).
   const long = new Uint8Array(1529).map((_, i) => (i * 7 + 3) & 0xff);
-  const longLine = add('gw_status.max_line', SERIAL_TYPE.GW_STATUS, long);
+  const longFrame = { src_mac: hexOf(long.subarray(0, 6)), rssi: (long[6] << 24) >> 24, channel: long[7], rx_ts_us: (long[8] | (long[9] << 8) | (long[10] << 16) | (long[11] << 24)) >>> 0, env: hexOf(long.subarray(12)) };
+  const longLine = add('gw_rx.max_line', SERIAL_TYPE.GW_RX, long, { frame: longFrame });
   if (longLine.length !== b.model.protocol.serial.maxLine) {
     throw new Error(`max_line vector is ${longLine.length} characters`);
   }
   const term = (name: string, line: string, type: number, body: Uint8Array, extra: Obj = {}) =>
     c.add({ name: `serial.${name}`, kind: 'serial', type: `serial.${typeName(type)}`, value: { type, body: hexOf(body), line, ...extra }, hex: ascii(line), decodeOnly: true });
   term('env.crlf', `${down}\r\n`, SERIAL_TYPE.ENV, env('event.button_down'));
-  term('link_ping.lf', `${ping}\n`, SERIAL_TYPE.LINK_PING, u32(0xffffffff), { t: 0xffffffff });
+  term('link_ping.lf', `${ping}\n`, SERIAL_TYPE.LINK_PING, u32(0xffffffff), { frame: { t: 0xffffffff } });
   const bad = (name: string, line: string, error: DecodeError) => c.error(`serial.${name}`, 'serial', 'serial.line', ascii(line), error);
   bad('error_no_prefix', down.slice(1), 'no_prefix');
   bad('error_bad_base64_padding', '@fr1:AQ==', 'bad_base64');
@@ -1237,7 +1512,7 @@ export function emitVectors(model: Model): { cases: GoldenVector[]; files: Gener
   messageCases(b);
   capCases(b);
   const envelopes = envelopeCases(b);
-  serialCases(b, envelopes);
+  serialCases(b, envelopes, serialBodyCases(b, envelopes));
   const groups: [string, Cases][] = [
     ['header', b.header],
     ['envelope', b.envelope],

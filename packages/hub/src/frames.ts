@@ -14,7 +14,7 @@ import {
   type Envelope,
   type ManifestCap,
 } from '@fractonica/protocol';
-import { decodeEnvelope, decodeMember, findCap, PORT } from '@fractonica/protocol/gen';
+import { decodeEnvelope, decodeMember, findCap, PORT, SERIAL_TYPE_NAME } from '@fractonica/protocol/gen';
 
 import { manifestCapsByFwPrefix } from './artifacts.ts';
 import { type Db, kvGet, kvSet } from './db.ts';
@@ -87,6 +87,12 @@ const hex4 = (n: number) => n.toString(16).padStart(4, '0');
 /** Field values as JSON: u64 (bigint) as a decimal string, bytes as hex. */
 function fieldsJson(v: unknown): string {
   return JSON.stringify(v ?? {}, (_k, x: unknown) => (typeof x === 'bigint' ? x.toString() : x instanceof Uint8Array ? hex(x) : x));
+}
+
+/** A decodable `@fr1:` line of a known type other than ENV: a gateway bridge's GW_* or LINK_* line. */
+export function isBridgeLine(line: string): boolean {
+  const frame = decodeSerialLine(line);
+  return frame.ok && frame.value.type !== SERIAL_TYPE.ENV && SERIAL_TYPE_NAME[frame.value.type] !== undefined;
 }
 
 /** Decodes one `@fr1:` line. Never throws: anything undecodable is kept verbatim as a raw line with the error. */
@@ -163,6 +169,16 @@ export class FrameDecoder {
 
   format(device: string, line: string): FrameText {
     return formatFrame(line, this.#codec, this.#capsOf(device));
+  }
+
+  /**
+   * Whether an `@fr1:` line is a gateway bridge's (GW_RX, GW_STATUS, GW_TX_DONE, GW_RSP, LINK_PONG ...: design
+   * m2-c4-gateway D13), which is no log text: the log store does not keep it (a gateway forwards every air frame it
+   * hears, many a second) and hands it on here instead. SerialFrameTap passes it to the gateway link. ENV lines, lines
+   * that do not decode and types this hub does not know are false: stored as before.
+   */
+  bridge(_device: string, line: string): boolean {
+    return isBridgeLine(line);
   }
 
   #capsOf(device: string): readonly PortCap[] | null {

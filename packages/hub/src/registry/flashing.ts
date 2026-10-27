@@ -8,6 +8,7 @@
 import { type ArtifactManifest, FrError, MAX_WAIT_S } from '@fractonica/protocol';
 
 import { loadManifest, newestBuildId } from '../artifacts.ts';
+import { profileApp } from '../build.ts';
 import type { Device, HubContext } from '../context.ts';
 import { assertFixtureImage } from '../fixture/fence.ts';
 import { type FlashPlan, flashPlan, hardResetCapturing, type IdentRegion, identRegion, type PlanName, runPytools } from '../flash.ts';
@@ -18,10 +19,11 @@ import { attachedPort, isDeviceId, registryOf, resolveOne } from './hub.ts';
 import { CHIP_IDS, markIdentWritten, markImageFlashed, prepareIdentity, type ProvisionRecord, provisionOf } from './store.ts';
 
 /**
- * The artifact to flash: `build` if given, else the newest debug artifact of (node, profile); a release
- * build only by naming it (spec 08 §8.5). NOT_FOUND points at build_start.
+ * The artifact to flash: `build` if given, else the newest debug artifact of (the profile's app, profile): node, or
+ * gateway for c6g-gateway (its `app:` in the hub's checkout; node without one); a release build only by naming it
+ * (spec 08 §8.5). NOT_FOUND points at build_start.
  */
-export function pickArtifact(hub: Pick<HubContext, 'db'>, q: { build?: string; profile?: string | null }): { buildId: string; manifest: ArtifactManifest } {
+export function pickArtifact(hub: Pick<HubContext, 'db'> & Partial<Pick<HubContext, 'hubSourceDir'>>, q: { build?: string; profile?: string | null }): { buildId: string; manifest: ArtifactManifest } {
   if (q.build) {
     return { buildId: q.build, manifest: loadManifest(hub.db, q.build) };
   }
@@ -30,9 +32,10 @@ export function pickArtifact(hub: Pick<HubContext, 'db'>, q: { build?: string; p
       remediation: [{ tool: 'artifact_list', cli: 'fr artifacts ls' }],
     });
   }
-  const buildId = newestBuildId(hub.db, { app: 'node', profile: q.profile, buildType: 'debug' });
+  const app = profileApp(hub.hubSourceDir, q.profile);
+  const buildId = newestBuildId(hub.db, { app, profile: q.profile, buildType: 'debug' });
   if (!buildId) {
-    const release = newestBuildId(hub.db, { app: 'node', profile: q.profile, buildType: 'release' });
+    const release = newestBuildId(hub.db, { app, profile: q.profile, buildType: 'release' });
     throw new FrError('NOT_FOUND', `no debug artifact for profile ${q.profile}`, {
       ...(release ? { hint: `a release build exists; flash it with --build ${release}` } : {}),
       remediation: [{ tool: 'build_start', args: { profile: q.profile } }],
@@ -143,7 +146,7 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
   if (input.plan === 'identity') {
     if (input.build || input.profile) {
       art = pickArtifact(hub, { build: input.build, profile: input.profile });
-    } else if (dev!.profile && newestBuildId(hub.db, { app: 'node', profile: dev!.profile, buildType: 'debug' })) {
+    } else if (dev!.profile && newestBuildId(hub.db, { app: profileApp(hub.hubSourceDir, dev!.profile), profile: dev!.profile, buildType: 'debug' })) {
       art = pickArtifact(hub, { profile: dev!.profile });
     }
   } else {

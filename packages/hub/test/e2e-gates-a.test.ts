@@ -305,7 +305,7 @@ describe('tests/e2e/t-codec.ts', () => {
     expect(r.pass).toBe(true);
     expect(r.measured).toMatchObject({
       gen: { pass: true, stale: [] },
-      vectors: { pass: true, cases: { header: 27, total: expect.any(Number) }, ts: { passed: 56, failed: 0 }, cpp: { passed: 2, failed: 0 } },
+      vectors: { pass: true, cases: { header: 29, total: expect.any(Number) }, ts: { passed: 56, failed: 0 }, cpp: { passed: 2, failed: 0 } },
       fuzz: { pass: true, ts: { targets: 2 }, cpp: { targets: 2 }, parity: { common: 2, identical: 2, mismatched: [], host_test_identical: 2 } },
     });
     expect(measured.fuzz).toEqual(r.measured.fuzz);

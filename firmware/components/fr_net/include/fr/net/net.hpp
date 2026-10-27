@@ -16,6 +16,10 @@
 //
 // M2-C3 (design m2-c3-inputs D6, D8, D10): an ordered capability's events carry EXT port_seq and take the URGENT
 // route, and a STATE's pending second copy is replaced by a newer STATE of the same property (superseded).
+//
+// M2-C4 (design m2-c4-gateway D8, D10-D12, D19): the gateway session, a third hub session link (LinkKind::gateway, Net's
+// own GatewayLink over AirLink unicasts to a gateway found by its BEACONs; gateway.cpp), opened only while no TCP
+// session is up; a gateway's bridge (AirTap, air_send_raw); spike S2's `air bench` frames and `net stream` (bench.cpp).
 #pragma once
 
 #include <algorithm>
@@ -36,7 +40,9 @@
 #include "fr/net/link.hpp"
 #include "fr/net/log_source.hpp"
 #include "fr/net/stores.hpp"
+#include "fr/net/us_histogram.hpp"
 #include "fr/net/window.hpp"
+#include "messages.hpp"  // generated fr::proto::NetTest (kBenchLenMax)
 #include "protocol.hpp"  // generated fr::proto enums (Role, OtaState)
 
 namespace fr::net {
@@ -251,11 +257,12 @@ struct Config {
 };
 
 /** Per link kind (State::links is indexed by LinkKind). espnow never has a session: its `up` is AirLink::up(),
- * tx/tx_fail count AirLink::send accepted/refused plus unicasts that failed after the link retries. */
+ * tx/tx_fail count AirLink::send accepted/refused plus unicasts that failed after the link retries. gateway's `up` is
+ * a live gateway chosen (design m2-c4-gateway D11); its retries are Q1 re-sends over it, as UDP's. */
 struct LinkState {
     bool attached = false;
     bool up = false;           // Link::up() as of the last link_changed()
-    bool session = false;      // WELCOMEd on this link (serial, tcp; udp rides tcp's)
+    bool session = false;      // WELCOMEd on this link (serial, tcp, gateway; udp rides tcp's)
     bool udp_ok = false;       // udp: a hub echo of a UDP HEARTBEAT arrived within 3 intervals
     bool time_synced = false;  // a TIME/SYNC_REQ was answered on this link's session
     uint32_t tx = 0;           // envelopes Link::send accepted
@@ -331,6 +338,83 @@ struct MsgStats {
 /** `net loss` (design c6 D21): the envelopes the hook may drop, those sent, those received, or both. */
 enum class LossDir : uint8_t { both = 0, tx = 1, rx = 2 };
 
+/** The gateway session (design m2-c4-gateway D10-D12): the gateway chosen and what its link did. */
+struct GatewayStats {
+    bool chosen = false;    // a live gateway is chosen (LinkState gateway `up`)
+    Mac mac{};              // the chosen gateway, or the last one while none is (all zero: none yet)
+    int8_t rssi = 0;        // of its newest BEACON
+    TimeUs heard_at = 0;    // its newest BEACON, on the core clock
+    uint8_t live = 0;       // gateways heard within their 3 beacon intervals
+    // Counters; reset_stats() zeroes them.
+    uint32_t beacons = 0;   // BEACONs taken, any gateway
+    uint32_t lost = 0;      // gateways forgotten after 3 missed beacons
+    uint32_t opened = 0;    // gateway sessions WELCOMEd
+    uint32_t closed = 0;    // ... closed by the TCP-back rule (kGatewayCloseMs of TCP session)
+    uint32_t tx_nak = 0;    // envelopes to the gateway never MAC-ACKed after the link retries
+    uint32_t too_big = 0;   // requests over it answered UNSUPPORTED (flagged BULK, or an answer over one frame), and
+                            // other BULK frames from it dropped
+};
+
+/**
+ * A gateway's bridge (design m2-c4-gateway D8, role gateway only): what Net hears on the air goes to the tap before
+ * Net's own handling, and air_send_raw's sends end through it. Called on the core task, inside Net::receive_air and
+ * Net::air_sent; the tap may call air_send_raw from either.
+ */
+class AirTap
+{
+public:
+    /** Every air frame AirLink handed Net (the driver's filter passed it: channel, magic, net), `env` valid only during
+     * the call; `at` its receive stamp (RxMeta::rx_at, else now), on the core clock. */
+    virtual void on_air_frame(std::span<const uint8_t> env, const RxMeta &meta, TimeUs at) = 0;
+    /** The end of air_send_raw `token`: `ok` a unicast MAC-ACKed or a broadcast that went out, with its link retries
+     * and its wait in the driver's queue before its first attempt (AirDone; 0 from a driver that does not know). */
+    virtual void on_air_sent(uint32_t token, bool ok, uint8_t retries, TimeUs queued_us) = 0;
+
+protected:
+    ~AirTap() = default;
+};
+
+/** `air bench tx` (design m2-c4-gateway D19): the sender's run, as `air bench rx` reports it. */
+struct BenchTx {
+    bool running = false;
+    bool broadcast = false;
+    Mac dst{};
+    bool echo = false;
+    uint32_t count = 0;
+    uint16_t len = 0;          // envelope bytes on the air
+    uint32_t interval_ms = 0;  // 0: as fast as the driver takes them (kBenchWindow in its queue at once)
+    uint32_t sent = 0;     // frames AirLink accepted
+    uint32_t refused = 0;  // ... refused (its queue full, no peer slot): that seq is skipped, or at interval 0 retried
+    uint32_t acked = 0;    // ends ok: a unicast MAC-ACKed (after the link retries), a broadcast that went out
+    uint32_t failed = 0;   // ends not ok: no MAC ACK after the link retries
+    uint32_t echoes = 0;   // echoes back from the target (`echo`)
+    uint32_t rtt_p50_us = 0;
+    uint32_t rtt_p99_us = 0;
+    uint32_t rtt_max_us = 0;
+    uint32_t elapsed_ms = 0;  // first frame to the last end (to now while running)
+};
+
+/** `air bench rx`: test frames heard from one source (its MAC), within its newest run. */
+struct BenchRx {
+    Mac mac{};
+    uint16_t addr = 0;
+    uint32_t received = 0;  // distinct seqs
+    uint32_t gaps = 0;      // seqs missing between the run's first and newest
+    uint32_t dups = 0;      // seqs heard again
+    uint32_t echoed = 0;    // echoes sent back (the driver took them)
+    int8_t rssi_p50 = 0;
+    uint32_t age_ms = 0;  // since its newest frame
+};
+
+/** Bench sources kept (the least recently heard is forgotten). */
+inline constexpr size_t kBenchSources = 4;
+
+struct BenchReport {
+    BenchTx tx;
+    std::array<BenchRx, kBenchSources> rx{};  // the most recently heard first
+    size_t rx_count = 0;
+};
+
 struct State {
     std::array<LinkState, kLinkKinds> links{};
     uint16_t hub_epoch = 0;        // from the last WELCOME, or the run adopted over the air (design m2-c2 D19)
@@ -367,10 +451,18 @@ struct State {
     BindingStats bindings;
     NodeStats nodes;
     LogStats logs;  // M2-C2 (design m2-c2 D20); reset_stats() zeroes it
+    GatewayStats gateway;  // M2-C4 (design m2-c4-gateway D10-D12); reset_stats() zeroes its counters
 
     const LinkState &link(LinkKind k) const { return links[index_of(k)]; }
-    bool hub_link() const { return link(LinkKind::serial).session || link(LinkKind::tcp).session; }
-    bool time_synced() const { return link(LinkKind::serial).time_synced || link(LinkKind::tcp).time_synced; }
+    bool hub_link() const
+    {
+        return link(LinkKind::serial).session || link(LinkKind::tcp).session || link(LinkKind::gateway).session;
+    }
+    bool time_synced() const
+    {
+        return link(LinkKind::serial).time_synced || link(LinkKind::tcp).time_synced ||
+               link(LinkKind::gateway).time_synced;
+    }
 };
 
 /** Lives on the core task: every method, and the links' receive path, runs there. */
@@ -407,7 +499,8 @@ public:
 
     /** Up to one link per kind; a second link of a kind replaces the first. The first call takes Net's
      * one timer from the Core pool, so attach before fr::board::init drains it. An up serial or TCP link
-     * gets its HELLO from the timer, i.e. once the core task runs. */
+     * gets its HELLO from the timer, i.e. once the core task runs. A gateway link is refused: Net has its own
+     * (GatewayLink, attached with the air, design m2-c4-gateway D10). */
     void attach(Link &link);
     /** A link went up or down. */
     void link_changed(LinkKind kind);
@@ -436,7 +529,7 @@ public:
     /** The hub run of the last WELCOME, or the run adopted over the air (design m2-c2 D19; State::hub_epoch, without
      * the copy state() makes); 0 before any. */
     uint16_t hub_epoch() const { return state_.hub_epoch; }
-    /** A WELCOMEd hub session on serial or TCP now (State::hub_link(), without the copy state() makes). */
+    /** A WELCOMEd hub session on serial, TCP or a gateway now (State::hub_link(), without the copy state() makes). */
     bool hub_link() const { return state_.hub_link(); }
     /** `diag stats reset`: zeroes the counters (not the flags, hub_epoch or state_seq). */
     void reset_stats();
@@ -461,6 +554,104 @@ public:
     /** Persistence of the directory and the bindings (either may be null): each loads at once, so attach
      * them before the first event a binding could fire on, and every change is saved through them. */
     void attach_stores(DirectoryStore *directory, BindingStore *bindings);
+
+    // ---- the gateway session (design m2-c4-gateway D10-D12): gateway.cpp ----
+    //
+    // attach_air() also attaches Net's own GatewayLink (LinkKind::gateway): envelopes as ESP-NOW unicasts to the chosen
+    // gateway's MAC (AirPrio urgent for URGENT frames, RESULTs and ACKs, else normal), and the air unicasts from that
+    // MAC whose header src is the hub, delivered as that link's (TIME t2 from the driver's receive stamp). A NET.BEACON
+    // heard over the air (src the hub, outside every window, never relayed) keeps its gateway (gw_mac, which must be the
+    // radio sender's MAC; none: the sender) with its RSSI and age, up to kGatewaysMax; one is lost after 3 missed
+    // beacons (kGatewayLostX10 tenths of its beacon_interval_ms). The chosen gateway is kept while it lives, then the
+    // strongest live one is taken. The link is up while one is chosen, and its session works as TCP's (HELLO until
+    // WELCOME, the keepalive timeout, heartbeats on every session), but HELLO goes over it only while no TCP session is
+    // up and (D12's open rule, as refined 2026-10-27) the STA is not associated, or has been associated for
+    // kGatewayAssocWaitMs without a WELCOMEd TCP session, or a TCP session ended kGatewayTcpGoneMs ago with none back;
+    // so a boot near a gateway does not open a session TCP takes over seconds later. The session closes with a BYE over
+    // it (the hub ends that session alone) once a TCP session has been WELCOMEd for kGatewayCloseMs, or without one
+    // when its gateway is lost or another is chosen; a hub BYE over it ends that session alone
+    // (the hub closes a gateway endpoint so; a BYE on serial or TCP still ends every session). route() prefers TCP/UDP, then the gateway,
+    // then serial, and a request from the gateway is answered over it. Q1 frames over it are re-sent end to end as on
+    // UDP (no udp_ok probe: the gateway path has no cheaper twin), with the backoff of one hop (ack_base_ms +
+    // ack_per_hop_ms, x2, +-25 %, max_attempts) until the hub's ACK; no STATE second copy (an ESP-NOW unicast has its
+    // link retries), nothing BULK (one ESP-NOW frame is 250 B) and no OTA frame (relay OTA is C10). ip_block leaves it alone (it is not IP);
+    // drop_hub_link and loss cut it as any hub link. A gateway node (HELLO role gateway) never opens one.
+
+    /** Gateways kept from their BEACONs. */
+    static constexpr size_t kGatewaysMax = 4;
+    /** A gateway is lost after this many tenths of its beacon interval without one: 3 missed, plus half an interval of
+     * the hub's jitter. */
+    static constexpr uint32_t kGatewayLostX10 = 35;
+    /** A BEACON without beacon_interval_ms is taken at 1 Hz (D11). */
+    static constexpr uint32_t kBeaconDefaultMs = 1000;
+    /** D12: the gateway session closes once a TCP session has been WELCOMEd this long (no flapping). */
+    static constexpr uint32_t kGatewayCloseMs = 5000;
+    /** The PRESENCE.BYE reason of D12's close over the gateway: 0 (shutdown), of that session alone. */
+    static constexpr uint8_t kByeGatewayClose = 0;
+    /** D12's open rule: associated this long without a WELCOMEd TCP session (DHCP, resolve and connect after a boot or a
+     * rejoin take a few seconds, and BEACONs arrive about 1 s after association). */
+    static constexpr uint32_t kGatewayAssocWaitMs = 10000;
+    /** ... or a TCP session ended this long ago, associated all along, with none back. */
+    static constexpr uint32_t kGatewayTcpGoneMs = 5000;
+    /** While the rule holds a live gateway back, the association is read again this often (Wi-Fi lost: HELLO at once). */
+    static constexpr uint32_t kGatewayPollMs = 1000;
+
+    // ---- a gateway's bridge (design m2-c4-gateway D8; role gateway only): gateway.cpp ----
+
+    /** The bridge (null: none). Every air frame reaches it first; Net then handles the frame as usual, so a gateway
+     * still answers what is addressed to its own addr (and never relays, 05 §5.9). */
+    void set_air_tap(AirTap *tap) { tap_ = tap; }
+    /**
+     * One envelope as it came (a GW_TX: the hub's bytes, never rebuilt) to `mac` (a unicast peer through the driver's
+     * LRU, or FF x 6 for broadcast) at `rate` (a GwRate: 0 the peer's default, 1 robust, 2 fast), its AirPrio from the
+     * frame (URGENT, RESULT and ACK urgent, else normal). Accepted, AirTap::on_air_sent(token, ...) follows once, with
+     * this token exactly. Refused, none follows: failed while the radio is down (radio_off), invalid_args for an empty
+     * frame, one above 250 B (too_big) or a rate above 2, not_found when every unicast peer slot was used within the
+     * last second (no_peer), busy when the driver's queue is full or kRawInFlight raw sends await their end
+     * (queue_full).
+     */
+    Status air_send_raw(const uint8_t (&mac)[6], std::span<const uint8_t> env, uint8_t rate, uint32_t token);
+    /** air_send_raw frames awaiting their end at once (the driver queues 16 frames in all). */
+    static constexpr size_t kRawInFlight = 16;
+
+    // ---- spike S2 (design m2-c4-gateway D19), diag `air bench` and `net stream` (FR_TEST_HOOKS): bench.cpp ----
+
+    /** Envelope sizes `air bench tx` takes: about a NET.TEST frame without pad, up to the realtime payload budget. */
+    static constexpr uint16_t kBenchLenMin = 32;
+    static constexpr uint16_t kBenchLenMax = fr::wire::kHeaderSize + fr::proto::NetTest::kMaxSize;
+    static constexpr uint32_t kBenchCountMax = 1'000'000;
+    static constexpr uint32_t kBenchIntervalMaxMs = 60'000;
+    /** With interval 0, frames in the driver's queue at once. */
+    static constexpr uint32_t kBenchWindow = 4;
+    /**
+     * `air bench tx <mac|bcast> <count> <len> <interval_ms> [echo]`: `count` NET.TEST frames (seq 1.., the sender's
+     * t_us, pad to `len` envelope bytes, one byte short where a varint leaves no room), TTL 1, port 241, dst 0xFFFF, to
+     * `dst` (kBroadcastMac: broadcast) at the peer's rate, one every `interval_ms` (0: kBenchWindow in the queue at
+     * once), counting AirLink's verdicts. With `echo` the receiver sends each back (unicast, echo false, dst this
+     * node's addr), and the RTT of each echo from the target (any MAC for a broadcast run) is recorded. A new run
+     * replaces the one going. Every NET.TEST received is counted per source and echoed when asked, in any build (diag
+     * only starts runs in FR_TEST_HOOKS builds). failed while ESP-NOW is down, not_provisioned without an addr,
+     * invalid_args outside the limits above.
+     */
+    Status bench_tx(const Mac &dst, uint32_t count, uint16_t len, uint32_t interval_ms, bool echo);
+    /** `air bench rx`: the run and the sources heard. */
+    BenchReport bench_report() const;
+    /** `air bench rx reset`: the run stops and every count goes. */
+    void bench_reset();
+
+    /** `net stream`: the STATE it sends (port 241, prop kStreamProp, value `len` bytes: a u32 LE count, then zeros). */
+    static constexpr uint8_t kStreamProp = 1;
+    static constexpr uint32_t kStreamHzMax = 1000;
+    static constexpr uint32_t kStreamSecondsMax = 3600;
+    static constexpr uint16_t kStreamLenMax = 200;
+    /**
+     * `net stream <hz> <s> [len]` (D19, S2 (f) and (g)): a synthetic STATE stream to the hub at `hz` for `s` seconds,
+     * through Net::property as an analog node's reports go (route, UDP second copies, supersede): the load of such a
+     * node without an ADC. 0 for either ends it; a new one replaces the one going. invalid_args beyond the limits.
+     */
+    Status stream(uint32_t hz, uint32_t seconds, uint16_t len);
+    /** STATEs the running (or last) `net stream` handed to property(). */
+    uint32_t stream_sent() const { return stream_n_; }
     /**
      * An envelope ESP-NOW received, copied off the driver's frame pool, with what the radio saw. A provisioned
      * node takes frames of its net only: node frames through a window per (src, epoch) (64 sources, LRU),
@@ -578,10 +769,11 @@ private:
     static constexpr uint8_t kViaSerial = 1u << index_of(LinkKind::serial);
     static constexpr uint8_t kViaTcp = 1u << index_of(LinkKind::tcp);
     static constexpr uint8_t kViaUdp = 1u << index_of(LinkKind::udp);
+    static constexpr uint8_t kViaGateway = 1u << index_of(LinkKind::gateway);
     static constexpr size_t kRtSize = fr::proto::kMtuRealtime;
     static constexpr size_t kBulkSize = fr::proto::kMtuBulk;
 
-    /** Per serial/tcp link: what the session needs beyond the public LinkState. */
+    /** Per serial/tcp/gateway link: what the session needs beyond the public LinkState. */
     struct Session {
         TimeUs hello_due = kNever;  // next HELLO while up without a session
         TimeUs last_rx = 0;         // last hub frame on this link (05 §5.11 keepalive)
@@ -674,6 +866,12 @@ private:
     uint8_t every_session(uint8_t cls, uint8_t kind, size_t len) const;
     /** Timeout or hub BYE: end_session, then Link::drop() and HELLO again (TCP after reconnecting). */
     void lose_session(LinkKind k, DropReason why);
+    /** HELLO may go over `k` now: always, but over the gateway only while no TCP session is up and D12's open rule
+     * holds (gw_gate_, update_gateway_gate). */
+    bool hello_allowed(LinkKind k) const
+    {
+        return k != LinkKind::gateway || (!ls(LinkKind::tcp).session && gw_gate_);
+    }
     /** On every session in `via` (kVia* bits; 0: every session). */
     void send_bye(uint8_t reason, uint8_t via);
     void end_sessions_after_bye();
@@ -734,7 +932,8 @@ private:
      * hooks cut hub links only: ESP-NOW carries on (T-FLOOD drops a node's hub link to test the flood). */
     bool frozen(LinkKind k) const
     {
-        return k != LinkKind::espnow && (dropping() || (state_.ip_blocked && k != LinkKind::serial));
+        const bool ip = k == LinkKind::tcp || k == LinkKind::udp;  // the gateway is not IP (design m2-c4 D10)
+        return k != LinkKind::espnow && (dropping() || (state_.ip_blocked && ip));
     }
 
     // Send side.
@@ -777,7 +976,9 @@ private:
     uint32_t next_random();
     /** `ms` +- `pct` percent, uniformly, in microseconds. */
     uint32_t jittered_us(uint32_t ms, uint32_t pct);
-    uint32_t backoff_us(uint8_t attempt);
+    /** 05 §5.8 Q1 retry `attempt` over a path of `hops` relays: (ack_base_ms + ack_per_hop_ms per hop) x2 per
+     * attempt, +-25 %. UDP is 0 hops, the gateway 1 (design m2-c4-gateway D10). */
+    uint32_t backoff_us(uint8_t attempt, uint8_t hops = 0);
 
     // ---- ESP-NOW and node <-> node (design c5 §3): air.cpp, peer.cpp, bindings.cpp ----
 
@@ -924,6 +1125,104 @@ private:
     /** The HEARTBEAT this node reports now (to the hub, and as the ESP-NOW heartbeat). */
     fr::proto::PresenceHeartbeat heartbeat_msg(const LinkInfo &li, const Vitals &vit) const;
 
+    // ---- the gateway session and the bridge (design m2-c4-gateway D8, D10-D12): gateway.cpp ----
+
+    /** Net's link to the hub through the chosen gateway: what Link asks of it, Net answers. */
+    class GatewayLink final : public Link
+    {
+    public:
+        explicit GatewayLink(Net &net) : net_(net) {}
+        LinkKind kind() const override { return LinkKind::gateway; }
+        bool up() const override { return net_.gateway_up(); }
+        Status send(std::span<const uint8_t> envelope) override { return net_.gateway_send(envelope); }
+
+    private:
+        Net &net_;
+    };
+
+    /** A gateway heard by its BEACONs (D11). */
+    struct GatewaySeen {
+        bool used = false;
+        Mac mac{};
+        int8_t rssi = 0;
+        TimeUs heard = 0;              // its newest BEACON (core clock)
+        uint32_t interval_ms = kBeaconDefaultMs;
+    };
+
+    /** An air_send_raw frame awaiting its end: the tap's token under Net's own. */
+    struct RawSend {
+        bool used = false;
+        uint32_t token = 0;  // Net's (kTokenRaw)
+        uint32_t tap_token = 0;
+    };
+
+    // AirLink tokens: the low 30 bits count (next_token), the top two say whose send it is.
+    static constexpr uint32_t kTokenSeqMask = 0x3FFF'FFFFu;
+    static constexpr uint32_t kTokenTagMask = 0xC000'0000u;
+    static constexpr uint32_t kTokenNode = 0;  // Net's own: node <-> node, floods, the ESP-NOW heartbeat
+    static constexpr uint32_t kTokenGateway = 0x4000'0000u;
+    static constexpr uint32_t kTokenBench = 0x8000'0000u;
+    static constexpr uint32_t kTokenRaw = 0xC000'0000u;
+
+    /** The gateway link is up: the air up, a live gateway chosen, a provisioned node that is no gateway itself. */
+    bool gateway_up() const;
+    /** GatewayLink::send: an ESP-NOW unicast to the chosen gateway. */
+    Status gateway_send(std::span<const uint8_t> envelope);
+    /** A NET.BEACON heard over the air. */
+    void on_beacon(const fr::wire::EnvelopeView &e, const RxMeta &meta);
+    /** An air unicast from the chosen gateway with src the hub: an envelope of the gateway link. */
+    void deliver_gateway(std::span<const uint8_t> envelope, const RxMeta &meta);
+    /** Gateways past their 3 beacons go; the chosen one, when it went, is replaced by the strongest live one. */
+    void expire_gateways(TimeUs now);
+    /** The chosen gateway's MAC in the driver's reserved peer entry (AirLink::pin_peer), or none pinned without one. */
+    void pin_gateway();
+    /** link_changed(gateway) when gateway_up() differs from the link's `up`, or the chosen gateway changed. */
+    void update_gateway_link(bool rechosen);
+    /** D12's open rule from the STA's association (Host::link_info) now: gw_gate_, and when it next needs a look. */
+    void update_gateway_gate(TimeUs now);
+    /** A TCP session ended: D12's kGatewayTcpGoneMs wait starts (while associated). */
+    void gateway_tcp_ended(TimeUs now);
+    /** The deadlines of the gateway rules: a gateway's loss, the session's close after kGatewayCloseMs of TCP, D12's
+     * open rule while it holds a live gateway back. */
+    TimeUs next_gateway_due() const;
+    /** expire_gateways and D12's close, from tick(). */
+    void service_gateway(TimeUs now);
+    /** State::gateway's live fields (state() fills them in): the chosen gateway, how many live. */
+    void gateway_state(GatewayStats &st) const;
+    /** The end of an air_send_raw frame. */
+    void raw_sent(uint32_t token, bool ok);
+
+    // ---- spike S2's bench and stream (design m2-c4-gateway D19): bench.cpp ----
+
+    /** -100..-10 dBm, one bin each (clamped), for a source's RSSI median. */
+    static constexpr size_t kRssiBins = 91;
+
+    /** One source of NET.TEST frames, within its newest run (a seq 1 after 64 more starts a new one). */
+    struct BenchSource {
+        bool used = false;
+        Mac mac{};
+        uint16_t addr = 0;
+        uint32_t first = 0;   // the run's lowest seq
+        uint32_t newest = 0;  // ... and its highest
+        uint64_t seen = 0;    // bit i: newest - i heard
+        uint32_t received = 0;
+        uint32_t dups = 0;
+        uint32_t echoed = 0;
+        TimeUs heard = 0;
+        std::array<uint32_t, kRssiBins> rssi{};
+    };
+
+    /** A NET.TEST from a node over the air: counted and echoed (a request), or an echo of this node's run. */
+    void on_bench(const fr::wire::EnvelopeView &e, const RxMeta &meta);
+    /** The next frame of the run, now. */
+    void bench_send(TimeUs now);
+    void service_bench(TimeUs now);
+    /** The end of a bench frame (its token names its run). */
+    void bench_sent(uint32_t token, bool ok);
+    void service_stream(TimeUs now);
+    /** The earliest of the bench and stream deadlines. */
+    TimeUs next_bench_due() const;
+
     // Node <-> node sends (peer.cpp, 05 §5.8, §5.10).
     std::expected<Path, Err> broadcast_frame(uint8_t cls, uint8_t kind, uint8_t port, std::span<const uint8_t> body,
                                              uint8_t ttl);
@@ -1052,7 +1351,7 @@ private:
     MsgStats msgs_;
     bool gateway_ = false;  // HELLO role gateway: never relays (05 §5.9)
     TimeUs wifi_up_heard_at_ = 0;  // wifi_up_neighbor_heard_at()
-    uint32_t air_token_ = 0;
+    uint32_t air_token_ = 0;  // the low 30 bits of the next token (kTokenSeqMask)
     TimeUs air_hb_due_ = kNever;
     std::array<Source, kSourcesMax> sources_{};
     uint32_t source_clock_ = 0;
@@ -1121,6 +1420,37 @@ private:
     size_t log_charged_ = 0;
     char log_buf_[kLogScratch];
     char log_text_[kLogTextMax];
+
+    // The gateway session and the bridge (design m2-c4-gateway D8, D10-D12; gateway.cpp).
+    GatewayLink gw_link_{*this};
+    std::array<GatewaySeen, kGatewaysMax> gateways_{};
+    int gw_ = -1;                // the chosen one in gateways_, -1: none
+    bool gw_pinned_ = false;     // the chosen one holds its reserved peer entry (pin_gateway)
+    // D12's open rule (update_gateway_gate): HELLO over the gateway once gw_gate_ (and no TCP session).
+    bool gw_gate_ = true;           // not associated, or associated and the wait below is over
+    bool gw_assoc_ = false;         // the STA associated at the last look
+    TimeUs gw_wait_from_ = 0;       // the association, or the end of the last TCP session after it
+    uint32_t gw_wait_ms_ = 0;       // kGatewayAssocWaitMs or kGatewayTcpGoneMs from gw_wait_from_
+    TimeUs gw_poll_due_ = kNever;   // the next look while the rule holds a live gateway back
+    TimeUs tcp_since_ = kNever;  // the TCP session's WELCOME (D12's close); kNever without one
+    AirTap *tap_ = nullptr;
+    std::array<RawSend, kRawInFlight> raw_{};
+
+    // Spike S2 (design m2-c4-gateway D19; bench.cpp).
+    BenchTx bench_;
+    TimeUs bench_due_ = kNever;  // the next frame of the run
+    TimeUs bench_t0_ = 0;        // the run's first frame
+    TimeUs bench_end_ = 0;       // its last end
+    uint32_t bench_seq_ = 0;     // seqs of the run used so far (sent or refused)
+    uint32_t bench_open_ = 0;    // frames sent, not ended yet
+    uint8_t bench_run_ = 0;      // in the bench tokens: ends of an earlier run are not this one's
+    UsHistogram bench_rtt_;
+    std::array<BenchSource, kBenchSources> bench_src_{};
+    TimeUs stream_due_ = kNever;
+    TimeUs stream_until_ = 0;
+    uint32_t stream_period_us_ = 0;
+    uint16_t stream_len_ = 0;
+    uint32_t stream_n_ = 0;
 };
 
 }  // namespace fr::net

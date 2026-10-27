@@ -33,6 +33,7 @@ struct AirTx {
     std::vector<uint8_t> bytes;
     fr::net::AirPrio prio = fr::net::AirPrio::normal;
     uint32_t token = 0;
+    fr::net::AirRate rate = fr::net::AirRate::peer_default;  // send_at's (design m2-c4-gateway D1)
 
     bool broadcast() const { return dst == fr::net::kBroadcastMac; }
     Frame frame() const { return decode_frame({at, bytes}); }
@@ -60,6 +61,18 @@ public:
         sent.push_back({core_.now(), dst, {envelope.begin(), envelope.end()}, prio, token});
         return {};
     }
+    fr::Status send_at(const Mac &dst, std::span<const uint8_t> envelope, fr::net::AirPrio prio, uint32_t token,
+                       fr::net::AirRate rate) override
+    {
+        const fr::Status st = send(dst, envelope, prio, token);
+        if (st) {
+            sent.back().rate = rate;
+        }
+        return st;
+    }
+    /** What the next completion reports (design m2-c4-gateway D1): `done` for `done_token`. */
+    fr::net::AirDone done_info(uint32_t token) const override { return token == done_token ? done : fr::net::AirDone{}; }
+    bool refused_no_peer() const override { return no_peer; }
 
     /** Sends to the broadcast MAC / to a unicast MAC, decoded. */
     std::vector<AirTx> broadcasts() const
@@ -97,6 +110,9 @@ public:
     bool is_up = true;
     std::optional<fr::Err> refuse;  // send() fails with it
     bool refuse_once = false;
+    bool no_peer = false;  // a busy refusal is for want of a peer slot
+    uint32_t done_token = 0;
+    fr::net::AirDone done;
     std::vector<AirTx> sent;
 
 private:

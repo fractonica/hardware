@@ -43,10 +43,12 @@ export const EXT = {
   /** u16: the per-port EVENT counter of an `ordered` capability (from 1 at boot); the hub restores order by it. */
   PORT_SEQ: 0x05,
   EXEC_AT_US: 0x81,
+  /** u32, critical: the low 32 bits of the hub's µs clock (BEACON hub_time_us); refused as UNSUPPORTED until M2-C8. */
+  EXEC_AT_HUB_US: 0x82,
 } as const;
 
 /** Value size in bytes of each known EXT type; a known TLV of any other length is `bad_ext`. */
-export const EXT_VALUE_SIZE = { 0x02: 4, 0x03: 2, 0x04: 4, 0x05: 2, 0x81: 4 } as const;
+export const EXT_VALUE_SIZE = { 0x02: 4, 0x03: 2, 0x04: 4, 0x05: 2, 0x81: 4, 0x82: 4 } as const;
 
 export const EXT_CRITICAL = 0x80;
 /** TLV bytes one header can carry: the block's `len` is a u8. */

@@ -1,0 +1,43 @@
+schema: fractonica/board@1
+id: nanoesp32c6-n4
+name: MuseLab nanoESP32-C6 (4 MB)
+# The M2-C4 gateway (design m2-c4-gateway §0, D6): ESP32-C6 (QFN40) rev v0.1 with external 4 MB flash, on its
+# native "ESP32C6" USB-C port (USB-Serial/JTAG). The second USB-C port is a CH343 bridge to UART0, left unused.
+idf_target: esp32c6
+flash: { size: 4MB, mode: dio, part_profile: fr-4mb-v1 }
+psram: null
+usb: { kind: usb_serial_jtag, vid: 0x303A, pid: 0x1001, bcd_device: 0x0102, serial_is_mac: true, pins: [12, 13] }
+console: usb_serial_jtag
+buttons:
+  boot: { gpio: 9, active_level: low, pull: external, strapping: true, deep_sleep_wake: false, confidence: M }
+leds:
+  # Inferred from MuseLab's docs (GPIO8, as on Espressif's C6 DevKitC-1); the bench step blinks it to confirm.
+  rgb: { gpio: 8, kind: ws2812, color_order: GRB, count: 1, strapping: true, confidence: L }
+pins:
+  # 16/17: UART0 to the CH343 (the ROM log prints there); 24-30: the external SPI flash.
+  reserved: { usb: [12, 13], uart0_ch343: [16, 17], flash: [24, 25, 26, 27, 28, 29, 30] }
+  strapping: [4, 5, 8, 9, 15]
+  # As on every C6 (spec 04 §4.1): GPIO9 low selects download mode, which needs GPIO8 high; 4, 5 (SDIO timing)
+  # and 15 (JTAG source) matter only with non-default eFuses.
+  strapping_levels: { 4: none, 5: none, 8: high, 9: high, 15: none }
+  # Inferred: the chip's GPIO0-23 less USB, UART0 and the strapping pins the board uses (8 LED, 9 BOOT); 14 is
+  # left out until the headers are read off the board.
+  free: [0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 18, 19, 20, 21, 22, 23]
+  adc1: [0, 1, 2, 3, 4, 5, 6]
+# headers: not recorded yet (no pinout read on the bench); en_access unknown.
+boot_uart_tx: 16              # U0TXD, to the CH343
+en_access: null
+rf: { max_tx_power_qdbm: null, antenna: pcb }
+test_pin: null                # the gateway drives no T-LAT line
+resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1, adc1_channel: 7 }   # ADC1: GPIO0-6
+defaults:
+  boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb }
+detection:
+  # Same USB IDs as every C6 on USB-Serial/JTAG (bcd_device inferred from the supermini); esptool tells them apart.
+  usb: { vid: 0x303A, pid: 0x1001, bcd_device: 0x0102 }
+  esptool: { chip_type: '^ESP32-C6 \(QFN40\)', flash_size: 4MB }
+  probe: { leds: [rgb] }
+sources:
+  - https://documentation.espressif.com/esp32-c6_datasheet_en.pdf
+  - https://github.com/wuxx/nanoESP32-C6   # MuseLab: two USB-C ports (CH343, native USB), an RGB LED

@@ -49,10 +49,11 @@ set(FR_CXX_WARNINGS -Wall -Wextra -Werror)
 set(FR_CXX_FLAGS "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 
 # fr_net/src/core and fr_ota/src/core are IDF-free like fr_core/src/services (design c3 §3, c4 §3); their
-# src/esp directories are not built here. fr_ota/src/http is the image GET over BSD sockets, the same source
-# on lwIP and POSIX: fr_net_node downloads with it. fr_core/src/services includes FixtureService (design
-# m2-c1-hil D3), so every target below links it; a target that uses it defines fr::core::link_info() (fr/core/
-# node_net.hpp), which core.cpp defines on target: fr_net_node in tools/net_node.cpp, the suite in
+# src/esp directories are not built here. fr_gw (the gateway's bridge, design m2-c4-gateway D8) is IDF-free whole.
+# fr_ota/src/http is the image GET over BSD sockets, the same source on lwIP and POSIX: fr_net_node downloads
+# with it. fr_core/src/services includes FixtureService (design m2-c1-hil D3), so every target below links it; a
+# target that uses it defines fr::core::link_info() (fr/core/node_net.hpp), which core.cpp defines on target:
+# fr_net_node in tools/net_node.cpp, the suite in
 # tests/fixture_link.cpp.
 file(GLOB FR_LIB_SRCS CONFIGURE_DEPENDS
     ${COMPONENTS_DIR}/fr_proto/src/*.cpp
@@ -62,6 +63,7 @@ file(GLOB FR_LIB_SRCS CONFIGURE_DEPENDS
     ${COMPONENTS_DIR}/fr_core/src/services/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/host/*.cpp
     ${COMPONENTS_DIR}/fr_net/src/core/*.cpp
+    ${COMPONENTS_DIR}/fr_gw/src/*.cpp
     ${COMPONENTS_DIR}/fr_ota/src/core/*.cpp
     ${COMPONENTS_DIR}/fr_ota/src/http/*.cpp)
 file(GLOB FR_TEST_SRCS CONFIGURE_DEPENDS ${HOST_DIR}/tests/*.cpp)
@@ -78,6 +80,7 @@ target_include_directories(fr_host_lib PUBLIC
     ${COMPONENTS_DIR}/fr_caps/gen
     ${COMPONENTS_DIR}/fr_core/include
     ${COMPONENTS_DIR}/fr_net/include
+    ${COMPONENTS_DIR}/fr_gw/include
     ${COMPONENTS_DIR}/fr_ota/include
     ${HOST_DIR}
     ${HOST_DIR}/gen)

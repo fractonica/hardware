@@ -10,7 +10,7 @@ import { type FaultKind, formatCursor, FrError, HUB_VERSION, type JobOrigin, MAX
 import { APPS_HANDLERS } from './apps/ops.ts';
 import { buildVariant, listArtifacts } from './artifacts.ts';
 import { NET_HANDLERS } from './bindings/ops.ts';
-import { runBuild } from './build.ts';
+import { profileApp, runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
 import { HUB_HANDLERS } from './doctor/ops.ts';
 import { mintCursor, mintTimeUs } from './events/index.ts';
@@ -284,7 +284,8 @@ export const HANDLERS: Record<OpName, Handler> = {
       pytools: py,
       ports: { total: ports.length, open: ports.filter((p) => p.state === 'open').length },
       devices: { registered, online: hub.router?.online().length ?? 0 },
-      ...(router ? { links: { ...router.links, sessions: router.sessions } } : {}),
+      // Gateways (design m2-c4-gateway D15, D17): per gateway port key, its bridge's state and last GW_STATUS.
+      ...(router ? { links: { ...router.links, sessions: router.sessions, gateways: router.gateways } } : {}),
       ...(hub.ota ? { ota: { http_port: hub.ota.httpPort(), listen_error: otaListenError, active: hub.ota.active() } } : {}),
       jobs: hub.jobs.counts(),
       head: mintCursor(hub),
@@ -335,7 +336,7 @@ export const HANDLERS: Record<OpName, Handler> = {
   },
 
   build_start: async (
-    input: { source_dir: string; profile: string; build_type: 'debug' | 'release'; app: string; clean: boolean; fault?: FaultKind; wait_s?: number },
+    input: { source_dir: string; profile: string; build_type: 'debug' | 'release'; app?: string; clean: boolean; fault?: FaultKind; wait_s?: number },
     hub,
   ) => {
     if (input.fault && input.build_type !== 'debug') {
@@ -344,14 +345,16 @@ export const HANDLERS: Record<OpName, Handler> = {
     // Canonical path, so /tmp/x, /private/tmp/x and x/ take the same build lock.
     const src = checkSourceDir(input.source_dir);
     const srcKey = Buffer.from(src).toString('base64url');
+    // The profile's own app unless named (c6g-gateway builds gateway); deploy builds through here too.
+    const app = input.app ?? profileApp(src, input.profile);
     // The second lock is the build dir's: a fault build has its own (<profile>-debug-fault).
-    const dirKey = `build:${srcKey}:${input.app}:${input.profile}:${buildVariant(input.build_type, input.fault)}`;
-    const job = hub.jobs.start('build', [input.profile], [`build:${srcKey}:${input.app}`, dirKey], (ctx) =>
+    const dirKey = `build:${srcKey}:${app}:${input.profile}:${buildVariant(input.build_type, input.fault)}`;
+    const job = hub.jobs.start('build', [input.profile], [`build:${srcKey}:${app}`, dirKey], (ctx) =>
       runBuild(hub.db, ctx, {
         sourceDir: src,
         profile: input.profile,
         buildType: input.build_type,
-        app: input.app,
+        app,
         clean: input.clean,
         ...(input.fault ? { fault: input.fault } : {}),
       }),

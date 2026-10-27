@@ -12,6 +12,7 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/services/descriptor.cpp"
                             "src/services/fixture_service.cpp"
                             "src/services/led_service.cpp"
+                            "src/s2_hooks.cpp"
                             "src/test_pin.cpp"
                        INCLUDE_DIRS "include"
                        # Public: the generated capability classes (and fr_caps' FR_TEST_HOOKS definition,
@@ -23,7 +24,10 @@ idf_component_register(SRCS "src/adc1.cpp"
                        # esp_driver_gpio: the T-LAT test pin (src/test_pin.cpp, design c6 D24). esp_adc: the shared
                        # ADC1 unit (src/adc1.cpp, fr/platform/adc1.hpp) and the vitals' vbat_mv (design m2-c3-inputs
                        # D3, D11); adc_oneshot, the one other includer of fr/platform/adc1.hpp, requires it itself.
-                       PRIV_REQUIRES fr_serial fr_diag fr_net fr_ota app_update esp_app_format esp_partition
+                       # fr_gw: the gateway's bridge (design m2-c4-gateway D8), which core.cpp builds in role gateway
+                       # only (requirements cannot follow CONFIG_FR_ROLE, so every image compiles it; others link none
+                       # of it). It requires fr_core in turn, a cycle like fr_net's.
+                       PRIV_REQUIRES fr_serial fr_diag fr_net fr_gw fr_ota app_update esp_app_format esp_partition
                                      esp_system esp_timer espcoredump nvs_flash esp_driver_gpio esp_adc
                        LDFRAGMENTS "linker.lf")
 

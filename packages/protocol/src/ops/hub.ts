@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import { PromptSchema } from '../events.ts';
 import { cursor, op } from './common.ts';
+import { GatewayInfoSchema } from './registry.ts';
 
 /** One doctor check (packages/host doctor.ts Check): `fix` says what to do, `fixed` that --fix did it. */
 export const CheckSchema = z.looseObject({
@@ -42,8 +43,17 @@ export const HubStatusSchema = z.looseObject({
   pytools: z.looseObject({ ok: z.boolean() }).nullable(),
   ports: z.looseObject({ total: z.number().int(), open: z.number().int() }),
   devices: z.looseObject({ registered: z.number().int(), online: z.number().int() }),
-  /** Node links (C3): the listeners' counters plus sessions per link. */
-  links: z.looseObject({ sessions: z.looseObject({ tcp: z.number().int(), serial: z.number().int() }) }).optional(),
+  /**
+   * Node links (C3): the listeners' counters plus sessions per link; since M2-C4 (design m2-c4-gateway D15, D17)
+   * gateway sessions and `gateways`, per gateway port key: alias, up, rtt_us, last_pong_ms_ago, status (its last
+   * GwStatus), the node sessions through it and its counters.
+   */
+  links: z
+    .looseObject({
+      sessions: z.looseObject({ tcp: z.number().int(), serial: z.number().int(), gateway: z.number().int().optional() }),
+      gateways: z.record(z.string(), GatewayInfoSchema).optional(),
+    })
+    .optional(),
   ota: z.looseObject({ http_port: z.number().int().nullable(), listen_error: z.string().nullable(), active: z.boolean() }).optional(),
   /** Job counts by status (queued, working). */
   jobs: z.record(z.string(), z.number()),

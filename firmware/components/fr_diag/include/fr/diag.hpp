@@ -2,11 +2,15 @@
 // `[#<id> ]<command> [args…]`; the response is exactly one line `[#<id> ]<json>` with
 // {"ok":true,...} or {"ok":false,"error":"<code>","detail":"…"}. Requests run on the core task and
 // return their output; nothing here prints. fr_core owns the runtime state and implements Host.
+//
+// M2-C4 (design m2-c4-gateway D10, D19): the gateway link joins the link rows (and `stats gateway`), and spike S2's test
+// hooks (`air ...`, `wifi proto`, `cpu`, `net stream`) reach the runtime through TestHooks.
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -40,17 +44,18 @@ struct RuntimeStats {
     uint32_t posts_dropped;  // Core::post calls refused (queue full)
 };
 
-/** The links in fr_net's order (LinkKind: serial 0, tcp 1, udp 2, espnow 3). */
-inline constexpr size_t kLinks = 4;
-inline constexpr const char *kLinkNames[kLinks] = {"serial", "tcp", "udp", "espnow"};
+/** The links in fr_net's order (LinkKind: serial 0, tcp 1, udp 2, espnow 3, gateway 4). */
+inline constexpr size_t kLinks = 5;
+inline constexpr const char *kLinkNames[kLinks] = {"serial", "tcp", "udp", "espnow", "gateway"};
 inline constexpr size_t kLinkUdp = 2;
 inline constexpr size_t kLinkEspnow = 3;
+inline constexpr size_t kLinkGateway = 4;
 
 /** One link as fr_net sees it; counters since boot or the last `stats reset`. */
 struct LinkStatus {
     bool attached = false;
     bool up = false;           // transport connected
-    bool session = false;      // WELCOMEd (serial, tcp; udp rides tcp's)
+    bool session = false;      // WELCOMEd (serial, tcp, gateway; udp rides tcp's)
     bool udp_ok = false;       // udp: the hub echoes its heartbeats
     bool time_synced = false;  // a TIME request was answered on this link
     uint32_t tx = 0;
@@ -142,10 +147,40 @@ struct NeighborInfo {
 };
 inline constexpr size_t kNeighborsMax = 20;
 
+/** The gateway session (design m2-c4-gateway D10-D12): `info` links.gateway, `stats gateway`. */
+struct GatewayStatus {
+    bool chosen = false;   // a live gateway chosen (the link is up)
+    uint8_t mac[6] = {};   // the chosen one, or the last one
+    int8_t rssi = 0;       // of its newest BEACON
+    uint32_t age_ms = 0;   // since that BEACON
+    uint8_t live = 0;      // gateways heard within 3 beacon intervals
+    uint32_t beacons = 0;  // BEACONs taken
+    uint32_t lost = 0;     // gateways lost after 3 missed beacons
+    uint32_t opened = 0;   // gateway sessions WELCOMEd
+    uint32_t closed = 0;   // ... closed with TCP back for 5 s
+    uint32_t tx_nak = 0;   // envelopes the gateway never MAC-ACKed
+    uint32_t too_big = 0;  // requests over it answered UNSUPPORTED (BULK, or an answer over one frame); BULK dropped
+};
+
+/** A gateway's bridge (design m2-c4-gateway D8; fr_gw Bridge::stats()): `stats gw`, role gateway only. */
+struct GwBridgeStatus {
+    bool on = false;  // this image runs the bridge (the rest is 0 otherwise)
+    // GW_TX by verdict; tx + tx_fail is every GW_TX that got one.
+    uint32_t tx = 0, tx_fail = 0, tx_nak = 0, tx_queue_full = 0, tx_no_peer = 0, tx_too_big = 0, tx_radio_off = 0;
+    uint32_t tx_stale = 0, tx_dropped = 0, tx_busy = 0, done_dropped = 0;
+    uint32_t tx_refused = 0;  // of tx_queue_full + tx_too_big: GW_TX the serial reader answered (no buffer, too long)
+    // Air -> hub.
+    uint32_t rx = 0, rx_drop = 0, rx_no_hub = 0, rx_line_full = 0, rx_too_big = 0;
+    // The hub's lines.
+    uint32_t rx_bad = 0, pings = 0, hub_lost = 0, cmds = 0, beacons = 0;
+    uint32_t q_high = 0;      // most GW_TX held at once (not a counter)
+    uint32_t last_tx_us = 0;  // the last verdict's time since its GW_TX arrived (not a counter)
+};
+
 /** Hub link and Wi-Fi state for `info` (states) and `stats` (counters). */
 struct NetStatus {
     LinkStatus links[kLinks];
-    bool hub_link = false;  // a session on serial or TCP
+    bool hub_link = false;  // a session on serial, TCP or a gateway
     uint16_t hub_epoch = 0;
     uint32_t events_dropped = 0;   // no path to the hub, or too old to send
     uint32_t delivery_failed = 0;  // Q1 frames given up on
@@ -210,6 +245,94 @@ struct NetStatus {
     uint32_t msgs_other = 0;
     // M2-C2 (design m2-c2 D20).
     LogCounters net_logs;
+    // M2-C4 (design m2-c4-gateway D8, D10-D12).
+    GatewayStatus gateway;
+    GwBridgeStatus gw;
+};
+
+// ---- spike S2's test hooks (design m2-c4-gateway D19), FR_TEST_HOOKS builds ----
+
+/** `air bench rx`'s sender part: the run of `air bench tx`. */
+struct BenchTxStatus {
+    bool running = false;
+    bool broadcast = false;
+    uint8_t dst[6] = {};
+    bool echo = false;
+    uint32_t count = 0, len = 0, interval_ms = 0;
+    uint32_t sent = 0, refused = 0, acked = 0, failed = 0, echoes = 0;
+    uint32_t rtt_p50_us = 0, rtt_p99_us = 0, rtt_max_us = 0;
+    uint32_t elapsed_ms = 0;
+};
+
+/** `air bench rx`: one source of test frames. */
+struct BenchRxStatus {
+    uint8_t mac[6] = {};
+    uint16_t addr = 0;
+    uint32_t received = 0, gaps = 0, dups = 0, echoed = 0;
+    int8_t rssi_p50 = 0;
+    uint32_t age_ms = 0;
+};
+inline constexpr size_t kBenchSources = 4;
+
+struct BenchStatus {
+    BenchTxStatus tx;
+    BenchRxStatus rx[kBenchSources];
+    size_t rx_count = 0;
+};
+
+/** `air rate`: peer entries set now, and those the driver refused. */
+struct RateStatus {
+    uint32_t peers = 0;
+    uint32_t failed = 0;
+};
+
+/** `air txpower`: what is in force now, and the profile's value (`air txpower profile` restores it). */
+struct TxPowerStatus {
+    int8_t qdbm = 0;
+    int8_t profile_qdbm = 0;
+};
+
+/** `air churn`: µs per add and del of n throwaway peers. */
+struct ChurnStatus {
+    uint32_t n = 0, failed = 0;
+    uint32_t add_p50_us = 0, add_p99_us = 0, add_max_us = 0;
+    uint32_t del_p50_us = 0, del_p99_us = 0, del_max_us = 0;
+};
+
+/** `cpu`: the idle tasks' share of each core over `window_ms` (FreeRTOS run-time stats). */
+inline constexpr size_t kCpuCoresMax = 2;
+struct CpuStatus {
+    uint32_t window_ms = 0;
+    uint8_t cores = 0;
+    uint16_t idle_permille[kCpuCoresMax] = {};
+};
+
+/**
+ * Spike S2's hooks (design m2-c4-gateway D19), each a diag command; every call on the core task. A runtime without a
+ * hook answers Err::unsupported.
+ */
+class TestHooks
+{
+public:
+    /** `air bench tx`: `dst` null for broadcast. Net::bench_tx's limits and errors. */
+    virtual Status bench_tx(const uint8_t *dst, uint32_t count, uint16_t len, uint32_t interval_ms, bool echo) = 0;
+    virtual BenchStatus bench() const = 0;
+    virtual void bench_reset() = 0;
+    /** `air rate <robust|fast> [bcast]`. */
+    virtual std::expected<RateStatus, Err> air_rate(bool fast, bool broadcast) = 0;
+    /** `air txpower <qdbm>`, or `air txpower profile` (nullopt): what the driver reads back, and the profile's cap. */
+    virtual std::expected<TxPowerStatus, Err> air_txpower(std::optional<int8_t> qdbm) = 0;
+    /** `air churn <n>`. */
+    virtual std::expected<ChurnStatus, Err> air_churn(uint32_t n) = 0;
+    /** `wifi proto <ax|bgn>`. */
+    virtual Status wifi_proto(bool ax) = 0;
+    /** `cpu`. */
+    virtual std::expected<CpuStatus, Err> cpu() = 0;
+    /** `net stream <hz> <s> [len]` (0 ends it). */
+    virtual Status net_stream(uint32_t hz, uint32_t seconds, uint16_t len) = 0;
+
+protected:
+    ~TestHooks() = default;
 };
 
 /** Debug hooks of `net` (spec 09 §9.7, design c3 §3), FR_TEST_HOOKS builds only. */
@@ -289,6 +412,8 @@ public:
     virtual int test_pin() const = 0;
     /** Restarts shortly after the response line has gone out. */
     virtual void reboot(bool bootloader) = 0;
+    /** Spike S2's hooks (design m2-c4-gateway D19); null: `air`, `wifi`, `cpu` and `net stream` answer unsupported. */
+    virtual TestHooks *test_hooks() { return nullptr; }
 
 protected:
     ~Host() = default;

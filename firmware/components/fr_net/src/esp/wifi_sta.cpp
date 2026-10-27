@@ -439,6 +439,16 @@ void WifiSta::request_down(uint32_t seconds, TimeUs now)
     wake();
 }
 
+void WifiSta::request_protocol(uint8_t bitmap, TimeUs now)
+{
+    portENTER_CRITICAL(&mux_);
+    proto_pending_ = true;
+    proto_at_ = now + kApplyDelayUs;
+    proto_ = bitmap;
+    portEXIT_CRITICAL(&mux_);
+    wake();
+}
+
 void WifiSta::apply_down(uint32_t seconds, TimeUs now)
 {
     if (seconds == 0) {
@@ -564,6 +574,26 @@ void WifiSta::poll(TimeUs now)
         apply_down(down_s, now);
     }
 
+    bool proto = false;
+    uint8_t bitmap = 0;
+    portENTER_CRITICAL(&mux_);
+    if (proto_pending_ && now >= proto_at_) {
+        proto_pending_ = false;
+        proto = true;
+        bitmap = proto_;
+    }
+    portEXIT_CRITICAL(&mux_);
+    if (proto) {
+        // Design m2-c4-gateway D19 (e): the protocols an association negotiates, so a rejoin follows (the hold's end
+        // does it during a wifi_down).
+        esp_err_t err = esp_wifi_set_protocol(WIFI_IF_STA, bitmap);
+        ESP_LOGW(TAG, "wifi: protocols 0x%02x (debug hook): %s%s", bitmap, esp_err_to_name(err),
+                 err == ESP_OK && !held_ ? ", rejoining" : "");
+        if (err == ESP_OK && !held_) {
+            rejoin(now);
+        }
+    }
+
     if (trial_ && !held_ && now >= trial_deadline_ && !ip_up_) {
         revert_override(now);
     }
@@ -629,6 +659,9 @@ TimeUs WifiSta::next_deadline() const
     portENTER_CRITICAL(&mux_);
     if (pending_) {
         consider(pending_at_);
+    }
+    if (proto_pending_) {
+        consider(proto_at_);
     }
     if (down_pending_) {
         consider(down_at_);

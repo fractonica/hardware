@@ -1,16 +1,20 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { pytoolsSourceHash } from '@fractonica/host';
+import { findOp } from '@fractonica/protocol';
 
+import { profileApp } from '../src/build.ts';
 import { openDb } from '../src/db.ts';
 import { JobRunner } from '../src/jobs.ts';
 import { LogStore } from '../src/logstore.ts';
 import { HANDLERS, type HubContext } from '../src/ops.ts';
 import { SerialPortManager } from '../src/serial.ts';
+
+const REPO = join(dirname(new URL(import.meta.url).pathname), '..', '..', '..');
 
 // Cross-group seams: hub shutdown cancels jobs, build locks use the canonical source_dir,
 // hub_status flags a stale sidecar, AMBIGUOUS_SELECTOR names its candidates. No hardware, no hub.
@@ -115,6 +119,25 @@ describe('build_start lock keys', () => {
     }
     expect(calls).toHaveLength(4);
     expect(new Set(calls.map((c) => JSON.stringify(c.locks))).size).toBe(1);
+  });
+
+  it("builds the profile's own app unless one is named: c6g-gateway is gateway, not INCOMPATIBLE_PROFILE as node", async () => {
+    const src = checkout();
+    mkdirSync(join(src, 'firmware', 'profiles'), { recursive: true });
+    writeFileSync(join(src, 'firmware', 'profiles', 'gw-x.profile.yaml'), 'profile: gw-x\nboard: nanoesp32c6-n4\napp: gateway\nrole: gateway\n');
+    writeFileSync(join(src, 'firmware', 'profiles', 'pad-x.profile.yaml'), 'profile: pad-x\nboard: esp32c6-supermini\napp: node\n');
+    const { hub, calls } = capture();
+    await HANDLERS.build_start({ source_dir: src, profile: 'gw-x', build_type: 'debug', clean: false }, hub);
+    await HANDLERS.build_start({ source_dir: src, profile: 'pad-x', build_type: 'debug', clean: false }, hub);
+    await HANDLERS.build_start({ source_dir: src, profile: 'unknown', build_type: 'debug', clean: false }, hub);
+    await HANDLERS.build_start({ source_dir: src, profile: 'gw-x', build_type: 'debug', app: 'node', clean: false }, hub);
+    const apps = calls.map((c) => c.locks[1].split(':')[2]);
+    expect(apps).toEqual(['gateway', 'node', 'node', 'node']);
+    // The checkout's own profile, as `fr build --profile c6g-gateway` (and deploy, which builds through build_start).
+    expect(profileApp(REPO, 'c6g-gateway')).toBe('gateway');
+    expect(profileApp(REPO, 'c6-pad')).toBe('node');
+    // The op's input: app is optional now (the default is the profile's, not 'node').
+    expect(findOp('build_start')!.input.parse({ source_dir: '/x', profile: 'c6g-gateway' }).app).toBeUndefined();
   });
 
   it('rejects a directory that is not a checkout before starting a job', async () => {

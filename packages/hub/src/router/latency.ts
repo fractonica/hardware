@@ -134,16 +134,27 @@ interface LoopSnapshot {
   max: number;
 }
 
-/** Event-loop delay across the window, in ms: p50 the median of the per-second medians, p99 and max the worst second's. */
+/**
+ * Event-loop delay across the window, in ms. p99 is over every probe in the window when the window fits the probe
+ * ring (PROBE_KEEP_MS; design m2-c4 D23), else the worst second's (`p99_source` says which); p50 the median of the
+ * per-second medians, max the worst probe (over the same probes p99 came from, so p99 ≤ max). `p99_max_s_ms` is the
+ * worst second's p99, the figure p99 was before M2-C4 (about the window's worst probe, since a second holds ~50
+ * probes), kept for one release.
+ */
 export interface LoopDelay {
   seconds: number;
   p50_ms: number | null;
   p99_ms: number | null;
   max_ms: number | null;
+  p99_max_s_ms?: number | null;
+  /** `probes`: p99 over every probe in the window (≤ 120 s); `seconds`: the worst second's p99 (a longer window). */
+  p99_source?: 'probes' | 'seconds';
 }
 
 /** The lateness probe's period: short enough to see a busy tick, long enough to cost nothing. */
 const PROBE_MS = 20;
+/** How long every probe's lateness is kept for a true windowed p99 (D23): 120 s, about 6,000 probes. */
+const PROBE_KEEP_MS = 120_000;
 
 /**
  * The hub's event-loop delay (spec 08 §8.2 rule 2: the receive path runs in the tick a frame arrives in, so
@@ -151,10 +162,10 @@ const PROBE_MS = 20;
  * a second. Started and stopped with the router. (perf_hooks' monitorEventLoopDelay counts its own
  * resolution in every sample, so an idle loop would read as ~10 ms.)
  *
- * Also every probe's lateness in one cumulative histogram (design m2-c2 D15, hub_status router.scale.loop): the
- * per-second p99 of `stats` is the second's worst probe (about 50 probes a second), and a window's p99 the worst
- * second's, so over a run it is the single worst probe. A reader takes the histogram's difference between two
- * reads instead and gets the p99 over every probe in between.
+ * Also every probe's lateness in one cumulative histogram (design m2-c2 D15, hub_status router.scale.loop), whose
+ * difference between two reads gives the p99 over every probe in between. Since M2-C4 (D23) `stats` keeps 120 s of
+ * probes and reports a window's true p99 over them; before, it reported the worst second's p99 (`p99_max_s_ms`),
+ * which with ~50 probes a second is about the window's single worst probe.
  */
 export class LoopMonitor {
   #timer: NodeJS.Timeout | null = null;
@@ -165,6 +176,9 @@ export class LoopMonitor {
   #snaps: LoopSnapshot[] = [];
   /** Every probe since this monitor was made (one per router, so it restarts with a new router). */
   #all = new Histogram();
+  /** The last PROBE_KEEP_MS of probes: performance.now() ms and lateness ms, oldest first. */
+  #probeAt: number[] = [];
+  #probeLate: number[] = [];
 
   start(): void {
     if (this.#timer) {
@@ -179,6 +193,9 @@ export class LoopMonitor {
     clearInterval(this.#timer ?? undefined);
     this.#timer = null;
     this.#second = [];
+    this.#snaps = [];
+    this.#probeAt = [];
+    this.#probeLate = [];
   }
 
   #probe(): void {
@@ -186,6 +203,16 @@ export class LoopMonitor {
     const late = Math.max(0, now - this.#last - PROBE_MS);
     this.#second.push(late);
     this.#all.add(late);
+    this.#probeAt.push(now);
+    this.#probeLate.push(late);
+    let drop = 0;
+    while (drop < this.#probeAt.length && this.#probeAt[drop] < now - PROBE_KEEP_MS) {
+      drop++;
+    }
+    if (drop > 256) {
+      this.#probeAt.splice(0, drop);
+      this.#probeLate.splice(0, drop);
+    }
     this.#last = now;
     if (now - this.#secondAt < 1000) {
       return;
@@ -213,11 +240,32 @@ export class LoopMonitor {
     }
     const r2 = (v: number) => Math.round(v * 100) / 100;
     const medians = snaps.map((s) => s.p50).sort((a, b) => a - b);
+    const worstSecond = Math.max(...snaps.map((s) => s.p99));
+    let p99 = worstSecond;
+    let max = Math.max(...snaps.map((s) => s.max));
+    let source: 'probes' | 'seconds' = 'seconds';
+    if (windowMs <= PROBE_KEEP_MS) {
+      const window: number[] = [];
+      for (let i = 0; i < this.#probeAt.length; i++) {
+        if (this.#probeAt[i] >= since) {
+          window.push(this.#probeLate[i]);
+        }
+      }
+      if (window.length) {
+        window.sort((a, b) => a - b);
+        p99 = window[Math.min(window.length - 1, Math.max(0, Math.ceil(0.99 * window.length) - 1))];
+        // The window's own probes, the second still open included: the closed seconds' max can miss a probe p99 has.
+        max = window[window.length - 1];
+        source = 'probes';
+      }
+    }
     return {
       seconds: snaps.length,
       p50_ms: r2(medians[Math.floor((medians.length - 1) / 2)]),
-      p99_ms: r2(Math.max(...snaps.map((s) => s.p99))),
-      max_ms: r2(Math.max(...snaps.map((s) => s.max))),
+      p99_ms: r2(p99),
+      max_ms: r2(max),
+      p99_max_s_ms: r2(worstSecond),
+      p99_source: source,
     };
   }
 }

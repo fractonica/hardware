@@ -3,7 +3,8 @@
 //   lease -> probe (refuse secure boot / flash encryption) -> select the artifact (the probe's chip must
 //   match) -> registry upsert (addr, alias, net, epoch_floor) -> render fr_ident (0700 temp dir) -> one
 //   write_flash (full plan + fr_ident) -> hub reset (boot log captured) -> serial HELLO (<= 10 s) ->
-//   HELLO over TCP (<= 30 s; reported as wifi joined | not_joined, not a failure).
+//   HELLO over TCP (<= 30 s; reported as wifi joined | not_joined, not a failure). A gateway (role gateway, design
+//   m2-c4-gateway D8) never opens TCP: its join is its GW_STATUS showing the AP (ap_channel or ap_rssi), via gateway_status.
 // From M2-C1 (design m2-c1-hil D6, D15): the selected build goes through the fixture fence (S4's
 // fixture/fence.ts) before anything is written, and a radio-off image (the HIL fixture's) has no join
 // stage: its result says wifi off.
@@ -105,6 +106,19 @@ export type ProvisionFence = (hub: HubContext, target: ProvisionTarget) => void;
 export const PROVISION_FENCE: ProvisionFence = (hub, t) =>
   assertFixtureImage(hub, { deviceId: t.device_id, alias: t.alias }, { profile: t.profile, build_id: t.build_id }, 'device_provision');
 
+/** What a gateway's last GW_STATUS says of its AP, and how long ago it came (null: none yet). */
+export interface GatewayApStatus {
+  ap_channel: number;
+  ap_rssi: number;
+  ms_ago: number | null;
+}
+
+/** The gateway's last GW_STATUS as the router holds it (device_get gateway.status); null for none. */
+export const GATEWAY_AP_STATUS = (hub: HubContext, deviceId: string): GatewayApStatus | null => {
+  const g = routerInfo(hub.router, deviceId)?.gateway;
+  return g?.status ? { ap_channel: g.status.ap_channel, ap_rssi: g.status.ap_rssi, ms_ago: g.status_ms_ago } : null;
+};
+
 /** The sidecar, the HELLO deadlines and the fixture fence, replaceable in tests. */
 export interface ProvisionDeps {
   pytools: PytoolsRunner;
@@ -112,6 +126,39 @@ export interface ProvisionDeps {
   joinMs?: number;
   /** Default PROVISION_FENCE. */
   fence?: ProvisionFence;
+  /** A gateway's GW_STATUS AP fields (its join); default GATEWAY_AP_STATUS. */
+  gatewayStatus?: (hub: HubContext, deviceId: string) => GatewayApStatus | null;
+}
+
+/**
+ * A gateway's join (design m2-c4-gateway D8: it associates as a STA but opens no TCP session, so no HELLO over TCP
+ * ever comes): a GW_STATUS newer than `sinceMs` (Date.now() ms, the reset) whose ap_channel or ap_rssi is not 0.
+ * Resolves its AP fields, or null after `ms`; rejects when the job is cancelled.
+ */
+function gatewayJoin(look: () => GatewayApStatus | null, sinceMs: number, ms: number, signal: AbortSignal): Promise<{ ap_channel: number; ap_rssi: number } | null> {
+  return new Promise((resolve, reject) => {
+    const done = (v: { ap_channel: number; ap_rssi: number } | null | Error) => {
+      clearTimeout(timer);
+      clearInterval(poll);
+      signal.removeEventListener('abort', onAbort);
+      return v instanceof Error ? reject(v) : resolve(v);
+    };
+    const check = () => {
+      const st = look();
+      if (st && st.ms_ago !== null && st.ms_ago <= Date.now() - sinceMs && (st.ap_channel !== 0 || st.ap_rssi !== 0)) {
+        done({ ap_channel: st.ap_channel, ap_rssi: st.ap_rssi });
+      }
+    };
+    const onAbort = () => done(signal.reason instanceof Error ? signal.reason : new FrError('INTERNAL', 'cancelled'));
+    const timer = setTimeout(() => done(null), ms);
+    const poll = setInterval(check, 200);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      check();
+    }
+  });
 }
 
 export async function startProvision(input: ProvisionInput, hub: HubContext, deps: ProvisionDeps = { pytools: runPytools }): Promise<unknown> {
@@ -398,6 +445,7 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
 
   // Watched from before the reset, so a quick HELLO is not missed.
   const watch = watchHello(hub, deviceId, lease.key);
+  const resetAt = Date.now();
   try {
     ctx.stage('reset');
     const reset = await hardResetCapturing(hub, lease.key, ctx);
@@ -414,6 +462,8 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
     }
     ctx.log(`${device.alias}: HELLO on serial`, 'event');
     let wifi: ProvisionWifi;
+    let via: 'tcp' | 'gateway_status' | undefined;
+    let ap: { ap_channel: number; ap_rssi: number } | null = null;
     const role = watch.serialRole() ?? registryOf(hub).get(deviceId)?.role;
     if (radioOff(role)) {
       // A radio-off image (the HIL fixture's) has no join stage: it talks to the hub over serial only (D6).
@@ -421,12 +471,28 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
       wifi = 'off';
     } else {
       ctx.stage('join');
-      const joined = await watch.wait('tcp', joinMs, ctx.signal);
-      ctx.log(`${device.alias}: ${joined ? 'HELLO over TCP (joined Wi-Fi)' : `no HELLO over TCP within ${joinMs / 1000} s`}`, 'event');
-      if (!joined) {
-        warnings.push(`${device.alias} did not reach the hub over Wi-Fi within ${joinMs / 1000} s; check the network (fr net get) and its serial log`);
+      if (role === 'gateway') {
+        // A gateway associates with the AP but never opens TCP (design m2-c4-gateway D8): its GW_STATUS says it joined.
+        const look = deps.gatewayStatus ?? GATEWAY_AP_STATUS;
+        ap = await gatewayJoin(() => look(hub, deviceId), resetAt, joinMs, ctx.signal);
+        ctx.log(
+          `${device.alias}: ${ap ? `GW_STATUS shows the AP (channel ${ap.ap_channel}, ${ap.ap_rssi} dBm): joined Wi-Fi` : `no GW_STATUS with an AP channel within ${joinMs / 1000} s`}`,
+          'event',
+        );
+        if (!ap) {
+          warnings.push(`${device.alias} (a gateway) reported no AP in its GW_STATUS within ${joinMs / 1000} s; check the network (fr net get) and its serial log`);
+        }
+        wifi = ap ? 'joined' : 'not_joined';
+        via = ap ? 'gateway_status' : undefined;
+      } else {
+        const joined = await watch.wait('tcp', joinMs, ctx.signal);
+        ctx.log(`${device.alias}: ${joined ? 'HELLO over TCP (joined Wi-Fi)' : `no HELLO over TCP within ${joinMs / 1000} s`}`, 'event');
+        if (!joined) {
+          warnings.push(`${device.alias} did not reach the hub over Wi-Fi within ${joinMs / 1000} s; check the network (fr net get) and its serial log`);
+        }
+        wifi = joined ? 'joined' : 'not_joined';
+        via = joined ? 'tcp' : undefined;
       }
-      wifi = joined ? 'joined' : 'not_joined';
     }
     return {
       device_id: deviceId,
@@ -446,6 +512,8 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
       reset,
       hello: 'serial',
       wifi,
+      ...(via ? { via } : {}),
+      ...(ap ? { ap } : {}),
       duration_ms: Date.now() - t0,
       ...(warnings.length ? { warnings } : {}),
     };

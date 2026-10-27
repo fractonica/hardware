@@ -46,6 +46,7 @@ inline constexpr uint8_t kExtValidMs = 0x03;     // u16, lifetime of a hub broad
 inline constexpr uint8_t kExtExpireAtUs = 0x04;  // u32, destination clock: not executed after it
 inline constexpr uint8_t kExtPortSeq = 0x05;     // u16, per-port EVENT counter of an ordered capability
 inline constexpr uint8_t kExtExecAtUs = 0x81;    // u32, destination clock: execute then (critical)
+inline constexpr uint8_t kExtExecAtHubUs = 0x82;  // u32, hub clock (BEACON hub_time_us): refused until M2-C8 (critical)
 inline constexpr uint8_t kExtCritical = 0x80;
 /** TLV bytes one header can carry: the block's `len` is a u8. */
 inline constexpr size_t kExtMaxSize = 255;
@@ -62,6 +63,7 @@ constexpr size_t ext_value_size(uint8_t type)
     case kExtTraceId:
     case kExtExpireAtUs:
     case kExtExecAtUs:
+    case kExtExecAtHubUs:
         return 4;
     default:
         return 0;

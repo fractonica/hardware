@@ -1,0 +1,595 @@
+{
+  "schema": "fractonica/s2-record@1",
+  "q": "a",
+  "title": "C3 TX cap: AP RSSI, RTT/loss, unicast to the gateway, TCP closes per air txpower",
+  "started_at": "2026-10-27T14:54:51.872Z",
+  "finished_at": "2026-10-27T15:09:35.462Z",
+  "hub": "http://127.0.0.1:7420",
+  "devices": {
+    "gw-c6": {
+      "device_id": "f0f5bd09fdec",
+      "role": "gateway",
+      "profile": "c6g-gateway",
+      "fw_id": "5a3158a7aa11350192981fc161411f70ef502479583879fd12574927c60ddc45"
+    },
+    "pad-c3": {
+      "device_id": "1cdbd4175cc4",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-c3b": {
+      "device_id": "1cdbd416ba34",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    }
+  },
+  "params": {
+    "boards": [
+      "pad-c3",
+      "pad-c3b"
+    ],
+    "marks": [
+      -71,
+      -74
+    ],
+    "caps": [
+      34,
+      44,
+      52
+    ],
+    "pings": 200,
+    "bench": 1000,
+    "len": 64,
+    "interval_ms": 5,
+    "tcp_window_s": 120,
+    "gateway": "gw-c6",
+    "restore": "air txpower profile"
+  },
+  "results": {
+    "placed_rssi": {
+      "pad-c3": -69,
+      "pad-c3b": -68
+    },
+    "per_cap": {
+      "34": {
+        "pad-c3": {
+          "qdbm": 34,
+          "set_qdbm": 34,
+          "profile_qdbm": 34,
+          "ap_rssi": [
+            -73,
+            -72,
+            -72,
+            -72,
+            -72
+          ],
+          "ap_rssi_p50": -72,
+          "pings": {
+            "sent": 200,
+            "ok": 200,
+            "loss_pct": 0,
+            "links": {
+              "tcp": 200
+            },
+            "rtt_p50_ms": 12,
+            "rtt_p99_ms": 96,
+            "rtt_max_ms": 102,
+            "hub_ping": {
+              "tcp": {
+                "n": 40,
+                "p50_ms": 8.36,
+                "p99_ms": 70.05,
+                "max_ms": 70.05
+              }
+            }
+          },
+          "bench": {
+            "src": "pad-c3",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "robust",
+            "attempted": 1000,
+            "sent": 1000,
+            "refused": 0,
+            "acked": 1000,
+            "failed": 0,
+            "received": 1000,
+            "dups": 0,
+            "rssi_p50": -72,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 1000,
+            "rtt_p50_us": 4607,
+            "rtt_p99_us": 12287,
+            "rtt_max_us": 15990,
+            "elapsed_ms": 5008
+          },
+          "espnow": {
+            "pad-c3": {
+              "tx": 1001,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1008,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            },
+            "gw-c6": {
+              "tx": 1006,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1004,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            }
+          },
+          "tcp_closes": {
+            "tcp_closes": 0,
+            "tcp_close_peer": 0,
+            "tcp_close_keepalive": 0,
+            "tcp_close_error": 0,
+            "tcp_close_session": 0,
+            "tcp_close_wifi": 0
+          },
+          "tcp_window_s": 120
+        },
+        "pad-c3b": {
+          "qdbm": 34,
+          "set_qdbm": 34,
+          "profile_qdbm": 34,
+          "ap_rssi": [
+            -68,
+            -68,
+            -68,
+            -68,
+            -68
+          ],
+          "ap_rssi_p50": -68,
+          "pings": {
+            "sent": 200,
+            "ok": 200,
+            "loss_pct": 0,
+            "links": {
+              "tcp": 200
+            },
+            "rtt_p50_ms": 15,
+            "rtt_p99_ms": 113,
+            "rtt_max_ms": 120,
+            "hub_ping": {
+              "tcp": {
+                "n": 40,
+                "p50_ms": 9.06,
+                "p99_ms": 95.97,
+                "max_ms": 95.97
+              }
+            }
+          },
+          "bench": {
+            "src": "pad-c3b",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "robust",
+            "attempted": 1000,
+            "sent": 1000,
+            "refused": 0,
+            "acked": 1000,
+            "failed": 0,
+            "received": 1000,
+            "dups": 0,
+            "rssi_p50": -73,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 1000,
+            "rtt_p50_us": 4607,
+            "rtt_p99_us": 10239,
+            "rtt_max_us": 18162,
+            "elapsed_ms": 5007
+          },
+          "espnow": {
+            "pad-c3b": {
+              "tx": 1001,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1010,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            },
+            "gw-c6": {
+              "tx": 1007,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1004,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            }
+          },
+          "tcp_closes": {
+            "tcp_closes": 0,
+            "tcp_close_peer": 0,
+            "tcp_close_keepalive": 0,
+            "tcp_close_error": 0,
+            "tcp_close_session": 0,
+            "tcp_close_wifi": 0
+          },
+          "tcp_window_s": 120
+        }
+      },
+      "44": {
+        "pad-c3": {
+          "qdbm": 44,
+          "set_qdbm": 44,
+          "profile_qdbm": 34,
+          "ap_rssi": [
+            -69,
+            -68,
+            -68,
+            -68,
+            -68
+          ],
+          "ap_rssi_p50": -68,
+          "pings": {
+            "sent": 200,
+            "ok": 200,
+            "loss_pct": 0,
+            "links": {
+              "tcp": 200
+            },
+            "rtt_p50_ms": 14,
+            "rtt_p99_ms": 97,
+            "rtt_max_ms": 116,
+            "hub_ping": {
+              "tcp": {
+                "n": 40,
+                "p50_ms": 8.56,
+                "p99_ms": 284.89,
+                "max_ms": 284.89
+              }
+            }
+          },
+          "bench": {
+            "src": "pad-c3",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "robust",
+            "attempted": 1000,
+            "sent": 1000,
+            "refused": 0,
+            "acked": 1000,
+            "failed": 0,
+            "received": 1000,
+            "dups": 0,
+            "rssi_p50": -68,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 1000,
+            "rtt_p50_us": 4607,
+            "rtt_p99_us": 7679,
+            "rtt_max_us": 11359,
+            "elapsed_ms": 5008
+          },
+          "espnow": {
+            "pad-c3": {
+              "tx": 1001,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1012,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            },
+            "gw-c6": {
+              "tx": 1008,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1005,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            }
+          },
+          "tcp_closes": {
+            "tcp_closes": 0,
+            "tcp_close_peer": 0,
+            "tcp_close_keepalive": 0,
+            "tcp_close_error": 0,
+            "tcp_close_session": 0,
+            "tcp_close_wifi": 0
+          },
+          "tcp_window_s": 120
+        },
+        "pad-c3b": {
+          "qdbm": 44,
+          "set_qdbm": 44,
+          "profile_qdbm": 34,
+          "ap_rssi": [
+            -67,
+            -67,
+            -66,
+            -66,
+            -68
+          ],
+          "ap_rssi_p50": -67,
+          "pings": {
+            "sent": 200,
+            "ok": 200,
+            "loss_pct": 0,
+            "links": {
+              "tcp": 200
+            },
+            "rtt_p50_ms": 12,
+            "rtt_p99_ms": 111,
+            "rtt_max_ms": 132,
+            "hub_ping": {
+              "tcp": {
+                "n": 40,
+                "p50_ms": 8.44,
+                "p99_ms": 99.68,
+                "max_ms": 99.68
+              }
+            }
+          },
+          "bench": {
+            "src": "pad-c3b",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "robust",
+            "attempted": 1000,
+            "sent": 1000,
+            "refused": 0,
+            "acked": 1000,
+            "failed": 0,
+            "received": 1000,
+            "dups": 0,
+            "rssi_p50": -75,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 1000,
+            "rtt_p50_us": 4607,
+            "rtt_p99_us": 9215,
+            "rtt_max_us": 16021,
+            "elapsed_ms": 5014
+          },
+          "espnow": {
+            "pad-c3b": {
+              "tx": 1002,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1012,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            },
+            "gw-c6": {
+              "tx": 1007,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1008,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            }
+          },
+          "tcp_closes": {
+            "tcp_closes": 0,
+            "tcp_close_peer": 0,
+            "tcp_close_keepalive": 0,
+            "tcp_close_error": 0,
+            "tcp_close_session": 0,
+            "tcp_close_wifi": 0
+          },
+          "tcp_window_s": 120
+        }
+      },
+      "52": {
+        "pad-c3": {
+          "qdbm": 52,
+          "set_qdbm": 52,
+          "profile_qdbm": 34,
+          "ap_rssi": [
+            -68,
+            -68,
+            -68,
+            -68,
+            -68
+          ],
+          "ap_rssi_p50": -68,
+          "pings": {
+            "sent": 200,
+            "ok": 200,
+            "loss_pct": 0,
+            "links": {
+              "tcp": 200
+            },
+            "rtt_p50_ms": 17,
+            "rtt_p99_ms": 129,
+            "rtt_max_ms": 136,
+            "hub_ping": {
+              "tcp": {
+                "n": 40,
+                "p50_ms": 7.71,
+                "p99_ms": 145.81,
+                "max_ms": 145.81
+              }
+            }
+          },
+          "bench": {
+            "src": "pad-c3",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "robust",
+            "attempted": 1000,
+            "sent": 1000,
+            "refused": 0,
+            "acked": 1000,
+            "failed": 0,
+            "received": 1000,
+            "dups": 0,
+            "rssi_p50": -67,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 1000,
+            "rtt_p50_us": 4607,
+            "rtt_p99_us": 47103,
+            "rtt_max_us": 50969,
+            "elapsed_ms": 5012
+          },
+          "espnow": {
+            "pad-c3": {
+              "tx": 1001,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1010,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            },
+            "gw-c6": {
+              "tx": 1007,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1005,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            }
+          },
+          "tcp_closes": {
+            "tcp_closes": 0,
+            "tcp_close_peer": 0,
+            "tcp_close_keepalive": 0,
+            "tcp_close_error": 0,
+            "tcp_close_session": 0,
+            "tcp_close_wifi": 0
+          },
+          "tcp_window_s": 120
+        },
+        "pad-c3b": {
+          "qdbm": 52,
+          "set_qdbm": 52,
+          "profile_qdbm": 34,
+          "ap_rssi": [
+            -69,
+            -68,
+            -68,
+            -67,
+            -67
+          ],
+          "ap_rssi_p50": -68,
+          "pings": {
+            "sent": 200,
+            "ok": 200,
+            "loss_pct": 0,
+            "links": {
+              "tcp": 200
+            },
+            "rtt_p50_ms": 11,
+            "rtt_p99_ms": 97,
+            "rtt_max_ms": 141,
+            "hub_ping": {
+              "tcp": {
+                "n": 40,
+                "p50_ms": 11.15,
+                "p99_ms": 129.73,
+                "max_ms": 129.73
+              }
+            }
+          },
+          "bench": {
+            "src": "pad-c3b",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "robust",
+            "attempted": 1000,
+            "sent": 1000,
+            "refused": 0,
+            "acked": 1000,
+            "failed": 0,
+            "received": 1000,
+            "dups": 0,
+            "rssi_p50": -72,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 1000,
+            "rtt_p50_us": 4607,
+            "rtt_p99_us": 13823,
+            "rtt_max_us": 23027,
+            "elapsed_ms": 5008
+          },
+          "espnow": {
+            "pad-c3b": {
+              "tx": 1002,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1010,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            },
+            "gw-c6": {
+              "tx": 1007,
+              "tx_fail": 0,
+              "retries": 0,
+              "refused": 0,
+              "rx": 1005,
+              "rx_bad": 0,
+              "rx_lost": 0,
+              "peers": 0
+            }
+          },
+          "tcp_closes": {
+            "tcp_closes": 0,
+            "tcp_close_peer": 0,
+            "tcp_close_keepalive": 0,
+            "tcp_close_error": 0,
+            "tcp_close_session": 0,
+            "tcp_close_wifi": 0
+          },
+          "tcp_window_s": 120
+        }
+      }
+    },
+    "restored": {
+      "pad-c3": {
+        "how": "profile",
+        "qdbm": 34,
+        "profile_qdbm": 34
+      },
+      "pad-c3b": {
+        "how": "profile",
+        "qdbm": 34,
+        "profile_qdbm": 34
+      }
+    }
+  },
+  "summary": {
+    "line": "34: pad-c3 -72 dBm pad-c3b -68 dBm; 44: pad-c3 -68 dBm pad-c3b -67 dBm; 52: pad-c3 -68 dBm pad-c3b -68 dBm"
+  },
+  "warnings": [
+    "pad-c3: cap 44 is above its profile's 34 qdBm (the board's rf.max_tx_power_qdbm) for this run",
+    "pad-c3b: cap 44 is above its profile's 34 qdBm (the board's rf.max_tx_power_qdbm) for this run",
+    "pad-c3: cap 52 is above its profile's 34 qdBm (the board's rf.max_tx_power_qdbm) for this run",
+    "pad-c3b: cap 52 is above its profile's 34 qdBm (the board's rf.max_tx_power_qdbm) for this run"
+  ]
+}

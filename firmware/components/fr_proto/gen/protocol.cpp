@@ -111,4 +111,190 @@ bool from_name(std::string_view s, OtaState &out)
     return false;
 }
 
+const char *to_name(NetMode v)
+{
+    switch (v) {
+    case NetMode::router:
+        return "router";
+    case NetMode::gateway:
+        return "gateway";
+    case NetMode::dual:
+        return "dual";
+    }
+    return nullptr;
+}
+
+bool from_name(std::string_view s, NetMode &out)
+{
+    if (s == "router") {
+        out = NetMode::router;
+        return true;
+    }
+    if (s == "gateway") {
+        out = NetMode::gateway;
+        return true;
+    }
+    if (s == "dual") {
+        out = NetMode::dual;
+        return true;
+    }
+    return false;
+}
+
+const char *to_name(GwOp v)
+{
+    switch (v) {
+    case GwOp::none:
+        return "none";
+    case GwOp::set_channel:
+        return "set_channel";
+    case GwOp::set_net:
+        return "set_net";
+    case GwOp::set_rate:
+        return "set_rate";
+    case GwOp::peer_flush:
+        return "peer_flush";
+    case GwOp::info:
+        return "info";
+    }
+    return nullptr;
+}
+
+bool from_name(std::string_view s, GwOp &out)
+{
+    if (s == "none") {
+        out = GwOp::none;
+        return true;
+    }
+    if (s == "set_channel") {
+        out = GwOp::set_channel;
+        return true;
+    }
+    if (s == "set_net") {
+        out = GwOp::set_net;
+        return true;
+    }
+    if (s == "set_rate") {
+        out = GwOp::set_rate;
+        return true;
+    }
+    if (s == "peer_flush") {
+        out = GwOp::peer_flush;
+        return true;
+    }
+    if (s == "info") {
+        out = GwOp::info;
+        return true;
+    }
+    return false;
+}
+
+const char *to_name(GwRate v)
+{
+    switch (v) {
+    case GwRate::peer_default:
+        return "peer_default";
+    case GwRate::robust:
+        return "robust";
+    case GwRate::fast:
+        return "fast";
+    }
+    return nullptr;
+}
+
+bool from_name(std::string_view s, GwRate &out)
+{
+    if (s == "peer_default") {
+        out = GwRate::peer_default;
+        return true;
+    }
+    if (s == "robust") {
+        out = GwRate::robust;
+        return true;
+    }
+    if (s == "fast") {
+        out = GwRate::fast;
+        return true;
+    }
+    return false;
+}
+
+const char *to_name(GwTxOpt v)
+{
+    switch (v) {
+    case GwTxOpt::rate_mask:
+        return "rate_mask";
+    case GwTxOpt::no_retry:
+        return "no_retry";
+    }
+    return nullptr;
+}
+
+bool from_name(std::string_view s, GwTxOpt &out)
+{
+    if (s == "rate_mask") {
+        out = GwTxOpt::rate_mask;
+        return true;
+    }
+    if (s == "no_retry") {
+        out = GwTxOpt::no_retry;
+        return true;
+    }
+    return false;
+}
+
+const char *to_name(GwTxStatus v)
+{
+    switch (v) {
+    case GwTxStatus::ok:
+        return "ok";
+    case GwTxStatus::nak:
+        return "nak";
+    case GwTxStatus::queue_full:
+        return "queue_full";
+    case GwTxStatus::no_peer:
+        return "no_peer";
+    case GwTxStatus::too_big:
+        return "too_big";
+    case GwTxStatus::radio_off:
+        return "radio_off";
+    case GwTxStatus::stale:
+        return "stale";
+    }
+    return nullptr;
+}
+
+bool from_name(std::string_view s, GwTxStatus &out)
+{
+    if (s == "ok") {
+        out = GwTxStatus::ok;
+        return true;
+    }
+    if (s == "nak") {
+        out = GwTxStatus::nak;
+        return true;
+    }
+    if (s == "queue_full") {
+        out = GwTxStatus::queue_full;
+        return true;
+    }
+    if (s == "no_peer") {
+        out = GwTxStatus::no_peer;
+        return true;
+    }
+    if (s == "too_big") {
+        out = GwTxStatus::too_big;
+        return true;
+    }
+    if (s == "radio_off") {
+        out = GwTxStatus::radio_off;
+        return true;
+    }
+    if (s == "stale") {
+        out = GwTxStatus::stale;
+        return true;
+    }
+    return false;
+}
+
 }  // namespace fr::proto

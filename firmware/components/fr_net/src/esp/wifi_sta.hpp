@@ -61,6 +61,9 @@ public:
     bool request_override(const fr_net_creds_t &creds, TimeUs now);
     /** Core task: queues `net wifi_down <seconds>` (0 ends a hold); a newer request replaces a waiting one. */
     void request_down(uint32_t seconds, TimeUs now);
+    /** Core task: queues `wifi proto` (design m2-c4-gateway D19 (e)): esp_wifi_set_protocol(`bitmap`) and a rejoin
+     * (none during a wifi_down hold: its end joins with the new protocols); a newer request replaces a waiting one. */
+    void request_protocol(uint8_t bitmap, TimeUs now);
 
     bool ip_up() const { return ip_up_; }
     /** wifi_err_reason_t of the last disconnect; 0 after an address came (an address lost on its own). */
@@ -163,6 +166,10 @@ private:
     bool down_pending_ = false;
     TimeUs down_at_ = 0;
     uint32_t down_s_ = 0;
+    // `wifi proto` handover from the core task (under mux_ too).
+    bool proto_pending_ = false;
+    TimeUs proto_at_ = 0;
+    uint8_t proto_ = 0;
 
     Snapshot snap_;  // under mux_
 };

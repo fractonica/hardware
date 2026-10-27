@@ -4,7 +4,11 @@
 // the run's (`--tier`); a hil run also carries its bench_get preflight. A sim run (design m2-c2 D14,
 // tests/sim/lib/runner.ts) reports one entry per scenario run (and its storm), and a published one is marked: its
 // figures are reported, and its status never fails the run. A sim run that left a gated entry not judged (the
-// preflight's host_load) says `conclusive: false` and exits 4: nothing failed, and nothing passed either.
+// preflight's host_load) says `conclusive: false` and exits 4: nothing failed, and nothing passed either. From M2-C4
+// (design m2-c4-gateway D22) a target/hil gate run snapshots each DUT's `diag stats` tcp_close_* and `stats espnow`
+// right before the gate's first hub call and after the gate, and publishes the deltas as `measured.stats_delta`
+// (pickDutStats, statsDelta; lib/runner.ts takes the snapshots): an unexplained tcp_close_* gets a note before the M2
+// exit.
 
 import type { Needs, ScenarioTier } from './scenario.ts';
 
@@ -136,4 +140,79 @@ export function renderReport(report: E2eReport): string {
   const head = !report.pass ? 'FAIL' : report.conclusive === false ? 'NOT JUDGED' : 'PASS';
   lines.push(`${head}: ${c.pass} passed, ${c.fail} failed, ${c.error} errored, ${c.skipped} skipped (${(report.duration_ms / 1000).toFixed(1)} s)`);
   return lines.join('\n');
+}
+
+// ---- D22: the DUTs' TCP closes and ESP-NOW counters across a gate ----
+
+/** One DUT's counters D22 follows: the full `stats` answer's tcp_close_* (09 §9.7) and its `espnow` section. */
+export interface DutStats {
+  tcp_close: Record<string, number>;
+  espnow: Record<string, number>;
+}
+
+/** Each DUT's counters at one moment, by alias; a DUT whose diag did not answer has the reason instead. */
+export type StatsSnapshot = Record<string, DutStats | { error: string }>;
+
+/** What a gate report publishes (measured.stats_delta). */
+export interface StatsDelta {
+  /** Per DUT: the deltas (a counter that went down was reset by a reboot: the after value, and `reset`), or why not. */
+  devices: Record<string, { tcp_close: Record<string, number>; espnow: Record<string, number>; reset?: string[] } | { unread: string }>;
+  /** tcp_close_* summed over the DUTs: what needs a note before the M2 exit when not 0 (D22). */
+  tcp_closes: number;
+  /** DUTs with a tcp_close_* delta, as `<alias> <field>=<n>`. */
+  tcp_close_seen: string[];
+}
+
+const numbers = (o: unknown): Record<string, number> =>
+  o && typeof o === 'object' ? Object.fromEntries(Object.entries(o as Record<string, unknown>).filter((e): e is [string, number] => typeof e[1] === 'number')) : {};
+
+/**
+ * A DUT's D22 counters from its diag answers: `full` the `stats` response (tcp_close_* at its top level), `espnow` the
+ * `stats espnow` response, or null to take the full answer's own section (it is dropped there when the answer is long).
+ */
+export function pickDutStats(full: Record<string, unknown>, espnow: Record<string, unknown> | null = null): DutStats {
+  const tcp_close = Object.fromEntries(Object.entries(numbers(full)).filter(([k]) => k.startsWith('tcp_close_')));
+  return { tcp_close, espnow: numbers((espnow ?? full).espnow) };
+}
+
+/** after - before per counter; one that went down (a reboot reset it) counts its after value and is named in `reset`. */
+function diff(before: Record<string, number>, after: Record<string, number>, reset: string[], prefix: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(after)) {
+    const b = before[k] ?? 0;
+    if (v < b) {
+      reset.push(`${prefix}${k}`);
+      out[k] = v;
+    } else {
+      out[k] = v - b;
+    }
+  }
+  return out;
+}
+
+/** The deltas between two snapshots (DUTs in either; one unread in either is `unread`). */
+export function statsDelta(before: StatsSnapshot, after: StatsSnapshot): StatsDelta {
+  const devices: StatsDelta['devices'] = {};
+  const seen: string[] = [];
+  let total = 0;
+  for (const alias of [...new Set([...Object.keys(before), ...Object.keys(after)])].sort()) {
+    const b = before[alias];
+    const a = after[alias];
+    if (!b || !a || 'error' in b || 'error' in a) {
+      const why = !b ? 'not read before the gate' : !a ? 'not read after the gate' : 'error' in b ? `before: ${b.error}` : `after: ${(a as { error: string }).error}`;
+      devices[alias] = { unread: why };
+      continue;
+    }
+    const reset: string[] = [];
+    const tcp_close = diff(b.tcp_close, a.tcp_close, reset, '');
+    const espnow = diff(b.espnow, a.espnow, reset, 'espnow.');
+    for (const [k, v] of Object.entries(tcp_close)) {
+      if (v > 0) {
+        total += v;
+        seen.push(`${alias} ${k}=${v}`);
+      }
+    }
+    devices[alias] = { tcp_close, espnow, ...(reset.length ? { reset } : {}) };
+  }
+  return { devices, tcp_closes: total, tcp_close_seen: seen };
 }

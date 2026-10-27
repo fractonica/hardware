@@ -1,0 +1,190 @@
+{
+  "schema": "fractonica/s2-record@1",
+  "q": "e",
+  "title": "pad-c6 11ax vs bgn: RTT/loss and air bench",
+  "started_at": "2026-10-27T13:53:18.402Z",
+  "finished_at": "2026-10-27T13:54:06.968Z",
+  "hub": "http://127.0.0.1:7420",
+  "devices": {
+    "pad-c3": {
+      "device_id": "1cdbd4175cc4",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-c6": {
+      "device_id": "58e6c5d55e64",
+      "role": "node",
+      "profile": "c6-pad",
+      "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a"
+    },
+    "pad-s3": {
+      "device_id": "94a99015cecc",
+      "role": "node",
+      "profile": "s3l-pad",
+      "fw_id": "21741d5b8fe3c24b5dca4027b607aea7784a1fccc12ea289c6ede26aa0b1c121"
+    },
+    "gw-c6": {
+      "device_id": "f0f5bd09fdec",
+      "role": "gateway",
+      "profile": "c6g-gateway",
+      "fw_id": "5a3158a7aa11350192981fc161411f70ef502479583879fd12574927c60ddc45"
+    }
+  },
+  "params": {
+    "device": "pad-c6",
+    "gateway": "gw-c6",
+    "pings": 200,
+    "bench": 2000
+  },
+  "results": {
+    "ax": {
+      "ap_rssi": -69,
+      "pings": {
+        "sent": 200,
+        "ok": 200,
+        "loss_pct": 0,
+        "links": {
+          "tcp": 200
+        },
+        "rtt_p50_ms": 15,
+        "rtt_p99_ms": 132,
+        "rtt_max_ms": 163,
+        "hub_ping": {
+          "tcp": {
+            "n": 32,
+            "p50_ms": 12.89,
+            "p99_ms": 168.57,
+            "max_ms": 168.57
+          },
+          "gateway": {
+            "n": 8,
+            "p50_ms": 33.15,
+            "p99_ms": 137.63,
+            "max_ms": 137.63
+          }
+        }
+      },
+      "bench": {
+        "src": "pad-c6",
+        "dst": "gw-c6",
+        "mode": "unicast",
+        "rate": "robust",
+        "attempted": 2000,
+        "sent": 2000,
+        "refused": 0,
+        "acked": 2000,
+        "failed": 0,
+        "received": 2000,
+        "dups": 0,
+        "rssi_p50": -64,
+        "delivery_pct": 100,
+        "received_sent_pct": 100,
+        "acked_pct": 100,
+        "echoes": 2000,
+        "rtt_p50_us": 4095,
+        "rtt_p99_us": 12287,
+        "rtt_max_us": 27867,
+        "elapsed_ms": 9997
+      },
+      "espnow": {
+        "pad-c6": {
+          "tx": 2002,
+          "tx_fail": 0,
+          "retries": 0,
+          "refused": 0,
+          "rx": 2020,
+          "rx_bad": 0,
+          "rx_lost": 0,
+          "peers": 0
+        },
+        "gw-c6": {
+          "tx": 2013,
+          "tx_fail": 0,
+          "retries": 0,
+          "refused": 0,
+          "rx": 2009,
+          "rx_bad": 0,
+          "rx_lost": 0,
+          "peers": 0
+        }
+      }
+    },
+    "bgn": {
+      "ap_rssi": -69,
+      "pings": {
+        "sent": 200,
+        "ok": 200,
+        "loss_pct": 0,
+        "links": {
+          "tcp": 200
+        },
+        "rtt_p50_ms": 12,
+        "rtt_p99_ms": 185,
+        "rtt_max_ms": 239,
+        "hub_ping": {
+          "tcp": {
+            "n": 40,
+            "p50_ms": 10,
+            "p99_ms": 168.57,
+            "max_ms": 168.57
+          },
+          "gateway": {
+            "n": 16,
+            "p50_ms": 11.82,
+            "p99_ms": 137.63,
+            "max_ms": 137.63
+          }
+        }
+      },
+      "bench": {
+        "src": "pad-c6",
+        "dst": "gw-c6",
+        "mode": "unicast",
+        "rate": "robust",
+        "attempted": 2000,
+        "sent": 2000,
+        "refused": 0,
+        "acked": 2000,
+        "failed": 0,
+        "received": 2000,
+        "dups": 0,
+        "rssi_p50": -63,
+        "delivery_pct": 100,
+        "received_sent_pct": 100,
+        "acked_pct": 100,
+        "echoes": 2000,
+        "rtt_p50_us": 4351,
+        "rtt_p99_us": 21503,
+        "rtt_max_us": 30468,
+        "elapsed_ms": 9996
+      },
+      "espnow": {
+        "pad-c6": {
+          "tx": 2003,
+          "tx_fail": 0,
+          "retries": 0,
+          "refused": 0,
+          "rx": 2021,
+          "rx_bad": 0,
+          "rx_lost": 0,
+          "peers": 0
+        },
+        "gw-c6": {
+          "tx": 2014,
+          "tx_fail": 0,
+          "retries": 0,
+          "refused": 0,
+          "rx": 2009,
+          "rx_bad": 0,
+          "rx_lost": 0,
+          "peers": 0
+        }
+      }
+    }
+  },
+  "summary": {
+    "line": "ax rtt p50 15 ms loss 0 %; bgn rtt p50 12 ms loss 0 %"
+  },
+  "warnings": []
+}

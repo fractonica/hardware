@@ -28,6 +28,8 @@ import {
   type JsonScalar,
   type Model,
   type ScalarName,
+  type SerialBody,
+  type SerialLayoutField,
   type TypeRef,
 } from '../model.ts';
 
@@ -878,6 +880,17 @@ export function bytes(v: unknown, max: number, name: string): Uint8Array {
   return v;
 }
 
+/** A serial layout's mac: exactly 6 bytes; absent is six zero bytes. */
+export function mac(v: unknown, name: string): Uint8Array {
+  if (v === undefined) {
+    return new Uint8Array(6);
+  }
+  if (!(v instanceof Uint8Array) || v.length !== 6) {
+    bad(name, '6 bytes', v);
+  }
+  return v;
+}
+
 export function list(v: unknown, max: number, name: string): readonly unknown[] {
   if (!Array.isArray(v)) {
     bad(name, 'an array', v);
@@ -1351,6 +1364,132 @@ function emitEnvelope(model: Model, names: Names): GeneratedFile {
   return { path: `${TS_GEN_DIR}/envelope.ts`, content: c.toString() };
 }
 
+/** Largest body of a serial line (05 §5.12.3): `@fr1:` + base64url of type | body | crc16 within max_line. */
+function serialMaxBody(prefix: string, maxLine: number): number {
+  const chars = maxLine - prefix.length;
+  return Math.floor(chars / 4) * 3 + Math.floor(((chars % 4) * 3) / 4) - 3;
+}
+
+/** 'GW_TX_DONE' -> 'GwTxDone' */
+function serialTypeName(name: string): string {
+  return pascalCase(name.toLowerCase());
+}
+
+const LAYOUT_TS: Record<Exclude<SerialLayoutField['type'], 'mac' | 'enum'>, [number, number]> = { u8: [0, 0xff], i8: [-0x80, 0x7f], u16: [0, 0xffff], u32: [0, 0xffffffff] };
+
+function emitLayoutBody(c: Code, b: SerialBody, maxBody: number, ctx: Ctx, names: Names): string {
+  const t = names.claim(serialTypeName(b.name), `serial_bodies.${b.name}`);
+  names.claim(`encode${t}`, `serial_bodies.${b.name}`);
+  names.claim(`decode${t}`, `serial_bodies.${b.name}`);
+  const sizeConst = names.claim(`${b.name}_${b.envelope ? 'PREFIX_SIZE' : 'SIZE'}`, `serial_bodies.${b.name}`);
+  const wire = b.layout.map((f) => (f.type === 'mac' ? `${f.name}[6]` : `${f.name} ${f.type === 'enum' ? f.enum!.name : f.type}`));
+  c.line(`/** ${b.name} (0x${b.code.toString(16).padStart(2, '0')}): \`${[...wire, ...(b.envelope ? ['envelope'] : [])].join(' | ')}\`, little-endian. */`);
+  c.open(`export interface ${t} {`);
+  for (const f of b.layout) {
+    doc(c, f.type === 'mac' ? [f.doc, '6 bytes; decoded, a view into the body.'].filter(Boolean).join(' ') : f.doc);
+    c.line(`${f.name}: ${f.type === 'enum' ? `${ctx.enumName(f.enum!)} | number` : f.type === 'mac' ? 'Uint8Array' : 'number'};`);
+  }
+  if (b.envelope) {
+    doc(c, 'The envelope bytes (not decoded); decoded, a subarray of the body.');
+    c.line('env: Uint8Array;');
+  }
+  c.close();
+  c.line();
+  c.line(`export const ${sizeConst} = ${b.prefixSize};`);
+  c.line();
+  const what = b.envelope ? 'prefix' : 'body';
+  const macs = b.layout.some((f) => f.type === 'mac');
+  c.line(`/** Absent fields are zero${macs ? ' (a mac six zero bytes)' : ''}; throws RangeError on a value its field cannot carry. */`);
+  c.open(`export function encode${t}(v: Partial<${t}> = {}): Uint8Array {`);
+  if (b.envelope) {
+    c.line(`const env = $.bytes(v.env ?? $.EMPTY, ${maxBody - b.prefixSize}, 'env');`);
+  }
+  c.line(`const w = new Writer(${b.envelope ? `${sizeConst} + env.length` : sizeConst});`);
+  for (const f of b.layout) {
+    switch (f.type) {
+      case 'mac':
+        c.line(`w.raw($.mac(v.${f.name}, ${q(f.name)}));`);
+        break;
+      case 'enum':
+        c.line(`w.u8($.enumValue(${ctx.enumName(f.enum!)}, v.${f.name} ?? 0, ${q(f.name)}, 255));`);
+        break;
+      case 'i8':
+        c.line(`w.u8($.int(v.${f.name} ?? 0, -128, 127, ${q(f.name)}) & 0xff);`);
+        break;
+      default: {
+        const [lo, hi] = LAYOUT_TS[f.type];
+        const put = f.type === 'u8' ? 'u8' : f.type === 'u16' ? 'u16le' : 'u32le';
+        c.line(`w.${put}($.int(v.${f.name} ?? 0, ${lo}, ${num(hi)}, ${q(f.name)}));`);
+      }
+    }
+  }
+  if (b.envelope) {
+    c.line('w.raw(env);');
+  }
+  c.line('return w.finish();');
+  c.close();
+  c.line();
+  c.line(
+    b.envelope
+      ? `/** The ${what} is ${b.prefixSize} bytes, then the envelope; shorter is truncated. Views into \`body\`, no copies. */`
+      : `/** Exactly ${b.prefixSize} bytes: shorter is truncated, longer too_long. */`,
+  );
+  c.open(`export function decode${t}(body: Uint8Array): Decoded<${t}> {`);
+  if (b.envelope) {
+    c.open(`if (body.length < ${sizeConst}) {`);
+    c.line("return decodeFail('truncated');");
+  } else {
+    c.open(`if (body.length !== ${sizeConst}) {`);
+    c.line(`return decodeFail(body.length < ${sizeConst} ? 'truncated' : 'too_long');`);
+  }
+  c.close();
+  c.line('const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);');
+  const parts: string[] = [];
+  for (const f of b.layout) {
+    switch (f.type) {
+      case 'mac':
+        parts.push(`${f.name}: body.subarray(${f.offset}, ${f.offset + 6})`);
+        break;
+      case 'enum':
+        c.line(`const ${f.name} = dv.getUint8(${f.offset});`);
+        parts.push(`${f.name}: ${ctx.enumNames(f.enum!)}.get(${f.name}) ?? ${f.name}`);
+        break;
+      case 'u8':
+        parts.push(`${f.name}: dv.getUint8(${f.offset})`);
+        break;
+      case 'i8':
+        parts.push(`${f.name}: dv.getInt8(${f.offset})`);
+        break;
+      case 'u16':
+        parts.push(`${f.name}: dv.getUint16(${f.offset}, true)`);
+        break;
+      case 'u32':
+        parts.push(`${f.name}: dv.getUint32(${f.offset}, true)`);
+        break;
+    }
+  }
+  if (b.envelope) {
+    parts.push(`env: body.subarray(${sizeConst})`);
+  }
+  c.line(`return decodeOk({ ${parts.join(', ')} });`);
+  c.close();
+  c.line();
+  const fields = b.layout.map((f) => {
+    const x = [`name: ${q(f.name)}`];
+    if (f.type === 'mac') {
+      x.push("json: 'bytes'");
+    }
+    if (f.type === 'enum') {
+      x.push(`members: ${ctx.enumName(f.enum!)}`);
+    }
+    return `{ ${x.join(', ')} }`;
+  });
+  if (b.envelope) {
+    fields.push("{ name: 'env', json: 'bytes' }");
+  }
+  return `{ fields: [${fields.join(', ')}], maxSize: ${b.envelope ? maxBody : b.prefixSize}, encode: encode${t}, decode: decode${t} }`;
+}
+
 function emitSerial(model: Model, names: Names): GeneratedFile {
   const p = model.protocol;
   const types = p.serial.types;
@@ -1359,29 +1498,83 @@ function emitSerial(model: Model, names: Names): GeneratedFile {
       throw new Error(`${p.file}: serial_framing.types lacks ${need}`);
     }
   }
-  const opaque = types.filter((t) => !['ENV', 'LINK_PING', 'LINK_PONG'].includes(t.name));
+  for (const need of ['LINK_PING', 'LINK_PONG']) {
+    const b = p.serial.bodies.find((x) => x.name === need);
+    if (b?.kind !== 'layout' || b.envelope || b.layout.length !== 1 || b.layout[0].name !== 't' || b.layout[0].type !== 'u32') {
+      throw new Error(`${p.file}: serial_bodies.${need} must be the layout [t u32] (encodeLinkLine)`);
+    }
+  }
+  const ctx = protocolCtx(model);
+  const maxBody = serialMaxBody(p.serial.prefix, p.serial.maxLine);
+  const bodies = p.serial.bodies;
+  const layoutEnums = [...new Set(bodies.flatMap((b) => b.layout.flatMap((f) => (f.enum ? [f.enum] : []))))];
+  const messageTypes = bodies.filter((b) => b.kind === 'message').map((b) => b.message!.name);
   const c = new Code();
   c.block(
     header(
       p.file,
-      'Serial line frames (spec 05 §5.12.3): ENV carries an envelope, LINK_PING/LINK_PONG `t u32` LE; the\n// gateway types (M2) stay opaque bodies here.',
+      'Serial line frames (spec 05 §5.12.3, design m2-c4-gateway D1): ENV carries an envelope; every other type\n// has a body codec from serial_bodies: a fixed little-endian layout, GW_RX and GW_TX with the envelope after\n// it (as bytes, a subarray when decoded), or a protocol type encoded protobuf-wire (GW_STATUS, GW_CMD, GW_RSP).',
     ).trimEnd(),
   );
   c.line();
-  c.line("import { decodeFail, decodeOk, decodeSerialLine, encodeSerialLine, packEnvelope, SERIAL_TYPE, type Decoded, type Envelope } from '../wire/index.ts';");
+  c.line("import { decodeFail, decodeOk, decodeSerialLine, encodeSerialLine, packEnvelope, SERIAL_TYPE, Writer, type Decoded, type Envelope } from '../wire/index.ts';");
   c.line();
   c.line("import { decodeEnvelope, encodeEnvelope, type EnvelopeInit } from './envelope.ts';");
+  if (messageTypes.length > 0) {
+    const imports = messageTypes.flatMap((n) => [`decode${n}`, `encode${n}`]).concat(['PROTOCOL_TYPES'], messageTypes.map((n) => `type ${n}`));
+    c.line(`import { ${imports.join(', ')} } from './messages.ts';`);
+  }
+  if (layoutEnums.length > 0) {
+    c.line(`import { ${layoutEnums.map((e) => e.name).join(', ')} } from './protocol.ts';`);
+  }
+  c.line("import * as $ from './support.ts';");
   c.line();
+  for (const e of layoutEnums) {
+    c.line(`const ${ctx.enumNames(e)} = $.enumNames(${e.name});`);
+  }
+  if (layoutEnums.length > 0) {
+    c.line();
+  }
   c.line(`export type SerialTypeName = ${types.map((t) => q(t.name)).join(' | ')};`);
-  c.line(`export type OpaqueSerialType = ${opaque.length > 0 ? opaque.map((t) => q(t.name)).join(' | ') : 'never'};`);
   c.line(`export const SERIAL_TYPE_NAME: Readonly<Record<number, SerialTypeName>> = { ${types.map((t) => `${num(t.value)}: ${q(t.name)}`).join(', ')} };`);
-  c.line(`const OPAQUE: Readonly<Record<number, OpaqueSerialType>> = { ${opaque.map((t) => `${num(t.value)}: ${q(t.name)}`).join(', ')} };`);
+  c.line(`/** The largest body a line carries (${p.serial.maxLine} characters). */`);
+  c.line(`export const SERIAL_MAX_BODY = ${maxBody};`);
   c.line();
+
+  const codecs = new Map<string, string>();
+  for (const b of bodies) {
+    if (b.kind === 'layout') {
+      codecs.set(b.name, emitLayoutBody(c, b, maxBody, ctx, names));
+    } else {
+      codecs.set(b.name, `PROTOCOL_TYPES.find((t) => t.name === ${q(b.message!.name)})!.codec`);
+    }
+  }
+  const bodyType = (b: SerialBody) => (b.kind === 'layout' ? serialTypeName(b.name) : b.message!.name);
+
+  c.line('/** A decoded line: the body fields beside `type` (ENV: the envelope; UNKNOWN: a type this schema lacks). */');
   c.line('export type SerialFrame =');
   c.line("  | { type: 'ENV'; envelope: Envelope }");
-  c.line("  | { type: 'LINK_PING' | 'LINK_PONG'; t: number }");
-  c.line('  | { type: OpaqueSerialType; body: Uint8Array }');
+  for (const b of bodies) {
+    c.line(`  | ({ type: ${q(b.name)} } & ${bodyType(b)})`);
+  }
   c.line("  | { type: 'UNKNOWN'; code: number; body: Uint8Array };");
+  c.line();
+  c.open('export interface SerialBodyInfo {');
+  c.line('readonly name: SerialTypeName;');
+  c.line('readonly code: number;');
+  c.line("/** layout: fixed little-endian fields (and the envelope when `envelope`); message: protobuf-wire. */");
+  c.line("readonly kind: 'layout' | 'message';");
+  c.line('readonly prefixSize: number;');
+  c.line('readonly envelope: boolean;');
+  c.line('readonly codec: $.Codec<any>;');
+  c.close();
+  c.line();
+  c.line('/** Every body codec, by type code (ENV is the envelope codec, encodeEnvelope/decodeEnvelope). */');
+  c.open('export const SERIAL_BODIES: readonly SerialBodyInfo[] = [');
+  for (const b of bodies) {
+    c.line(`{ name: ${q(b.name)}, code: ${num(b.code)}, kind: '${b.kind}', prefixSize: ${b.prefixSize}, envelope: ${b.envelope}, codec: ${codecs.get(b.name)} },`);
+  }
+  c.close('];');
   c.line();
   c.line('/** One `@fr1:` line without the terminator. */');
   c.open('export function encodeEnvLine(e: EnvelopeInit): string {');
@@ -1395,46 +1588,54 @@ function emitSerial(model: Model, names: Names): GeneratedFile {
   c.line('return encodeSerialLine(SERIAL_TYPE[type], Uint8Array.of(t & 0xff, (t >>> 8) & 0xff, (t >>> 16) & 0xff, t >>> 24));');
   c.close();
   c.line();
+  c.line('/** Throws RangeError on a field its type cannot carry, or a body over SERIAL_MAX_BODY. */');
   c.open('export function encodeFrameLine(f: SerialFrame): string {');
   c.open('switch (f.type) {');
   c.open("case 'ENV':");
   c.line('return encodeSerialLine(SERIAL_TYPE.ENV, packEnvelope(f.envelope));');
   c.dedent();
-  c.line("case 'LINK_PING':");
-  c.open("case 'LINK_PONG':");
-  c.line('return encodeLinkLine(f.type, f.t);');
-  c.dedent();
+  for (const b of bodies) {
+    c.open(`case ${q(b.name)}:`);
+    if (b.name === 'LINK_PING' || b.name === 'LINK_PONG') {
+      c.line('return encodeLinkLine(f.type, f.t);');
+    } else {
+      c.line(`return encodeSerialLine(SERIAL_TYPE.${b.name}, encode${bodyType(b)}(f));`);
+    }
+    c.dedent();
+  }
   c.open("case 'UNKNOWN':");
   c.line('return encodeSerialLine(f.code, f.body);');
-  c.dedent();
-  c.open('default:');
-  c.line('return encodeSerialLine(SERIAL_TYPE[f.type], f.body);');
   c.dedent();
   c.close();
   c.close();
   c.line();
-  c.line('/** Line errors as decodeSerialLine; an ENV body must be a valid envelope and a LINK body exactly 4 bytes. */');
+  c.open("function framed(type: SerialFrame['type'], d: Decoded<object>): Decoded<SerialFrame> {");
+  c.line('return d.ok ? decodeOk({ type, ...d.value } as SerialFrame) : d;');
+  c.close();
+  c.line();
+  c.line('/** Line errors as decodeSerialLine, then the body codec\'s (an ENV body must be a valid envelope). */');
   c.open('export function decodeFrameLine(line: string): Decoded<SerialFrame> {');
   c.line('const d = decodeSerialLine(line);');
   c.open('if (!d.ok) {');
   c.line('return d;');
   c.close();
   c.line('const { type, body } = d.value;');
-  c.open('if (type === SERIAL_TYPE.ENV) {');
+  c.open('switch (type) {');
+  c.open('case SERIAL_TYPE.ENV: {');
   c.line('const e = decodeEnvelope(body);');
   c.line("return e.ok ? decodeOk({ type: 'ENV', envelope: e.value }) : e;");
   c.close();
-  c.open('if (type === SERIAL_TYPE.LINK_PING || type === SERIAL_TYPE.LINK_PONG) {');
-  c.open('if (body.length !== 4) {');
-  c.line("return decodeFail(body.length < 4 ? 'truncated' : 'too_long');");
+  for (const b of bodies) {
+    c.open(`case SERIAL_TYPE.${b.name}:`);
+    c.line(`return framed(${q(b.name)}, decode${bodyType(b)}(body));`);
+    c.dedent();
+  }
+  c.open('default:');
+  c.line("return decodeOk({ type: 'UNKNOWN', code: type, body });");
+  c.dedent();
   c.close();
-  c.line('const t = (body[0] | (body[1] << 8) | (body[2] << 16) | (body[3] << 24)) >>> 0;');
-  c.line("return decodeOk({ type: type === SERIAL_TYPE.LINK_PING ? 'LINK_PING' : 'LINK_PONG', t });");
   c.close();
-  c.line('const name = OPAQUE[type];');
-  c.line("return decodeOk(name === undefined ? { type: 'UNKNOWN', code: type, body } : { type: name, body });");
-  c.close();
-  for (const n of ['SerialTypeName', 'OpaqueSerialType', 'SERIAL_TYPE_NAME', 'SerialFrame', 'encodeEnvLine', 'encodeLinkLine', 'encodeFrameLine', 'decodeFrameLine']) {
+  for (const n of ['SerialTypeName', 'SERIAL_TYPE_NAME', 'SERIAL_MAX_BODY', 'SerialFrame', 'SerialBodyInfo', 'SERIAL_BODIES', 'encodeEnvLine', 'encodeLinkLine', 'encodeFrameLine', 'decodeFrameLine']) {
     names.claim(n, 'serial');
   }
   return { path: `${TS_GEN_DIR}/serial.ts`, content: c.toString() };

@@ -10,6 +10,10 @@
 // Contract by the foundation (design m2-c2 §3 item 5), implemented in sim_air.cpp (stream S1). The receive filter's
 // net is set_net()'s (0: no net check). A node rebuilt in place (power off/on, D8) keeps its SimAir and calls crash()
 // after its SimCore's, so the radio keeps its place on the medium. Test code: it may allocate.
+//
+// M2-C4 (design m2-c4-gateway D19): per-frame rates (send_at) and `air rate` through the scheduler, robust being 1 Mbps
+// and fast 6 Mbps on the medium (peer_default: the spec's rates), a send's end (done_info), and `air churn` over this
+// radio's add_peer/del_peer, timed on the core's clock (which stands still inside a call: 0 µs each).
 #pragma once
 
 #include <array>
@@ -17,6 +21,8 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <utility>
+#include <vector>
 
 #include "fr/base.hpp"
 #include "fr/net/air.hpp"
@@ -79,10 +85,21 @@ public:
     const fr::net::air::Scheduler &scheduler() const;
     const Stats &stats() const;
 
+    /** `air rate` (design m2-c4-gateway D19): the scheduler's default rate for unicast peers or the broadcast peer. */
+    fr::net::air::RateChange set_default_rate(bool broadcast, fr::net::AirRate rate);
+    /** `air churn <n>` over this radio. */
+    void churn(uint32_t n, fr::net::air::ChurnStats &out);
+
     // fr::net::AirLink
     bool up() const override;
     fr::Status send(const fr::net::Mac &dst, std::span<const uint8_t> envelope, fr::net::AirPrio prio,
                     uint32_t token) override;
+    fr::Status send_at(const fr::net::Mac &dst, std::span<const uint8_t> envelope, fr::net::AirPrio prio, uint32_t token,
+                       fr::net::AirRate rate) override;
+    fr::net::AirDone done_info(uint32_t token) const override;
+    bool refused_no_peer() const override { return sched_->refused_no_peer(); }
+    bool pin_peer(const fr::net::Mac *mac) override { return sched_->pin(mac, core_.now()); }
+    void bridge_peers() override { sched_->set_bridge(true); }
 
     // fr::net::air::Radio
     bool add_peer(const fr::net::Mac &mac) override;
@@ -91,6 +108,7 @@ public:
     void arm(uint32_t delay_us) override;
     void disarm() override;
     void done(uint32_t token, bool ok) override;
+    bool set_rate(const fr::net::Mac &mac, fr::net::AirRate rate) override;
 
     // RadioPort
     void received(std::span<const uint8_t> frame, const fr::net::RxMeta &meta) override;
@@ -137,6 +155,8 @@ private:
     uint64_t arm_event_ = 0;
     uint64_t knob_draws_ = 0;
     std::optional<fr::net::air::Scheduler> sched_;
+    // Rates set on peers (set_rate) other than the spec's; the broadcast peer's under kBroadcastMac.
+    std::vector<std::pair<fr::net::Mac, Rate>> peer_rates_;
 };
 
 }  // namespace frsim

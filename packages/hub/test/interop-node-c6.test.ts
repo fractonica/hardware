@@ -96,7 +96,7 @@ describe.skipIf(!existsSync(BIN))('fr_net_node C6 hooks against the router', () 
     const full = (await diag(r, mac, 'stats')).response;
     // The C3/C6 counters T-LED and T-PRES read (dup, cached_replies, delivery_failed), then the C5 sections.
     expect(full).toMatchObject({ ok: true, dup: 0, cached_replies: 0, delivery_failed: 0, events_dropped: 0, loss_tx: 0 });
-    expect(Object.keys(full).filter((k) => typeof full[k] === 'object')).toEqual(['links', 'bcast', 'relay', 'espnow', 'bindings', 'nodes', 'msgs', 'net_logs']);
+    expect(Object.keys(full).filter((k) => typeof full[k] === 'object')).toEqual(['links', 'bcast', 'relay', 'espnow', 'bindings', 'nodes', 'msgs', 'net_logs', 'gateway']); // gateway since M2-C4
     expect(Number((full.links as { tcp: { tx: number } }).tcp.tx)).toBeGreaterThan(0);
     // One section alone, as T-FLOOD and T-NN read them.
     expect((await diag(r, mac, 'stats bcast')).response).toEqual({ ok: true, bcast: { delivered: 0, dup: 0, old: 0, watermark: expect.any(Number), adopted: 0 } });

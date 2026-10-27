@@ -180,6 +180,17 @@ export function bytes(v: unknown, max: number, name: string): Uint8Array {
   return v;
 }
 
+/** A serial layout's mac: exactly 6 bytes; absent is six zero bytes. */
+export function mac(v: unknown, name: string): Uint8Array {
+  if (v === undefined) {
+    return new Uint8Array(6);
+  }
+  if (!(v instanceof Uint8Array) || v.length !== 6) {
+    bad(name, '6 bytes', v);
+  }
+  return v;
+}
+
 export function list(v: unknown, max: number, name: string): readonly unknown[] {
   if (!Array.isArray(v)) {
     bad(name, 'an array', v);

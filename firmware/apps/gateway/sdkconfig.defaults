@@ -1,0 +1,3 @@
+# App layer (layer 2, spec 03 §3.7). Board, partition and target settings come from the
+# generated board fragment; framework-wide settings from firmware/config/sdkconfig.framework.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096

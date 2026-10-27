@@ -45,7 +45,9 @@ function fixture(opts: { locks?: boolean } = {}): string {
     recursive: true,
     filter: (src) => opts.locks === true || !src.endsWith('.slots.lock'),
   });
-  cpSync(join(ROOT, 'firmware', 'apps', 'node', 'CMakeLists.txt'), join(dir, 'firmware', 'apps', 'node', 'CMakeLists.txt'));
+  for (const app of ['node', 'gateway']) {
+    cpSync(join(ROOT, 'firmware', 'apps', app, 'CMakeLists.txt'), join(dir, 'firmware', 'apps', app, 'CMakeLists.txt'));
+  }
   return dir;
 }
 
@@ -537,12 +539,12 @@ describe('validation', () => {
     });
     expect(messages(dir)).toEqual(['board esp32c6-maxi (from firmware/profiles/c6-pad.profile.yaml) not found']);
     edit(dir, PROFILE('c6-pad-mono'), (y) => {
-      y.app = 'gateway';
+      y.app = 'sensor';
     });
     edit(dir, C6, (y) => {
       y.flash.part_profile = 'fr-2mb-v1';
     });
-    expect(messages(dir, 'c6-pad-mono')).toEqual(['partition table firmware/partitions/fr-2mb-v1.csv not found', "app 'gateway' not found (firmware/apps/gateway)"]);
+    expect(messages(dir, 'c6-pad-mono')).toEqual(['partition table firmware/partitions/fr-2mb-v1.csv not found', "app 'sensor' not found (firmware/apps/sensor)"]);
   });
 });
 
@@ -804,6 +806,7 @@ describe('gpio.<n> binds, test_pin: none, role and radio (design m2-c1-hil D5)',
     ]);
     edit(dir, PROFILE('c6-pad'), (y) => {
       y.role = 'gateway';
+      y.app = 'gateway';
     });
     expect(file(gen(dir, 'c6-pad', false), 'sdkconfig.board')).toContain('CONFIG_FR_PART_PROFILE="fr-4mb-v1"\nCONFIG_FR_ROLE=1\nCONFIG_FR_TEST_PIN=20\n');
     // The hub knows a radio-off device by its HELLO role alone (provision.ts radioOff): a node or gateway with
@@ -815,6 +818,7 @@ describe('gpio.<n> binds, test_pin: none, role and radio (design m2-c1-hil D5)',
         } else {
           y.role = role;
         }
+        y.app = role === 'gateway' ? 'gateway' : 'node';
         y.net.radio = 'off';
       });
       expect(issuesOf(() => gen(dir, 'c6-pad', false)).map(formatIssue)).toEqual([
@@ -839,6 +843,7 @@ describe('gpio.<n> binds, test_pin: none, role and radio (design m2-c1-hil D5)',
     for (const m of role.members) {
       edit(dir, PROFILE('c6-pad'), (y) => {
         y.role = m.name;
+        y.app = m.name === 'gateway' ? 'gateway' : 'node';
       });
       expect(resolveProfile(dir, 'c6-pad').fragment).toContain(`\nCONFIG_FR_ROLE=${m.value}\n`);
     }
@@ -1190,6 +1195,56 @@ describe('fixture pwm lines (design m2-c3-inputs §3)', () => {
       delete c.ch13;
     });
     expect(() => gen(dir, FIXTURE, false)).not.toThrow();
+  });
+});
+
+// ---- M2-C4: the gateway (design m2-c4-gateway D6, D7) ----
+
+describe('the gateway profile (design m2-c4-gateway D6, D7)', () => {
+  it('c6g-gateway: role gateway on the nanoESP32-C6, the status LED only, no test pin, against its committed slots.lock', () => {
+    const r = generateFirmware({ sourceDir: ROOT, profile: 'c6g-gateway', outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+    expect(r.slotsLockChanged).toBe(false);
+    expect(r.slotsLock.content).toBe(readFileSync(join(ROOT, slotsLockFile('c6g-gateway')), 'utf8'));
+    expect(r.manifest.caps.map((c) => [c.name, c.cap, c.driver, c.port])).toEqual([['status', 'fr.led', 'led_ws2812', 1]]);
+    expect(r.manifest.test_pin).toBeNull();
+    // As on c6-pad: the WS2812 sits on strapping GPIO8 (inferred on this board until the bench blinks it).
+    expect(r.warnings).toEqual(['status: GPIO8 (leds.rgb) is a strapping pin and must be high at reset; nothing wired to it may pull it low while the chip resets']);
+    const frag = file(r, 'sdkconfig.board');
+    expect(frag).toContain('CONFIG_IDF_TARGET="esp32c6"');
+    expect(frag).toContain('CONFIG_FR_BOARD="nanoesp32c6-n4"');
+    expect(frag).toContain('CONFIG_FR_ROLE=1');
+    expect(frag).not.toContain('CONFIG_FR_TEST_PIN');
+    expect(frag).not.toContain('CONFIG_FR_NET_RADIO');
+    const board = loadBoardManifest(ROOT, 'nanoesp32c6-n4');
+    expect(board.rf?.max_tx_power_qdbm).toBeNull();
+    expect(board.pins.reserved).toMatchObject({ usb: [12, 13], uart0_ch343: [16, 17] });
+  });
+
+  it('role gateway needs app gateway, and app gateway needs role gateway', () => {
+    const dir = fixture();
+    edit(dir, PROFILE('c6g-gateway'), (y) => {
+      y.app = 'node';
+    });
+    expect(issuesOf(() => gen(dir, 'c6g-gateway', false)).map(formatIssue)).toEqual([
+      'firmware/profiles/c6g-gateway.profile.yaml: app: a role: gateway profile needs app: gateway, not app node',
+    ]);
+    for (const role of [undefined, 'node', 'fixture']) {
+      edit(dir, PROFILE('c6-pad'), (y) => {
+        if (role === undefined) {
+          delete y.role;
+        } else {
+          y.role = role;
+        }
+        y.app = 'gateway';
+        if (role === 'fixture') {
+          y.test_pin = 'none';
+          y.net.radio = 'off';
+        }
+      });
+      expect(issuesOf(() => gen(dir, 'c6-pad', false)).map(formatIssue)).toEqual([
+        `firmware/profiles/c6-pad.profile.yaml: role: app: gateway needs role: gateway, not role ${role ?? 'node'}`,
+      ]);
+    }
   });
 });
 

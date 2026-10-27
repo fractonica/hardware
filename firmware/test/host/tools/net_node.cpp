@@ -949,6 +949,8 @@ public:
     {
         return sched_.send(dst, envelope, prio, token, core_.now());
     }
+    bool pin_peer(const fr::net::Mac *mac) override { return sched_.pin(mac, core_.now()); }
+    void bridge_peers() override { sched_.set_bridge(true); }
 
     // fr::net::air::Radio: peers need no setup here; the verdict comes from poll(), never from inside transmit().
     bool add_peer(const fr::net::Mac &) override { return true; }

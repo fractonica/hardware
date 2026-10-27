@@ -378,6 +378,25 @@ TEST(net_air_target_answers_to_the_source_mac)
     }
 }
 
+TEST(net_air_target_refuses_exec_at_either_clock)
+{
+    // A node -> node CMD carrying exec_at answers UNSUPPORTED, unrun (design c6 D22); so does the hub-clock TLV
+    // 0x82, refused everywhere until M2-C8 (design m2-c4-gateway D4).
+    AirRig r;
+    Peer p;
+    for (const uint8_t type : {wire::kExtExecAtUs, wire::kExtExecAtHubUs}) {
+        wire::ExtBuilder ext;
+        ext.add_value(type, static_cast<uint32_t>(r.core.now() + 100'000));
+        r.rx(p.frame(wire::kFlagAckReq, wire::kClsCmd, 3, r.host.id.addr, 2, {}, {}, 0x22, 0, ext.view()), p.meta(false));
+        const Frame res = r.air.unicasts().back().frame();
+        CHECK(res.is(wire::kClsResult, 3));
+        CHECK_EQ(res.result.status, static_cast<uint8_t>(fr::Err::unsupported));
+    }
+    r.core.advance_ms(200);
+    CHECK(r.host.calls.empty());
+    CHECK_EQ(r.net.state().cmds_refused, 2u);
+}
+
 TEST(net_air_target_acks_msgs_and_events)
 {
     AirRig r;

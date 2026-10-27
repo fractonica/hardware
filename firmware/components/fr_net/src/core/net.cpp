@@ -21,6 +21,10 @@
 // M2-C3 (design m2-c3-inputs D6, D8, D10): an ordered capability's EVENTs get the port's next port_seq in EXT and
 // the URGENT route (send_event), and schedule_repeat lets a newer STATE supersede the pending second copy of an
 // older one of the same property.
+//
+// M2-C4 (design m2-c4-gateway D10-D12): the gateway is a third session link here (kSessionLinks): its HELLO waits for
+// no TCP session (hello_allowed), route() takes it after TCP/UDP and before serial, and its Q1 frames are re-sent as
+// UDP's. The gateway table, the bridge and the D12 close are gateway.cpp's; the S2 bench and stream bench.cpp's.
 #include "fr/net/net.hpp"
 
 #include <algorithm>
@@ -40,7 +44,7 @@ using namespace util;
 
 namespace {
 
-constexpr std::array<LinkKind, 2> kSessionLinks{LinkKind::serial, LinkKind::tcp};
+constexpr std::array<LinkKind, 3> kSessionLinks{LinkKind::serial, LinkKind::tcp, LinkKind::gateway};
 
 /** loss()'s PRNG starts from the jitter's seed mixed with this, so the two streams never coincide. */
 constexpr uint32_t kLossSeedMix = 0x10551055u;
@@ -87,6 +91,9 @@ void Net::attach(Link &l)
     if (index_of(k) >= kLinkKinds || k == LinkKind::espnow) {
         return;  // ESP-NOW is an AirLink (attach_air): its frames need RxMeta and send completions
     }
+    if (k == LinkKind::gateway && &l != &gw_link_) {
+        return;  // Net's own GatewayLink only (attach_air): it needs the air and the gateway table
+    }
     ensure_timer();
     if (link(k) != &l && ls(k).session) {
         end_session(k, false);
@@ -118,6 +125,7 @@ void Net::link_changed(LinkKind k)
         } else if (!ls(k).up) {
             air_hb_due_ = kNever;
         }
+        update_gateway_link(false);  // the gateway link rides the air (design m2-c4-gateway D10)
         arm();
         return;
     }
@@ -131,9 +139,10 @@ void Net::link_changed(LinkKind k)
             clear_udp_ok();
         }
     } else if (k != LinkKind::udp && !s.session) {
-        // A fresh TCP connection or USB host: HELLO at once, then every hello_retry_ms until WELCOME.
+        // A fresh TCP connection or USB host, or a gateway chosen: HELLO at once, then every hello_retry_ms until
+        // WELCOME; over the gateway only once no TCP session is up (design m2-c4-gateway D12).
         sess(k).hello_due = core_.now();
-        if (!frozen(k)) {
+        if (!frozen(k) && hello_allowed(k)) {
             send_hello(k);
             sess(k).hello_due = core_.now() + ms_us(cfg_.hello_retry_ms);
         }
@@ -202,6 +211,7 @@ State Net::state() const
 {
     State s = state_;
     s.bcast.watermark = bcast_.watermark();
+    gateway_state(s.gateway);
     s.bindings.rtt_p50_us = rtt_p50();
     if (s.loss_pct != 0) {
         const TimeUs left = std::max<TimeUs>(loss_until_ - core_.now(), 0);
@@ -224,6 +234,8 @@ void Net::reset_stats()
     state_.state_repeats_superseded = 0;
     state_.relay = {};
     state_.bcast = {};  // state() reads the watermark from the window
+    GatewayStats &g = state_.gateway;
+    g.beacons = g.lost = g.opened = g.closed = g.tx_nak = 0;
     state_.bindings = {};
     state_.nodes = {};
     state_.logs = {};
@@ -476,6 +488,13 @@ void Net::handle(LinkKind from, std::span<const uint8_t> envelope)
         flood_relay(envelope, h, true, nullptr);  // non-members relay group floods all the same
         return;
     }
+    if (from == LinkKind::gateway && (h.flags & kFlagBulk) != 0 && h.cls != kClsCmd) {
+        // Nothing BULK is taken over a gateway (one ESP-NOW frame each way, design m2-c4-gateway D10); a CMD is
+        // answered UNSUPPORTED (on_cmd), anything else is dropped here, counted on the gateway link.
+        ++s.rx_drop;
+        ++state_.gateway.too_big;
+        return;
+    }
     if (bcast_space) {
         ++state_.bcast.delivered;
     }
@@ -565,10 +584,16 @@ void Net::on_welcome(LinkKind from, std::span<const uint8_t> body)
     }
     latest_.clear();
     LinkState &s = ls(from);
+    const bool opened = !s.session;
     s.session = true;
     s.time_synced = false;  // the handshake's TIME burst follows
     if (from == LinkKind::tcp) {
         log_welcome(rx_at_);  // design m2-c2 D20: LOG waits for this handshake to settle
+        if (opened) {
+            tcp_since_ = rx_at_;  // design m2-c4-gateway D12: the gateway session closes 5 s from here
+        }
+    } else if (from == LinkKind::gateway && opened) {
+        ++state_.gateway.opened;
     }
     sess(from).last_rx = rx_at_;
     hub_heard_at_ = rx_at_;
@@ -639,7 +664,15 @@ void Net::on_presence(LinkKind from, uint8_t kind, std::span<const uint8_t> body
         // The hub ends its link with this node (it is shutting down, or it took the node offline): every
         // session of this hub run ends now, not only the one the BYE came on. The hub sends it over USB
         // and closes TCP, and a close that never reached the node (Wi-Fi gone) would otherwise keep
-        // RESULTs on a dead connection while the hub WELCOMEs the node again over USB.
+        // RESULTs on a dead connection while the hub WELCOMEs the node again over USB. A BYE over a gateway is the
+        // hub ending that session alone (design m2-c4-gateway D14: the gateway or its endpoint went), so the others
+        // stay; it HELLOs there again only while no TCP session is up (D12).
+        if (from == LinkKind::gateway) {
+            if (ls(from).session) {
+                lose_session(from, DropReason::hub_bye);
+            }
+            break;
+        }
         for (LinkKind k : kSessionLinks) {
             if (ls(k).session) {
                 lose_session(k, DropReason::hub_bye);
@@ -701,6 +734,22 @@ void Net::on_cmd(const EnvelopeView &e, bool unicast, LinkKind from)
         answer_cmd(c, std::unexpected(Err::expired), {});
         return;
     }
+    if (from == LinkKind::gateway && (h.flags & kFlagBulk) != 0) {
+        // A request flagged BULK (its answer may exceed one frame: describe) over a gateway, where every answer is one
+        // ESP-NOW frame (design m2-c4-gateway D10): refused unrun, UNSUPPORTED, so the hub never waits on an answer
+        // that cannot come; counted as too_big on the gateway.
+        ++state_.cmds_refused;
+        ++state_.gateway.too_big;
+        answer_cmd(c, std::unexpected(Err::unsupported), {});
+        return;
+    }
+    if (h.ext.find(kExtExecAtHubUs)) {
+        // exec_at in hub time (design m2-c4-gateway D4) needs BEACON's clock on the node: refused until M2-C8,
+        // never run at once (it is critical for that reason).
+        ++state_.cmds_refused;
+        answer_cmd(c, std::unexpected(Err::unsupported), {});
+        return;
+    }
     if (const std::optional<uint32_t> exec_at = h.ext.value(kExtExecAtUs)) {
         if (!unicast) {
             // exec_at is in one destination's clock (05 §5.6), and a broadcast has a clock per node: dropped
@@ -719,11 +768,22 @@ void Net::on_cmd(const EnvelopeView &e, bool unicast, LinkKind from)
 
 void Net::run_cmd(const CmdRef &c, std::span<const uint8_t> args)
 {
-    // Requests arrive on TCP or serial, where a RESULT may go BULK (design c3 §2).
-    const size_t capacity = c.from == LinkKind::udp ? cap::Reply::kRealtimeCapacity : cap::Reply::kBulkCapacity;
+    // Requests arrive on TCP or serial, where a RESULT may go BULK (design c3 §2); over a gateway it is one ESP-NOW
+    // frame (design m2-c4-gateway D10).
+    const bool realtime = c.from == LinkKind::udp || c.from == LinkKind::gateway;
+    const size_t capacity = realtime ? cap::Reply::kRealtimeCapacity : cap::Reply::kBulkCapacity;
     cap::Reply reply(std::span<uint8_t>(reply_buf_, capacity));
     ++state_.cmds;
-    const Status st = host_.dispatch(c.port, c.kind, args, reply);
+    Status st = host_.dispatch(c.port, c.kind, args, reply);
+    if (!st && realtime && reply.overflowed()) {
+        // The answer does not fit one realtime frame (the dispatch ran, then cleared what overflowed): UNSUPPORTED
+        // over this link, not the capability's FAILED, so the hub can ask again over TCP or serial (design m2-c4-gateway
+        // D10). Counted as too_big on the gateway.
+        st = std::unexpected(Err::unsupported);
+        if (c.from == LinkKind::gateway) {
+            ++state_.gateway.too_big;
+        }
+    }
     // Only a successful dispatch owns what it wrote into the reply.
     answer_cmd(c, st, st ? reply.bytes() : std::span<const uint8_t>{});
     if (c.from == LinkKind::tcp && c.port == fr::proto::kPortNode && c.kind == cap::Node::kCmdGetState) {
@@ -857,7 +917,8 @@ Status Net::send_ota(uint8_t kind, std::span<const uint8_t> body, bool ack_req)
     }
     const uint32_t seq = ++seq_;
     auto env = build(flags, kClsOta, kind, seq, fr::proto::kAddrHub, fr::proto::kPortOta, {}, body);
-    if (env.empty() || !transmit_on(via == kViaTcp ? LinkKind::tcp : LinkKind::serial, env)) {
+    const LinkKind k = via == kViaTcp ? LinkKind::tcp : via == kViaGateway ? LinkKind::gateway : LinkKind::serial;
+    if (env.empty() || !transmit_on(k, env)) {
         return std::unexpected(Err::busy);
     }
     if (ack_req) {
@@ -959,6 +1020,9 @@ void Net::send_hello(LinkKind k)
     const HelloInfo hi = host_.hello_info();
     const LinkInfo li = host_.link_info();
     gateway_ = hi.role == fr::proto::Role::gateway;
+    if (gateway_ && air_ != nullptr) {
+        air_->bridge_peers();  // design m2-c4-gateway D8 (idempotent)
+    }
     seed_rng(hi.mac);
     const bool associated = li.channel != 0;
     const fr::proto::PresenceHello m{
@@ -1048,7 +1112,8 @@ uint8_t Net::every_session(uint8_t cls, uint8_t kind, size_t len) const
     if (dropping()) {
         return 0;
     }
-    const uint8_t via = ls(LinkKind::tcp).session ? wifi_route(cls, kind, 0, len) : 0;
+    uint8_t via = ls(LinkKind::tcp).session ? wifi_route(cls, kind, 0, len) : 0;
+    via |= ls(LinkKind::gateway).session && len <= kRtSize ? kViaGateway : 0;  // design m2-c4-gateway D10
     return ls(LinkKind::serial).session ? static_cast<uint8_t>(via | kViaSerial) : via;
 }
 
@@ -1072,8 +1137,20 @@ void Net::end_session(LinkKind k, bool lost)
         log_session_end();  // design m2-c2 D20: the next session settles again, its socket starts empty
         clear_udp_ok();
         fail_pending(kViaTcp | kViaUdp);
+        tcp_since_ = kNever;
         // A standby serial session becomes the path: its keepalive clock starts now.
         sess(LinkKind::serial).last_rx = core_.now();
+        // Design m2-c4-gateway D12: no TCP session, so a live gateway gets its HELLO once the open rule allows it (at
+        // once with the STA gone, kGatewayTcpGoneMs from now while it stays associated).
+        gateway_tcp_ended(core_.now());
+        if (ls(LinkKind::gateway).up && !ls(LinkKind::gateway).session) {
+            sess(LinkKind::gateway).hello_due = std::min(sess(LinkKind::gateway).hello_due, core_.now());
+        }
+    } else if (k == LinkKind::gateway) {
+        fail_pending(kViaGateway);
+        if (!ls(LinkKind::tcp).session) {
+            sess(LinkKind::serial).last_rx = core_.now();  // as for TCP: a standby serial session becomes the path
+        }
     } else {
         fail_pending(kViaSerial);
     }
@@ -1235,7 +1312,7 @@ void Net::end_drop()
     // Session timeouts resume from the last hub frame before the drop: a drop longer than the timeout
     // ends every session at once, the standby serial one included (the hub declared the node offline
     // long ago), and they re-HELLO. HELLOs that fell due during the drop go at the next tick.
-    lose_stale_sessions(kViaSerial | kViaTcp);
+    lose_stale_sessions(kViaSerial | kViaTcp | kViaGateway);
 }
 
 void Net::end_ip_block()
@@ -1287,19 +1364,20 @@ void Net::tick()
     if (state_.ip_blocked && now >= ip_block_until_) {
         end_ip_block();
     }
+    service_gateway(now);  // design m2-c4-gateway D11-D12: gateways lost, the session closed after 5 s of TCP
     for (LinkKind k : kSessionLinks) {
         LinkState &s = ls(k);
         Session &x = sess(k);
         if (s.session && !frozen(k)) {
-            if (k == LinkKind::serial && ls(LinkKind::tcp).session) {
-                // Standby: everything goes over TCP/UDP, so the hub owes the serial link nothing. Its
-                // clock starts when it becomes the path (from design c3 §9, decision 4).
+            if (k == LinkKind::serial && (ls(LinkKind::tcp).session || ls(LinkKind::gateway).session)) {
+                // Standby: everything goes over TCP/UDP (or the gateway), so the hub owes the serial link nothing.
+                // Its clock starts when it becomes the path (from design c3 §9, decision 4).
                 x.last_rx = now;
             } else if (now - x.last_rx >= session_timeout_us()) {
                 lose_session(k, DropReason::hub_silent);
             }
         }
-        if (!s.session && s.up && !frozen(k) && x.hello_due <= now) {
+        if (!s.session && s.up && !frozen(k) && hello_allowed(k) && x.hello_due <= now) {
             send_hello(k);
             x.hello_due = now + ms_us(cfg_.hello_retry_ms);
         }
@@ -1328,6 +1406,8 @@ void Net::tick()
         send_air_heartbeat();
         air_hb_due_ = now + jittered_us(cfg_.espnow_hb_ms, 20);
     }
+    service_bench(now);  // spike S2 (design m2-c4-gateway D19): `air bench tx` and `net stream`
+    service_stream(now);
     flush_fired();
     arm();
 }
@@ -1348,10 +1428,10 @@ void Net::arm()
                 continue;  // ip_block: the TCP session's clock and HELLOs wait for its end
             }
             if (s.session) {
-                if (!(k == LinkKind::serial && ls(LinkKind::tcp).session)) {
+                if (!(k == LinkKind::serial && (ls(LinkKind::tcp).session || ls(LinkKind::gateway).session))) {
                     next = std::min(next, x.last_rx + session_timeout_us());
                 }
-            } else if (s.up) {
+            } else if (s.up && hello_allowed(k)) {
                 next = std::min(next, x.hello_due);
             }
         }
@@ -1395,6 +1475,7 @@ void Net::arm()
     if (air_up()) {
         next = std::min(next, air_hb_due_);
     }
+    next = std::min({next, next_gateway_due(), next_bench_due()});
     if (next == kNever) {
         timer_->stop();
         armed_for_ = kNever;
@@ -1421,9 +1502,15 @@ uint8_t Net::route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const
     // can stall without dropping (an AP gone, IP traffic lost; the ip_block hook): with nothing from the hub
     // over TCP for 2 intervals, a USB node sends over serial, where the hub sends to it by the same rule,
     // and goes back to TCP with the next hub frame there (its TCP session times out at 3.5 intervals).
+    // Design m2-c4-gateway D12: a gateway session comes after TCP/UDP and before serial, for what fits one ESP-NOW
+    // frame (a BULK frame takes serial, or nothing), never for OTA frames (relay OTA is C10; D16 as built).
     const bool serial = ls(LinkKind::serial).session;
-    if (ls(LinkKind::tcp).session && !(serial && wifi_silent())) {
+    const bool gateway = ls(LinkKind::gateway).session && len <= kRtSize && cls != kClsOta;
+    if (ls(LinkKind::tcp).session && !((serial || gateway) && wifi_silent())) {
         return wifi_route(cls, kind, flags, len);
+    }
+    if (gateway) {
+        return kViaGateway;
     }
     return serial ? kViaSerial : 0;
 }
@@ -1435,6 +1522,11 @@ uint8_t Net::answer_route(LinkKind from, uint8_t cls, uint8_t kind, uint8_t flag
     // node does not see when only its uplink is gone (the hub's keepalives still arrive over TCP).
     if (from == LinkKind::serial && !dropping()) {
         return ls(LinkKind::serial).session ? kViaSerial : 0;
+    }
+    // Likewise a request from the gateway (design m2-c4-gateway D10): the hub sent it there for a reason it sees.
+    if (from == LinkKind::gateway && !dropping() && ls(LinkKind::gateway).session && len <= kRtSize &&
+        cls != kClsOta) {
+        return kViaGateway;
     }
     return route(cls, kind, flags, len);
 }
@@ -1502,6 +1594,9 @@ uint8_t Net::transmit(uint8_t via, std::span<const uint8_t> envelope)
     }
     if ((via & kViaTcp) != 0) {
         transmit_on(LinkKind::tcp, envelope);
+    }
+    if ((via & kViaGateway) != 0) {
+        transmit_on(LinkKind::gateway, envelope);
     }
     if ((via & kViaSerial) != 0) {
         transmit_on(LinkKind::serial, envelope);
@@ -1638,6 +1733,7 @@ void Net::track(std::span<const uint8_t> envelope, uint32_t seq, uint8_t via, Ti
     Pending *p = take_slot(true);
     const TimeUs now = core_.now();
     const bool udp = (via & kViaUdp) != 0;
+    const bool gateway = !udp && (via & kViaGateway) != 0;
     p->used = true;
     p->repeat = false;
     p->exempt = exempt;
@@ -1645,9 +1741,10 @@ void Net::track(std::span<const uint8_t> envelope, uint32_t seq, uint8_t via, Ti
     p->seq = seq;
     p->at = at;
     p->sent = now;
-    // 05 §5.8: re-sent over UDP only (same seq); TCP and serial deliver or fail, after tcp_delivery_ms.
-    p->attempts = udp ? 1 : 0;
-    p->retry_at = udp ? now + backoff_us(1) : kNever;
+    // 05 §5.8: re-sent over UDP only (same seq), and over a gateway as over UDP (design m2-c4-gateway D10, one hop);
+    // TCP and serial deliver or fail, after tcp_delivery_ms.
+    p->attempts = udp || gateway ? 1 : 0;
+    p->retry_at = udp ? now + backoff_us(1) : gateway ? now + backoff_us(1, 1) : kNever;
     p->deadline = (via & (kViaTcp | kViaSerial)) != 0 ? now + ms_us(cfg_.tcp_delivery_ms) : kNever;
     p->len = static_cast<uint16_t>(envelope.size());
     std::memcpy(p->bytes, envelope.data(), envelope.size());
@@ -1721,17 +1818,20 @@ void Net::service_pending(Pending &p, TimeUs now)
     if (p.retry_at <= now) {
         const bool stale = !p.exempt && now - p.at > ms_us(cfg_.event_max_age_ms);
         if (p.attempts < cfg_.max_attempts && !stale) {
+            // Over UDP, or over the gateway for a frame that went there (design m2-c4-gateway D10).
+            const bool gateway = (p.via & kViaUdp) == 0 && (p.via & kViaGateway) != 0;
+            const LinkKind rl = gateway ? LinkKind::gateway : LinkKind::udp;
             ++p.attempts;
-            ++ls(LinkKind::udp).retries;
-            transmit_on(LinkKind::udp, env);
-            p.retry_at = now + backoff_us(p.attempts);
+            ++ls(rl).retries;
+            transmit_on(rl, env);
+            p.retry_at = now + backoff_us(p.attempts, gateway ? 1 : 0);
         } else {
             // Out of attempts, or too old to re-send as input (05 §5.11).
             if (stale) {
                 ++state_.events_dropped;
             }
             p.retry_at = kNever;
-            if (p.deadline == kNever) {  // UDP was its only path
+            if (p.deadline == kNever) {  // UDP (or the gateway) was its only path
                 // A UDP loss burst longer than the retries must not lose fresh input while TCP carries:
                 // one copy over TCP, then TCP's own give-up after tcp_delivery_ms (design c6, bench).
                 if (!stale && ls(LinkKind::tcp).session && transmit_on(LinkKind::tcp, env)) {
@@ -1777,11 +1877,12 @@ uint32_t Net::jittered_us(uint32_t ms, uint32_t pct)
     return static_cast<uint32_t>(std::min<uint64_t>(uint64_t{ms} * permille, UINT32_MAX));
 }
 
-uint32_t Net::backoff_us(uint8_t attempt)
+uint32_t Net::backoff_us(uint8_t attempt, uint8_t hops)
 {
-    // 05 §5.8: 20 ms after the first send, x2 per attempt, +-25 % (0 hops in router mode).
+    // 05 §5.8: 20 ms after the first send, x2 per attempt, +-25 % (0 hops in router mode; a gateway is 1).
     const uint32_t shift = std::min<uint32_t>(attempt > 0 ? attempt - 1u : 0u, 16);
-    const uint64_t ms = std::min<uint64_t>(uint64_t{cfg_.ack_base_ms} << shift, UINT32_MAX / 1250);
+    const uint64_t base = uint64_t{cfg_.ack_base_ms} + uint64_t{cfg_.ack_per_hop_ms} * hops;
+    const uint64_t ms = std::min<uint64_t>(base << shift, UINT32_MAX / 1250);
     return jittered_us(static_cast<uint32_t>(ms), 25);
 }
 

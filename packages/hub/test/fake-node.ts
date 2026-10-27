@@ -23,6 +23,9 @@
 // LOG over TCP (design m2-c2 D20, D21; stream S5): a FakeNode with `netLog` says net_log in HELLO and sends its
 // log lines as LOG frames over TCP (log()), as fr_net drains fr_serial's ring; rig() routes them into a real log
 // ingest (logs/ingest.ts) counting into the rig's scale counters.
+// Gateways (design m2-c4-gateway D13-D16): a FakeNode's `serial` may be any NodeSerial, so one behind a FakeGateway
+// (fake-gateway.ts) sends over the air through its bridge; it records the NET.BEACONs it hears; FakeSerial hands the
+// GW_* lines the hub writes to a gateway's port to that gateway's bridge.
 
 import { createHash, randomBytes } from 'node:crypto';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
@@ -58,6 +61,7 @@ import {
   decodeDiagExecArgs,
   decodeEnvelope,
   decodeMsgMsg,
+  decodeNetBeacon,
   decodeNetWelcome,
   decodeNodeBindClearArgs,
   decodeOtaAbort,
@@ -84,6 +88,7 @@ import {
   encodeTimeSyncRes,
   findCap,
   KIND,
+  type NetBeacon,
   type NetWelcome,
   type OtaOffer,
   type OtaState,
@@ -152,8 +157,8 @@ export interface FakeNodeOptions {
   clockOffsetUs?: number;
   /** Where the hub is (TCP and UDP). */
   hub?: { host?: string; tcp: number; udp: number };
-  /** Instead of TCP/UDP: this node is USB-attached through `serial`. */
-  serial?: FakeSerial;
+  /** Instead of TCP/UDP: this node is USB-attached through `serial` (or on the air behind a FakeGateway). */
+  serial?: NodeSerial;
   /** HELLO `caps` (default: wifi + inject_enabled; + provisioned when addr is set; + net_log with `netLog`). */
   caps?: number;
   /** LOG frames over TCP (design m2-c2 D20): HELLO says net_log (caps b6) unless `caps` is given. */
@@ -162,6 +167,14 @@ export interface FakeNodeOptions {
   role?: 'node' | 'gateway' | 'fixture';
   /** The last seq of the ordinary space already used (a reconnect within one boot continues it). */
   seqStart?: number;
+}
+
+/** Where a non-TCP FakeNode's lines go: a FakeSerial (USB) or a FakeGateway's bridge (ESP-NOW). */
+export interface NodeSerial {
+  attach(node: FakeNode): void;
+  detach(node: FakeNode): void;
+  /** One `@fr1:` line the node printed (or sent over the air). */
+  fromNode(device: string, line: string): void;
 }
 
 /**
@@ -264,6 +277,8 @@ export class FakeNode {
   welcomes = 0;
   /** Every hub frame received, in order. */
   frames: Seen[] = [];
+  /** NET.BEACONs heard (design m2-c4-gateway D11): not a broadcast, outside every window. */
+  beacons: NetBeacon[] = [];
   /** Executions per `port/cmd` (the response cache keeps duplicates out). */
   executions = new Map<string, number>();
   handlers = new Map<string, CmdHandler>();
@@ -646,6 +661,14 @@ export class FakeNode {
     // Recorded even while unplugged: what the hub sent is what the tests look at.
     this.frames.push({ header: h, prefix, body, via });
     if (this.silent) {
+      return;
+    }
+    if (h.cls === CLS.NET && h.kind === KIND.NET.BEACON) {
+      const b = decodeNetBeacon(body);
+      if (!b.ok) {
+        throw new Error(`bad BEACON: ${b.error}`);
+      }
+      this.beacons.push(b.value);
       return;
     }
     if (h.cls === CLS.NET && h.kind === KIND.NET.WELCOME) {
@@ -1381,9 +1404,11 @@ export class FakeNode {
 }
 
 /** The USB side of FakeNodes: lines from nodes go to `deliver` (the router), writeLine reaches the node. */
-export class FakeSerial {
+export class FakeSerial implements NodeSerial {
   #nodes = new Map<string, FakeNode>();
   #goneListeners = new Set<(key: string) => void>();
+  /** A gateway's bridge per port key: the hub's GW_* lines to that port (design m2-c4-gateway D13). */
+  #bridges = new Map<string, (line: string) => void>();
   deliver: (device: string, line: string) => void = () => undefined;
   /** Lines the hub wrote, per device key. */
   written: [string, string][] = [];
@@ -1412,9 +1437,19 @@ export class FakeSerial {
     return () => this.#goneListeners.delete(fn);
   }
 
+  /** The port `key` is a gateway's: every line the hub writes there that is not ENV goes to `fn` (in a microtask). */
+  bridge(key: string, fn: ((line: string) => void) | null): void {
+    if (fn) {
+      this.#bridges.set(key, fn);
+    } else {
+      this.#bridges.delete(key);
+    }
+  }
+
   /** The USB cable of `device` is pulled: its node hears nothing more over serial, and the hub is told. */
   unplugPort(device: string): void {
     this.#nodes.delete(device);
+    this.#bridges.delete(device);
     for (const fn of this.#goneListeners) {
       fn(device);
     }
@@ -1434,6 +1469,10 @@ export class FakeSerial {
     if (node && d.ok && d.value.type === SERIAL_TYPE.ENV) {
       const body = d.value.body.slice();
       queueMicrotask(() => node.receive(body, 'serial'));
+    }
+    const bridge = this.#bridges.get(selector);
+    if (bridge && d.ok && d.value.type !== SERIAL_TYPE.ENV) {
+      queueMicrotask(() => bridge(line));
     }
     return { path: `/dev/cu.fake-${selector}`, key: selector };
   }
@@ -1570,6 +1609,8 @@ export async function rig(
     registry?: FakeRegistry;
     scale?: ScaleCounters;
     logNow?: () => number;
+    /** BEACON hub_ipv4 (design m2-c4-gateway D11). */
+    hubIpv4?: () => string | null;
   } = {},
 ): Promise<Rig> {
   const dir = mkdtempSync(join(tmpdir(), 'fr-router-'));
@@ -1595,6 +1636,7 @@ export async function rig(
     onSessions: (n) => sessions.push(n),
     logIngest: createLogIngest(logs, scale),
     scale,
+    ...(opts.hubIpv4 ? { hubIpv4: opts.hubIpv4 } : {}),
   });
   serial.deliver = (device, line) => router.serialLine(device, line);
   await router.start();

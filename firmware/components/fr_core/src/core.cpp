@@ -5,7 +5,8 @@
 // and the liveness log. M2-C1 (design m2-c1-hil D6, D11): the HELLO role from the profile, the radio-off build
 // (serial only, NET health from the serial session) and the hub link (session, last frame, run) in link_info() for
 // services. M2-C2 (design m2-c2 D20): with the radio on, fr_serial's net log ring as Net's LogSource (LOG frames
-// over TCP, HELLO net_log).
+// over TCP, HELLO net_log). M2-C4 (design m2-c4-gateway D8, D9): in role gateway, fr_gw's bridge beside Net, fed the
+// hub's GW_TX, GW_CMD and LINK_PING lines and every air frame (Net's air tap), sending through Net::air_send_raw.
 #include "fr/core.hpp"
 
 #include <array>
@@ -45,7 +46,16 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "s2_hooks.hpp"
 #include "test_pin.hpp"
+
+// design m2-c4-gateway D8: role gateway (HELLO role 1) runs the bridge; every other role builds none of it.
+#if CONFIG_FR_ROLE == 1
+#define FR_GATEWAY 1
+#include "fr/gw/bridge.hpp"  // with the generated GW_* bodies (serial.hpp)
+#else
+#define FR_GATEWAY 0
+#endif
 
 namespace fr::core {
 namespace {
@@ -366,6 +376,123 @@ private:
 };
 
 SerialLink s_serial;
+
+#if FR_GATEWAY
+// ---- the gateway's bridge (design m2-c4-gateway D8, D9) ----
+
+/** The first working fr.led port: the status LED of a gateway profile (D9); null before run_ports or without one. */
+cap::Led *status_led()
+{
+    for (size_t i = 0; i < s_nports; ++i) {
+        const PortEntry &p = s_ports[i];
+        if (p.ok && p.cap != nullptr && p.cap->cap_id() == cap::Led::kId) {
+            return static_cast<cap::Led *>(p.cap);
+        }
+    }
+    return nullptr;
+}
+
+/** The radio as the bridge sees it: Net::air_send_raw, the driver's and the station's state. Core task. */
+class GwAir final : public gw::Air
+{
+public:
+    Status send(const net::Mac &dst, std::span<const uint8_t> env, proto::GwRate rate, uint32_t token) override
+    {
+        uint8_t mac[6];
+        std::memcpy(mac, dst.data(), sizeof(mac));
+        return s_net->air_send_raw(mac, env, static_cast<uint8_t>(rate), token);
+    }
+    bool up() const override { return net::esp::air_status().up; }
+    gw::AirInfo info() const override
+    {
+        const net::esp::AirStatus air = net::esp::air_status();
+        const net::LinkInfo li = net::esp::link_info();
+        return {.up = air.up,
+                .channel = air.channel,
+                .peers = air.peers,
+                .net = s_identity.state == FR_ID_PROVISIONED ? s_identity.net : uint16_t{0},
+                .associated = li.channel != 0,
+                .ap_rssi = li.rssi,
+                .ap_channel = li.channel};
+    }
+    // The driver's peer table is fr_net's; it has no flush yet, and its LRU replaces idle peers on its own.
+    Status peer_flush() override { return std::unexpected(Err::unsupported); }
+};
+
+/** fr_serial's frame ring. Core task (write_frame's one static buffer). */
+class GwLine final : public gw::Line
+{
+public:
+    bool write_frame(uint8_t type, std::span<const uint8_t> body) override { return serial::write_frame(type, body); }
+};
+
+/**
+ * D9 on the status LED through fr.led (the LED service caps the brightness at the profile's max_brightness): dim
+ * green with a hub, 2 Hz amber without, one white flash per kFlashEvery forwarded frames (a one-cycle blink, after
+ * which the service restores the green).
+ */
+class GwLight final : public gw::Indicator
+{
+public:
+    void show(bool hub) override
+    {
+        cap::Led *led = status_led();
+        if (led == nullptr) {
+            return;
+        }
+        if (hub) {
+            (void)led->set({.on = true, .has_brightness = true, .brightness = 8, .has_color = true, .color = kGreen});
+            return;
+        }
+        (void)led->set({.on = false, .has_brightness = true, .brightness = 32});
+        (void)led->blink({.on_ms = 250, .off_ms = 250, .count = 0, .has_color = true, .color = kAmber});
+    }
+    void flash() override
+    {
+        if (cap::Led *led = status_led()) {
+            (void)led->blink({.on_ms = 30, .off_ms = 10, .count = 1, .has_color = true, .color = kWhite});
+        }
+    }
+
+private:
+    static constexpr uint32_t kGreen = 0x00FF00;
+    static constexpr uint32_t kAmber = 0xFF8000;
+    static constexpr uint32_t kWhite = 0xFFFFFF;
+};
+
+GwAir s_gw_air;
+GwLine s_gw_line;
+GwLight s_gw_light;
+gw::Bridge s_bridge{s_core, s_gw_air, s_gw_line, &s_gw_light};
+
+/** Every air frame Net accepted, and the ends of the bridge's sends: to the bridge. Core task. */
+class GwTap final : public net::AirTap
+{
+public:
+    void on_air_frame(std::span<const uint8_t> env, const net::RxMeta &meta, TimeUs at) override
+    {
+        s_bridge.on_air_frame(env, meta, at);
+    }
+    void on_air_sent(uint32_t token, bool ok, uint8_t retries, TimeUs queued_us) override
+    {
+        s_bridge.on_air_sent(token, ok, retries, queued_us);
+    }
+};
+
+GwTap s_gw_tap;
+
+/** The hub's GW_* lines, lent to the core task like the envelopes: a GW_TX of the longest envelope fits one. */
+struct GwBuf {
+    bool busy;
+    uint8_t type;
+    uint16_t len;
+    TimeUs at;  // esp_timer µs when the reader had it: the GW_TX's queue time runs from here
+    uint8_t bytes[proto::GwTx::kPrefixSize + gw::kEnvMax];
+};
+
+constexpr size_t kGwBufs = 16;
+GwBuf s_gw_bufs[kGwBufs];
+#endif
 
 /**
  * The node's log lines for LOG frames over TCP (design m2-c2 D20): fr_serial's net log ring, which the ESP_LOG hook
@@ -990,6 +1117,9 @@ public:
     void reset_runtime_stats() override
     {
         s_net->reset_stats();
+#if FR_GATEWAY
+        s_bridge.reset_stats();  // `stats reset` clears the bridge's counters too (core task, as net_status reads them)
+#endif
         s_base = counters_now(net::esp::status(), net::esp::air_status());
         s_core.reset_posts_dropped();
     }
@@ -1001,8 +1131,8 @@ public:
         net::esp::AirStatus air = net::esp::air_status();
         Counters c = counters_since_reset(es, air);
         diag::NetStatus n;
-        static_assert(diag::kLinks == net::kLinkKinds);
-        for (size_t i = 0; i < net::kLinkKinds; ++i) {
+        static_assert(diag::kLinks == net::kLinkKinds && diag::kLinkGateway == net::index_of(net::LinkKind::gateway));
+        for (size_t i = 0; i < diag::kLinks; ++i) {
             const net::LinkState &l = st.links[i];
             n.links[i] = {.attached = l.attached,
                           .up = l.up,
@@ -1112,6 +1242,47 @@ public:
                       .age_drop = st.logs.age_drop,
                       .rate_drop = st.logs.rate_drop,
                       .cut = st.logs.cut};
+        const net::GatewayStats &g = st.gateway;  // design m2-c4-gateway D10-D12
+        n.gateway = {.chosen = g.chosen,
+                     .mac = {},
+                     .rssi = g.rssi,
+                     .age_ms = static_cast<uint32_t>(std::max<TimeUs>(s_core.now() - g.heard_at, 0) / 1000),
+                     .live = g.live,
+                     .beacons = g.beacons,
+                     .lost = g.lost,
+                     .opened = g.opened,
+                     .closed = g.closed,
+                     .tx_nak = g.tx_nak,
+                     .too_big = g.too_big};
+        std::memcpy(n.gateway.mac, g.mac.data(), sizeof(n.gateway.mac));
+#if FR_GATEWAY
+        const gw::Stats b = s_bridge.stats();  // `stats gw` (design m2-c4-gateway D8), the reader's refusals folded in
+        n.gw = {.on = true,
+                .tx = b.tx,
+                .tx_fail = b.tx_fail,
+                .tx_nak = b.tx_nak,
+                .tx_queue_full = b.tx_queue_full,
+                .tx_no_peer = b.tx_no_peer,
+                .tx_too_big = b.tx_too_big,
+                .tx_radio_off = b.tx_radio_off,
+                .tx_stale = b.tx_stale,
+                .tx_dropped = b.tx_dropped,
+                .tx_busy = b.tx_busy,
+                .done_dropped = b.done_dropped,
+                .tx_refused = b.tx_refused,
+                .rx = b.rx,
+                .rx_drop = b.rx_drop,
+                .rx_no_hub = b.rx_no_hub,
+                .rx_line_full = b.rx_line_full,
+                .rx_too_big = b.rx_too_big,
+                .rx_bad = b.rx_bad,
+                .pings = b.pings,
+                .hub_lost = b.hub_lost,
+                .cmds = b.cmds,
+                .beacons = b.beacons,
+                .q_high = b.q_high,
+                .last_tx_us = b.last_tx_us};
+#endif
         return n;
     }
 
@@ -1176,6 +1347,11 @@ public:
     int test_pin() const override { return fr::core::test_pin::pin(); }
 
     void reboot(bool bootloader) override { schedule_reboot(bootloader); }
+
+#if FR_TEST_HOOKS
+    // Spike S2 (design m2-c4-gateway D19): s2_hooks.cpp.
+    diag::TestHooks *test_hooks() override { return &s2_hooks(*s_net); }
+#endif
 };
 
 DiagHost s_diag_host;
@@ -1230,6 +1406,73 @@ void release_line(LineBuf *b)
     portEXIT_CRITICAL(&s_buf_mux);
 }
 
+#if FR_GATEWAY
+/**
+ * Reader task: a GW_TX the core task cannot take now is answered here (its GW_TX_DONE, unless tx_id 0), so the hub
+ * never waits on a verdict that cannot come. write_line takes any task.
+ */
+void refuse_gw_tx(std::span<const uint8_t> body, proto::GwTxStatus st)
+{
+    const auto tx = proto::decode_gw_tx(body);
+    if (!tx) {
+        return;
+    }
+    s_bridge.refused(st);  // the bridge's tx_fail and `stats gw` count it (atomic: this is the reader task)
+    if (tx->tx_id == 0) {
+        return;
+    }
+    char out[64];
+    const size_t n = proto::encode_line(proto::GwTxDone{.tx_id = tx->tx_id, .status = st}, out);
+    if (n > 0) {
+        serial::write_line({out, n});
+    }
+}
+
+/** Reader task: one of the hub's GW_* frames to the bridge on the core task (network queue), stamped now. */
+void deliver_gw(uint8_t type, std::span<const uint8_t> body)
+{
+    const TimeUs at = esp_timer_get_time();
+    if (body.size() > sizeof(GwBuf::bytes)) {
+        s_rx_dropped.fetch_add(1, std::memory_order_relaxed);
+        if (type == wire::kSerialGwTx) {
+            refuse_gw_tx(body, proto::GwTxStatus::too_big);  // an envelope over the realtime MTU
+        }
+        return;
+    }
+    GwBuf *b = nullptr;
+    portENTER_CRITICAL(&s_buf_mux);
+    for (GwBuf &candidate : s_gw_bufs) {
+        if (!candidate.busy) {
+            candidate.busy = true;
+            b = &candidate;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_buf_mux);
+    if (b != nullptr) {
+        b->type = type;
+        b->len = static_cast<uint16_t>(body.size());
+        b->at = at;
+        std::memcpy(b->bytes, body.data(), body.size());
+        if (s_core.post_net([b] {
+                s_bridge.on_serial_frame(b->type, {b->bytes, b->len}, b->at);
+                portENTER_CRITICAL(&s_buf_mux);
+                b->busy = false;
+                portEXIT_CRITICAL(&s_buf_mux);
+            })) {
+            return;
+        }
+        portENTER_CRITICAL(&s_buf_mux);
+        b->busy = false;
+        portEXIT_CRITICAL(&s_buf_mux);
+    }
+    s_rx_dropped.fetch_add(1, std::memory_order_relaxed);
+    if (type == wire::kSerialGwTx) {
+        refuse_gw_tx(body, proto::GwTxStatus::queue_full);
+    }
+}
+#endif
+
 bool on_frame_line(std::string_view line)
 {
     static uint8_t scratch[wire::kMaxLineFrame];  // the reader task is the only caller
@@ -1240,7 +1483,12 @@ bool on_frame_line(std::string_view line)
     if (frame->type == wire::kSerialEnv) {
         deliver(LinkKind::serial, frame->body);
     }
-    return true;  // GW_* and LINK_* frames are for a gateway (M2)
+#if FR_GATEWAY
+    else {
+        deliver_gw(frame->type, frame->body);  // the bridge takes GW_TX, GW_CMD, LINK_PING and counts the rest
+    }
+#endif
+    return true;  // GW_* and LINK_* frames are for a gateway; another role drops them
 }
 
 /** Answers a request the core task never saw (no buffer, queue full), keeping its `#<id>`. */
@@ -1419,6 +1667,17 @@ Core &start()
         serial::enable_net_logs(CONFIG_FR_NET_LOG_LEVEL, wake_net_logs);
         s_net->attach_logs(&s_serial_logs);
     }
+#if FR_GATEWAY
+    // design m2-c4-gateway D8: the bridge's timers before the board's services drain the pool; every air frame Net
+    // accepts reaches it from now on (Net handles only the ones addressed to the gateway itself, and never relays).
+    if (s_bridge.begin()) {
+        s_net->set_air_tap(&s_gw_tap);
+        ESP_LOGI(TAG, "gateway: bridge on (queue %u, GW_STATUS every %u ms)", static_cast<unsigned>(gw::kQueueDepth),
+                 static_cast<unsigned>(gw::kStatusPeriodUs / 1000));
+    } else {
+        ESP_LOGE(TAG, "gateway: no timer left for the bridge: no GW_* this boot");
+    }
+#endif
     s_stores.emplace(s_core, worker::get(), s_dir_blob, s_bind_blob);
     s_net->attach_stores(s_stores->directory(), s_stores->bindings());
     size_t bindings = 0;
@@ -1489,6 +1748,9 @@ void run_ports(std::span<const PortEntry> instances, SelftestFn selftest, size_t
         caps_ok = caps_ok && p.ok;
     }
     s_core.post([caps_ok] { s_ota.health_set(ota::kHealthCore | (caps_ok ? ota::kHealthCaps : 0)); });
+#if FR_GATEWAY
+    s_core.post([] { s_bridge.refresh_light(); });  // the status LED exists now (D9)
+#endif
     if (s_serial_timer != nullptr) {
         s_serial_timer->start(kSerialPollUs);
     }

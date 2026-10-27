@@ -1,16 +1,19 @@
 // What the node links hand the router (design c3 §4 NodeLinks; spec 08 §8.4): whole envelopes with the
 // link they came on, and a way to answer on a connection-like link. TCP connections and serial ports are
-// endpoints the hub can send on; UDP is receive-only (the hub never sends UDP, 05 §5.12.2).
+// endpoints the hub can send on; UDP is receive-only (the hub never sends UDP, 05 §5.12.2). So is a node heard
+// through a gateway's bridge (design m2-c4-gateway D14): one endpoint per (gateway, node MAC).
 
 import type { LinkName } from '../context.ts';
 
-/** A TCP connection or a serial port: a link the hub can answer on and a node can hold a session over. */
+/** A TCP connection, a serial port or a node behind a gateway: a link the hub can answer on and a node can hold a session over. */
 export interface Endpoint {
   readonly kind: Exclude<LinkName, 'udp'>;
-  /** Unique per endpoint for logs: `tcp:192.168.0.23:51234#4`, `serial:1cdbd416ba34`. */
+  /** Unique per endpoint for logs: `tcp:192.168.0.23:51234#4`, `serial:1cdbd416ba34#2`, `gateway:f0f5bd09fdec/1cdbd416ba34#3`. */
   readonly id: string;
-  /** The peer's IPv4 address (tcp) or the port key (serial, = the USB serial / MAC). */
+  /** The peer's IPv4 address (tcp), the port key (serial, = the USB serial / MAC), or the node's MAC (gateway). */
   readonly remote: string;
+  /** gateway: the gateway's port key (its MAC). */
+  readonly gateway?: string;
   /** Queues one envelope; the link adds its framing. Never blocks; false when it was dropped. */
   send(envelope: Uint8Array): boolean;
   /** Ends the endpoint (TCP: destroys the socket). Serial ports stay open; only the session ends. */

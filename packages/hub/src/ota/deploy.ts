@@ -16,7 +16,7 @@ import { checkSourceDir } from '@fractonica/host';
 import { type FaultKind, findOp, formatCursor, FrError, type Job, MAX_WAIT_S, type Remediation, type ToolError } from '@fractonica/protocol';
 import { z } from 'zod';
 
-import { buildDirOf } from '../build.ts';
+import { buildDirOf, profileApp } from '../build.ts';
 import type { Device, Handler, HubContext, HubEvent } from '../context.ts';
 import { mintCursor } from '../events/index.ts';
 import type { JobCtx } from '../jobs.ts';
@@ -401,7 +401,7 @@ function dryRun(input: DeployInput, hub: HubContext, p: Plan) {
     via: p.via,
     builds: [...p.groups].map(([profile, devs]) => ({
       profile,
-      build_dir: buildDirOf(p.src, { app: 'node', profile, buildType: input.build_type, fault: input.fault }),
+      build_dir: buildDirOf(p.src, { app: profileApp(p.src, profile), profile, buildType: input.build_type, fault: input.fault }),
       devices: devs.map((d) => d.alias),
     })),
     devices: p.devices.map((d) => ({

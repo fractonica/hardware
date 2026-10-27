@@ -1,7 +1,9 @@
 // The ESP-NOW driver's send discipline (design c5 §3, spec 05 §5.3; fr_net/src/esp/air_sched.hpp), which
 // espnow.cpp runs on target and fr_net_node's fake air medium on the host: priority queues with one send in
 // flight, link retries 2 ms then 4 ms, the send guard and the late verdicts it holds the next send for, the
-// 17-peer LRU that never evicts a peer used within a second, and Net sending again from inside a frame's end.
+// 17-peer LRU that never evicts a peer used within a second, and Net sending again from inside a frame's end. M2-C4: a
+// rate the driver refused is asked again (never recorded as set), a node's chosen gateway pinned outside the LRU, and a
+// gateway's bridge with all 19 unicast entries.
 #include <functional>
 #include <vector>
 
@@ -42,6 +44,11 @@ public:
         timer_on = true;
     }
     void disarm() override { timer_on = false; }
+    bool set_rate(const Mac &mac, fr::net::AirRate rate) override
+    {
+        rates.push_back({mac, rate});
+        return rate_ok;
+    }
     void done(uint32_t token, bool ok) override
     {
         ends.push_back({token, ok});
@@ -59,6 +66,12 @@ public:
     std::vector<Tx> tx;
     std::vector<uint32_t> armed;
     std::vector<End> ends;
+    struct RateSet {
+        Mac mac;
+        fr::net::AirRate rate;
+    };
+    std::vector<RateSet> rates;
+    bool rate_ok = true;
     bool timer_on = false;
     bool add_ok = true;
     bool transmit_ok = true;
@@ -362,4 +375,109 @@ TEST(air_sched_done_may_send_again)
     s.sent(true, 7'000);
     CHECK_EQ(r.ends.size(), 2u);
     CHECK(!s.in_flight());
+}
+
+TEST(air_sched_a_refused_rate_is_asked_again_never_recorded)
+{
+    using fr::net::AirRate;
+    FakeRadio r;
+    Scheduler s(r);
+    TimeUs now = 0;
+    r.rate_ok = false;
+    REQUIRE(s.send(mac(1), frame(1), AirPrio::normal, 1, now, AirRate::fast));
+    s.sent(true, now);
+    REQUIRE_EQ(r.rates.size(), 1u);
+    CHECK_EQ(s.stats().rate_fail, 1u);
+    // The peer kept its rate: the next fast frame asks the driver again.
+    REQUIRE(s.send(mac(1), frame(2), AirPrio::normal, 2, now, AirRate::fast));
+    s.sent(true, now);
+    CHECK_EQ(r.rates.size(), 2u);
+    CHECK_EQ(s.stats().rate_fail, 2u);
+    r.rate_ok = true;
+    REQUIRE(s.send(mac(1), frame(3), AirPrio::normal, 3, now, AirRate::fast));
+    s.sent(true, now);
+    CHECK_EQ(r.rates.size(), 3u);
+    // Taken now: the next one at the same rate leaves the peer alone.
+    REQUIRE(s.send(mac(1), frame(4), AirPrio::normal, 4, now, AirRate::fast));
+    s.sent(true, now);
+    CHECK_EQ(r.rates.size(), 3u);
+    // `air rate` the driver refuses: counted, and the default's next frame asks again.
+    r.rate_ok = false;
+    const fr::net::air::RateChange rc = s.set_default_rate(false, AirRate::robust);
+    CHECK_EQ(rc.peers, 1u);
+    CHECK_EQ(rc.failed, 1u);
+    r.rate_ok = true;
+    const size_t before = r.rates.size();
+    REQUIRE(s.send(mac(1), frame(5), AirPrio::normal, 5, now));
+    s.sent(true, now);
+    REQUIRE_EQ(r.rates.size(), before + 1);
+    CHECK(r.rates.back().rate == AirRate::robust);
+}
+
+TEST(air_sched_a_pinned_gateway_is_never_evicted_by_peer_churn)
+{
+    FakeRadio r;
+    Scheduler s(r);
+    const Mac gw{0xf0, 0xf5, 0xbd, 0x09, 0xfd, 0xec};
+    TimeUs now = 0;
+    REQUIRE(s.pin(&gw, now));
+    CHECK_EQ(r.adds.size(), 1u);
+    REQUIRE(s.pinned() != nullptr);
+    // The LRU keeps its 17 beside it.
+    for (uint8_t i = 0; i < fr::net::air::kUnicastPeers; ++i) {
+        now += 10'000;
+        REQUIRE(s.send(mac(i), frame(i), AirPrio::normal, i, now));
+        s.sent(true, now);
+    }
+    CHECK_EQ(s.peers(), fr::net::air::kUnicastPeers + 1);
+    // Churn long after the gateway was last used: only LRU entries go.
+    now = 5'000'000;
+    for (uint8_t i = 100; i < 140; ++i) {
+        now += 1'100'000;
+        REQUIRE(s.send(mac(i), frame(i), AirPrio::normal, i, now));
+        s.sent(true, now);
+    }
+    for (const Mac &d : r.dels) {
+        CHECK(d != gw);
+    }
+    // Its frames take the pinned entry, no add.
+    const size_t adds = r.adds.size();
+    REQUIRE(s.send(gw, frame(9), AirPrio::urgent, 9, now));
+    s.sent(true, now);
+    CHECK_EQ(r.adds.size(), adds);
+    // Another gateway chosen: the old one is released (the LRU is full: deleted), the new one pinned.
+    const Mac gw2{0xf0, 0xf5, 0xbd, 0x09, 0xfd, 0x02};
+    REQUIRE(s.pin(&gw2, now));
+    CHECK(r.dels.back() == gw);
+    CHECK(*s.pinned() == gw2);
+    // A peer already in the LRU moves over as it is (no add, no delete).
+    const size_t dels = r.dels.size();
+    const Mac lru = mac(139);
+    REQUIRE(s.pin(&lru, now));
+    CHECK(r.dels.size() == dels + 1);  // gw2 released, the LRU being full
+    CHECK_EQ(r.adds.size(), adds + 1);  // gw2's add only
+    CHECK_EQ(s.peers(), fr::net::air::kUnicastPeers + 1 - 1);  // lru moved out of the LRU into the pin
+    REQUIRE(s.pin(nullptr, now));
+    CHECK(s.pinned() == nullptr);
+}
+
+TEST(air_sched_a_gateway_bridge_has_19_unicast_entries_and_pins_nothing)
+{
+    FakeRadio r;
+    Scheduler s(r);
+    s.set_bridge(true);
+    CHECK_EQ(s.peer_limit(), fr::net::air::kBridgePeers);
+    const Mac gw{0xf0, 0xf5, 0xbd, 0x09, 0xfd, 0xec};
+    CHECK(!s.pin(&gw, 0));
+    TimeUs now = 0;
+    for (uint8_t i = 0; i < fr::net::air::kBridgePeers; ++i) {
+        now += 10'000;
+        REQUIRE(s.send(mac(i), frame(i), AirPrio::normal, i, now));
+        s.sent(true, now);
+    }
+    CHECK_EQ(s.peers(), fr::net::air::kBridgePeers);
+    // A 20th within the second: refused (the broadcast peer has the 20th entry).
+    CHECK_EQ(s.send(mac(100), frame(100), AirPrio::normal, 100, now).error(), fr::Err::busy);
+    CHECK(s.refused_no_peer());
+    CHECK(r.dels.empty());
 }

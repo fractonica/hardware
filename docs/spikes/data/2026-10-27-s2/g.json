@@ -1,0 +1,523 @@
+{
+  "schema": "fractonica/s2-record@1",
+  "q": "g",
+  "title": "four pads at net stream 200 for 60 s: hub receive, loop, node cpu, RTT under load",
+  "started_at": "2026-10-27T14:16:06.899Z",
+  "finished_at": "2026-10-27T14:17:20.363Z",
+  "hub": "http://127.0.0.1:7420",
+  "devices": {
+    "pad-c3": {
+      "device_id": "1cdbd4175cc4",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-s3": {
+      "device_id": "94a99015cecc",
+      "role": "node",
+      "profile": "s3l-pad",
+      "fw_id": "21741d5b8fe3c24b5dca4027b607aea7784a1fccc12ea289c6ede26aa0b1c121"
+    },
+    "gw-c6": {
+      "device_id": "f0f5bd09fdec",
+      "role": "gateway",
+      "profile": "c6g-gateway",
+      "fw_id": "5a3158a7aa11350192981fc161411f70ef502479583879fd12574927c60ddc45"
+    },
+    "pad-c6": {
+      "device_id": "58e6c5d55e64",
+      "role": "node",
+      "profile": "c6-pad",
+      "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a"
+    },
+    "pad-c3b": {
+      "device_id": "1cdbd416ba34",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    }
+  },
+  "params": {
+    "pads": [
+      "pad-c3",
+      "pad-c3b",
+      "pad-c6",
+      "pad-s3"
+    ],
+    "hz": 200,
+    "s": 60,
+    "expected_per_s": 800
+  },
+  "results": {
+    "hub_idle": {
+      "seconds": 10,
+      "tcp_per_s": {
+        "port": 0,
+        "connections": 0,
+        "rx": 0.4,
+        "tx": 5.8,
+        "tx_drop": 0,
+        "rx_bad": 0
+      },
+      "udp_per_s": {
+        "port": 0,
+        "rx": 3.9,
+        "tx": 0,
+        "tx_drop": 0,
+        "rx_bad": 0
+      }
+    },
+    "hub_stream": {
+      "seconds": 58.1,
+      "tcp_per_s": {
+        "port": 0,
+        "connections": 0,
+        "rx": 1.5,
+        "tx": 9.6,
+        "tx_drop": 0,
+        "rx_bad": 0
+      },
+      "udp_per_s": {
+        "port": 0,
+        "rx": 981.4,
+        "tx": 0,
+        "tx_drop": 0,
+        "rx_bad": 0
+      }
+    },
+    "hub_loop": {
+      "before": {
+        "count": 74378,
+        "sum": 57598.049,
+        "max": 80.149,
+        "buckets": [
+          19198,
+          10086,
+          20676,
+          21818,
+          2372,
+          181,
+          34,
+          11,
+          2,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      "after": {
+        "count": 77172,
+        "sum": 60043.824,
+        "max": 80.149,
+        "buckets": [
+          20181,
+          10483,
+          21321,
+          22342,
+          2570,
+          220,
+          40,
+          12,
+          3,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    "latency_stats": {
+      "window_s": 90,
+      "event_loop": {
+        "seconds": 89,
+        "p50_ms": 0.56,
+        "p99_ms": 5.19,
+        "max_ms": 80.09,
+        "p99_max_s_ms": 80.09,
+        "p99_source": "probes"
+      },
+      "devices": [
+        {
+          "device": "1cdbd4175cc4",
+          "alias": "pad-c3",
+          "presence": "online",
+          "ping": {
+            "tcp": {
+              "n": 16,
+              "p50_ms": 8.98,
+              "p99_ms": 77.6,
+              "max_ms": 77.6
+            }
+          },
+          "input": {
+            "n": 0,
+            "p50_ms": null,
+            "p99_ms": null,
+            "max_ms": null
+          },
+          "bindings": {
+            "espnow": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "hub": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "flood": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "local": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            }
+          }
+        },
+        {
+          "device": "1cdbd416ba34",
+          "alias": "pad-c3b",
+          "presence": "online",
+          "ping": {
+            "tcp": {
+              "n": 16,
+              "p50_ms": 20.73,
+              "p99_ms": 214.19,
+              "max_ms": 214.19
+            }
+          },
+          "input": {
+            "n": 0,
+            "p50_ms": null,
+            "p99_ms": null,
+            "max_ms": null
+          },
+          "bindings": {
+            "espnow": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "hub": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "flood": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "local": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            }
+          }
+        },
+        {
+          "device": "58e6c5d55e64",
+          "alias": "pad-c6",
+          "presence": "online",
+          "ping": {
+            "tcp": {
+              "n": 8,
+              "p50_ms": 9.57,
+              "p99_ms": 15.41,
+              "max_ms": 15.41
+            }
+          },
+          "input": {
+            "n": 0,
+            "p50_ms": null,
+            "p99_ms": null,
+            "max_ms": null
+          },
+          "bindings": {
+            "espnow": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "hub": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "flood": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "local": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            }
+          }
+        },
+        {
+          "device": "94a99015cecc",
+          "alias": "pad-s3",
+          "presence": "online",
+          "ping": {
+            "tcp": {
+              "n": 16,
+              "p50_ms": 14.59,
+              "p99_ms": 46.09,
+              "max_ms": 46.09
+            }
+          },
+          "input": {
+            "n": 0,
+            "p50_ms": null,
+            "p99_ms": null,
+            "max_ms": null
+          },
+          "bindings": {
+            "espnow": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "hub": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "flood": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            },
+            "local": {
+              "n": 0,
+              "p50_ms": null,
+              "p99_ms": null,
+              "max_ms": null,
+              "fast": 0,
+              "failed": 0
+            }
+          }
+        }
+      ],
+      "count": 4,
+      "truncated": false
+    },
+    "pings_under_load": {
+      "pad-c3": {
+        "sent": 50,
+        "ok": 50,
+        "loss_pct": 0,
+        "links": {
+          "tcp": 50
+        },
+        "rtt_p50_ms": 19,
+        "rtt_p99_ms": 138,
+        "rtt_max_ms": 138,
+        "hub_ping": {
+          "tcp": {
+            "n": 40,
+            "p50_ms": 13.12,
+            "p99_ms": 133.88,
+            "max_ms": 133.88
+          }
+        }
+      },
+      "pad-c3b": {
+        "sent": 50,
+        "ok": 50,
+        "loss_pct": 0,
+        "links": {
+          "tcp": 50
+        },
+        "rtt_p50_ms": 21,
+        "rtt_p99_ms": 220,
+        "rtt_max_ms": 220,
+        "hub_ping": {
+          "tcp": {
+            "n": 40,
+            "p50_ms": 11.87,
+            "p99_ms": 214.19,
+            "max_ms": 214.19
+          }
+        }
+      },
+      "pad-c6": {
+        "sent": 50,
+        "ok": 50,
+        "loss_pct": 0,
+        "links": {
+          "tcp": 50
+        },
+        "rtt_p50_ms": 14,
+        "rtt_p99_ms": 106,
+        "rtt_max_ms": 106,
+        "hub_ping": {
+          "tcp": {
+            "n": 40,
+            "p50_ms": 6.53,
+            "p99_ms": 40.13,
+            "max_ms": 40.13
+          }
+        }
+      },
+      "pad-s3": {
+        "sent": 50,
+        "ok": 50,
+        "loss_pct": 0,
+        "links": {
+          "tcp": 50
+        },
+        "rtt_p50_ms": 21,
+        "rtt_p99_ms": 126,
+        "rtt_max_ms": 126,
+        "hub_ping": {
+          "tcp": {
+            "n": 40,
+            "p50_ms": 11.28,
+            "p99_ms": 42.66,
+            "max_ms": 42.66
+          }
+        }
+      }
+    },
+    "cpu": {
+      "pad-c3": {
+        "ok": true,
+        "per_core": [
+          53.3
+        ],
+        "idle_pct": 53.3,
+        "window_ms": 10203
+      },
+      "pad-c3b": {
+        "ok": true,
+        "per_core": [
+          53
+        ],
+        "idle_pct": 53,
+        "window_ms": 10194
+      },
+      "pad-c6": {
+        "ok": true,
+        "per_core": [
+          82
+        ],
+        "idle_pct": 82,
+        "window_ms": 10321
+      },
+      "pad-s3": {
+        "ok": true,
+        "per_core": [
+          75.9,
+          57.4
+        ],
+        "idle_pct": 66.65,
+        "window_ms": 10158
+      }
+    },
+    "espnow": {
+      "pad-c3": {
+        "tx": 15,
+        "tx_fail": 0,
+        "retries": 0,
+        "refused": 0,
+        "rx": 118,
+        "rx_bad": 0,
+        "rx_lost": 0,
+        "peers": 0
+      },
+      "pad-c3b": {
+        "tx": 14,
+        "tx_fail": 0,
+        "retries": 0,
+        "refused": 0,
+        "rx": 119,
+        "rx_bad": 0,
+        "rx_lost": 0,
+        "peers": 0
+      },
+      "pad-c6": {
+        "tx": 15,
+        "tx_fail": 0,
+        "retries": 0,
+        "refused": 0,
+        "rx": 127,
+        "rx_bad": 0,
+        "rx_lost": 0,
+        "peers": 0
+      },
+      "pad-s3": {
+        "tx": 14,
+        "tx_fail": 0,
+        "retries": 0,
+        "refused": 0,
+        "rx": 131,
+        "rx_bad": 0,
+        "rx_lost": 0,
+        "peers": 0
+      }
+    }
+  },
+  "summary": {
+    "line": "expected 800 STATEs/s; pings under load: pad-c3 p99 138 ms, pad-c3b p99 220 ms, pad-c6 p99 106 ms, pad-s3 p99 126 ms"
+  },
+  "warnings": []
+}

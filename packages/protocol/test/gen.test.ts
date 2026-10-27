@@ -63,9 +63,22 @@ import {
   MESSAGES,
   PORT,
   PROTOCOL_TYPES,
+  SERIAL_BODIES,
   statusName,
   type Codec,
   type MemberPart,
+  decodeGwRx,
+  decodeGwStatus,
+  decodeGwTxDone,
+  encodeGwRx,
+  encodeGwStatus,
+  encodeGwTx,
+  encodeGwTxDone,
+  GW_RX_PREFIX_SIZE,
+  GW_TX_DONE_SIZE,
+  GwRate,
+  GwTxOpt,
+  SERIAL_MAX_BODY,
 } from '@fractonica/protocol/gen';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -102,7 +115,7 @@ function latin1(b: Uint8Array): string {
   return String.fromCharCode(...b);
 }
 
-/** The codec of a vector type: a message key, a protocol type, or <cap>.<member>.<part> / <cap>.traits. */
+/** The codec of a vector type: a message key, a protocol type, a serial body (GW_RX), or <cap>.<member>.<part> / <cap>.traits. */
 function codecOf(type: string): Codec<any> {
   const msg = MESSAGES.find((m) => m.key === type);
   if (msg) {
@@ -111,6 +124,10 @@ function codecOf(type: string): Codec<any> {
   const struct = PROTOCOL_TYPES.find((t) => t.name === type);
   if (struct) {
     return struct.codec;
+  }
+  const body = SERIAL_BODIES.find((b) => b.name === type);
+  if (body) {
+    return body.codec;
   }
   const parts = type.split('.');
   const part = parts[parts.length - 1];
@@ -209,8 +226,13 @@ function checkSerial(v: Vector): void {
   const frame = f.value;
   if (frame.type === 'ENV') {
     expect(hex(packEnvelope(frame.envelope))).toBe(v.value.body);
-  } else if (frame.type === 'LINK_PING' || frame.type === 'LINK_PONG') {
-    expect(frame.t).toBe(v.value.t);
+  } else {
+    // Every other type decodes through its body codec; `frame` is that body's JSON form.
+    const body = SERIAL_BODIES.find((b) => b.code === v.value.type)!;
+    expect(frame.type).toBe(body.name);
+    expect(decodeJson(body.codec, bytes(v.value.body), false)).toEqual({ ok: true, value: v.value.frame });
+    const { type: _, ...fields } = frame;
+    expect(hex(body.codec.encode(fields))).toBe(v.value.body);
   }
   if (!v.decodeOnly) {
     expect(encodeFrameLine(frame)).toBe(line);
@@ -276,8 +298,11 @@ describe('golden vectors', () => {
         need(`${cap.name}.${p.name}.state`);
       }
     }
-    for (const t of ['ENV', 'LINK_PING', 'LINK_PONG']) {
+    for (const t of Object.keys(SERIAL_TYPE)) {
       need(`serial.${t}`);
+    }
+    for (const b of SERIAL_BODIES.filter((x) => x.kind === 'layout')) {
+      need(b.name);
     }
     expect(missing).toEqual([]);
     for (const kind of ['header', 'envelope', 'message', 'cap', 'serial']) {
@@ -458,15 +483,53 @@ describe('protocol helpers', () => {
     expect(hex(encodeEnvelope({ header: { ...h, cls: CLS.CMD } })).length).toBe(36);
   });
 
-  it('serial frames: LINK bodies are exactly a u32, gateway types stay opaque', () => {
+  it('serial frames: LINK bodies are exactly a u32, unknown types stay opaque', () => {
     const ping = decodeFrameLine(encodeLinkLine('LINK_PING', 0x01020304));
     expect(ping).toEqual({ ok: true, value: { type: 'LINK_PING', t: 0x01020304 } });
     expect(decodeFrameLine(encodeSerialLine(SERIAL_TYPE.LINK_PONG, bytes('010203')))).toEqual({ ok: false, error: 'truncated' });
     expect(decodeFrameLine(encodeSerialLine(SERIAL_TYPE.LINK_PONG, bytes('0102030405')))).toEqual({ ok: false, error: 'too_long' });
-    expect(decodeFrameLine(encodeSerialLine(SERIAL_TYPE.GW_STATUS, bytes('aa')))).toEqual({ ok: true, value: { type: 'GW_STATUS', body: bytes('aa') } });
     expect(decodeFrameLine(encodeSerialLine(0x42, bytes('aa')))).toEqual({ ok: true, value: { type: 'UNKNOWN', code: 0x42, body: bytes('aa') } });
     expect(decodeFrameLine(encodeSerialLine(SERIAL_TYPE.ENV, bytes('a2')))).toEqual({ ok: false, error: 'truncated' });
     expect(() => encodeLinkLine('LINK_PING', -1)).toThrow(RangeError);
+  });
+
+  it('gateway frames (design m2-c4-gateway D1): GW_RX and GW_TX expose the envelope as a subarray', () => {
+    const env = encodeEnvelope({ header: { flags: 0, cls: CLS.CMD, kind: 1, seq: 9, net: 0, src: 0, dst: 0x12, epoch: 3, ttl: 0x22, port: 2 } });
+    const mac = bytes('a0b1c2d3e4f5');
+    const line = encodeFrameLine({ type: 'GW_TX', tx_id: 513, dst_mac: mac, tx_opts: GwTxOpt.no_retry | GwRate.robust, env });
+    const f = decodeFrameLine(line);
+    expect(f.ok && f.value).toMatchObject({ type: 'GW_TX', tx_id: 513, tx_opts: 5 });
+    if (!f.ok || f.value.type !== 'GW_TX') {
+      throw new Error('not a GW_TX');
+    }
+    expect(hex(f.value.dst_mac)).toBe('a0b1c2d3e4f5');
+    expect(hex(f.value.env)).toBe(hex(env));
+    // Views into the decoded line, not copies.
+    expect(f.value.env.buffer).toBe(f.value.dst_mac.buffer);
+    expect(decodeEnvelope(f.value.env).ok).toBe(true);
+    const rx = decodeGwRx(encodeGwRx({ src_mac: mac, rssi: -61, channel: 6, rx_ts_us: 0xffffffff, env }));
+    expect(rx.ok && { ...rx.value, src_mac: hex(rx.value.src_mac), env: hex(rx.value.env) }).toEqual({ src_mac: 'a0b1c2d3e4f5', rssi: -61, channel: 6, rx_ts_us: 0xffffffff, env: hex(env) });
+    // A prefix alone is a GW_RX with an empty envelope; one byte short is truncated.
+    expect(decodeGwRx(new Uint8Array(GW_RX_PREFIX_SIZE)).ok).toBe(true);
+    expect(decodeGwRx(new Uint8Array(GW_RX_PREFIX_SIZE - 1))).toEqual({ ok: false, error: 'truncated' });
+    expect(decodeGwTxDone(new Uint8Array(GW_TX_DONE_SIZE + 1))).toEqual({ ok: false, error: 'too_long' });
+    expect(decodeGwTxDone(encodeGwTxDone({ tx_id: 1, status: 'queue_full' }))).toEqual({ ok: true, value: { tx_id: 1, status: 'queue_full', link_retries: 0, queued_us: 0 } });
+    // Enums are open: an unnamed status decodes as its number.
+    expect(decodeGwTxDone(encodeGwTxDone({ status: 9 }))).toMatchObject({ ok: true, value: { status: 9 } });
+    expect(() => encodeGwTx({ dst_mac: bytes('a0b1c2d3e4') })).toThrow(/6 bytes/);
+    expect(() => encodeGwRx({ rssi: -129 })).toThrow(RangeError);
+    expect(() => encodeGwRx({ env: new Uint8Array(SERIAL_MAX_BODY - GW_RX_PREFIX_SIZE + 1) })).toThrow(RangeError);
+    // The protobuf bodies: GW_STATUS decodes through GwStatus, a malformed body fails the line.
+    const status = decodeGwStatus(encodeGwStatus({ channel: 6, mode: 'router', q_max: 32 }));
+    if (!status.ok) {
+      throw new Error(status.error);
+    }
+    const st = decodeFrameLine(encodeFrameLine({ type: 'GW_STATUS', ...status.value }));
+    expect(st.ok && st.value).toMatchObject({ type: 'GW_STATUS', channel: 6, mode: 'router', q_max: 32 });
+    expect(decodeFrameLine(encodeSerialLine(SERIAL_TYPE.GW_STATUS, bytes('08')))).toEqual({ ok: false, error: 'truncated' });
+    expect(decodeFrameLine(encodeSerialLine(SERIAL_TYPE.GW_RSP, bytes('0b')))).toEqual({ ok: false, error: 'bad_wire_type' });
+    const cmd = decodeFrameLine(encodeFrameLine({ type: 'GW_CMD', req: 4, op: 'set_rate', channel: 0, net: 0, rate: 'fast' }));
+    expect(cmd.ok && cmd.value).toEqual({ type: 'GW_CMD', req: 4, op: 'set_rate', channel: 0, net: 0, rate: 'fast' });
   });
 });
 

@@ -256,6 +256,65 @@ describe('validation errors name the file and path', () => {
     expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x0002))), BUTTON, 'id', /allocates 0x0002 to fr\.led, not fr\.button/);
   });
 
+  it('serial_bodies (design m2-c4-gateway D1)', () => {
+    const issues = issuesOf(
+      edited(PROTOCOL, (y) => {
+        delete y.serial_bodies.GW_RSP;
+        y.serial_bodies.ENV = { envelope: true };
+        y.serial_bodies.GW_NOPE = { layout: [{ name: 't', type: 'u32' }] };
+        y.serial_bodies.GW_TX.layout.push({ name: 'env', type: 'u8' }, { name: 'tx_id', type: 'u8' }, { name: 'speed', type: 'f32' });
+        y.serial_bodies.GW_TX_DONE.layout[1].type = 'ChipId';
+        y.serial_bodies.GW_CMD = { message: 'GwNope' };
+        y.serial_bodies.GW_STATUS = { message: 'GwStatus', layout: [{ name: 't', type: 'u8' }] };
+        y.serial_bodies.LINK_PING = { message: 'GwStatus', envelope: true };
+      }),
+    );
+    expectIssue(issues, PROTOCOL, 'serial_bodies', /serial type GW_RSP has no body/);
+    expectIssue(issues, PROTOCOL, 'serial_bodies.ENV', /ENV's body is an envelope/);
+    expectIssue(issues, PROTOCOL, 'serial_bodies.GW_NOPE', /not a serial_framing type/);
+    expectIssue(issues, PROTOCOL, 'serial_bodies.GW_TX.layout.3', /field name 'env' is taken/);
+    expectIssue(issues, PROTOCOL, 'serial_bodies.GW_TX.layout.4', /field name 'tx_id' is taken/);
+    expectIssue(issues, PROTOCOL, 'serial_bodies.GW_TX.layout.5.type', /unknown layout type 'f32'/);
+    expectIssue(issues, PROTOCOL, 'serial_bodies.GW_CMD.message', /unknown protocol type 'GwNope'/);
+    expectIssue(issues, PROTOCOL, 'serial_bodies.GW_STATUS', /exactly one of layout and message/);
+    expectIssue(issues, PROTOCOL, 'serial_bodies.LINK_PING.envelope', /layout bodies only/);
+    // A u8 enum is fine; one that needs a u16 is not (ChipId fits a u8, so widen it).
+    const wide = issuesOf(
+      edited(PROTOCOL, (y) => {
+        y.enums.ChipId.esp32p4 = 300;
+        y.serial_bodies.GW_TX_DONE.layout[1].type = 'ChipId';
+      }),
+    );
+    expectIssue(wide, PROTOCOL, 'serial_bodies.GW_TX_DONE.layout.1.type', /does not fit the u8/);
+    const named = issuesOf(edited(PROTOCOL, (y) => (y.types.GwRsp.type = { id: 7, type: 'u8' })));
+    expectIssue(named, PROTOCOL, 'serial_bodies.GW_RSP.message', /GwRsp\.type: the frame objects use 'type'/);
+  });
+
+  it('the committed serial bodies: layouts, offsets and the protobuf types', () => {
+    const b = model().protocol.serial.bodies;
+    expect(b.map((x) => [x.name, x.kind, x.prefixSize, x.envelope, x.message?.name ?? null])).toEqual([
+      ['GW_RX', 'layout', 12, true, null],
+      ['GW_TX', 'layout', 9, true, null],
+      ['GW_TX_DONE', 'layout', 8, false, null],
+      ['GW_STATUS', 'message', 0, false, 'GwStatus'],
+      ['GW_CMD', 'message', 0, false, 'GwCmd'],
+      ['GW_RSP', 'message', 0, false, 'GwRsp'],
+      ['LINK_PING', 'layout', 4, false, null],
+      ['LINK_PONG', 'layout', 4, false, null],
+    ]);
+    expect(b[0].layout.map((f) => [f.name, f.type, f.offset])).toEqual([['src_mac', 'mac', 0], ['rssi', 'i8', 6], ['channel', 'u8', 7], ['rx_ts_us', 'u32', 8]]);
+    expect(b[2].layout[1].enum?.name).toBe('GwTxStatus');
+    // The gateway-era bodies stay inside the realtime budget (NET.NEIGHBORS 12 entries, OTA.CHUNK 187 data bytes).
+    const msgs = model().protocol.messages;
+    for (const k of ['NET.BEACON', 'NET.DISCOVER', 'NET.JOIN_REQ', 'NET.JOIN_ACCEPT', 'NET.CHANNEL_SWITCH', 'NET.NEIGHBORS', 'OTA.CHUNK', 'ACK.SACK']) {
+      const m = msgs.find((x) => x.key === k)!;
+      expect(m.realtime, k).toBe(true);
+    }
+    expect(msgs.find((x) => x.key === 'OTA.CHUNK')!.maxBody).toBe(200);
+    expect(msgs.find((x) => x.key === 'NET.WELCOME')!.fields.find((f) => f.name === 'net_mode')!.typeName).toBe('NetMode');
+    expect(model().protocol.extTlvs.find((t) => t.type === 0x82)).toEqual({ type: 0x82, name: 'exec_at_hub_us', valueType: 'u32', critical: true });
+  });
+
   it('the realtime payload budget', () => {
     const big = issuesOf(edited(BUTTON, (y) => (y.events.down.fields = { note: { id: 1, type: 'string', max: 200 } })));
     expectIssue(big, BUTTON, 'events.down', /worst-case EVENT payload 207 B exceeds the 200 B realtime budget/);

@@ -18,6 +18,7 @@ constexpr uint8_t kLate = static_cast<uint8_t>(fr::Err::late);
 constexpr uint8_t kBusy = static_cast<uint8_t>(fr::Err::busy);
 constexpr uint8_t kExpired = static_cast<uint8_t>(fr::Err::expired);
 constexpr uint8_t kInvalid = static_cast<uint8_t>(fr::Err::invalid_args);
+constexpr uint8_t kUnsupported = static_cast<uint8_t>(fr::Err::unsupported);
 
 std::vector<Frame> results(const frt::FakeLink &l)
 {
@@ -163,6 +164,33 @@ TEST(net_exec_at_refusals_in_order)
     CHECK_EQ(r.host.calls.size(), 8u);
     r.deliver(LinkKind::tcp, at_cmd(r.hub, 2, 1, {}, wire::kFlagAckReq, r.core.now() + 1000));
     CHECK_EQ(r.net.state().cmds_scheduled, 9u);
+}
+
+TEST(net_exec_at_hub_clock_is_unsupported)
+{
+    // EXT 0x82 exec_at_hub_us (design m2-c4-gateway D4): the hub's clock, which the node cannot read before
+    // M2-C8. A hub CMD carrying it answers UNSUPPORTED, unrun and unscheduled, with or without 0x81 beside it.
+    NetRig r;
+    synced(r);
+    const auto hub_at = [&r](bool with_exec_at) {
+        wire::ExtBuilder ext;
+        if (with_exec_at) {
+            ext.add_value(wire::kExtExecAtUs, static_cast<uint32_t>(r.core.now() + 100'000));
+        }
+        ext.add_value(wire::kExtExecAtHubUs, 0x80000001u);
+        return r.hub.cmd(2, 1, {}, wire::kFlagAckReq, ext.view());
+    };
+    r.deliver(LinkKind::tcp, hub_at(false));
+    r.deliver(LinkKind::tcp, hub_at(true));
+    const auto res = results(r.tcp);
+    REQUIRE_EQ(res.size(), 2u);
+    CHECK_EQ(res[0].result.status, kUnsupported);
+    CHECK_EQ(res[1].result.status, kUnsupported);
+    r.core.advance_ms(200);
+    CHECK(r.host.calls.empty());
+    fr::net::State s = r.net.state();
+    CHECK_EQ(s.cmds_scheduled, 0u);
+    CHECK_EQ(s.cmds_refused, 2u);
 }
 
 TEST(net_exec_at_runs_in_order_of_its_time)

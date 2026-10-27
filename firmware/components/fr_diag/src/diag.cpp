@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 #include "cJSON.h"
 #include "catalog.hpp"
@@ -145,6 +146,14 @@ void add_link_states(cJSON *res, const NetStatus &n)
         } else {
             cJSON_AddBoolToObject(o, "session", l.session);
             cJSON_AddBoolToObject(o, "synced", l.time_synced);
+        }
+        if (i == kLinkGateway && n.gateway.chosen) {
+            // design m2-c4-gateway D11: the gateway it would use, by its newest BEACON.
+            char mac[13];
+            const uint8_t *m = n.gateway.mac;
+            std::snprintf(mac, sizeof(mac), "%02x%02x%02x%02x%02x%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
+            cJSON_AddStringToObject(o, "gw", mac);
+            cJSON_AddNumberToObject(o, "rssi", n.gateway.rssi);
         }
     }
     cJSON *hub = cJSON_AddObjectToObject(res, "hub");
@@ -523,7 +532,7 @@ bool fits(cJSON *json, size_t room)
  * `omitted`, so a Wi-Fi-only node always answers; the dropped ones are a `stats <section>` away.
  */
 constexpr std::string_view kStatSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs",
-                                              "net_logs"};
+                                              "net_logs", "gateway", "gw"};
 constexpr size_t kStatSectionCount = sizeof(kStatSections) / sizeof(kStatSections[0]);
 
 /** The index of `name` in kStatSections, or kStatSectionCount. */
@@ -602,6 +611,34 @@ void add_stat_section(cJSON *res, size_t i, const NetStatus &n)
         cJSON_AddNumberToObject(o, "age_drop", n.net_logs.age_drop);
         cJSON_AddNumberToObject(o, "rate_drop", n.net_logs.rate_drop);
         cJSON_AddNumberToObject(o, "cut", n.net_logs.cut);
+    } else if (name == "gateway") {  // the gateway session (design m2-c4-gateway D10-D12)
+        const GatewayStatus &g = n.gateway;
+        cJSON_AddNumberToObject(o, "live", g.live);
+        cJSON_AddNumberToObject(o, "beacons", g.beacons);
+        cJSON_AddNumberToObject(o, "lost", g.lost);
+        cJSON_AddNumberToObject(o, "opened", g.opened);
+        cJSON_AddNumberToObject(o, "closed", g.closed);
+        cJSON_AddNumberToObject(o, "tx_nak", g.tx_nak);
+        cJSON_AddNumberToObject(o, "too_big", g.too_big);
+        if (g.chosen) {
+            cJSON_AddNumberToObject(o, "age_ms", g.age_ms);
+        }
+    } else if (name == "gw") {  // a gateway's bridge (design m2-c4-gateway D8)
+        const GwBridgeStatus &g = n.gw;
+        cJSON_AddBoolToObject(o, "on", g.on);
+        const std::pair<const char *, uint32_t> fields[] = {
+            {"tx", g.tx},           {"tx_fail", g.tx_fail},       {"tx_nak", g.tx_nak},
+            {"tx_queue_full", g.tx_queue_full}, {"tx_no_peer", g.tx_no_peer}, {"tx_too_big", g.tx_too_big},
+            {"tx_radio_off", g.tx_radio_off},   {"tx_stale", g.tx_stale},     {"tx_dropped", g.tx_dropped},
+            {"tx_busy", g.tx_busy}, {"done_dropped", g.done_dropped}, {"tx_refused", g.tx_refused}, {"rx", g.rx},
+            {"rx_drop", g.rx_drop}, {"rx_no_hub", g.rx_no_hub},   {"rx_line_full", g.rx_line_full},
+            {"rx_too_big", g.rx_too_big}, {"rx_bad", g.rx_bad},   {"pings", g.pings},
+            {"hub_lost", g.hub_lost}, {"cmds", g.cmds},           {"beacons", g.beacons},
+            {"q_high", g.q_high},   {"last_tx_us", g.last_tx_us},
+        };
+        for (const auto &[key, v] : fields) {
+            cJSON_AddNumberToObject(o, key, v);
+        }
     } else {  // msgs: per topic, the first kMsgTopics seen, then `other`
         for (const MsgTopicCount &t : n.msgs) {
             if (t.name[0] != '\0') {
@@ -630,6 +667,9 @@ void fit_stats(cJSON *res, const NetStatus &n, size_t room)
         if (omitted == nullptr) {
             omitted = cJSON_AddArrayToObject(res, "omitted");
         }
+        if (cJSON_GetObjectItem(res, kStatSections[i].data()) == nullptr) {
+            continue;  // a section the full answer leaves out (gw off a gateway)
+        }
         if (kStatSections[i] == "msgs") {
             cJSON_DeleteItemFromObject(res, "msgs_folded");
         }
@@ -643,7 +683,7 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t room)
     std::string_view opt = next_word(args);
     const size_t section = stat_section(opt);
     if (!args.empty() || (!opt.empty() && opt != "reset" && section == kStatSectionCount)) {
-        return fail("invalid_args", "usage: stats [reset|links|bcast|relay|espnow|bindings|nodes|msgs|net_logs]");
+        return fail("invalid_args", "usage: stats [reset|links|bcast|relay|espnow|bindings|nodes|msgs|net_logs|gateway|gw]");
     }
     NetStatus n = host.net_status();
     if (section != kStatSectionCount) {
@@ -699,6 +739,9 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t room)
     // design m2-c3-inputs D6: STATE second copies a newer STATE of the same property replaced.
     cJSON_AddNumberToObject(res, "state_repeats_superseded", n.state_repeats_superseded);
     for (size_t i = 1; i < kStatSectionCount; ++i) {
+        if (kStatSections[i] == "gw" && !n.gw.on) {
+            continue;  // only a gateway has a bridge; `stats gw` still answers {"on":false}
+        }
         add_stat_section(res, i, n);
     }
     fit_stats(res, n, room);
@@ -826,6 +869,300 @@ Fail cmd_net_loss(std::string_view args, Host &host, cJSON *res)
 }
 #endif
 
+// ---- spike S2's hooks (design m2-c4-gateway D19): air, wifi proto, cpu, net stream ----
+
+#if FR_TEST_HOOKS
+constexpr const char *kNoHooks = "no S2 hooks in this runtime";
+
+/** A MAC as 12 hex digits, colons between the bytes allowed. */
+bool parse_mac(std::string_view s, uint8_t (&out)[6])
+{
+    size_t n = 0;
+    for (size_t i = 0; i < s.size(); ++i) {
+        const char c = s[i];
+        if (c == ':') {
+            continue;
+        }
+        const int v = std::isdigit(static_cast<unsigned char>(c)) ? c - '0'
+                      : (c >= 'a' && c <= 'f')                    ? c - 'a' + 10
+                      : (c >= 'A' && c <= 'F')                    ? c - 'A' + 10
+                                                                  : -1;
+        if (v < 0 || n >= 12) {
+            return false;
+        }
+        out[n / 2] = static_cast<uint8_t>(n % 2 == 0 ? v << 4 : out[n / 2] | v);
+        ++n;
+    }
+    return n == 12;
+}
+
+void add_mac(cJSON *o, const char *key, const uint8_t (&mac)[6])
+{
+    char text[13];
+    std::snprintf(text, sizeof(text), "%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    cJSON_AddStringToObject(o, key, text);
+}
+
+void add_percentiles(cJSON *res, const char *key, uint32_t p50, uint32_t p99, uint32_t max)
+{
+    cJSON *o = cJSON_AddObjectToObject(res, key);
+    cJSON_AddNumberToObject(o, "p50", p50);
+    cJSON_AddNumberToObject(o, "p99", p99);
+    cJSON_AddNumberToObject(o, "max", max);
+}
+
+/** `air bench rx [reset]`: the run and every source, then (reset) all of it cleared. */
+Fail air_bench_rx(std::string_view args, TestHooks &t, cJSON *res)
+{
+    const std::string_view opt = next_word(args);
+    if ((!opt.empty() && opt != "reset") || !args.empty()) {
+        return fail("invalid_args", "usage: air bench rx [reset]");
+    }
+    const BenchStatus b = t.bench();
+    cJSON *tx = cJSON_AddObjectToObject(res, "tx");
+    cJSON_AddBoolToObject(tx, "running", b.tx.running);
+    if (b.tx.broadcast) {
+        cJSON_AddStringToObject(tx, "dst", "bcast");
+    } else {
+        add_mac(tx, "dst", b.tx.dst);
+    }
+    cJSON_AddNumberToObject(tx, "count", b.tx.count);
+    cJSON_AddNumberToObject(tx, "len", b.tx.len);
+    cJSON_AddNumberToObject(tx, "interval_ms", b.tx.interval_ms);
+    cJSON_AddBoolToObject(tx, "echo", b.tx.echo);
+    cJSON_AddNumberToObject(tx, "sent", b.tx.sent);
+    cJSON_AddNumberToObject(tx, "refused", b.tx.refused);
+    cJSON_AddNumberToObject(tx, "acked", b.tx.acked);
+    cJSON_AddNumberToObject(tx, "failed", b.tx.failed);
+    cJSON_AddNumberToObject(tx, "echoes", b.tx.echoes);
+    cJSON_AddNumberToObject(tx, "rtt_p50_us", b.tx.rtt_p50_us);
+    cJSON_AddNumberToObject(tx, "rtt_p99_us", b.tx.rtt_p99_us);
+    cJSON_AddNumberToObject(tx, "rtt_max_us", b.tx.rtt_max_us);
+    cJSON_AddNumberToObject(tx, "elapsed_ms", b.tx.elapsed_ms);
+    cJSON *rx = cJSON_AddArrayToObject(res, "rx");
+    for (size_t i = 0; i < b.rx_count && i < kBenchSources; ++i) {
+        const BenchRxStatus &r = b.rx[i];
+        cJSON *o = cJSON_CreateObject();
+        add_mac(o, "mac", r.mac);
+        cJSON_AddNumberToObject(o, "addr", r.addr);
+        cJSON_AddNumberToObject(o, "received", r.received);
+        cJSON_AddNumberToObject(o, "gaps", r.gaps);
+        cJSON_AddNumberToObject(o, "dups", r.dups);
+        cJSON_AddNumberToObject(o, "rssi_p50", r.rssi_p50);
+        cJSON_AddNumberToObject(o, "echoed", r.echoed);
+        cJSON_AddNumberToObject(o, "age_ms", r.age_ms);
+        cJSON_AddItemToArray(rx, o);
+    }
+    if (opt == "reset") {
+        t.bench_reset();  // the answer carries what was cleared, as `stats reset` does
+    }
+    return ok;
+}
+#endif
+
+/**
+ * `air bench tx <mac|bcast> <count> <len> <interval_ms> [echo]`, `air bench rx [reset]`, `air rate <robust|fast>
+ * [bcast]`, `air txpower <qdbm|profile>`, `air churn <n>` (design m2-c4-gateway D19).
+ */
+Fail cmd_air(std::string_view args, Host &host, cJSON *res, size_t)
+{
+#if FR_TEST_HOOKS
+    TestHooks *t = host.test_hooks();
+    if (t == nullptr) {
+        return fail("unsupported", kNoHooks);
+    }
+    const std::string_view what = next_word(args);
+    if (what == "bench") {
+        const std::string_view dir = next_word(args);
+        if (dir == "rx") {
+            return air_bench_rx(args, *t, res);
+        }
+        const std::string_view dst_arg = next_word(args);
+        const std::string_view count_arg = next_word(args);
+        const std::string_view len_arg = next_word(args);
+        const std::string_view interval_arg = next_word(args);
+        const std::string_view echo_arg = next_word(args);
+        uint8_t mac[6] = {};
+        const bool bcast = dst_arg == "bcast";
+        uint32_t count = 0;
+        uint32_t len = 0;
+        uint32_t interval = 0;
+        if (dir != "tx" || (!bcast && !parse_mac(dst_arg, mac)) || !parse_uint(count_arg, 1, 1'000'000, count) ||
+            !parse_uint(len_arg, 32, 215, len) || !parse_uint(interval_arg, 0, 60'000, interval) ||
+            (!echo_arg.empty() && echo_arg != "echo") || !args.empty()) {
+            return fail("invalid_args", "usage: air bench tx <mac|bcast> <count 1-1000000> <len 32-215> "
+                                        "<interval_ms 0-60000> [echo] | air bench rx [reset]");
+        }
+        const bool echo = echo_arg == "echo";
+        Status st = t->bench_tx(bcast ? nullptr : mac, count, static_cast<uint16_t>(len), interval, echo);
+        if (!st) {
+            return fail(err_name(st.error()));
+        }
+        if (bcast) {
+            cJSON_AddStringToObject(res, "dst", "bcast");
+        } else {
+            add_mac(res, "dst", mac);
+        }
+        cJSON_AddNumberToObject(res, "count", count);
+        cJSON_AddNumberToObject(res, "len", len);
+        cJSON_AddNumberToObject(res, "interval_ms", interval);
+        cJSON_AddBoolToObject(res, "echo", echo);
+        return ok;
+    }
+    if (what == "rate") {
+        const std::string_view rate = next_word(args);
+        const std::string_view peer = next_word(args);
+        if ((rate != "robust" && rate != "fast") || (!peer.empty() && peer != "bcast") || !args.empty()) {
+            return fail("invalid_args", "usage: air rate <robust|fast> [bcast]");
+        }
+        auto r = t->air_rate(rate == "fast", peer == "bcast");
+        if (!r) {
+            return fail(err_name(r.error()));
+        }
+        cJSON_AddStringToObject(res, "rate", rate == "fast" ? "fast" : "robust");
+        cJSON_AddStringToObject(res, "peer", peer == "bcast" ? "bcast" : "unicast");
+        cJSON_AddNumberToObject(res, "peers", r->peers);
+        cJSON_AddNumberToObject(res, "rate_fail", r->failed);
+        return ok;
+    }
+    if (what == "txpower") {
+        // A number bypasses the board's cap (rf.max_tx_power_qdbm) for the spike; `profile` puts it back.
+        const std::string_view q = next_word(args);
+        const bool profile = q == "profile";
+        uint32_t qdbm = 0;
+        if ((!profile && !parse_uint(q, 8, 84, qdbm)) || !args.empty()) {
+            return fail("invalid_args", "usage: air txpower <qdbm 8-84 | profile> (0.25 dBm steps)");
+        }
+        auto r = t->air_txpower(profile ? std::nullopt : std::optional<int8_t>(static_cast<int8_t>(qdbm)));
+        if (!r) {
+            return fail(err_name(r.error()));
+        }
+        if (profile) {
+            cJSON_AddStringToObject(res, "set_qdbm", "profile");
+        } else {
+            cJSON_AddNumberToObject(res, "set_qdbm", qdbm);
+        }
+        cJSON_AddNumberToObject(res, "qdbm", r->qdbm);
+        cJSON_AddNumberToObject(res, "profile_qdbm", r->profile_qdbm);
+        return ok;
+    }
+    if (what == "churn") {
+        const std::string_view n_arg = next_word(args);
+        uint32_t n = 0;
+        if (!parse_uint(n_arg, 1, 1000, n) || !args.empty()) {
+            return fail("invalid_args", "usage: air churn <n 1-1000>");
+        }
+        auto r = t->air_churn(n);
+        if (!r) {
+            return fail(err_name(r.error()));
+        }
+        cJSON_AddNumberToObject(res, "n", r->n);
+        cJSON_AddNumberToObject(res, "failed", r->failed);
+        add_percentiles(res, "add_us", r->add_p50_us, r->add_p99_us, r->add_max_us);
+        add_percentiles(res, "del_us", r->del_p50_us, r->del_p99_us, r->del_max_us);
+        return ok;
+    }
+    return fail("invalid_args",
+                "usage: air bench tx|rx ... | rate <robust|fast> [bcast] | txpower <qdbm|profile> | churn <n>");
+#else
+    (void)args;
+    (void)host;
+    (void)res;
+    return fail("unsupported", "test hooks are off in this build");
+#endif
+}
+
+/** `wifi proto <ax|bgn>` (design m2-c4-gateway D19 (e), ESP32-C6 only). */
+Fail cmd_wifi(std::string_view args, Host &host, cJSON *res, size_t)
+{
+#if FR_TEST_HOOKS
+    TestHooks *t = host.test_hooks();
+    if (t == nullptr) {
+        return fail("unsupported", kNoHooks);
+    }
+    const std::string_view what = next_word(args);
+    const std::string_view proto = next_word(args);
+    if (what != "proto" || (proto != "ax" && proto != "bgn") || !args.empty()) {
+        return fail("invalid_args", "usage: wifi proto <ax|bgn>");
+    }
+    Status st = t->wifi_proto(proto == "ax");
+    if (!st) {
+        return fail(err_name(st.error()), st.error() == Err::unsupported ? "11ax needs an ESP32-C6" : nullptr);
+    }
+    cJSON_AddStringToObject(res, "proto", proto == "ax" ? "ax" : "bgn");
+    return ok;
+#else
+    (void)args;
+    (void)host;
+    (void)res;
+    return fail("unsupported", "test hooks are off in this build");
+#endif
+}
+
+/** `cpu` (design m2-c4-gateway D19 (f)): the idle share of each core over the last 10 s (since boot at the first). */
+Fail cmd_cpu(std::string_view args, Host &host, cJSON *res, size_t)
+{
+#if FR_TEST_HOOKS
+    TestHooks *t = host.test_hooks();
+    if (t == nullptr) {
+        return fail("unsupported", kNoHooks);
+    }
+    if (!trim(args).empty()) {
+        return fail("invalid_args", "usage: cpu");
+    }
+    auto c = t->cpu();
+    if (!c) {
+        return fail(err_name(c.error()), c.error() == Err::unsupported ? "no FreeRTOS run-time stats" : nullptr);
+    }
+    uint32_t sum = 0;
+    cJSON *per = cJSON_AddArrayToObject(res, "per_core");
+    for (size_t i = 0; i < c->cores && i < kCpuCoresMax; ++i) {
+        sum += c->idle_permille[i];
+        cJSON_AddItemToArray(per, cJSON_CreateNumber(c->idle_permille[i] / 10.0));
+    }
+    cJSON_AddNumberToObject(res, "idle_pct", c->cores != 0 ? sum / 10.0 / c->cores : 0.0);
+    cJSON_AddNumberToObject(res, "window_ms", c->window_ms);
+    return ok;
+#else
+    (void)args;
+    (void)host;
+    (void)res;
+    return fail("unsupported", "test hooks are off in this build");
+#endif
+}
+
+#if FR_TEST_HOOKS
+/** `net stream <hz> <s> [len]` (design m2-c4-gateway D19 (f), (g)). */
+Fail cmd_net_stream(std::string_view args, Host &host, cJSON *res)
+{
+    TestHooks *t = host.test_hooks();
+    if (t == nullptr) {
+        return fail("unsupported", kNoHooks);
+    }
+    const std::string_view hz_arg = next_word(args);
+    const std::string_view s_arg = next_word(args);
+    const std::string_view len_arg = next_word(args);
+    uint32_t hz = 0;
+    uint32_t s = 0;
+    uint32_t len = 8;
+    if (!parse_uint(hz_arg, 0, 1000, hz) || !parse_uint(s_arg, 0, 3600, s) ||
+        (!len_arg.empty() && !parse_uint(len_arg, 1, 200, len)) || !args.empty()) {
+        return fail("invalid_args", "usage: net stream <hz 0-1000> <seconds 0-3600> [len 1-200] (0 ends it)");
+    }
+    Status st = t->net_stream(hz, s, static_cast<uint16_t>(len));
+    if (!st) {
+        return fail(err_name(st.error()));
+    }
+    cJSON_AddStringToObject(res, "hook", "stream");
+    cJSON_AddNumberToObject(res, "hz", hz);
+    cJSON_AddNumberToObject(res, "s", s);
+    cJSON_AddNumberToObject(res, "len", len);
+    cJSON_AddNumberToObject(res, "port", kPortDiag);
+    cJSON_AddNumberToObject(res, "prop", 1);
+    return ok;
+}
+#endif
+
 Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
 {
 #if FR_TEST_HOOKS
@@ -833,6 +1170,9 @@ Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
     std::string_view name = next_word(args);
     if (name == "loss") {
         return cmd_net_loss(args, host, res);
+    }
+    if (name == "stream") {
+        return cmd_net_stream(args, host, res);
     }
     std::string_view secs = next_word(args);
     NetHook hook;
@@ -846,7 +1186,7 @@ Fail cmd_net(std::string_view args, Host &host, cJSON *res, size_t)
         hook = NetHook::wifi_down;
     } else {
         return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds> | "
-                                    "loss <pct> <seconds> [both|tx|rx]");
+                                    "loss <pct> <seconds> [both|tx|rx] | stream <hz> <seconds> [len]");
     }
     uint32_t s = 0;
     auto [end, ec] = std::from_chars(secs.data(), secs.data() + secs.size(), s);
@@ -910,7 +1250,7 @@ constexpr Command kCommands[] = {
     {"info", cmd_info},         {"caps", cmd_caps}, {"call", cmd_call},   {"inject", cmd_inject},
     {"selftest", cmd_selftest}, {"mark", cmd_mark}, {"log", cmd_log},     {"stats", cmd_stats},
     {"reboot", cmd_reboot},     {"net", cmd_net},   {"neighbors", cmd_neighbors},
-    {"pin_pulse", cmd_pin_pulse},
+    {"pin_pulse", cmd_pin_pulse}, {"air", cmd_air},   {"wifi", cmd_wifi},     {"cpu", cmd_cpu},
 };
 
 /** `#<id> ` prefix: 1-8 decimal digits. Returns the id text (empty when absent); false if malformed. */

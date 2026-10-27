@@ -3,11 +3,14 @@
 
 import { Reader, Writer, type Decoded } from '../wire/index.ts';
 
-import { Role, OtaState } from './protocol.ts';
+import { Role, NetMode, OtaState, GwOp, GwRate } from './protocol.ts';
 import * as $ from './support.ts';
 
 const RoleNames = $.enumNames(Role);
+const NetModeNames = $.enumNames(NetMode);
 const OtaStateNames = $.enumNames(OtaState);
+const GwOpNames = $.enumNames(GwOp);
+const GwRateNames = $.enumNames(GwRate);
 
 const DIRECTORY_ENTRY_JSON: readonly $.JsonField[] = [{ name: 'addr' }, { name: 'mac', json: 'bytes' }];
 
@@ -52,6 +55,57 @@ export function encodeDirectoryEntry(v: Partial<DirectoryEntry> = {}): Uint8Arra
 export function decodeDirectoryEntry(bytes: Uint8Array): Decoded<DirectoryEntry> {
   const r = new Reader(bytes);
   return $.done(r, readDirectoryEntry(r));
+}
+
+const NEIGHBOR_JSON: readonly $.JsonField[] = [{ name: 'mac', json: 'bytes' }, { name: 'rssi' }, { name: 'age_s' }];
+
+/** Neighbor (protocol type). */
+export interface Neighbor {
+  /** (<= 6 bytes) */
+  mac: Uint8Array;
+  rssi: number;
+  age_s: number;
+}
+
+function writeNeighbor(w: Writer, value: unknown, path: string): void {
+  const v = $.obj(value, path) as Partial<Neighbor>;
+  const f1 = $.bytes(v.mac ?? $.EMPTY, 6, `${path}.mac`);
+  if (f1.length > 0) w.fieldBytes(1, f1);
+  const f2 = $.int(v.rssi ?? 0, -128, 127, `${path}.rssi`);
+  if (f2 !== 0) w.fieldSint(2, f2);
+  const f3 = $.int(v.age_s ?? 0, 0, 255, `${path}.age_s`);
+  if (f3 !== 0) w.fieldUint(3, f3);
+}
+
+function readNeighbor(r: Reader): Neighbor {
+  const v: Neighbor = { mac: new Uint8Array(0), rssi: 0, age_s: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.mac = r.readBytes(6).slice();
+        break;
+      case 2:
+        v.rssi = r.readSint(-128, 127);
+        break;
+      case 3:
+        v.age_s = r.readUint(255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return v;
+}
+
+export function encodeNeighbor(v: Partial<Neighbor> = {}): Uint8Array {
+  const w = new Writer();
+  writeNeighbor(w, v, 'neighbor');
+  return w.finish();
+}
+
+export function decodeNeighbor(bytes: Uint8Array): Decoded<Neighbor> {
+  const r = new Reader(bytes);
+  return $.done(r, readNeighbor(r));
 }
 
 const DESCRIPTOR_CAP_JSON: readonly $.JsonField[] = [{ name: 'port' }, { name: 'cap_id' }, { name: 'version' }, { name: 'name' }, { name: 'traits', json: 'bytes' }];
@@ -363,13 +417,566 @@ export function decodeBindingList(bytes: Uint8Array): Decoded<BindingList> {
   return $.done(r, readBindingList(r));
 }
 
+const GW_STATUS_JSON: readonly $.JsonField[] = [{ name: 'channel' }, { name: 'mode', members: NetMode }, { name: 'uptime_s' }, { name: 'q_depth' }, { name: 'q_max' }, { name: 'peers' }, { name: 'tx' }, { name: 'tx_fail' }, { name: 'rx' }, { name: 'rx_drop' }, { name: 'rx_bad' }, { name: 'beacons' }, { name: 'ap_rssi' }, { name: 'ap_channel' }, { name: 'last_tx_us' }];
+
+/** GwStatus (protocol type). */
+export interface GwStatus {
+  channel: number;
+  mode: NetMode | number;
+  uptime_s: number;
+  /** GW_TX queued now */
+  q_depth: number;
+  /** the queue's capacity */
+  q_max: number;
+  /** unicast peers in the driver's table */
+  peers: number;
+  tx: number;
+  tx_fail: number;
+  rx: number;
+  /** received frames not forwarded (no hub, full line buffer) */
+  rx_drop: number;
+  /** GW_* lines from the host that did not decode */
+  rx_bad: number;
+  /** BEACONs forwarded */
+  beacons: number;
+  ap_rssi: number;
+  ap_channel: number;
+  /** the last GW_TX's queue-to-verdict time */
+  last_tx_us: number;
+}
+
+function writeGwStatus(w: Writer, value: unknown, path: string): void {
+  const v = $.obj(value, path) as Partial<GwStatus>;
+  const f1 = $.int(v.channel ?? 0, 0, 255, `${path}.channel`);
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.enumValue(NetMode, v.mode ?? 'router', `${path}.mode`, 255);
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.uptime_s ?? 0, 0, 0xffffffff, `${path}.uptime_s`);
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.int(v.q_depth ?? 0, 0, 255, `${path}.q_depth`);
+  if (f4 !== 0) w.fieldUint(4, f4);
+  const f5 = $.int(v.q_max ?? 0, 0, 255, `${path}.q_max`);
+  if (f5 !== 0) w.fieldUint(5, f5);
+  const f6 = $.int(v.peers ?? 0, 0, 255, `${path}.peers`);
+  if (f6 !== 0) w.fieldUint(6, f6);
+  const f7 = $.int(v.tx ?? 0, 0, 0xffffffff, `${path}.tx`);
+  if (f7 !== 0) w.fieldUint(7, f7);
+  const f8 = $.int(v.tx_fail ?? 0, 0, 0xffffffff, `${path}.tx_fail`);
+  if (f8 !== 0) w.fieldUint(8, f8);
+  const f9 = $.int(v.rx ?? 0, 0, 0xffffffff, `${path}.rx`);
+  if (f9 !== 0) w.fieldUint(9, f9);
+  const f10 = $.int(v.rx_drop ?? 0, 0, 0xffffffff, `${path}.rx_drop`);
+  if (f10 !== 0) w.fieldUint(10, f10);
+  const f11 = $.int(v.rx_bad ?? 0, 0, 0xffffffff, `${path}.rx_bad`);
+  if (f11 !== 0) w.fieldUint(11, f11);
+  const f12 = $.int(v.beacons ?? 0, 0, 0xffffffff, `${path}.beacons`);
+  if (f12 !== 0) w.fieldUint(12, f12);
+  const f13 = $.int(v.ap_rssi ?? 0, -128, 127, `${path}.ap_rssi`);
+  if (f13 !== 0) w.fieldSint(13, f13);
+  const f14 = $.int(v.ap_channel ?? 0, 0, 255, `${path}.ap_channel`);
+  if (f14 !== 0) w.fieldUint(14, f14);
+  const f15 = $.int(v.last_tx_us ?? 0, 0, 0xffffffff, `${path}.last_tx_us`);
+  if (f15 !== 0) w.fieldUint(15, f15);
+}
+
+function readGwStatus(r: Reader): GwStatus {
+  const v: GwStatus = { channel: 0, mode: 'router', uptime_s: 0, q_depth: 0, q_max: 0, peers: 0, tx: 0, tx_fail: 0, rx: 0, rx_drop: 0, rx_bad: 0, beacons: 0, ap_rssi: 0, ap_channel: 0, last_tx_us: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.channel = r.readUint(255);
+        break;
+      case 2:
+        v.mode = $.readEnum(r, NetModeNames, 255);
+        break;
+      case 3:
+        v.uptime_s = r.readUint(0xffffffff);
+        break;
+      case 4:
+        v.q_depth = r.readUint(255);
+        break;
+      case 5:
+        v.q_max = r.readUint(255);
+        break;
+      case 6:
+        v.peers = r.readUint(255);
+        break;
+      case 7:
+        v.tx = r.readUint(0xffffffff);
+        break;
+      case 8:
+        v.tx_fail = r.readUint(0xffffffff);
+        break;
+      case 9:
+        v.rx = r.readUint(0xffffffff);
+        break;
+      case 10:
+        v.rx_drop = r.readUint(0xffffffff);
+        break;
+      case 11:
+        v.rx_bad = r.readUint(0xffffffff);
+        break;
+      case 12:
+        v.beacons = r.readUint(0xffffffff);
+        break;
+      case 13:
+        v.ap_rssi = r.readSint(-128, 127);
+        break;
+      case 14:
+        v.ap_channel = r.readUint(255);
+        break;
+      case 15:
+        v.last_tx_us = r.readUint(0xffffffff);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return v;
+}
+
+export function encodeGwStatus(v: Partial<GwStatus> = {}): Uint8Array {
+  const w = new Writer();
+  writeGwStatus(w, v, 'gw_status');
+  return w.finish();
+}
+
+export function decodeGwStatus(bytes: Uint8Array): Decoded<GwStatus> {
+  const r = new Reader(bytes);
+  return $.done(r, readGwStatus(r));
+}
+
+const GW_CMD_JSON: readonly $.JsonField[] = [{ name: 'req' }, { name: 'op', members: GwOp }, { name: 'channel' }, { name: 'net' }, { name: 'rate', members: GwRate }];
+
+/** GwCmd (protocol type). */
+export interface GwCmd {
+  req: number;
+  op: GwOp | number;
+  /** set_channel */
+  channel: number;
+  /** set_net */
+  net: number;
+  /** set_rate: the default per-peer rate */
+  rate: GwRate | number;
+}
+
+function writeGwCmd(w: Writer, value: unknown, path: string): void {
+  const v = $.obj(value, path) as Partial<GwCmd>;
+  const f1 = $.int(v.req ?? 0, 0, 65535, `${path}.req`);
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.enumValue(GwOp, v.op ?? 'none', `${path}.op`, 255);
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.channel ?? 0, 0, 255, `${path}.channel`);
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.int(v.net ?? 0, 0, 65535, `${path}.net`);
+  if (f4 !== 0) w.fieldUint(4, f4);
+  const f5 = $.enumValue(GwRate, v.rate ?? 'peer_default', `${path}.rate`, 255);
+  if (f5 !== 0) w.fieldUint(5, f5);
+}
+
+function readGwCmd(r: Reader): GwCmd {
+  const v: GwCmd = { req: 0, op: 'none', channel: 0, net: 0, rate: 'peer_default' };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.req = r.readUint(65535);
+        break;
+      case 2:
+        v.op = $.readEnum(r, GwOpNames, 255);
+        break;
+      case 3:
+        v.channel = r.readUint(255);
+        break;
+      case 4:
+        v.net = r.readUint(65535);
+        break;
+      case 5:
+        v.rate = $.readEnum(r, GwRateNames, 255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return v;
+}
+
+export function encodeGwCmd(v: Partial<GwCmd> = {}): Uint8Array {
+  const w = new Writer();
+  writeGwCmd(w, v, 'gw_cmd');
+  return w.finish();
+}
+
+export function decodeGwCmd(bytes: Uint8Array): Decoded<GwCmd> {
+  const r = new Reader(bytes);
+  return $.done(r, readGwCmd(r));
+}
+
+const GW_RSP_JSON: readonly $.JsonField[] = [{ name: 'req' }, { name: 'status' }, { name: 'channel' }, { name: 'net' }, { name: 'rate', members: GwRate }, { name: 'peers' }];
+
+/** GwRsp (protocol type). */
+export interface GwRsp {
+  req: number;
+  /** a status code: OK, or BUSY for set_channel while associated, UNSUPPORTED, INVALID_ARGS */
+  status: number;
+  channel: number;
+  net: number;
+  rate: GwRate | number;
+  peers: number;
+}
+
+function writeGwRsp(w: Writer, value: unknown, path: string): void {
+  const v = $.obj(value, path) as Partial<GwRsp>;
+  const f1 = $.int(v.req ?? 0, 0, 65535, `${path}.req`);
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.status ?? 0, 0, 255, `${path}.status`);
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.channel ?? 0, 0, 255, `${path}.channel`);
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.int(v.net ?? 0, 0, 65535, `${path}.net`);
+  if (f4 !== 0) w.fieldUint(4, f4);
+  const f5 = $.enumValue(GwRate, v.rate ?? 'peer_default', `${path}.rate`, 255);
+  if (f5 !== 0) w.fieldUint(5, f5);
+  const f6 = $.int(v.peers ?? 0, 0, 255, `${path}.peers`);
+  if (f6 !== 0) w.fieldUint(6, f6);
+}
+
+function readGwRsp(r: Reader): GwRsp {
+  const v: GwRsp = { req: 0, status: 0, channel: 0, net: 0, rate: 'peer_default', peers: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.req = r.readUint(65535);
+        break;
+      case 2:
+        v.status = r.readUint(255);
+        break;
+      case 3:
+        v.channel = r.readUint(255);
+        break;
+      case 4:
+        v.net = r.readUint(65535);
+        break;
+      case 5:
+        v.rate = $.readEnum(r, GwRateNames, 255);
+        break;
+      case 6:
+        v.peers = r.readUint(255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return v;
+}
+
+export function encodeGwRsp(v: Partial<GwRsp> = {}): Uint8Array {
+  const w = new Writer();
+  writeGwRsp(w, v, 'gw_rsp');
+  return w.finish();
+}
+
+export function decodeGwRsp(bytes: Uint8Array): Decoded<GwRsp> {
+  const r = new Reader(bytes);
+  return $.done(r, readGwRsp(r));
+}
+
+/** NET.DISCOVER (class 0x00, kind 1). */
+export interface NetDiscover {
+  net: number;
+  role: Role | number;
+  /** (<= 6 bytes) */
+  mac: Uint8Array;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNetDiscover(v: Partial<NetDiscover> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.net ?? 0, 0, 65535, 'net');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.enumValue(Role, v.role ?? 'node', 'role', 255);
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.bytes(v.mac ?? $.EMPTY, 6, 'mac');
+  if (f3.length > 0) w.fieldBytes(3, f3);
+  return w.finish();
+}
+
+export function decodeNetDiscover(bytes: Uint8Array): Decoded<NetDiscover> {
+  const r = new Reader(bytes);
+  const v: NetDiscover = { net: 0, role: 'node', mac: new Uint8Array(0) };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.net = r.readUint(65535);
+        break;
+      case 2:
+        v.role = $.readEnum(r, RoleNames, 255);
+        break;
+      case 3:
+        v.mac = r.readBytes(6).slice();
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** NET.BEACON (class 0x00, kind 2). */
+export interface NetBeacon {
+  channel: number;
+  /** b0 gateway_mode, b1 switching */
+  flags: number;
+  hub_epoch: number;
+  bcast_floor: number;
+  hub_time_us: bigint;
+  /** a.b.c.d as a << 24 | b << 16 | c << 8 | d */
+  hub_ipv4: number;
+  hub_port: number;
+  beacon_interval_ms: number;
+  bcast_watermark: number;
+  /** the gateway it went out on (a node may hear several) (<= 6 bytes) */
+  gw_mac: Uint8Array;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNetBeacon(v: Partial<NetBeacon> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.channel ?? 0, 0, 255, 'channel');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.flags ?? 0, 0, 255, 'flags');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.hub_epoch ?? 0, 0, 65535, 'hub_epoch');
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.int(v.bcast_floor ?? 0, 0, 0xffffffff, 'bcast_floor');
+  if (f4 !== 0) w.fieldUint(4, f4);
+  const f5 = $.u64(v.hub_time_us ?? 0n, 0n, 18446744073709551615n, 'hub_time_us');
+  if (f5 !== 0n) w.fieldUint64(5, f5);
+  const f6 = $.int(v.hub_ipv4 ?? 0, 0, 0xffffffff, 'hub_ipv4');
+  if (f6 !== 0) w.fieldUint(6, f6);
+  const f7 = $.int(v.hub_port ?? 0, 0, 65535, 'hub_port');
+  if (f7 !== 0) w.fieldUint(7, f7);
+  const f8 = $.int(v.beacon_interval_ms ?? 0, 0, 65535, 'beacon_interval_ms');
+  if (f8 !== 0) w.fieldUint(8, f8);
+  const f9 = $.int(v.bcast_watermark ?? 0, 0, 0xffffffff, 'bcast_watermark');
+  if (f9 !== 0) w.fieldUint(9, f9);
+  const f10 = $.bytes(v.gw_mac ?? $.EMPTY, 6, 'gw_mac');
+  if (f10.length > 0) w.fieldBytes(10, f10);
+  return w.finish();
+}
+
+export function decodeNetBeacon(bytes: Uint8Array): Decoded<NetBeacon> {
+  const r = new Reader(bytes);
+  const v: NetBeacon = { channel: 0, flags: 0, hub_epoch: 0, bcast_floor: 0, hub_time_us: 0n, hub_ipv4: 0, hub_port: 0, beacon_interval_ms: 0, bcast_watermark: 0, gw_mac: new Uint8Array(0) };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.channel = r.readUint(255);
+        break;
+      case 2:
+        v.flags = r.readUint(255);
+        break;
+      case 3:
+        v.hub_epoch = r.readUint(65535);
+        break;
+      case 4:
+        v.bcast_floor = r.readUint(0xffffffff);
+        break;
+      case 5:
+        v.hub_time_us = r.readUint64();
+        break;
+      case 6:
+        v.hub_ipv4 = r.readUint(0xffffffff);
+        break;
+      case 7:
+        v.hub_port = r.readUint(65535);
+        break;
+      case 8:
+        v.beacon_interval_ms = r.readUint(65535);
+        break;
+      case 9:
+        v.bcast_watermark = r.readUint(0xffffffff);
+        break;
+      case 10:
+        v.gw_mac = r.readBytes(6).slice();
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** NET.JOIN_REQ (class 0x00, kind 3). */
+export interface NetJoinReq {
+  /** (<= 6 bytes) */
+  mac: Uint8Array;
+  /** (<= 8 bytes) */
+  fw_id_prefix: Uint8Array;
+  role: Role | number;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNetJoinReq(v: Partial<NetJoinReq> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.bytes(v.mac ?? $.EMPTY, 6, 'mac');
+  if (f1.length > 0) w.fieldBytes(1, f1);
+  const f2 = $.bytes(v.fw_id_prefix ?? $.EMPTY, 8, 'fw_id_prefix');
+  if (f2.length > 0) w.fieldBytes(2, f2);
+  const f3 = $.enumValue(Role, v.role ?? 'node', 'role', 255);
+  if (f3 !== 0) w.fieldUint(3, f3);
+  return w.finish();
+}
+
+export function decodeNetJoinReq(bytes: Uint8Array): Decoded<NetJoinReq> {
+  const r = new Reader(bytes);
+  const v: NetJoinReq = { mac: new Uint8Array(0), fw_id_prefix: new Uint8Array(0), role: 'node' };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.mac = r.readBytes(6).slice();
+        break;
+      case 2:
+        v.fw_id_prefix = r.readBytes(8).slice();
+        break;
+      case 3:
+        v.role = $.readEnum(r, RoleNames, 255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** NET.JOIN_ACCEPT (class 0x00, kind 4). */
+export interface NetJoinAccept {
+  /** (<= 6 bytes) */
+  mac: Uint8Array;
+  addr: number;
+  hub_epoch: number;
+  channel: number;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNetJoinAccept(v: Partial<NetJoinAccept> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.bytes(v.mac ?? $.EMPTY, 6, 'mac');
+  if (f1.length > 0) w.fieldBytes(1, f1);
+  const f2 = $.int(v.addr ?? 0, 0, 65535, 'addr');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.hub_epoch ?? 0, 0, 65535, 'hub_epoch');
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.int(v.channel ?? 0, 0, 255, 'channel');
+  if (f4 !== 0) w.fieldUint(4, f4);
+  return w.finish();
+}
+
+export function decodeNetJoinAccept(bytes: Uint8Array): Decoded<NetJoinAccept> {
+  const r = new Reader(bytes);
+  const v: NetJoinAccept = { mac: new Uint8Array(0), addr: 0, hub_epoch: 0, channel: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.mac = r.readBytes(6).slice();
+        break;
+      case 2:
+        v.addr = r.readUint(65535);
+        break;
+      case 3:
+        v.hub_epoch = r.readUint(65535);
+        break;
+      case 4:
+        v.channel = r.readUint(255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** NET.CHANNEL_SWITCH (class 0x00, kind 5). */
+export interface NetChannelSwitch {
+  channel: number;
+  at_hub_us: bigint;
+  count: number;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNetChannelSwitch(v: Partial<NetChannelSwitch> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.channel ?? 0, 0, 255, 'channel');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.u64(v.at_hub_us ?? 0n, 0n, 18446744073709551615n, 'at_hub_us');
+  if (f2 !== 0n) w.fieldUint64(2, f2);
+  const f3 = $.int(v.count ?? 0, 0, 255, 'count');
+  if (f3 !== 0) w.fieldUint(3, f3);
+  return w.finish();
+}
+
+export function decodeNetChannelSwitch(bytes: Uint8Array): Decoded<NetChannelSwitch> {
+  const r = new Reader(bytes);
+  const v: NetChannelSwitch = { channel: 0, at_hub_us: 0n, count: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.channel = r.readUint(255);
+        break;
+      case 2:
+        v.at_hub_us = r.readUint64();
+        break;
+      case 3:
+        v.count = r.readUint(255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** NET.NEIGHBORS (class 0x00, kind 6). */
+export interface NetNeighbors {
+  /** (<= 12 items) */
+  entries: Neighbor[];
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNetNeighbors(v: Partial<NetNeighbors> = {}): Uint8Array {
+  const w = new Writer();
+  {
+    const f1 = $.list(v.entries ?? [], 12, 'entries');
+    for (let i = 0; i < f1.length; i++) {
+      const m = w.beginLen(1);
+      writeNeighbor(w, f1[i], `entries[${i}]`);
+      w.endLen(m);
+    }
+  }
+  return w.finish();
+}
+
+export function decodeNetNeighbors(bytes: Uint8Array): Decoded<NetNeighbors> {
+  const r = new Reader(bytes);
+  const v: NetNeighbors = { entries: [] };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        $.readRepeated(r, v.entries, 12, readNeighbor);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
 /** NET.WELCOME (class 0x00, kind 7). */
 export interface NetWelcome {
   hub_epoch: number;
   ucast_floor: number;
   bcast_base: number;
   hub_time_us: bigint;
-  net_mode: number;
+  net_mode: NetMode | number;
   channel: number;
 }
 
@@ -384,7 +991,7 @@ export function encodeNetWelcome(v: Partial<NetWelcome> = {}): Uint8Array {
   if (f3 !== 0) w.fieldUint(3, f3);
   const f4 = $.u64(v.hub_time_us ?? 0n, 0n, 18446744073709551615n, 'hub_time_us');
   if (f4 !== 0n) w.fieldUint64(4, f4);
-  const f5 = $.int(v.net_mode ?? 0, 0, 255, 'net_mode');
+  const f5 = $.enumValue(NetMode, v.net_mode ?? 'router', 'net_mode', 255);
   if (f5 !== 0) w.fieldUint(5, f5);
   const f6 = $.int(v.channel ?? 0, 0, 255, 'channel');
   if (f6 !== 0) w.fieldUint(6, f6);
@@ -393,7 +1000,7 @@ export function encodeNetWelcome(v: Partial<NetWelcome> = {}): Uint8Array {
 
 export function decodeNetWelcome(bytes: Uint8Array): Decoded<NetWelcome> {
   const r = new Reader(bytes);
-  const v: NetWelcome = { hub_epoch: 0, ucast_floor: 0, bcast_base: 0, hub_time_us: 0n, net_mode: 0, channel: 0 };
+  const v: NetWelcome = { hub_epoch: 0, ucast_floor: 0, bcast_base: 0, hub_time_us: 0n, net_mode: 'router', channel: 0 };
   while (r.next()) {
     switch (r.field) {
       case 1:
@@ -409,7 +1016,7 @@ export function decodeNetWelcome(bytes: Uint8Array): Decoded<NetWelcome> {
         v.hub_time_us = r.readUint64();
         break;
       case 5:
-        v.net_mode = r.readUint(255);
+        v.net_mode = $.readEnum(r, NetModeNames, 255);
         break;
       case 6:
         v.channel = r.readUint(255);
@@ -488,6 +1095,54 @@ export function decodeNetResolve(bytes: Uint8Array): Decoded<NetResolve> {
     switch (r.field) {
       case 1:
         v.addr = r.readUint(65535);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** NET.TEST (class 0x00, kind 127). */
+export interface NetTest {
+  seq: number;
+  t_us: number;
+  /** the receiver answers with an echo */
+  echo: boolean;
+  /** (<= 180 bytes) */
+  pad: Uint8Array;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeNetTest(v: Partial<NetTest> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.seq ?? 0, 0, 0xffffffff, 'seq');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.t_us ?? 0, 0, 0xffffffff, 't_us');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.bool(v.echo ?? false, 'echo');
+  if (f3) w.fieldBool(3, f3);
+  const f4 = $.bytes(v.pad ?? $.EMPTY, 180, 'pad');
+  if (f4.length > 0) w.fieldBytes(4, f4);
+  return w.finish();
+}
+
+export function decodeNetTest(bytes: Uint8Array): Decoded<NetTest> {
+  const r = new Reader(bytes);
+  const v: NetTest = { seq: 0, t_us: 0, echo: false, pad: new Uint8Array(0) };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.seq = r.readUint(0xffffffff);
+        break;
+      case 2:
+        v.t_us = r.readUint(0xffffffff);
+        break;
+      case 3:
+        v.echo = r.readBool();
+        break;
+      case 4:
+        v.pad = r.readBytes(180).slice();
         break;
       default:
         r.skip();
@@ -787,6 +1442,46 @@ export function decodePresencePong(bytes: Uint8Array): Decoded<PresencePong> {
   return $.done(r, v);
 }
 
+/** ACK.SACK (class 0x02, kind 3). */
+export interface AckSack {
+  frag_id: number;
+  cnt: number;
+  received_bitmap: bigint;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeAckSack(v: Partial<AckSack> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.frag_id ?? 0, 0, 65535, 'frag_id');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.cnt ?? 0, 0, 255, 'cnt');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.u64(v.received_bitmap ?? 0n, 0n, 18446744073709551615n, 'received_bitmap');
+  if (f3 !== 0n) w.fieldUint64(3, f3);
+  return w.finish();
+}
+
+export function decodeAckSack(bytes: Uint8Array): Decoded<AckSack> {
+  const r = new Reader(bytes);
+  const v: AckSack = { frag_id: 0, cnt: 0, received_bitmap: 0n };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.frag_id = r.readUint(65535);
+        break;
+      case 2:
+        v.cnt = r.readUint(255);
+        break;
+      case 3:
+        v.received_bitmap = r.readUint64();
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
 /** MSG.MSG (class 0x07, kind 0). */
 export interface MsgMsg {
   /** (<= 32 UTF-8 bytes) */
@@ -979,6 +1674,47 @@ export function decodeOtaReject(bytes: Uint8Array): Decoded<OtaReject> {
         break;
       case 2:
         v.code = r.readUint(255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** OTA.CHUNK (class 0x09, kind 4). */
+export interface OtaChunk {
+  job: number;
+  offset: number;
+  /** (<= 187 bytes) */
+  data: Uint8Array;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeOtaChunk(v: Partial<OtaChunk> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.job ?? 0, 0, 65535, 'job');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.offset ?? 0, 0, 0xffffffff, 'offset');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.bytes(v.data ?? $.EMPTY, 187, 'data');
+  if (f3.length > 0) w.fieldBytes(3, f3);
+  return w.finish();
+}
+
+export function decodeOtaChunk(bytes: Uint8Array): Decoded<OtaChunk> {
+  const r = new Reader(bytes);
+  const v: OtaChunk = { job: 0, offset: 0, data: new Uint8Array(0) };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.job = r.readUint(65535);
+        break;
+      case 2:
+        v.offset = r.readUint(0xffffffff);
+        break;
+      case 3:
+        v.data = r.readBytes(187).slice();
         break;
       default:
         r.skip();
@@ -1207,26 +1943,39 @@ export function decodeTimeSyncRes(bytes: Uint8Array): Decoded<TimeSyncRes> {
 
 export const PROTOCOL_TYPES: readonly $.StructInfo[] = [
   { name: 'DirectoryEntry', codec: { fields: [{ name: 'addr' }, { name: 'mac', json: 'bytes' }], maxSize: 12, encode: encodeDirectoryEntry, decode: decodeDirectoryEntry } },
+  { name: 'Neighbor', codec: { fields: [{ name: 'mac', json: 'bytes' }, { name: 'rssi' }, { name: 'age_s' }], maxSize: 14, encode: encodeNeighbor, decode: decodeNeighbor } },
   { name: 'DescriptorCap', codec: { fields: [{ name: 'port' }, { name: 'cap_id' }, { name: 'version' }, { name: 'name' }, { name: 'traits', json: 'bytes' }], maxSize: 62, encode: encodeDescriptorCap, decode: decodeDescriptorCap } },
   { name: 'Descriptor', codec: { fields: [{ name: 'frame_version' }, { name: 'fw_id_prefix', json: 'bytes' }, { name: 'catalog_hash' }, { name: 'profile' }, { name: 'board' }, { name: 'caps', json: DESCRIPTOR_CAP_JSON }], maxSize: 1109, encode: encodeDescriptor, decode: decodeDescriptor } },
   { name: 'Binding', codec: { fields: [{ name: 'slot', range: [0, 15] }, { name: 'on_port' }, { name: 'on_cls' }, { name: 'on_kind' }, { name: 'on_topic' }, { name: 'to_mac', json: 'bytes' }, { name: 'to_addr' }, { name: 'to_port' }, { name: 'to_cls' }, { name: 'to_kind' }, { name: 'to_topic' }, { name: 'payload', json: 'bytes' }, { name: 'reliable' }], maxSize: 169, encode: encodeBinding, decode: decodeBinding } },
   { name: 'BindingList', codec: { fields: [{ name: 'items', json: BINDING_JSON }], maxSize: 2752, encode: encodeBindingList, decode: decodeBindingList } },
+  { name: 'GwStatus', codec: { fields: [{ name: 'channel' }, { name: 'mode', members: NetMode }, { name: 'uptime_s' }, { name: 'q_depth' }, { name: 'q_max' }, { name: 'peers' }, { name: 'tx' }, { name: 'tx_fail' }, { name: 'rx' }, { name: 'rx_drop' }, { name: 'rx_bad' }, { name: 'beacons' }, { name: 'ap_rssi' }, { name: 'ap_channel' }, { name: 'last_tx_us' }], maxSize: 69, encode: encodeGwStatus, decode: decodeGwStatus } },
+  { name: 'GwCmd', codec: { fields: [{ name: 'req' }, { name: 'op', members: GwOp }, { name: 'channel' }, { name: 'net' }, { name: 'rate', members: GwRate }], maxSize: 17, encode: encodeGwCmd, decode: decodeGwCmd } },
+  { name: 'GwRsp', codec: { fields: [{ name: 'req' }, { name: 'status' }, { name: 'channel' }, { name: 'net' }, { name: 'rate', members: GwRate }, { name: 'peers' }], maxSize: 20, encode: encodeGwRsp, decode: decodeGwRsp } },
 ];
 
 export const MESSAGES: readonly $.MessageInfo[] = [
-  { key: 'NET.WELCOME', cls: 0, kind: 7, codec: { fields: [{ name: 'hub_epoch' }, { name: 'ucast_floor' }, { name: 'bcast_base' }, { name: 'hub_time_us', json: 'u64' }, { name: 'net_mode' }, { name: 'channel' }], maxSize: 33, encode: encodeNetWelcome, decode: decodeNetWelcome } },
+  { key: 'NET.DISCOVER', cls: 0, kind: 1, codec: { fields: [{ name: 'net' }, { name: 'role', members: Role }, { name: 'mac', json: 'bytes' }], maxSize: 15, encode: encodeNetDiscover, decode: decodeNetDiscover } },
+  { key: 'NET.BEACON', cls: 0, kind: 2, codec: { fields: [{ name: 'channel' }, { name: 'flags' }, { name: 'hub_epoch' }, { name: 'bcast_floor' }, { name: 'hub_time_us', json: 'u64' }, { name: 'hub_ipv4' }, { name: 'hub_port' }, { name: 'beacon_interval_ms' }, { name: 'bcast_watermark' }, { name: 'gw_mac', json: 'bytes' }], maxSize: 55, encode: encodeNetBeacon, decode: decodeNetBeacon } },
+  { key: 'NET.JOIN_REQ', cls: 0, kind: 3, codec: { fields: [{ name: 'mac', json: 'bytes' }, { name: 'fw_id_prefix', json: 'bytes' }, { name: 'role', members: Role }], maxSize: 21, encode: encodeNetJoinReq, decode: decodeNetJoinReq } },
+  { key: 'NET.JOIN_ACCEPT', cls: 0, kind: 4, codec: { fields: [{ name: 'mac', json: 'bytes' }, { name: 'addr' }, { name: 'hub_epoch' }, { name: 'channel' }], maxSize: 19, encode: encodeNetJoinAccept, decode: decodeNetJoinAccept } },
+  { key: 'NET.CHANNEL_SWITCH', cls: 0, kind: 5, codec: { fields: [{ name: 'channel' }, { name: 'at_hub_us', json: 'u64' }, { name: 'count' }], maxSize: 17, encode: encodeNetChannelSwitch, decode: decodeNetChannelSwitch } },
+  { key: 'NET.NEIGHBORS', cls: 0, kind: 6, codec: { fields: [{ name: 'entries', json: NEIGHBOR_JSON }], maxSize: 192, encode: encodeNetNeighbors, decode: decodeNetNeighbors } },
+  { key: 'NET.WELCOME', cls: 0, kind: 7, codec: { fields: [{ name: 'hub_epoch' }, { name: 'ucast_floor' }, { name: 'bcast_base' }, { name: 'hub_time_us', json: 'u64' }, { name: 'net_mode', members: NetMode }, { name: 'channel' }], maxSize: 33, encode: encodeNetWelcome, decode: decodeNetWelcome } },
   { key: 'NET.DIRECTORY', cls: 0, kind: 8, codec: { fields: [{ name: 'page' }, { name: 'pages' }, { name: 'entries', json: DIRECTORY_ENTRY_JSON }], maxSize: 202, encode: encodeNetDirectory, decode: decodeNetDirectory } },
   { key: 'NET.RESOLVE', cls: 0, kind: 9, codec: { fields: [{ name: 'addr' }], maxSize: 4, encode: encodeNetResolve, decode: decodeNetResolve } },
+  { key: 'NET.TEST', cls: 0, kind: 127, codec: { fields: [{ name: 'seq' }, { name: 't_us' }, { name: 'echo' }, { name: 'pad', json: 'bytes' }], maxSize: 197, encode: encodeNetTest, decode: decodeNetTest } },
   { key: 'PRESENCE.HELLO', cls: 1, kind: 1, codec: { fields: [{ name: 'mac', json: 'bytes' }, { name: 'chip' }, { name: 'chip_rev' }, { name: 'fw_id_prefix', json: 'bytes' }, { name: 'descriptor_hash' }, { name: 'board_hash' }, { name: 'role', members: Role }, { name: 'caps' }, { name: 'hb_interval_ms' }, { name: 'reset_reason' }, { name: 'ota_state', members: OtaState }, { name: 'alias' }, { name: 'alias_rev' }, { name: 'channel' }, { name: 'bssid', json: 'bytes' }], maxSize: 108, encode: encodePresenceHello, decode: decodePresenceHello } },
   { key: 'PRESENCE.HEARTBEAT', cls: 1, kind: 2, codec: { fields: [{ name: 'uptime_s' }, { name: 'state' }, { name: 'rssi_ap' }, { name: 'tx_fail' }, { name: 'rx_drop' }, { name: 'queue_hwm' }, { name: 'free_heap_kb' }, { name: 'vbat_mv' }, { name: 'bcast_watermark' }, { name: 'state_seq' }], maxSize: 54, encode: encodePresenceHeartbeat, decode: decodePresenceHeartbeat } },
   { key: 'PRESENCE.BYE', cls: 1, kind: 3, codec: { fields: [{ name: 'reason' }], maxSize: 3, encode: encodePresenceBye, decode: decodePresenceBye } },
   { key: 'PRESENCE.PING', cls: 1, kind: 4, codec: { fields: [{ name: 't0' }], maxSize: 6, encode: encodePresencePing, decode: decodePresencePing } },
   { key: 'PRESENCE.PONG', cls: 1, kind: 5, codec: { fields: [{ name: 't0' }, { name: 't1' }], maxSize: 12, encode: encodePresencePong, decode: decodePresencePong } },
+  { key: 'ACK.SACK', cls: 2, kind: 3, codec: { fields: [{ name: 'frag_id' }, { name: 'cnt' }, { name: 'received_bitmap', json: 'u64' }], maxSize: 18, encode: encodeAckSack, decode: decodeAckSack } },
   { key: 'MSG.MSG', cls: 7, kind: 0, codec: { fields: [{ name: 'topic' }, { name: 'data', json: 'bytes' }], maxSize: 205, encode: encodeMsgMsg, decode: decodeMsgMsg } },
   { key: 'LOG.LINE', cls: 8, kind: null, codec: { fields: [{ name: 'tag' }, { name: 'text' }], maxSize: 405, encode: encodeLogLine, decode: decodeLogLine } },
   { key: 'OTA.OFFER', cls: 9, kind: 1, codec: { fields: [{ name: 'job_id' }, { name: 'fw_id', json: 'bytes' }, { name: 'size' }, { name: 'version' }, { name: 'flags' }], maxSize: 104, encode: encodeOtaOffer, decode: decodeOtaOffer } },
   { key: 'OTA.ACCEPT', cls: 9, kind: 2, codec: { fields: [{ name: 'job_id' }, { name: 'code' }], maxSize: 28, encode: encodeOtaAccept, decode: decodeOtaAccept } },
   { key: 'OTA.REJECT', cls: 9, kind: 3, codec: { fields: [{ name: 'job_id' }, { name: 'code' }], maxSize: 28, encode: encodeOtaReject, decode: decodeOtaReject } },
+  { key: 'OTA.CHUNK', cls: 9, kind: 4, codec: { fields: [{ name: 'job' }, { name: 'offset' }, { name: 'data', json: 'bytes' }], maxSize: 200, encode: encodeOtaChunk, decode: decodeOtaChunk } },
   { key: 'OTA.STATUS', cls: 9, kind: 5, codec: { fields: [{ name: 'job_id' }, { name: 'state' }, { name: 'bytes' }], maxSize: 34, encode: encodeOtaStatus, decode: decodeOtaStatus } },
   { key: 'OTA.COMMIT', cls: 9, kind: 6, codec: { fields: [{ name: 'job_id' }], maxSize: 25, encode: encodeOtaCommit, decode: decodeOtaCommit } },
   { key: 'OTA.RESULT', cls: 9, kind: 7, codec: { fields: [{ name: 'job_id' }, { name: 'outcome' }, { name: 'fw_id_prefix', json: 'bytes' }, { name: 'reason' }], maxSize: 41, encode: encodeOtaResult, decode: decodeOtaResult } },

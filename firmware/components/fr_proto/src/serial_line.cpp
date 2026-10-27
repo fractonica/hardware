@@ -48,8 +48,8 @@ uint16_t crc16_ccitt_false(std::span<const uint8_t> data, uint16_t crc)
 
 namespace {
 
-// Encodes the concatenation of up to three spans without copying them into one buffer first, so
-// encode_line can stream `type | body | crc` straight from the caller's envelope.
+// Encodes the concatenation of several spans without copying them into one buffer first, so encode_line
+// can stream `type | body | crc` (or `type | prefix | envelope | crc`) straight from the caller's buffers.
 size_t encode_parts(std::span<const std::span<const uint8_t>> parts, size_t total, std::span<char> out)
 {
     if (base64url_len(total) > out.size()) {
@@ -132,18 +132,23 @@ std::expected<size_t, DecodeErr> base64url_decode(std::string_view in, std::span
 
 size_t encode_line(uint8_t type, std::span<const uint8_t> body, std::span<char> out)
 {
-    const size_t frame = body.size() + 3;
+    return encode_line(type, body, {}, out);
+}
+
+size_t encode_line(uint8_t type, std::span<const uint8_t> head, std::span<const uint8_t> tail, std::span<char> out)
+{
+    const size_t frame = head.size() + tail.size() + 3;
     const size_t len = kLinePrefix.size() + base64url_len(frame);
     if (len > kMaxLine || len > out.size()) {
         return 0;
     }
-    const uint8_t head[1] = {type};
-    const uint16_t crc = crc16_ccitt_false(body, crc16_ccitt_false(head));
-    const uint8_t tail[2] = {static_cast<uint8_t>(crc), static_cast<uint8_t>(crc >> 8)};
+    const uint8_t type_byte[1] = {type};
+    const uint16_t crc = crc16_ccitt_false(tail, crc16_ccitt_false(head, crc16_ccitt_false(type_byte)));
+    const uint8_t crc_bytes[2] = {static_cast<uint8_t>(crc), static_cast<uint8_t>(crc >> 8)};
     for (size_t i = 0; i < kLinePrefix.size(); ++i) {
         out[i] = kLinePrefix[i];
     }
-    const std::span<const uint8_t> parts[] = {head, body, tail};
+    const std::span<const uint8_t> parts[] = {type_byte, head, tail, crc_bytes};
     return kLinePrefix.size() + encode_parts(parts, frame, out.subspan(kLinePrefix.size()));
 }
 

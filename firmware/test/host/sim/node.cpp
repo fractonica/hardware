@@ -8,6 +8,7 @@
 #include <cstring>
 
 #include "catalog.hpp"
+#include "fr/gw/bridge.hpp"
 #include "fr/services/led_service.hpp"
 #include "sim/ap.hpp"
 #include "sim/commands.hpp"
@@ -161,8 +162,8 @@ public:
             return;
         }
         n.tcp_off_ = !on;
-        if (!n.ip_) {
-            return;
+        if (!n.ip_ || n.spec_->role == fr::proto::Role::gateway) {
+            return;  // a gateway has no TCP to the hub
         }
         if (on) {
             n.tcp_->ip_up();
@@ -217,9 +218,97 @@ public:
     }
     void serial_host(bool present) override { n_.usb(present); }
     void hub_mute(bool on) override { n_.serial_->set_mute(on); }
+    bool air_rate(fr::net::AirRate rate, bool broadcast, uint32_t &peers, uint32_t &failed) override
+    {
+        const fr::net::air::RateChange r = n_.air_->set_default_rate(broadcast, rate);
+        peers = r.peers;
+        failed = r.failed;
+        return true;
+    }
+    bool air_churn(uint32_t n, AirChurnCounts &out) override
+    {
+        fr::net::air::ChurnStats st;
+        n_.air_->churn(n, st);
+        out = {.n = st.n,
+               .failed = st.failed,
+               .add_p50_us = st.add.percentile(500),
+               .add_p99_us = st.add.percentile(990),
+               .add_max_us = st.add.max(),
+               .del_p50_us = st.del.percentile(500),
+               .del_p99_us = st.del.percentile(990),
+               .del_max_us = st.del.max()};
+        return true;
+    }
 
 private:
     FleetNode &n_;
+};
+
+// ---- a gateway's bridge (design m2-c4-gateway D18) ----
+
+/**
+ * fr_gw's bridge on a gateway node, wired as core.cpp wires it on target: the radio is Net::air_send_raw and the
+ * node's SimAir, the line the node's bridge port (SimSerial::write_frame), and Net's AirTap hands it every air frame
+ * and the end of each of its sends. No status light (D9's LED is cosmetic). Core task, one per boot.
+ */
+class FleetNode::Gateway final : public fr::gw::Air, public fr::gw::Line, public fr::net::AirTap
+{
+public:
+    Gateway(FleetNode &n, fr::net::Net &net) : n_(n), net_(net), bridge_(*n.core_, *this, *this, nullptr) {}
+    Gateway(const Gateway &) = delete;
+    Gateway &operator=(const Gateway &) = delete;
+
+    /** The bridge's timers, then the tap (core.cpp's order); false when the core's pool had none left. */
+    bool begin()
+    {
+        if (!bridge_.begin()) {
+            return false;
+        }
+        net_.set_air_tap(this);
+        return true;
+    }
+    fr::gw::Bridge &bridge() { return bridge_; }
+
+    // fr::gw::Air
+    fr::Status send(const fr::net::Mac &dst, std::span<const uint8_t> env, fr::proto::GwRate rate, uint32_t token) override
+    {
+        uint8_t mac[6];
+        std::memcpy(mac, dst.data(), sizeof(mac));
+        return net_.air_send_raw(mac, env, static_cast<uint8_t>(rate), token);
+    }
+    bool up() const override { return n_.air_->up(); }
+    fr::gw::AirInfo info() const override
+    {
+        const fr::net::LinkInfo li = n_.links_->wifi();
+        const bool up = n_.air_->up();
+        return {.up = up,
+                .channel = up ? n_.spec_->radio.channel : uint8_t{0},
+                .peers = static_cast<uint8_t>(n_.air_->scheduler().peers()),
+                .net = n_.spec_->net,
+                .associated = li.wifi_up && li.channel != 0,
+                .ap_rssi = li.rssi,
+                .ap_channel = li.channel};
+    }
+    // As core.cpp: the driver's peer table is fr_net's, its LRU replaces idle peers on its own.
+    fr::Status peer_flush() override { return std::unexpected(fr::Err::unsupported); }
+
+    // fr::gw::Line
+    bool write_frame(uint8_t type, std::span<const uint8_t> body) override { return n_.serial_->write_frame(type, body); }
+
+    // fr::net::AirTap
+    void on_air_frame(std::span<const uint8_t> env, const fr::net::RxMeta &meta, TimeUs at) override
+    {
+        bridge_.on_air_frame(env, meta, at);
+    }
+    void on_air_sent(uint32_t token, bool ok, uint8_t retries, TimeUs queued_us) override
+    {
+        bridge_.on_air_sent(token, ok, retries, queued_us);
+    }
+
+private:
+    FleetNode &n_;
+    fr::net::Net &net_;
+    fr::gw::Bridge bridge_;
 };
 
 // ---- one boot ----
@@ -313,6 +402,7 @@ struct FleetNode::Boot {
     fr::ota::Ota ota;
     NodeOtaHost ota_host;
     bool ota_bound = false;  // the spec runs fr_ota, and it got its timer
+    std::unique_ptr<Gateway> gateway;  // role gateway only (design m2-c4-gateway D18)
 };
 
 // ---- FleetNode ----
@@ -395,9 +485,26 @@ void FleetNode::boot()
         out_.emit(R"({"ev":"error","what":"service init failed"})");
     }
     b.diag.bind(b.net, *links_, b.ports);
+    // design m2-c4-gateway D18: a gateway's bridge takes its timers before the rest of the boot can drain the pool,
+    // and hears every air frame Net accepts from then on (Net handles only what is addressed to the gateway itself).
+    const bool gateway = spec_->role == fr::proto::Role::gateway;
+    if (gateway) {
+        b.gateway = std::make_unique<Gateway>(*this, b.net);
+        if (b.gateway->begin()) {
+            b.diag.set_gateway(&b.gateway->bridge());
+            fr::gw::Bridge *bridge = &b.gateway->bridge();
+            serial_->set_frames([bridge](uint8_t type, std::span<const uint8_t> body, TimeUs at) {
+                bridge->on_serial_frame(type, body, at);
+            });
+        } else {
+            out_.emit(R"({"ev":"error","what":"gateway: no timer left for the bridge"})");
+            b.gateway.reset();
+        }
+    }
 
-    // The links: TCP and UDP to the hub, the USB line where the scenario has one, and the radio.
-    const bool serial_only = !spec_->ip;
+    // The links: TCP and UDP to the hub (not a gateway's: its hub link is the USB line), the USB line where the
+    // scenario has one, and the radio.
+    const bool serial_only = !spec_->ip || gateway;
     RxFn rx = [this, serial_only](LinkKind k, std::span<const uint8_t> env) {
         Boot &bt = *boot_;
         const auto h = fr::wire::unpack_header(env);
@@ -418,7 +525,7 @@ void FleetNode::boot()
         });
         b.net.attach(*serial_);
     }
-    if (spec_->ip) {
+    if (spec_->ip && !gateway) {
         tcp_->bind(b.net, rx);
         udp_->bind(b.net);
         b.net.attach(*tcp_);
@@ -490,7 +597,7 @@ void FleetNode::tick()
     Boot &b = *boot_;
     // fr_core's 250 ms poll: writes a full worker queue refused.
     b.stores.retry();
-    if (!net_up_ && tcp_->up()) {
+    if (!net_up_ && (spec_->role == fr::proto::Role::gateway ? ip_ : tcp_->up())) {
         net_up_ = true;
         if (b.ota_bound) {
             b.ota.health_set(fr::ota::kHealthNet);  // NET: the network is there (Wi-Fi up on target)
@@ -568,6 +675,7 @@ void FleetNode::power_off()
         serial_->set_write(nullptr);
         serial_->set_host(false);
     }
+    boot_->net.set_air_tap(nullptr);
     boot_.reset();
 }
 
@@ -635,6 +743,9 @@ void FleetNode::update_ip(bool associate)
 void FleetNode::set_ip(bool up)
 {
     ip_ = up;
+    if (spec_->role == fr::proto::Role::gateway) {
+        return;  // associated for its channel, no hub link over IP (fr_net's gateway role starts no HubLink)
+    }
     udp_->set_ip(up);
     if (up && !tcp_off_) {
         tcp_->ip_up();

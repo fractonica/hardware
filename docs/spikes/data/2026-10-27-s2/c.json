@@ -1,0 +1,928 @@
+{
+  "schema": "fractonica/s2-record@1",
+  "q": "c",
+  "title": "(b) at air rate fast, rate_fail",
+  "started_at": "2026-10-27T14:20:02.822Z",
+  "finished_at": "2026-10-27T14:31:04.491Z",
+  "hub": "http://127.0.0.1:7420",
+  "devices": {
+    "pad-c3": {
+      "device_id": "1cdbd4175cc4",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-c6": {
+      "device_id": "58e6c5d55e64",
+      "role": "node",
+      "profile": "c6-pad",
+      "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a"
+    },
+    "pad-s3": {
+      "device_id": "94a99015cecc",
+      "role": "node",
+      "profile": "s3l-pad",
+      "fw_id": "21741d5b8fe3c24b5dca4027b607aea7784a1fccc12ea289c6ede26aa0b1c121"
+    },
+    "gw-c6": {
+      "device_id": "f0f5bd09fdec",
+      "role": "gateway",
+      "profile": "c6g-gateway",
+      "fw_id": "5a3158a7aa11350192981fc161411f70ef502479583879fd12574927c60ddc45"
+    }
+  },
+  "params": {
+    "nodes": [
+      "pad-c3",
+      "pad-c6",
+      "pad-s3"
+    ],
+    "gateway": "gw-c6",
+    "frames": 10000,
+    "len": 64,
+    "interval_ms": 5,
+    "rate": "fast",
+    "rule": {
+      "broadcast": 99,
+      "unicast": 99.9
+    },
+    "denominator": "sent + refused"
+  },
+  "results": {
+    "runs": [
+      {
+        "label": "pad-c3 -> gateway unicast",
+        "results": [
+          {
+            "src": "pad-c3",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 10000,
+            "dups": 0,
+            "rssi_p50": -75,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 10000,
+            "rtt_p50_us": 2431,
+            "rtt_p99_us": 8703,
+            "rtt_max_us": 44653,
+            "elapsed_ms": 50007
+          }
+        ],
+        "espnow": {
+          "pad-c3": {
+            "tx": 10010,
+            "tx_fail": 0,
+            "retries": 3,
+            "refused": 0,
+            "rx": 10087,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "gw-c6": {
+            "tx": 10060,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10041,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "gateway -> pad-c3 unicast",
+        "results": [
+          {
+            "src": "gw-c6",
+            "dst": "pad-c3",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 10000,
+            "dups": 1,
+            "rssi_p50": -65,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 10001,
+            "rtt_p50_us": 2431,
+            "rtt_p99_us": 8191,
+            "rtt_max_us": 36364,
+            "elapsed_ms": 49995
+          }
+        ],
+        "espnow": {
+          "gw-c6": {
+            "tx": 10061,
+            "tx_fail": 0,
+            "retries": 1,
+            "refused": 0,
+            "rx": 10040,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-c3": {
+            "tx": 10011,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10088,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "pad-c3 broadcast",
+        "results": [
+          {
+            "src": "pad-c3",
+            "dst": "gw-c6",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 9997,
+            "refused": 3,
+            "acked": 9997,
+            "failed": 0,
+            "received": 9798,
+            "dups": 0,
+            "rssi_p50": -76,
+            "delivery_pct": 97.98,
+            "received_sent_pct": 98.01,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 50015
+          },
+          {
+            "src": "pad-c3",
+            "dst": "pad-c6",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 9997,
+            "refused": 3,
+            "acked": 9997,
+            "failed": 0,
+            "received": 9975,
+            "dups": 0,
+            "rssi_p50": -34,
+            "delivery_pct": 99.75,
+            "received_sent_pct": 99.78,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 50015
+          }
+        ],
+        "espnow": {
+          "pad-c3": {
+            "tx": 10007,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 3,
+            "rx": 85,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "gw-c6": {
+            "tx": 61,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 9837,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-c6": {
+            "tx": 10,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10064,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "pad-c3 -> pad-c6 unicast",
+        "results": [
+          {
+            "src": "pad-c3",
+            "dst": "pad-c6",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 10000,
+            "dups": 0,
+            "rssi_p50": -34,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 10000,
+            "rtt_p50_us": 2303,
+            "rtt_p99_us": 7935,
+            "rtt_max_us": 18787,
+            "elapsed_ms": 50024
+          }
+        ],
+        "espnow": {
+          "pad-c3": {
+            "tx": 10011,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10086,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 1
+          },
+          "pad-c6": {
+            "tx": 10011,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10089,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 1
+          }
+        }
+      },
+      {
+        "label": "pad-c6 -> gateway unicast",
+        "results": [
+          {
+            "src": "pad-c6",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 10000,
+            "dups": 0,
+            "rssi_p50": -61,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 10000,
+            "rtt_p50_us": 1791,
+            "rtt_p99_us": 6911,
+            "rtt_max_us": 70811,
+            "elapsed_ms": 49995
+          }
+        ],
+        "espnow": {
+          "pad-c6": {
+            "tx": 10010,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10088,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "gw-c6": {
+            "tx": 10060,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10041,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "gateway -> pad-c6 unicast",
+        "results": [
+          {
+            "src": "gw-c6",
+            "dst": "pad-c6",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 10000,
+            "dups": 0,
+            "rssi_p50": -58,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 10000,
+            "rtt_p50_us": 1855,
+            "rtt_p99_us": 6655,
+            "rtt_max_us": 15692,
+            "elapsed_ms": 49995
+          }
+        ],
+        "espnow": {
+          "gw-c6": {
+            "tx": 10059,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10039,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-c6": {
+            "tx": 10010,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10084,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "pad-c6 broadcast",
+        "results": [
+          {
+            "src": "pad-c6",
+            "dst": "gw-c6",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 9971,
+            "dups": 0,
+            "rssi_p50": -59,
+            "delivery_pct": 99.71,
+            "received_sent_pct": 99.71,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 49995
+          },
+          {
+            "src": "pad-c6",
+            "dst": "pad-s3",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 9996,
+            "dups": 0,
+            "rssi_p50": -32,
+            "delivery_pct": 99.96,
+            "received_sent_pct": 99.96,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 49995
+          }
+        ],
+        "espnow": {
+          "pad-c6": {
+            "tx": 10011,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 89,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "gw-c6": {
+            "tx": 61,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10009,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-s3": {
+            "tx": 9,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10087,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "pad-c6 -> pad-s3 unicast",
+        "results": [
+          {
+            "src": "pad-c6",
+            "dst": "pad-s3",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 9993,
+            "refused": 7,
+            "acked": 9993,
+            "failed": 0,
+            "received": 9993,
+            "dups": 0,
+            "rssi_p50": -38,
+            "delivery_pct": 99.93,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 9993,
+            "rtt_p50_us": 2559,
+            "rtt_p99_us": 8703,
+            "rtt_max_us": 78216,
+            "elapsed_ms": 50000
+          }
+        ],
+        "espnow": {
+          "pad-c6": {
+            "tx": 10003,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 7,
+            "rx": 10084,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 1
+          },
+          "pad-s3": {
+            "tx": 10003,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10081,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 1
+          }
+        }
+      },
+      {
+        "label": "pad-s3 -> gateway unicast",
+        "results": [
+          {
+            "src": "pad-s3",
+            "dst": "gw-c6",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 9998,
+            "refused": 2,
+            "acked": 9998,
+            "failed": 0,
+            "received": 9998,
+            "dups": 1,
+            "rssi_p50": -60,
+            "delivery_pct": 99.98,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 9999,
+            "rtt_p50_us": 2815,
+            "rtt_p99_us": 9727,
+            "rtt_max_us": 74613,
+            "elapsed_ms": 50030
+          }
+        ],
+        "espnow": {
+          "pad-s3": {
+            "tx": 10008,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 2,
+            "rx": 10087,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "gw-c6": {
+            "tx": 10060,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10039,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "gateway -> pad-s3 unicast",
+        "results": [
+          {
+            "src": "gw-c6",
+            "dst": "pad-s3",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 10000,
+            "dups": 0,
+            "rssi_p50": -62,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 10000,
+            "rtt_p50_us": 2815,
+            "rtt_p99_us": 11263,
+            "rtt_max_us": 60557,
+            "elapsed_ms": 49995
+          }
+        ],
+        "espnow": {
+          "gw-c6": {
+            "tx": 10060,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10042,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-s3": {
+            "tx": 10010,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10088,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "pad-s3 broadcast",
+        "results": [
+          {
+            "src": "pad-s3",
+            "dst": "gw-c6",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 9967,
+            "dups": 0,
+            "rssi_p50": -61,
+            "delivery_pct": 99.67,
+            "received_sent_pct": 99.67,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 50017
+          },
+          {
+            "src": "pad-s3",
+            "dst": "pad-c3",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 9971,
+            "dups": 0,
+            "rssi_p50": -37,
+            "delivery_pct": 99.71,
+            "received_sent_pct": 99.71,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 50017
+          }
+        ],
+        "espnow": {
+          "pad-s3": {
+            "tx": 10010,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 85,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "gw-c6": {
+            "tx": 61,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10008,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-c3": {
+            "tx": 9,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10059,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      },
+      {
+        "label": "pad-s3 -> pad-c3 unicast",
+        "results": [
+          {
+            "src": "pad-s3",
+            "dst": "pad-c3",
+            "mode": "unicast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 10000,
+            "dups": 0,
+            "rssi_p50": -37,
+            "delivery_pct": 100,
+            "received_sent_pct": 100,
+            "acked_pct": 100,
+            "echoes": 10000,
+            "rtt_p50_us": 3199,
+            "rtt_p99_us": 9727,
+            "rtt_max_us": 56288,
+            "elapsed_ms": 50019
+          }
+        ],
+        "espnow": {
+          "pad-s3": {
+            "tx": 10010,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10089,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 1
+          },
+          "pad-c3": {
+            "tx": 10011,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 10087,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 1
+          }
+        }
+      },
+      {
+        "label": "gateway broadcast",
+        "results": [
+          {
+            "src": "gw-c6",
+            "dst": "pad-c3",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 9415,
+            "dups": 0,
+            "rssi_p50": -66,
+            "delivery_pct": 94.15,
+            "received_sent_pct": 94.15,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 49995
+          },
+          {
+            "src": "gw-c6",
+            "dst": "pad-c6",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 9684,
+            "dups": 0,
+            "rssi_p50": -57,
+            "delivery_pct": 96.84,
+            "received_sent_pct": 96.84,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 49995
+          },
+          {
+            "src": "gw-c6",
+            "dst": "pad-s3",
+            "mode": "broadcast",
+            "rate": "fast",
+            "attempted": 10000,
+            "sent": 10000,
+            "refused": 0,
+            "acked": 10000,
+            "failed": 0,
+            "received": 9449,
+            "dups": 0,
+            "rssi_p50": -69,
+            "delivery_pct": 94.49,
+            "received_sent_pct": 94.49,
+            "acked_pct": null,
+            "echoes": 0,
+            "rtt_p50_us": null,
+            "rtt_p99_us": null,
+            "rtt_max_us": null,
+            "elapsed_ms": 49995
+          }
+        ],
+        "espnow": {
+          "gw-c6": {
+            "tx": 10060,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 37,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-c3": {
+            "tx": 10,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 9500,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-c6": {
+            "tx": 9,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 9771,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          },
+          "pad-s3": {
+            "tx": 10,
+            "tx_fail": 0,
+            "retries": 0,
+            "refused": 0,
+            "rx": 9535,
+            "rx_bad": 0,
+            "rx_lost": 0,
+            "peers": 0
+          }
+        }
+      }
+    ],
+    "rate_answers": {
+      "pad-c3": {
+        "unicast": {
+          "ok": true,
+          "rate": "fast",
+          "peer": "unicast",
+          "peers": 1,
+          "rate_fail": 0
+        },
+        "bcast": {
+          "ok": true,
+          "rate": "fast",
+          "peer": "bcast",
+          "peers": 1,
+          "rate_fail": 0
+        }
+      },
+      "pad-c6": {
+        "unicast": {
+          "ok": true,
+          "rate": "fast",
+          "peer": "unicast",
+          "peers": 1,
+          "rate_fail": 0
+        },
+        "bcast": {
+          "ok": true,
+          "rate": "fast",
+          "peer": "bcast",
+          "peers": 1,
+          "rate_fail": 0
+        }
+      },
+      "pad-s3": {
+        "unicast": {
+          "ok": true,
+          "rate": "fast",
+          "peer": "unicast",
+          "peers": 1,
+          "rate_fail": 0
+        },
+        "bcast": {
+          "ok": true,
+          "rate": "fast",
+          "peer": "bcast",
+          "peers": 1,
+          "rate_fail": 0
+        }
+      },
+      "gw-c6": {
+        "unicast": {
+          "ok": true,
+          "rate": "fast",
+          "peer": "unicast",
+          "peers": 4,
+          "rate_fail": 0
+        },
+        "bcast": {
+          "ok": true,
+          "rate": "fast",
+          "peer": "bcast",
+          "peers": 1,
+          "rate_fail": 0
+        }
+      }
+    },
+    "reasons": [
+      "pad-c3 -> gw-c6 broadcast: 97.98 % < 99 %",
+      "gw-c6 -> pad-c3 broadcast: 94.15 % < 99 %",
+      "gw-c6 -> pad-c6 broadcast: 96.84 % < 99 %",
+      "gw-c6 -> pad-s3 broadcast: 94.49 % < 99 %"
+    ]
+  },
+  "summary": {
+    "line": "unicast worst 99.93 %, broadcast worst 94.15 % (rule 99.9/99)"
+  },
+  "warnings": []
+}

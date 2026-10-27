@@ -32,6 +32,7 @@ import { type ArtifactManifest, FrError, type Job, type Remediation, type ToolEr
 import { decodeOtaAccept, decodeOtaReject, decodeOtaResult, decodeOtaStatus, encodeOtaAbort, encodeOtaOffer, KIND } from '@fractonica/protocol/gen';
 
 import { blobPath, loadManifest, newestBuildId } from '../artifacts.ts';
+import { profileApp } from '../build.ts';
 import type { Device, Events, HubContext, HubEvent, OtaFrame, OtaService, Presence, Registry, Router } from '../context.ts';
 import type { Db } from '../db.ts';
 import type { JobCtx, JobRunner } from '../jobs.ts';
@@ -635,7 +636,7 @@ export class OtaOrchestrator implements OtaService {
         remediation: [{ tool: 'artifact_list', cli: 'fr artifacts ls' }],
       });
     }
-    const id = newestBuildId(hub.db, { app: 'node', profile: p, buildType: 'debug' });
+    const id = newestBuildId(hub.db, { app: profileApp(hub.hubSourceDir, p), profile: p, buildType: 'debug' });
     if (!id) {
       throw new FrError('NOT_FOUND', `no debug artifact for profile ${p}`, { remediation: [{ tool: 'build_start', args: { profile: p } }] });
     }
@@ -1394,6 +1395,13 @@ export class OtaOrchestrator implements OtaService {
         this.config.rollbackGraceMs,
       );
       return;
+    }
+    // Back on the target after a HELLO on another image (M2-C4 bench: the old image's last act before its OTA
+    // reboot was a HELLO over a gateway, after its BYE): that HELLO was not a rollback.
+    if (live.grace) {
+      clearTimeout(live.grace);
+      live.grace = null;
+      c.ctx?.log('a HELLO on the old image came before this one: not a rollback', 'event');
     }
     if (c.rec.state === 'REBOOTING') {
       this.#set(c, 'VERIFYING');

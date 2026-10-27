@@ -52,6 +52,12 @@ std::expected<size_t, DecodeErr> base64url_decode(std::string_view in, std::span
 /** Writes one line without the terminator. Returns its length; 0 if over kMaxLine or `out` is too small. */
 size_t encode_line(uint8_t type, std::span<const uint8_t> body, std::span<char> out);
 
+/**
+ * The same line for the body `head | tail`, streamed from both without copying them into one buffer: a GW_RX or
+ * GW_TX prefix and the envelope after it (fr::proto::encode_line in gen/serial.hpp).
+ */
+size_t encode_line(uint8_t type, std::span<const uint8_t> head, std::span<const uint8_t> tail, std::span<char> out);
+
 struct SerialFrame {
     uint8_t type;
     std::span<const uint8_t> body;  // view into the decode scratch

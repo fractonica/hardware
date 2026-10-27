@@ -5,6 +5,8 @@
 // ESP-NOW (design c5 §3) is not a Link: its frames carry a radio source MAC, RSSI and a broadcast or
 // unicast destination, and its sends complete later with a MAC ACK, so it has its own interface, AirLink,
 // and Net::receive_air / Net::air_sent. LinkKind::espnow still names it, for State::links and its counters.
+// LinkKind::gateway (design m2-c4-gateway D10) is the hub session through a gateway: envelopes as ESP-NOW
+// unicasts to the gateway's MAC, the hub's frames from it; Net::attach refuses it until GatewayLink exists.
 #pragma once
 
 #include <array>
@@ -17,8 +19,8 @@
 namespace fr::net {
 
 /** The links Net knows; a value indexes State::links. */
-enum class LinkKind : uint8_t { serial = 0, tcp = 1, udp = 2, espnow = 3 };
-inline constexpr size_t kLinkKinds = 4;
+enum class LinkKind : uint8_t { serial = 0, tcp = 1, udp = 2, espnow = 3, gateway = 4 };
+inline constexpr size_t kLinkKinds = 5;
 
 constexpr size_t index_of(LinkKind k)
 {

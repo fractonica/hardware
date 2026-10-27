@@ -139,13 +139,13 @@ afterAll(() => {
 beforeEach(() => sidecar());
 
 /** A full-plan artifact on the fr-4mb-v1 layout, registered like ingestBuild does. */
-function artifact(db: Db, profile: string, target: string, chipId: number, fw: string, builtAt = '2026-10-21T10:00:00.000Z'): string {
-  const buildId = `node/${profile}/debug/${fw}`;
+function artifact(db: Db, profile: string, target: string, chipId: number, fw: string, builtAt = '2026-10-21T10:00:00.000Z', app = 'node'): string {
+  const buildId = `${app}/${profile}/debug/${fw}`;
   const blob = (c: string) => `sha256:${c.repeat(64)}`;
   const manifest: ArtifactManifest = {
     schema: 'fractonica.artifact/1',
     build_id: buildId,
-    app: 'node',
+    app,
     profile,
     build_type: 'debug',
     board: target === 'esp32c6' ? 'esp32c6-supermini' : 'esp32c3-oled042',
@@ -242,11 +242,11 @@ function rig(opts: { network?: boolean } = {}): Rig {
 }
 
 /** The node after a reset: its HELLO on serial as the log store keeps it, then (optionally) a HELLO over TCP. */
-function nodeBoots(r: Rig, opts: { serial?: 'frame' | 'event' | 'none'; tcp?: boolean } = {}): void {
+function nodeBoots(r: Rig, opts: { serial?: 'frame' | 'event' | 'none'; tcp?: boolean; role?: 'node' | 'gateway' } = {}): void {
   r.onReset = () => {
     setTimeout(() => {
       if ((opts.serial ?? 'frame') === 'frame') {
-        const body = encodePresenceHello({ mac: Buffer.from(DEV, 'hex'), chip: 13, alias: 'c6-pad-d55e64', alias_rev: 1, caps: 0x22 });
+        const body = encodePresenceHello({ mac: Buffer.from(DEV, 'hex'), chip: 13, alias: 'c6-pad-d55e64', alias_rev: 1, caps: 0x22, ...(opts.role ? { role: opts.role } : {}) });
         r.logs.append(DEV, PORT, encodeEnvLine({ header: { flags: 0, cls: CLS.PRESENCE, kind: 1, seq: 1, net: 0, src: 1, dst: 0, epoch: 1, ttl: 0x22, port: 0 }, body }));
       } else if (opts.serial === 'event') {
         r.hub.events.publish({ type: 'device.online', device: DEV, t_hub_us: nowUs(), fields: { link: 'serial' } });
@@ -367,6 +367,7 @@ describe('device_provision', () => {
       reset: 'hub',
       hello: 'serial',
       wifi: 'joined',
+      via: 'tcp',
     });
     expect(r.resets).toBe(1);
 
@@ -406,6 +407,37 @@ describe('device_provision', () => {
     expect(job.status).toBe('completed');
     expect(job.result).toMatchObject({ alias: 'pad-red-1', wifi: 'not_joined', warnings: [expect.stringMatching(/did not reach the hub over Wi-Fi/)] });
     expectNoSecret(r, job);
+  });
+
+  it('judges a gateway’s join by its GW_STATUS (it never opens TCP): wifi joined via gateway_status, from a fresh status only', async () => {
+    const r = rig();
+    // The gateway profile's own build (gateway/...), found by profile whatever its app.
+    const buildId = artifact(r.db, 'c6g-gateway', 'esp32c6', 13, 'c6ggggggggg1', undefined, 'gateway');
+    nodeBoots(r, { serial: 'frame', role: 'gateway' });
+    let resetAt = Infinity;
+    const onReset = r.onReset!;
+    r.onReset = () => {
+      resetAt = Date.now();
+      onReset();
+    };
+    // A status from before the reset (the old image's, AP known) must not count; the new one comes 300 ms after it.
+    const gatewayStatus = () =>
+      Date.now() - resetAt < 300 ? { ap_channel: 11, ap_rssi: -40, ms_ago: 60_000 } : { ap_channel: 6, ap_rssi: -52, ms_ago: 0 };
+    const job = await provision(r, { profile: 'c6g-gateway' }, { ...FAST, gatewayStatus });
+    expect(job.status).toBe('completed');
+    expect(job.result).toMatchObject({ build_id: buildId, profile: 'c6g-gateway', wifi: 'joined', via: 'gateway_status', ap: { ap_channel: 6, ap_rssi: -52 } });
+    expect((job.result as { warnings?: string[] }).warnings).toBeUndefined();
+    expect(jobLogs(r, job.job_id).join('\n')).toMatch(/GW_STATUS shows the AP \(channel 6, -52 dBm\)/);
+  });
+
+  it('reports a gateway whose GW_STATUS never shows the AP as not_joined, with a warning', async () => {
+    const r = rig();
+    artifact(r.db, 'c6g-gateway', 'esp32c6', 13, 'c6ggggggggg1', undefined, 'gateway');
+    nodeBoots(r, { serial: 'frame', role: 'gateway' });
+    const job = await provision(r, { profile: 'c6g-gateway' }, { ...FAST, joinMs: 500, gatewayStatus: () => ({ ap_channel: 0, ap_rssi: 0, ms_ago: 0 }) });
+    expect(job.status).toBe('completed');
+    expect(job.result).toMatchObject({ wifi: 'not_joined', warnings: [expect.stringMatching(/a gateway\) reported no AP in its GW_STATUS/)] });
+    expect((job.result as { via?: string }).via).toBeUndefined();
   });
 
   it('fails with TIMEOUT when the node never says HELLO on serial, after registering it', async () => {

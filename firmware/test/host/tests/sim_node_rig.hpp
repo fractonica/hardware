@@ -70,7 +70,8 @@ inline void remove_tree(const std::string &path)
 
 struct FleetRig {
     /** `profile`: the kit profile every node plays (c6-pad; c3o-analog adds the analog input, design m2-c3-inputs §8). */
-    explicit FleetRig(size_t n, bool collisions = false, const std::string &profile = "c6-pad")
+    /** `gateway`: the node (1-based) that plays role gateway (design m2-c4-gateway D18; 0: none). */
+    explicit FleetRig(size_t n, bool collisions = false, const std::string &profile = "c6-pad", size_t gateway = 0)
         : medium(exec, frsim::MediumConfig{.seed = 1, .collisions = collisions}),
           ap(&medium, frsim::ApConfig{}),
           shared{.exec = exec,
@@ -97,6 +98,10 @@ struct FleetRig {
             spec->rng_seed = frsim::rng::node_seed(1, spec->mac);
             spec->net_log = true;
             spec->profile = profile;
+            if (i == gateway) {
+                spec->role = fr::proto::Role::gateway;
+                spec->usb = true;  // no bridge here: its port never opens
+            }
             const std::string alias = spec->alias;
             nodes.push_back(std::make_unique<frsim::FleetNode>(shared, std::move(spec), dir + "/" + alias));
             radios.push_back(nodes.back()->air().radio());

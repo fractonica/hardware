@@ -167,9 +167,12 @@ export function record(dev: AnyDevice, into: SeenEvent[]): () => void {
 
 // ---- options ----
 
+/** The default devices: every online one but gateways, which have no BOOT button (M2-C4). */
+export const DEFAULT_SELECTOR = 'online,!role:gateway';
+
 export interface TInputOptions {
   phases: ('sim' | 'human' | 'loss')[];
-  /** Aliases; default every online device. */
+  /** Aliases; default every online device but gateways (no BOOT button; since M2-C4). */
   devices?: string[];
   presses: number;
   simClicks: number;
@@ -574,13 +577,13 @@ export function lossPhases(ctx: ScenarioCtx, targets: Target[], o: TInputOptions
 }
 
 export async function runTInput(ctx: ScenarioCtx, o: TInputOptions): Promise<Outcome> {
-  const listed = await ctx.hub.ok<{ devices: { device_id: string; alias: string; presence: string }[] }>('device_list', { selector: o.devices?.join(',') ?? 'online' });
+  const listed = await ctx.hub.ok<{ devices: { device_id: string; alias: string; presence: string }[] }>('device_list', { selector: o.devices?.join(',') ?? DEFAULT_SELECTOR });
   const sdk = await connectSdk(ctx.hub);
   const targets: Target[] = [];
   const offs: (() => void)[] = [];
   try {
     if (!listed.devices.length) {
-      throw new Error(`no device matches ${o.devices?.join(',') ?? 'online'}`);
+      throw new Error(`no device matches ${o.devices?.join(',') ?? DEFAULT_SELECTOR}`);
     }
     for (const d of listed.devices) {
       // byAlias would hand out a placeholder for a device the welcome did not announce; byId does not.
@@ -652,7 +655,7 @@ const scenario = defineScenario({
   needs: { human: true, usb: true },
   needsFor: (args) => needsFor(parseArgs(runArgs(args))),
   usage: `--phase sim|human|loss|all   comma-separated (default sim,human,loss)
---devices a,b                aliases (default every online device)
+--devices a,b                aliases (default every online device but gateways)
 --presses 10 --sim-clicks 50 --gap-ms 400   the sim phase
 --loss 5 --clicks 1000 --checkpoints 200 --forced 10   the loss phase (diag over each board's USB)
 --say                        speak each human prompt with sk say

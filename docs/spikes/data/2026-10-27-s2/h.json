@@ -1,0 +1,96 @@
+{
+  "schema": "fractonica/s2-record@1",
+  "q": "h",
+  "title": "espnow guard/lost during (b) and (g)",
+  "started_at": "2026-10-27T14:53:22.568Z",
+  "finished_at": "2026-10-27T14:53:22.569Z",
+  "hub": "http://127.0.0.1:7420",
+  "devices": {
+    "pad-c3": {
+      "device_id": "1cdbd4175cc4",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-c6": {
+      "device_id": "58e6c5d55e64",
+      "role": "node",
+      "profile": "c6-pad",
+      "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a"
+    },
+    "pad-s3": {
+      "device_id": "94a99015cecc",
+      "role": "node",
+      "profile": "s3l-pad",
+      "fw_id": "21741d5b8fe3c24b5dca4027b607aea7784a1fccc12ea289c6ede26aa0b1c121"
+    },
+    "gw-c6": {
+      "device_id": "f0f5bd09fdec",
+      "role": "gateway",
+      "profile": "c6g-gateway",
+      "fw_id": "5a3158a7aa11350192981fc161411f70ef502479583879fd12574927c60ddc45"
+    }
+  },
+  "params": {
+    "from": {
+      "b": "2026-10-27T14:53:22.566Z",
+      "g": "2026-10-27T14:17:20.363Z"
+    }
+  },
+  "results": {
+    "counts": {
+      "b": {
+        "pad-c3": {
+          "guard": 0,
+          "lost": 0,
+          "runs": 7
+        },
+        "gw-c6": {
+          "guard": 0,
+          "lost": 0,
+          "runs": 10
+        },
+        "pad-c6": {
+          "guard": 0,
+          "lost": 0,
+          "runs": 7
+        },
+        "pad-s3": {
+          "guard": 0,
+          "lost": 0,
+          "runs": 7
+        }
+      },
+      "g": {
+        "pad-c3": {
+          "guard": 0,
+          "lost": 0,
+          "runs": 1
+        },
+        "pad-c3b": {
+          "guard": 0,
+          "lost": 0,
+          "runs": 1
+        },
+        "pad-c6": {
+          "guard": 0,
+          "lost": 0,
+          "runs": 1
+        },
+        "pad-s3": {
+          "guard": 0,
+          "lost": 0,
+          "runs": 1
+        }
+      }
+    },
+    "total": {
+      "guard": 0,
+      "lost": 0
+    }
+  },
+  "summary": {
+    "line": "guard 0, lost 0 (over (b) and (g))"
+  },
+  "warnings": []
+}

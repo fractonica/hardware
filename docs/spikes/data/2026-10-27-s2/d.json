@@ -1,0 +1,93 @@
+{
+  "schema": "fractonica/s2-record@1",
+  "q": "d",
+  "title": "peer churn: µs per add and del",
+  "started_at": "2026-10-27T13:53:18.313Z",
+  "finished_at": "2026-10-27T13:53:18.401Z",
+  "hub": "http://127.0.0.1:7420",
+  "devices": {
+    "pad-c3": {
+      "device_id": "1cdbd4175cc4",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-c6": {
+      "device_id": "58e6c5d55e64",
+      "role": "node",
+      "profile": "c6-pad",
+      "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a"
+    },
+    "pad-s3": {
+      "device_id": "94a99015cecc",
+      "role": "node",
+      "profile": "s3l-pad",
+      "fw_id": "21741d5b8fe3c24b5dca4027b607aea7784a1fccc12ea289c6ede26aa0b1c121"
+    },
+    "gw-c6": {
+      "device_id": "f0f5bd09fdec",
+      "role": "gateway",
+      "profile": "c6g-gateway",
+      "fw_id": "5a3158a7aa11350192981fc161411f70ef502479583879fd12574927c60ddc45"
+    }
+  },
+  "params": {
+    "nodes": [
+      "pad-c3",
+      "pad-c6",
+      "pad-s3"
+    ],
+    "n": 100
+  },
+  "results": {
+    "pad-c3": {
+      "ok": true,
+      "n": 100,
+      "failed": 0,
+      "add_us": {
+        "p50": 47,
+        "p99": 55,
+        "max": 270
+      },
+      "del_us": {
+        "p50": 12,
+        "p99": 13,
+        "max": 43
+      }
+    },
+    "pad-c6": {
+      "ok": true,
+      "n": 100,
+      "failed": 0,
+      "add_us": {
+        "p50": 39,
+        "p99": 47,
+        "max": 228
+      },
+      "del_us": {
+        "p50": 13,
+        "p99": 14,
+        "max": 41
+      }
+    },
+    "pad-s3": {
+      "ok": true,
+      "n": 100,
+      "failed": 0,
+      "add_us": {
+        "p50": 53,
+        "p99": 91,
+        "max": 345
+      },
+      "del_us": {
+        "p50": 18,
+        "p99": 47,
+        "max": 65
+      }
+    }
+  },
+  "summary": {
+    "line": "pad-c3 add p99 55 µs del p99 13 µs; pad-c6 add p99 47 µs del p99 14 µs; pad-s3 add p99 91 µs del p99 47 µs"
+  },
+  "warnings": []
+}

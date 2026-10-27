@@ -43,7 +43,9 @@ protected:
  * RESULT fields, filled by dispatch into a buffer the caller provides (design c3 §2): kRealtimeCapacity
  * for realtime dispatch (UDP), kBulkCapacity when the request arrived on TCP or serial, where the RESULT
  * may go BULK. Fields that do not fit make the generated dispatch answer FAILED with the reply cleared,
- * never truncated. StaticReply<N> carries its own buffer.
+ * never truncated; overflowed() still says so after the clear, so the runtime can tell "did not fit this link"
+ * from a failure of the capability (design m2-c4-gateway D10: UNSUPPORTED over the gateway). StaticReply<N>
+ * carries its own buffer.
  */
 class Reply
 {
@@ -61,11 +63,18 @@ public:
     fr::wire::Writer &fields() { return w_; }
     std::span<const uint8_t> bytes() const { return w_.bytes(); }
     size_t capacity() const { return w_.capacity(); }
-    /** Drops what was written (and an overflow): FAILED answers carry no fields. */
-    void clear() { w_.reset(); }
+    /** Drops what was written: FAILED answers carry no fields. An overflow before it stays in overflowed(). */
+    void clear()
+    {
+        overflowed_ = overflowed_ || w_.overflow();
+        w_.reset();
+    }
+    /** Fields beyond capacity() were written at some point (before a clear() too). */
+    bool overflowed() const { return overflowed_ || w_.overflow(); }
 
 private:
     fr::wire::Writer w_;
+    bool overflowed_ = false;
 };
 
 namespace detail {

@@ -65,6 +65,7 @@ inline constexpr uint8_t kKindNetNeighbors = 6;
 inline constexpr uint8_t kKindNetWelcome = 7;
 inline constexpr uint8_t kKindNetDirectory = 8;
 inline constexpr uint8_t kKindNetResolve = 9;
+inline constexpr uint8_t kKindNetTest = 127;
 inline constexpr uint8_t kKindPresenceHello = 1;
 inline constexpr uint8_t kKindPresenceHeartbeat = 2;
 inline constexpr uint8_t kKindPresenceBye = 3;
@@ -132,6 +133,7 @@ static_assert(fr::wire::kExtValidMs == 0x03 && fr::wire::ext_value_size(fr::wire
 static_assert(fr::wire::kExtExpireAtUs == 0x04 && fr::wire::ext_value_size(fr::wire::kExtExpireAtUs) == 4);
 static_assert(fr::wire::kExtPortSeq == 0x05 && fr::wire::ext_value_size(fr::wire::kExtPortSeq) == 2);
 static_assert(fr::wire::kExtExecAtUs == 0x81 && fr::wire::ext_value_size(fr::wire::kExtExecAtUs) == 4);
+static_assert(fr::wire::kExtExecAtHubUs == 0x82 && fr::wire::ext_value_size(fr::wire::kExtExecAtHubUs) == 4);
 
 // Serial line framing.
 static_assert(fr::wire::kLinePrefix == "@fr1:");
@@ -197,6 +199,95 @@ constexpr bool is_known(OtaState v)
     case OtaState::invalid:
     case OtaState::aborted:
     case OtaState::undefined:
+        return true;
+    }
+    return false;
+}
+
+enum class NetMode : uint8_t { router = 0, gateway = 1, dual = 2 };
+/** The YAML member name; nullptr for a value this build does not know. */
+const char *to_name(NetMode v);
+bool from_name(std::string_view s, NetMode &out);
+constexpr bool is_known(NetMode v)
+{
+    switch (v) {
+    case NetMode::router:
+    case NetMode::gateway:
+    case NetMode::dual:
+        return true;
+    }
+    return false;
+}
+
+enum class GwOp : uint8_t { none = 0, set_channel = 1, set_net = 2, set_rate = 3, peer_flush = 4, info = 5 };
+/** The YAML member name; nullptr for a value this build does not know. */
+const char *to_name(GwOp v);
+bool from_name(std::string_view s, GwOp &out);
+constexpr bool is_known(GwOp v)
+{
+    switch (v) {
+    case GwOp::none:
+    case GwOp::set_channel:
+    case GwOp::set_net:
+    case GwOp::set_rate:
+    case GwOp::peer_flush:
+    case GwOp::info:
+        return true;
+    }
+    return false;
+}
+
+enum class GwRate : uint8_t { peer_default = 0, robust = 1, fast = 2 };
+/** The YAML member name; nullptr for a value this build does not know. */
+const char *to_name(GwRate v);
+bool from_name(std::string_view s, GwRate &out);
+constexpr bool is_known(GwRate v)
+{
+    switch (v) {
+    case GwRate::peer_default:
+    case GwRate::robust:
+    case GwRate::fast:
+        return true;
+    }
+    return false;
+}
+
+enum class GwTxOpt : uint8_t { rate_mask = 3, no_retry = 4 };
+/** The YAML member name; nullptr for a value this build does not know. */
+const char *to_name(GwTxOpt v);
+bool from_name(std::string_view s, GwTxOpt &out);
+constexpr bool is_known(GwTxOpt v)
+{
+    switch (v) {
+    case GwTxOpt::rate_mask:
+    case GwTxOpt::no_retry:
+        return true;
+    }
+    return false;
+}
+
+enum class GwTxStatus : uint8_t {
+    ok = 0,
+    nak = 1,
+    queue_full = 2,
+    no_peer = 3,
+    too_big = 4,
+    radio_off = 5,
+    stale = 6,
+};
+/** The YAML member name; nullptr for a value this build does not know. */
+const char *to_name(GwTxStatus v);
+bool from_name(std::string_view s, GwTxStatus &out);
+constexpr bool is_known(GwTxStatus v)
+{
+    switch (v) {
+    case GwTxStatus::ok:
+    case GwTxStatus::nak:
+    case GwTxStatus::queue_full:
+    case GwTxStatus::no_peer:
+    case GwTxStatus::too_big:
+    case GwTxStatus::radio_off:
+    case GwTxStatus::stale:
         return true;
     }
     return false;

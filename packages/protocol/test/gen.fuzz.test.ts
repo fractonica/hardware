@@ -33,6 +33,7 @@ import {
   encodeFrameLine,
   MESSAGES,
   PROTOCOL_TYPES,
+  SERIAL_BODIES,
   type Codec,
 } from '@fractonica/protocol/gen';
 
@@ -148,6 +149,10 @@ function codecTargets(): Target[] {
   for (const m of MESSAGES) {
     out.push([m.key, m.codec]);
   }
+  // Layout serial bodies under their serial type name (GW_RX); the protobuf ones are protocol types above.
+  for (const b of SERIAL_BODIES.filter((x) => x.kind === 'layout')) {
+    out.push([b.name, b.codec]);
+  }
   // The decoders C++ generates: traits when declared, every command's args, declared results, every event and property.
   for (const cap of CAPS) {
     if (cap.traits.fields.length > 0) {
@@ -192,7 +197,7 @@ const TARGETS: Target[] = [
     },
   },
   {
-    // TS-only: line -> frame (ENV envelope, LINK u32, opaque gateway bodies) -> line.
+    // TS-only: line -> frame (ENV envelope, every other type through its body codec) -> line.
     name: 'gen.serial_frame',
     corpus: [
       ...SAMPLES.filter((s) => s.type === 'serial').map((s) => s.bytes),

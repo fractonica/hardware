@@ -45,6 +45,52 @@ bool operator==(const DirectoryEntry &a, const DirectoryEntry &b)
     return a.addr == b.addr && fr::proto::equal_bytes(a.mac, b.mac);
 }
 
+size_t encode(const Neighbor &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (!v.mac.empty()) {
+        w.field_bytes(1, v.mac);
+    }
+    if (v.rssi != 0) {
+        w.field_sint(2, v.rssi);
+    }
+    if (v.age_s != 0) {
+        w.field_uint(3, v.age_s);
+    }
+    return w.size() - start;
+}
+
+std::expected<Neighbor, fr::wire::DecodeErr> decode_neighbor(std::span<const uint8_t> in)
+{
+    Neighbor v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.mac = r.read_bytes(6);
+            break;
+        case 2:
+            v.rssi = static_cast<int8_t>(r.read_sint(-0x80, 0x7F));
+            break;
+        case 3:
+            v.age_s = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const Neighbor &a, const Neighbor &b)
+{
+    return fr::proto::equal_bytes(a.mac, b.mac) && a.rssi == b.rssi && a.age_s == b.age_s;
+}
+
 size_t encode(const DescriptorCap &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -358,6 +404,611 @@ bool operator==(const BindingList &a, const BindingList &b)
     return a.items == b.items;
 }
 
+size_t encode(const GwStatus &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.channel != 0) {
+        w.field_uint(1, v.channel);
+    }
+    if (v.mode != NetMode{}) {
+        w.field_uint(2, std::to_underlying(v.mode));
+    }
+    if (v.uptime_s != 0) {
+        w.field_uint(3, v.uptime_s);
+    }
+    if (v.q_depth != 0) {
+        w.field_uint(4, v.q_depth);
+    }
+    if (v.q_max != 0) {
+        w.field_uint(5, v.q_max);
+    }
+    if (v.peers != 0) {
+        w.field_uint(6, v.peers);
+    }
+    if (v.tx != 0) {
+        w.field_uint(7, v.tx);
+    }
+    if (v.tx_fail != 0) {
+        w.field_uint(8, v.tx_fail);
+    }
+    if (v.rx != 0) {
+        w.field_uint(9, v.rx);
+    }
+    if (v.rx_drop != 0) {
+        w.field_uint(10, v.rx_drop);
+    }
+    if (v.rx_bad != 0) {
+        w.field_uint(11, v.rx_bad);
+    }
+    if (v.beacons != 0) {
+        w.field_uint(12, v.beacons);
+    }
+    if (v.ap_rssi != 0) {
+        w.field_sint(13, v.ap_rssi);
+    }
+    if (v.ap_channel != 0) {
+        w.field_uint(14, v.ap_channel);
+    }
+    if (v.last_tx_us != 0) {
+        w.field_uint(15, v.last_tx_us);
+    }
+    return w.size() - start;
+}
+
+std::expected<GwStatus, fr::wire::DecodeErr> decode_gw_status(std::span<const uint8_t> in)
+{
+    GwStatus v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.channel = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.mode = static_cast<NetMode>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.uptime_s = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 4:
+            v.q_depth = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 5:
+            v.q_max = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 6:
+            v.peers = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 7:
+            v.tx = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 8:
+            v.tx_fail = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 9:
+            v.rx = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 10:
+            v.rx_drop = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 11:
+            v.rx_bad = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 12:
+            v.beacons = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 13:
+            v.ap_rssi = static_cast<int8_t>(r.read_sint(-0x80, 0x7F));
+            break;
+        case 14:
+            v.ap_channel = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 15:
+            v.last_tx_us = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const GwStatus &a, const GwStatus &b)
+{
+    return a.channel == b.channel &&
+           a.mode == b.mode &&
+           a.uptime_s == b.uptime_s &&
+           a.q_depth == b.q_depth &&
+           a.q_max == b.q_max &&
+           a.peers == b.peers &&
+           a.tx == b.tx &&
+           a.tx_fail == b.tx_fail &&
+           a.rx == b.rx &&
+           a.rx_drop == b.rx_drop &&
+           a.rx_bad == b.rx_bad &&
+           a.beacons == b.beacons &&
+           a.ap_rssi == b.ap_rssi &&
+           a.ap_channel == b.ap_channel &&
+           a.last_tx_us == b.last_tx_us;
+}
+
+size_t encode(const GwCmd &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.req != 0) {
+        w.field_uint(1, v.req);
+    }
+    if (v.op != GwOp{}) {
+        w.field_uint(2, std::to_underlying(v.op));
+    }
+    if (v.channel != 0) {
+        w.field_uint(3, v.channel);
+    }
+    if (v.net != 0) {
+        w.field_uint(4, v.net);
+    }
+    if (v.rate != GwRate{}) {
+        w.field_uint(5, std::to_underlying(v.rate));
+    }
+    return w.size() - start;
+}
+
+std::expected<GwCmd, fr::wire::DecodeErr> decode_gw_cmd(std::span<const uint8_t> in)
+{
+    GwCmd v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.req = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 2:
+            v.op = static_cast<GwOp>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.channel = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 4:
+            v.net = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 5:
+            v.rate = static_cast<GwRate>(r.read_uint(0xFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const GwCmd &a, const GwCmd &b)
+{
+    return a.req == b.req &&
+           a.op == b.op &&
+           a.channel == b.channel &&
+           a.net == b.net &&
+           a.rate == b.rate;
+}
+
+size_t encode(const GwRsp &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.req != 0) {
+        w.field_uint(1, v.req);
+    }
+    if (v.status != 0) {
+        w.field_uint(2, v.status);
+    }
+    if (v.channel != 0) {
+        w.field_uint(3, v.channel);
+    }
+    if (v.net != 0) {
+        w.field_uint(4, v.net);
+    }
+    if (v.rate != GwRate{}) {
+        w.field_uint(5, std::to_underlying(v.rate));
+    }
+    if (v.peers != 0) {
+        w.field_uint(6, v.peers);
+    }
+    return w.size() - start;
+}
+
+std::expected<GwRsp, fr::wire::DecodeErr> decode_gw_rsp(std::span<const uint8_t> in)
+{
+    GwRsp v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.req = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 2:
+            v.status = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.channel = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 4:
+            v.net = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 5:
+            v.rate = static_cast<GwRate>(r.read_uint(0xFF));
+            break;
+        case 6:
+            v.peers = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const GwRsp &a, const GwRsp &b)
+{
+    return a.req == b.req &&
+           a.status == b.status &&
+           a.channel == b.channel &&
+           a.net == b.net &&
+           a.rate == b.rate &&
+           a.peers == b.peers;
+}
+
+size_t encode(const NetDiscover &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.net != 0) {
+        w.field_uint(1, v.net);
+    }
+    if (v.role != Role{}) {
+        w.field_uint(2, std::to_underlying(v.role));
+    }
+    if (!v.mac.empty()) {
+        w.field_bytes(3, v.mac);
+    }
+    return w.size() - start;
+}
+
+std::expected<NetDiscover, fr::wire::DecodeErr> decode_net_discover(std::span<const uint8_t> in)
+{
+    NetDiscover v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.net = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 2:
+            v.role = static_cast<Role>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.mac = r.read_bytes(6);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NetDiscover &a, const NetDiscover &b)
+{
+    return a.net == b.net && a.role == b.role && fr::proto::equal_bytes(a.mac, b.mac);
+}
+
+size_t encode(const NetBeacon &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.channel != 0) {
+        w.field_uint(1, v.channel);
+    }
+    if (v.flags != 0) {
+        w.field_uint(2, v.flags);
+    }
+    if (v.hub_epoch != 0) {
+        w.field_uint(3, v.hub_epoch);
+    }
+    if (v.bcast_floor != 0) {
+        w.field_uint(4, v.bcast_floor);
+    }
+    if (v.hub_time_us != 0) {
+        w.field_uint(5, v.hub_time_us);
+    }
+    if (v.hub_ipv4 != 0) {
+        w.field_uint(6, v.hub_ipv4);
+    }
+    if (v.hub_port != 0) {
+        w.field_uint(7, v.hub_port);
+    }
+    if (v.beacon_interval_ms != 0) {
+        w.field_uint(8, v.beacon_interval_ms);
+    }
+    if (v.bcast_watermark != 0) {
+        w.field_uint(9, v.bcast_watermark);
+    }
+    if (!v.gw_mac.empty()) {
+        w.field_bytes(10, v.gw_mac);
+    }
+    return w.size() - start;
+}
+
+std::expected<NetBeacon, fr::wire::DecodeErr> decode_net_beacon(std::span<const uint8_t> in)
+{
+    NetBeacon v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.channel = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.flags = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.hub_epoch = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 4:
+            v.bcast_floor = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 5:
+            v.hub_time_us = r.read_uint64();
+            break;
+        case 6:
+            v.hub_ipv4 = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 7:
+            v.hub_port = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 8:
+            v.beacon_interval_ms = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 9:
+            v.bcast_watermark = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 10:
+            v.gw_mac = r.read_bytes(6);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NetBeacon &a, const NetBeacon &b)
+{
+    return a.channel == b.channel &&
+           a.flags == b.flags &&
+           a.hub_epoch == b.hub_epoch &&
+           a.bcast_floor == b.bcast_floor &&
+           a.hub_time_us == b.hub_time_us &&
+           a.hub_ipv4 == b.hub_ipv4 &&
+           a.hub_port == b.hub_port &&
+           a.beacon_interval_ms == b.beacon_interval_ms &&
+           a.bcast_watermark == b.bcast_watermark &&
+           fr::proto::equal_bytes(a.gw_mac, b.gw_mac);
+}
+
+size_t encode(const NetJoinReq &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (!v.mac.empty()) {
+        w.field_bytes(1, v.mac);
+    }
+    if (!v.fw_id_prefix.empty()) {
+        w.field_bytes(2, v.fw_id_prefix);
+    }
+    if (v.role != Role{}) {
+        w.field_uint(3, std::to_underlying(v.role));
+    }
+    return w.size() - start;
+}
+
+std::expected<NetJoinReq, fr::wire::DecodeErr> decode_net_join_req(std::span<const uint8_t> in)
+{
+    NetJoinReq v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.mac = r.read_bytes(6);
+            break;
+        case 2:
+            v.fw_id_prefix = r.read_bytes(8);
+            break;
+        case 3:
+            v.role = static_cast<Role>(r.read_uint(0xFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NetJoinReq &a, const NetJoinReq &b)
+{
+    return fr::proto::equal_bytes(a.mac, b.mac) &&
+           fr::proto::equal_bytes(a.fw_id_prefix, b.fw_id_prefix) &&
+           a.role == b.role;
+}
+
+size_t encode(const NetJoinAccept &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (!v.mac.empty()) {
+        w.field_bytes(1, v.mac);
+    }
+    if (v.addr != 0) {
+        w.field_uint(2, v.addr);
+    }
+    if (v.hub_epoch != 0) {
+        w.field_uint(3, v.hub_epoch);
+    }
+    if (v.channel != 0) {
+        w.field_uint(4, v.channel);
+    }
+    return w.size() - start;
+}
+
+std::expected<NetJoinAccept, fr::wire::DecodeErr> decode_net_join_accept(std::span<const uint8_t> in)
+{
+    NetJoinAccept v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.mac = r.read_bytes(6);
+            break;
+        case 2:
+            v.addr = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 3:
+            v.hub_epoch = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 4:
+            v.channel = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NetJoinAccept &a, const NetJoinAccept &b)
+{
+    return fr::proto::equal_bytes(a.mac, b.mac) &&
+           a.addr == b.addr &&
+           a.hub_epoch == b.hub_epoch &&
+           a.channel == b.channel;
+}
+
+size_t encode(const NetChannelSwitch &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.channel != 0) {
+        w.field_uint(1, v.channel);
+    }
+    if (v.at_hub_us != 0) {
+        w.field_uint(2, v.at_hub_us);
+    }
+    if (v.count != 0) {
+        w.field_uint(3, v.count);
+    }
+    return w.size() - start;
+}
+
+std::expected<NetChannelSwitch, fr::wire::DecodeErr> decode_net_channel_switch(std::span<const uint8_t> in)
+{
+    NetChannelSwitch v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.channel = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.at_hub_us = r.read_uint64();
+            break;
+        case 3:
+            v.count = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NetChannelSwitch &a, const NetChannelSwitch &b)
+{
+    return a.channel == b.channel && a.at_hub_us == b.at_hub_us && a.count == b.count;
+}
+
+size_t encode(const NetNeighbors &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    for (const auto &e : v.entries) {
+        const auto m = w.begin_len(1);
+        encode(e, w);
+        w.end_len(m);
+    }
+    return w.size() - start;
+}
+
+std::expected<NetNeighbors, fr::wire::DecodeErr> decode_net_neighbors(std::span<const uint8_t> in)
+{
+    NetNeighbors v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1: {
+            if (v.entries.full()) {
+                r.fail(fr::wire::DecodeErr::too_long);
+                break;
+            }
+            const auto b = r.read_bytes(SIZE_MAX);
+            if (!r.ok()) {
+                break;
+            }
+            const auto e = decode_neighbor(b);
+            if (e) {
+                v.entries.push_back(*e);
+            } else {
+                r.fail(e.error());
+            }
+            break;
+        }
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NetNeighbors &a, const NetNeighbors &b)
+{
+    return a.entries == b.entries;
+}
+
 size_t encode(const NetWelcome &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -373,8 +1024,8 @@ size_t encode(const NetWelcome &v, fr::wire::Writer &w)
     if (v.hub_time_us != 0) {
         w.field_uint(4, v.hub_time_us);
     }
-    if (v.net_mode != 0) {
-        w.field_uint(5, v.net_mode);
+    if (v.net_mode != NetMode{}) {
+        w.field_uint(5, std::to_underlying(v.net_mode));
     }
     if (v.channel != 0) {
         w.field_uint(6, v.channel);
@@ -401,7 +1052,7 @@ std::expected<NetWelcome, fr::wire::DecodeErr> decode_net_welcome(std::span<cons
             v.hub_time_us = r.read_uint64();
             break;
         case 5:
-            v.net_mode = static_cast<uint8_t>(r.read_uint(0xFF));
+            v.net_mode = static_cast<NetMode>(r.read_uint(0xFF));
             break;
         case 6:
             v.channel = static_cast<uint8_t>(r.read_uint(0xFF));
@@ -521,6 +1172,61 @@ std::expected<NetResolve, fr::wire::DecodeErr> decode_net_resolve(std::span<cons
 bool operator==(const NetResolve &a, const NetResolve &b)
 {
     return a.addr == b.addr;
+}
+
+size_t encode(const NetTest &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.seq != 0) {
+        w.field_uint(1, v.seq);
+    }
+    if (v.t_us != 0) {
+        w.field_uint(2, v.t_us);
+    }
+    if (v.echo) {
+        w.field_bool(3, v.echo);
+    }
+    if (!v.pad.empty()) {
+        w.field_bytes(4, v.pad);
+    }
+    return w.size() - start;
+}
+
+std::expected<NetTest, fr::wire::DecodeErr> decode_net_test(std::span<const uint8_t> in)
+{
+    NetTest v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.seq = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 2:
+            v.t_us = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 3:
+            v.echo = r.read_bool();
+            break;
+        case 4:
+            v.pad = r.read_bytes(180);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const NetTest &a, const NetTest &b)
+{
+    return a.seq == b.seq &&
+           a.t_us == b.t_us &&
+           a.echo == b.echo &&
+           fr::proto::equal_bytes(a.pad, b.pad);
 }
 
 size_t encode(const PresenceHello &v, fr::wire::Writer &w)
@@ -860,6 +1566,52 @@ bool operator==(const PresencePong &a, const PresencePong &b)
     return a.t0 == b.t0 && a.t1 == b.t1;
 }
 
+size_t encode(const AckSack &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.frag_id != 0) {
+        w.field_uint(1, v.frag_id);
+    }
+    if (v.cnt != 0) {
+        w.field_uint(2, v.cnt);
+    }
+    if (v.received_bitmap != 0) {
+        w.field_uint(3, v.received_bitmap);
+    }
+    return w.size() - start;
+}
+
+std::expected<AckSack, fr::wire::DecodeErr> decode_ack_sack(std::span<const uint8_t> in)
+{
+    AckSack v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.frag_id = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 2:
+            v.cnt = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.received_bitmap = r.read_uint64();
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const AckSack &a, const AckSack &b)
+{
+    return a.frag_id == b.frag_id && a.cnt == b.cnt && a.received_bitmap == b.received_bitmap;
+}
+
 size_t encode(const MsgMsg &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -1080,6 +1832,52 @@ std::expected<OtaReject, fr::wire::DecodeErr> decode_ota_reject(std::span<const 
 bool operator==(const OtaReject &a, const OtaReject &b)
 {
     return a.job_id == b.job_id && a.code == b.code;
+}
+
+size_t encode(const OtaChunk &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.job != 0) {
+        w.field_uint(1, v.job);
+    }
+    if (v.offset != 0) {
+        w.field_uint(2, v.offset);
+    }
+    if (!v.data.empty()) {
+        w.field_bytes(3, v.data);
+    }
+    return w.size() - start;
+}
+
+std::expected<OtaChunk, fr::wire::DecodeErr> decode_ota_chunk(std::span<const uint8_t> in)
+{
+    OtaChunk v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.job = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 2:
+            v.offset = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        case 3:
+            v.data = r.read_bytes(187);
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const OtaChunk &a, const OtaChunk &b)
+{
+    return a.job == b.job && a.offset == b.offset && fr::proto::equal_bytes(a.data, b.data);
 }
 
 size_t encode(const OtaStatus &v, fr::wire::Writer &w)

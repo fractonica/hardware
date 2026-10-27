@@ -1,6 +1,7 @@
 # Fractonica wire protocol v1 — single source of truth for the envelope and system messages
 # (spec 05 §5.5–5.8). `fr gen` (M1 step 2) generates C++ and TS codecs plus golden vectors from it.
-# Only the 18-byte header and the class prefixes are fixed layout; message bodies are protobuf-wire.
+# Only the 18-byte header, the class prefixes and the serial_bodies layouts are fixed layout; message bodies
+# are protobuf-wire.
 protocol: fractonica
 version: 1
 
@@ -35,6 +36,9 @@ ext_tlv:   # type u8 | len u8 | value (LE); types >= 0x80 are critical. The wire
   0x04: { name: expire_at_us, type: u32 }
   0x05: { name: port_seq, type: u16 }      # per-port event counter of an `ordered` capability (design m2-c3-inputs D8)
   0x81: { name: exec_at_us, type: u32, critical: true }
+  # The low 32 bits of the hub's µs clock (BEACON hub_time_us), a clock nodes on one gateway share (design
+  # m2-c4-gateway D4); 0x81 stays the destination's clock. Every runtime refuses it (UNSUPPORTED) until M2-C8.
+  0x82: { name: exec_at_hub_us, type: u32, critical: true }
 
 addresses:
   hub: 0x0000
@@ -67,6 +71,17 @@ enums:
   ChipId: { esp32c3: 5, esp32s3: 9, esp32c6: 13 }
   Role: { node: 0, gateway: 1, fixture: 2 }   # fixture: the HIL fixture node (design m2-c1-hil D6; CONFIG_FR_ROLE)
   OtaState: { new: 0, pending_verify: 1, valid: 2, invalid: 3, aborted: 4, undefined: 255 }
+  # WELCOME and GwStatus (design m2-c4-gateway D3): how the hub reaches the node. The hub sends router at C4.
+  NetMode: { router: 0, gateway: 1, dual: 2 }
+  # The bridge's serial bodies (05 §5.12.3, design m2-c4-gateway D1). GwOp none: a GW_CMD without op.
+  GwOp: { none: 0, set_channel: 1, set_net: 2, set_rate: 3, peer_flush: 4, info: 5 }
+  # ESP-NOW rate: peer_default the peer's configured rate, robust 11B/1M_L, fast 11G/6M (05 §5.3).
+  GwRate: { peer_default: 0, robust: 1, fast: 2 }
+  # GW_TX tx_opts masks: b0-1 a GwRate, b2 no_retry (no re-send after a NAK); b3-7 are zero.
+  GwTxOpt: { rate_mask: 3, no_retry: 4 }
+  # GW_TX_DONE status: nak no link ACK after the driver's retries, no_peer the peer table is full, stale it
+  # waited past its valid_ms.
+  GwTxStatus: { ok: 0, nak: 1, queue_full: 2, no_peer: 3, too_big: 4, radio_off: 5, stale: 6 }
 
 classes:
   0x00:
@@ -81,6 +96,8 @@ classes:
       WELCOME: 7
       DIRECTORY: 8
       RESOLVE: 9
+      # Spike S2's bench frames (design m2-c4-gateway D19, diag `air bench`, FR_TEST_HOOKS builds send them).
+      TEST: 0x7F
   0x01:
     name: PRESENCE
     kinds: { HELLO: 1, HEARTBEAT: 2, BYE: 3, PING: 4, PONG: 5 }
@@ -141,13 +158,52 @@ messages:
     ucast_floor: { id: 2, type: u32 }
     bcast_base: { id: 3, type: u32 }
     hub_time_us: { id: 4, type: u64 }
-    net_mode: { id: 5, type: u8 }
+    net_mode: { id: 5, type: NetMode }
     channel: { id: 6, type: u8 }
+  # Bodies of design m2-c4-gateway D2. Only BEACON is sent at C4 (hub -> GW_TX broadcast); the others are
+  # defined now so C6 (discovery, channels) and C10 (relay OTA) change no wire contract.
+  NET.DISCOVER:
+    net: { id: 1, type: u16 }
+    role: { id: 2, type: Role }
+    mac: { id: 3, type: bytes, max: 6 }
+  NET.BEACON:
+    channel: { id: 1, type: u8 }
+    flags: { id: 2, type: u8, doc: "b0 gateway_mode, b1 switching" }
+    hub_epoch: { id: 3, type: u16 }
+    bcast_floor: { id: 4, type: u32 }
+    hub_time_us: { id: 5, type: u64 }
+    hub_ipv4: { id: 6, type: u32, doc: "a.b.c.d as a << 24 | b << 16 | c << 8 | d" }
+    hub_port: { id: 7, type: u16 }
+    beacon_interval_ms: { id: 8, type: u16 }
+    bcast_watermark: { id: 9, type: u32 }
+    gw_mac: { id: 10, type: bytes, max: 6, doc: "the gateway it went out on (a node may hear several)" }
+  NET.JOIN_REQ:
+    mac: { id: 1, type: bytes, max: 6 }
+    fw_id_prefix: { id: 2, type: bytes, max: 8 }
+    role: { id: 3, type: Role }
+  NET.JOIN_ACCEPT:
+    mac: { id: 1, type: bytes, max: 6 }
+    addr: { id: 2, type: u16 }
+    hub_epoch: { id: 3, type: u16 }
+    channel: { id: 4, type: u8 }
+  NET.CHANNEL_SWITCH:
+    channel: { id: 1, type: u8 }
+    at_hub_us: { id: 2, type: u64 }
+    count: { id: 3, type: u8 }
+  # 12 entries keep it inside the 200 B realtime budget (16 B each at worst).
+  NET.NEIGHBORS: { entries: { id: 1, type: "array<Neighbor>", max: 12 } }
   NET.DIRECTORY:
     page: { id: 1, type: u8 }
     pages: { id: 2, type: u8 }
     entries: { id: 3, type: "array<DirectoryEntry>", max: 14 }
   NET.RESOLVE: { addr: { id: 1, type: u16 } }
+  # `air bench` (design m2-c4-gateway D19): one test frame, TTL 1, to dst 0xFFFF (it is addressed by MAC); its echo
+  # goes back by unicast to the sender's MAC and addr with echo false, the rest unchanged. t_us: the sender's clock.
+  NET.TEST:
+    seq: { id: 1, type: u32 }
+    t_us: { id: 2, type: u32 }
+    echo: { id: 3, type: bool, doc: "the receiver answers with an echo" }
+    pad: { id: 4, type: bytes, max: 180 }
   OTA.OFFER:
     job_id: { id: 1, type: string, max: 23 }
     fw_id: { id: 2, type: bytes, max: 32 }
@@ -165,6 +221,11 @@ messages:
     job_id: { id: 1, type: string, max: 23 }
     state: { id: 2, type: u8, doc: "1 downloading, 2 staged, 3 rebooting" }
     bytes: { id: 3, type: u32 }
+  # Relay OTA over ESP-NOW (C10; 64 KB resume strides): 187 data bytes keep it inside the realtime budget.
+  OTA.CHUNK:
+    job: { id: 1, type: u16 }
+    offset: { id: 2, type: u32 }
+    data: { id: 3, type: bytes, max: 187 }
   # hub -> node: install a STAGED image (an OFFER with DEFER_COMMIT), or drop the job (design c4 §3).
   OTA.COMMIT: { job_id: { id: 1, type: string, max: 23 } }
   OTA.ABORT: { job_id: { id: 1, type: string, max: 23 } }
@@ -173,6 +234,11 @@ messages:
     outcome: { id: 2, type: u8, doc: "0 success, 1 failed, 2 rolled_back" }
     fw_id_prefix: { id: 3, type: bytes, max: 8 }
     reason: { id: 4, type: u8, doc: "failed: 1 download, 2 digest, 3 flash; rolled_back: 1 health_timeout, 2 crash, 3 unknown" }
+  # The receiver's window of a relay OTA job (C10), after the ACK prefix: bit i is offset base + i chunks.
+  ACK.SACK:   # 05 §5.8 fragmentation (missing fragments of frag_id); C10's relay OTA reuses it (design m2-c4 D2)
+    frag_id: { id: 1, type: u16 }
+    cnt: { id: 2, type: u8 }
+    received_bitmap: { id: 3, type: u64 }
   TIME.SYNC_REQ: { t1: { id: 1, type: u64 } }
   TIME.SYNC_RES: { t1: { id: 1, type: u64 }, t2: { id: 2, type: u64 }, t3: { id: 3, type: u64 } }
   MSG.MSG: { topic: { id: 1, type: string, max: 32 }, data: { id: 2, type: bytes, max: 168 } }
@@ -184,6 +250,11 @@ messages:
 # arrays of the types declared above it (no recursion).
 types:
   DirectoryEntry: { addr: { id: 1, type: u16 }, mac: { id: 2, type: bytes, max: 6 } }
+  # NET.NEIGHBORS entry: a node heard over ESP-NOW (C6).
+  Neighbor:
+    mac: { id: 1, type: bytes, max: 6 }
+    rssi: { id: 2, type: i8 }
+    age_s: { id: 3, type: u8 }
   # One capability instance of a node descriptor (07 §7.4).
   DescriptorCap:
     port: { id: 1, type: u8 }
@@ -221,6 +292,38 @@ types:
   # fr.node.bind_list returns it encoded, as `bytes` (like describe's Descriptor).
   BindingList:
     items: { id: 1, type: "array<Binding>", max: 16 }
+  # Gateway serial bodies (serial_bodies below; design m2-c4-gateway D1).
+  # GW_STATUS, every 1 s: the bridge's channel and mode, its GW_TX queue and ESP-NOW counters since boot.
+  GwStatus:
+    channel: { id: 1, type: u8 }
+    mode: { id: 2, type: NetMode }
+    uptime_s: { id: 3, type: u32 }
+    q_depth: { id: 4, type: u8, doc: "GW_TX queued now" }
+    q_max: { id: 5, type: u8, doc: "the queue's capacity" }
+    peers: { id: 6, type: u8, doc: "unicast peers in the driver's table" }
+    tx: { id: 7, type: u32 }
+    tx_fail: { id: 8, type: u32 }
+    rx: { id: 9, type: u32 }
+    rx_drop: { id: 10, type: u32, doc: "received frames not forwarded (no hub, full line buffer)" }
+    rx_bad: { id: 11, type: u32, doc: "GW_* lines from the host that did not decode" }
+    beacons: { id: 12, type: u32, doc: "BEACONs forwarded" }
+    ap_rssi: { id: 13, type: i8 }
+    ap_channel: { id: 14, type: u8 }
+    last_tx_us: { id: 15, type: u32, doc: "the last GW_TX's queue-to-verdict time" }
+  # host -> gateway; answered by a GwRsp with the same req.
+  GwCmd:
+    req: { id: 1, type: u16 }
+    op: { id: 2, type: GwOp }
+    channel: { id: 3, type: u8, doc: "set_channel" }
+    net: { id: 4, type: u16, doc: "set_net" }
+    rate: { id: 5, type: GwRate, doc: "set_rate: the default per-peer rate" }
+  GwRsp:
+    req: { id: 1, type: u16 }
+    status: { id: 2, type: u8, doc: "a status code: OK, or BUSY for set_channel while associated, UNSUPPORTED, INVALID_ARGS" }
+    channel: { id: 3, type: u8 }
+    net: { id: 4, type: u16 }
+    rate: { id: 5, type: GwRate }
+    peers: { id: 6, type: u8 }
 
 serial_framing:
   prefix: "@fr1:"
@@ -228,3 +331,35 @@ serial_framing:
   crc: { algo: crc16-ccitt-false, poly: 0x1021, init: 0xFFFF, order: little-endian, covers: "type|body" }
   max_line: 2048
   types: { ENV: 0x01, GW_RX: 0x10, GW_TX: 0x11, GW_TX_DONE: 0x12, GW_STATUS: 0x13, GW_CMD: 0x14, GW_RSP: 0x15, LINK_PING: 0x16, LINK_PONG: 0x17 }
+
+# Bodies of the serial frame types (05 §5.12.3, design m2-c4-gateway D1); ENV's body is an envelope. `layout`
+# is a fixed little-endian prefix (u8, i8, u16, u32, mac = 6 bytes, or a u8 enum); `envelope: true` means an
+# envelope follows it (the rest of the body), else the body is exactly the layout. `message` names a protocol
+# type encoded protobuf-wire. Codegen turns each into C++/TS codecs, golden vectors and fuzz targets.
+serial_bodies:
+  GW_RX:   # gw -> host: an ESP-NOW frame the gateway heard (any fr frame, also those addressed elsewhere)
+    layout:
+      - { name: src_mac, type: mac }
+      - { name: rssi, type: i8 }
+      - { name: channel, type: u8 }
+      - { name: rx_ts_us, type: u32, doc: "the gateway's esp_timer at receive, low 32 bits" }
+    envelope: true
+  GW_TX:   # host -> gw: send the envelope to dst_mac (FF x6: broadcast)
+    layout:
+      - { name: tx_id, type: u16, doc: "per gateway, from the hub; 0: no GW_TX_DONE wanted" }
+      - { name: dst_mac, type: mac }
+      - { name: tx_opts, type: u8, doc: "b0-1 GwRate, b2 no_retry (GwTxOpt masks), b3-7 zero" }
+    envelope: true
+  GW_TX_DONE:   # gw -> host: the verdict of GW_TX tx_id
+    layout:
+      - { name: tx_id, type: u16 }
+      - { name: status, type: GwTxStatus }
+      - { name: link_retries, type: u8, doc: "the driver's retries for this frame" }
+      - { name: queued_us, type: u32, doc: "time in the gateway's queue before the send" }
+  GW_STATUS: { message: GwStatus }   # gw -> host, every 1 s
+  GW_CMD: { message: GwCmd }         # host -> gw
+  GW_RSP: { message: GwRsp }         # gw -> host
+  LINK_PING:   # both: every 250 ms; the link is down after 1 s without an answer
+    layout: [ { name: t, type: u32 } ]
+  LINK_PONG:   # both: echoes the PING's t
+    layout: [ { name: t, type: u32 } ]

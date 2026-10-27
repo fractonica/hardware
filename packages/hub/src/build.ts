@@ -8,7 +8,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join, relative } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { checkSourceDir, idfEnv, idfStatus, readIdfLock, run } from '@fractonica/host';
+import { checkSourceDir, idfEnv, idfStatus, readIdfLock, readProfiles, run } from '@fractonica/host';
 import { type FaultKind, FrError, type ToolError } from '@fractonica/protocol';
 
 import { buildVariant, ingestBuild, lastFwId } from './artifacts.ts';
@@ -341,6 +341,22 @@ export interface BuildInput {
   clean: boolean;
   /** A fault build (spec 03 §3.8, debug only): its own build dir `<profile>-debug-fault` and layer. */
   fault?: FaultKind;
+}
+
+/**
+ * The app a profile builds: its `app:` (firmware/profiles/<profile>.profile.yaml), so `fr build --profile
+ * c6g-gateway` builds `gateway` (design m2-c4-gateway D7: role gateway <=> app gateway). build_start's default, and
+ * so deploy's, which builds through it. 'node' when the profile cannot be read: the build then says why.
+ */
+export function profileApp(sourceDir: string | null | undefined, profile: string): string {
+  if (!sourceDir) {
+    return 'node';
+  }
+  try {
+    return readProfiles(sourceDir).profiles.find((p) => p.profile === profile)?.app ?? 'node';
+  } catch {
+    return 'node';
+  }
 }
 
 /** The build dir of (app, profile, build type[, fault]): firmware/apps/<app>/build/<profile>-<variant>. */

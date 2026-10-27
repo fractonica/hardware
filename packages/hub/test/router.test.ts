@@ -76,7 +76,7 @@ describe('handshake', () => {
       expect(f.header).toMatchObject({ src: 0, dst: 5, epoch: 7, net: 0 });
     }
     // WELCOME's ucast_floor is its own seq: everything after it is new to the node.
-    expect(n.welcome).toMatchObject({ hub_epoch: 7, ucast_floor: 1, bcast_base: 0, net_mode: 0, channel: 6 });
+    expect(n.welcome).toMatchObject({ hub_epoch: 7, ucast_floor: 1, bcast_base: 0, net_mode: 'router', channel: 6 });
     expect(Math.abs(Number(n.welcome!.hub_time_us) - nowUs())).toBeLessThan(5e6);
     const dir = decodeNetDirectory(n.received(CLS.NET, KIND.NET.DIRECTORY)[0].body);
     expect(dir.ok && dir.value.entries.map((e) => [e.addr, Buffer.from(e.mac).toString('hex')]).sort()).toEqual([
@@ -374,7 +374,7 @@ describe('presence', () => {
     await until(() => wifi.tcpClosed);
   });
 
-  it('keeps a USB node whose Wi-Fi went silent online on its USB heartbeats, and sends there after 2 silent intervals', async () => {
+  it('keeps a USB node whose Wi-Fi went silent online on its USB heartbeats, sends there after 2 silent intervals, and ends TCP after 3.5', async () => {
     const clock = new ManualClock();
     // udp_blocked after 3 s: silent Wi-Fi is no firewall, so it must not be raised meanwhile.
     const r = await open({ clock, config: { udpBlockedMs: 3000 } });
@@ -410,15 +410,22 @@ describe('presence', () => {
     expect(r.router.info(id)!.links).toEqual(['serial', 'tcp']);
     expect(await toggle()).toMatchObject({ status: STATUS.OK, link: 'serial' });
     expect(usb.executions.get('3/2')).toBe(1);
-    for (let i = 0; i < 5; i++) {
+    await step(1000); // 3 intervals: TCP still held
+    expect(r.router.info(id)!.links).toEqual(['serial', 'tcp']);
+    expect(r.router.status().counters.tcp_silent_closed).toBe(0);
+    await step(1000); // past 3.5 with USB carrying: the TCP session ends (a Wi-Fi gone without a FIN)
+    expect(r.router.info(id)!.links).toEqual(['serial']);
+    expect(r.router.status().counters.tcp_silent_closed).toBe(1);
+    await until(() => wifi.tcpClosed, 3000, 'the TCP socket closed');
+    for (let i = 0; i < 3; i++) {
       await step(1000); // 7 intervals without Wi-Fi, a USB heartbeat in each
     }
     expect(r.router.presence(id)).toBe('online');
     expect(types).toEqual([]); // no suspect, no offline, no hub.warning udp_blocked
-    expect(r.router.info(id)!.links).toEqual(['serial', 'tcp']); // both sessions still up
-    // Wi-Fi carries again: TCP is the path once more.
+    // Wi-Fi carries again: fr_net, its connection gone, connects and says HELLO; TCP is the path once more.
+    wifi.close();
     wifi.silent = false;
-    wifi.heartbeat();
+    await wifi.connect();
     await until(() => r.router.info(id)!.links[0] === 'tcp', 3000, 'TCP first again');
     expect(await toggle()).toMatchObject({ status: STATUS.OK, link: 'tcp' });
     expect(wifi.executions.get('3/2')).toBe(2);

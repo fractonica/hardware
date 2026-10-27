@@ -68,8 +68,11 @@ export interface Device {
   created_at: string;
 }
 
-/** The node links a frame can arrive on or be sent over (05 §5.10). */
-export type LinkName = 'serial' | 'tcp' | 'udp';
+/**
+ * The node links a frame can arrive on or be sent over (05 §5.10). 'gateway': ESP-NOW through a gateway's serial
+ * bridge (design m2-c4-gateway D13-D14): a `gateway:<G>/<M>` endpoint per node MAC heard through gateway G.
+ */
+export type LinkName = 'serial' | 'tcp' | 'udp' | 'gateway';
 
 /** What a PRESENCE.HELLO tells the registry (05 §5.7), decoded by the router. */
 export interface HelloSeen {
@@ -160,6 +163,12 @@ export interface CommandResult {
   sent_us: number;
   /** When its RESULT arrived, µs since the Unix epoch; null for ack none, which has no RESULT. */
   rx_us: number | null;
+  /**
+   * Why a status is what it is when the hub knows more than the node said: UNSUPPORTED over a gateway session with
+   * no other link to retry on is `{ via: 'gateway', reason: 'too_big' }` (design m2-c4-gateway: the node refuses a
+   * BULK CMD, and an answer over ~200 B, over the air).
+   */
+  details?: Record<string, unknown>;
 }
 
 export interface Router {

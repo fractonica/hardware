@@ -4,6 +4,9 @@
 // frame is appended to a lock-free FIFO, a UDP datagram is one non-blocking sendto() on a socket that
 // lives for the whole run, so only one task ever writes to each socket. The address chain, with the hub's
 // `_fractonica._tcp` advert as its last step (design c6 D26), is hub_resolve.hpp's.
+//
+// M2-C4 (design m2-c4-gateway D8): a gateway (CONFIG_FR_ROLE 1) never resolves the hub nor opens TCP or UDP (its hub
+// link is USB), while its STA joins as any node's does. Spike S2's `air txpower` and `wifi proto` hooks (D19) end here.
 #include <fcntl.h>
 #include <sys/select.h>
 #include <sys/time.h>
@@ -32,6 +35,7 @@
 #include "lwip/netdb.h"
 #include "lwip/sockets.h"
 #include "mdns.h"
+#include "sdkconfig.h"
 #include "hub_resolve.hpp"
 #include "protocol.hpp"  // generated fr::proto::kMtuBulk
 #include "wifi_sta.hpp"
@@ -43,6 +47,8 @@ using detail::Event;
 using detail::WifiSta;
 
 constexpr const char *TAG = "fr_net";
+// Design m2-c4-gateway D8: no hub IP links on a gateway (Role gateway = 1, schema/protocol.yaml).
+constexpr bool kHubIp = CONFIG_FR_ROLE != 1;
 // Above fr_core (10): a frame the core queues for TCP goes out as soon as the core yields the CPU it was
 // queued on. Below lwIP (18), the event loop (20) and Wi-Fi (23), as every fr task (spec 03 §3.4).
 constexpr UBaseType_t kTaskPrio = 11;
@@ -295,6 +301,7 @@ QueueHandle_t s_events = nullptr;
 int s_efd = -1;
 bool s_started = false;
 std::atomic<uint32_t> s_events_lost{0};
+int8_t s_profile_qdbm = 0;  // the TX power in force once start() applied the board cap (`air txpower profile`)
 
 // ---- Hub ----
 
@@ -499,6 +506,9 @@ void Hub::close_tcp(TimeUs now, Close why, int detail)
 
 void Hub::poll(TimeUs now, const WifiSta &wifi)
 {
+    if constexpr (!kHubIp) {
+        return;  // a gateway: tcp_link() and udp_link() stay down, Net HELLOs over serial only (design m2-c4 D8)
+    }
     // `net drop_hub_link` (09 §9.7): no resolve and no reconnect while it lasts; at its end, at once.
     bool hold = hold_.load(std::memory_order_acquire);
     if (held_ && !hold) {
@@ -911,6 +921,12 @@ bool start(const Settings &settings, const Hooks &hooks)
         ESP_LOGI(TAG, "wifi: TX power capped at %d.%02d dBm", CONFIG_FR_WIFI_MAX_TX_POWER_QDBM / 4,
                  CONFIG_FR_WIFI_MAX_TX_POWER_QDBM % 4 * 25);
     }
+    s_profile_qdbm = CONFIG_FR_WIFI_MAX_TX_POWER_QDBM;
+#else
+    // No board cap: the driver's default, read back now, is what `air txpower profile` restores.
+    if (int8_t q = 0; esp_wifi_get_max_tx_power(&q) == ESP_OK) {
+        s_profile_qdbm = q;
+    }
 #endif
 
     uint8_t sta[6];
@@ -968,6 +984,43 @@ fr::Status wifi_down(uint32_t seconds)
     }
     s_wifi.request_down(seconds, now_us());
     return {};
+}
+
+std::expected<TxPower, Err> set_tx_power(std::optional<int8_t> qdbm)
+{
+    if (!s_started) {
+        return std::unexpected(Err::failed);
+    }
+    const int8_t want = qdbm.value_or(s_profile_qdbm);
+    if (want <= 0 || esp_wifi_set_max_tx_power(want) != ESP_OK) {
+        return std::unexpected(Err::invalid_args);
+    }
+    int8_t now = 0;
+    if (esp_wifi_get_max_tx_power(&now) != ESP_OK) {
+        return std::unexpected(Err::failed);
+    }
+    if (qdbm) {
+        ESP_LOGW(TAG, "wifi: TX power %d qdBm asked, %d qdBm in force (debug hook; profile %d)", want, now,
+                 s_profile_qdbm);
+    } else {
+        ESP_LOGI(TAG, "wifi: TX power back to the profile's %d qdBm (%d in force)", want, now);
+    }
+    return TxPower{.qdbm = now, .profile_qdbm = s_profile_qdbm};
+}
+
+fr::Status wifi_proto(bool ax)
+{
+#if CONFIG_SOC_WIFI_HE_SUPPORT
+    if (!s_started) {
+        return std::unexpected(Err::failed);
+    }
+    const uint8_t bgn = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
+    s_wifi.request_protocol(ax ? bgn | WIFI_PROTOCOL_11AX : bgn, now_us());
+    return {};
+#else
+    static_cast<void>(ax);
+    return std::unexpected(Err::unsupported);  // design m2-c4-gateway D19 (e): 11ax is the C6's alone
+#endif
 }
 
 }  // namespace fr::net::esp

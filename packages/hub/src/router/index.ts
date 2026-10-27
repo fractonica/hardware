@@ -26,6 +26,13 @@
 // envelope that goes to many sessions framed once (links Framed); and the counters and 1 s windows of hub_status
 // router.scale. M2-C3 (design m2-c3-inputs D9): EVENTs that carry EXT port_seq (ordered capabilities) are
 // published in port_seq order per (device, port), a gap held up to 50 ms (reorder.ts; hub_status router.reorder).
+// M2-C4 (design m2-c4-gateway D13-D17): a third session link, `gateway` (a node heard through a gateway's USB
+// bridge, links/gateway.ts), ranked after TCP and before USB (never for OTA frames: relay OTA is C10); hub broadcasts
+// and node-broadcast fan-out written once per up gateway that holds a welcomed gateway session (GW_TX FF×6) instead of
+// on each such session, and not at all through a gateway nobody uses (router-mode flood figures stay as they were); a
+// BEACON per up gateway at 1 Hz (4 Hz for 10 s after its AP channel changed) whether used or not, so nodes find it;
+// and the gateways in hub_status and device_get. A gateway is a Fractonica node too: over
+// its own USB session it gets DIRECTORY, hub broadcasts and fan-out like any node (unlike the fixture); it never relays.
 //
 // Everything on the receive path runs synchronously in the tick the envelope arrived in (spec 08 §8.2
 // rule 2); only the handshake and commands await answers, and the reorder buffer's hold timer publishes later.
@@ -59,6 +66,7 @@ import {
   encodePresencePing,
   encodePresencePong,
   encodeTimeSyncReq,
+  encodeNetBeacon,
   findCap,
   KIND,
   MTU,
@@ -90,11 +98,12 @@ import {
   type Seq,
 } from '../context.ts';
 import type { Db } from '../db.ts';
-import type { Endpoint, LinkSink, NodeLinksStatus, Source } from '../links/index.ts';
-import { Framed, NodeLinks, queuedOn, SERIAL_MAX_QUEUED, sendFramed } from '../links/index.ts';
+import type { Endpoint, GatewayView, LinkSink, NodeLinksStatus, Source } from '../links/index.ts';
+import { fitsAir, Framed, GATEWAY_MAX_IN_FLIGHT, NodeLinks, queuedOn, SERIAL_MAX_QUEUED, sendFramed } from '../links/index.ts';
 import type { LogIngest } from '../logs/ingest.ts';
 import type { LogStore } from '../logstore.ts';
 import { readNetwork } from '../network.ts';
+import { hubIpv4 } from '../registry/ident.ts';
 import { nowUs } from '../ring.ts';
 import type { SerialPortManager } from '../serial.ts';
 import { CapDirectory, descriptorCaps, instanceAt, type PortCap } from './caps.ts';
@@ -165,6 +174,15 @@ export interface RouterConfig {
   directoryCheckMs: number;
   /** A DUP of a forwarded request is forwarded again (its target re-sends the cached answer) at most this often. */
   forwardDupMs: number;
+  /** LINK_PING period per gateway, and how long without a LINK_PONG until it is down (design m2-c4-gateway D15). */
+  gatewayPingMs: number;
+  gatewayDownMs: number;
+  /** A GW_TX without its GW_TX_DONE this long frees its in-flight slot (counted done_lost). */
+  gatewayTxTimeoutMs: number;
+  /** BEACON per up gateway (D11): every beaconMs; every beaconFastMs for beaconFastForMs after its AP channel changed. */
+  beaconMs: number;
+  beaconFastMs: number;
+  beaconFastForMs: number;
 }
 
 export const ROUTER_DEFAULTS: RouterConfig = {
@@ -190,6 +208,12 @@ export const ROUTER_DEFAULTS: RouterConfig = {
   repairMax: 2,
   directoryCheckMs: 1000,
   forwardDupMs: 20,
+  gatewayPingMs: 250,
+  gatewayDownMs: 1000,
+  gatewayTxTimeoutMs: 1000,
+  beaconMs: 1000,
+  beaconFastMs: 250,
+  beaconFastForMs: 10_000,
 };
 
 /** Time sources: `now` (ms, monotonic) drives presence and timeouts, `nowUs` (µs since the Unix epoch) stamps events and TIME. */
@@ -224,6 +248,8 @@ export interface RouterDeps {
   logIngest?: LogIngest;
   /** This router process's scale counters (scale.ts), shared with the log ingest; a fresh set when not given. */
   scale?: ScaleCounters;
+  /** The Mac's LAN IPv4 for BEACON hub_ipv4 (design m2-c4-gateway D11); default registry/ident hubIpv4, read every 10 s. */
+  hubIpv4?: () => string | null;
 }
 
 // A RESULT, as sendCommand resolves it: defined with the Router interface (design c6 §3.3 adds the µs stamps).
@@ -304,6 +330,17 @@ export interface DeviceLinkInfo {
   properties: Record<string, unknown>;
   /** Instances known for its firmware (manifest or descriptor). */
   instances: PortCap[] | null;
+  /** The alias of the gateway its gateway session goes through; null without one (design m2-c4-gateway D17). */
+  gw: string | null;
+  /** A gateway's bridge (up, LINK_PING round trip, its last GW_STATUS, counters); null for any other device. */
+  gateway: GatewayInfo | null;
+}
+
+/** One gateway as hub_status links.gateways and its device_get show it (design m2-c4-gateway D15, D17). */
+export interface GatewayInfo extends GatewayView {
+  alias: string;
+  /** Node sessions through it. */
+  sessions: number;
 }
 
 /**
@@ -323,7 +360,9 @@ export interface DeviceLinkSummary {
 export interface RouterStatus {
   links: NodeLinksStatus | null;
   listen_error: string | null;
-  sessions: { tcp: number; serial: number };
+  sessions: { tcp: number; serial: number; gateway: number };
+  /** Per gateway port key (its MAC), design m2-c4-gateway D15. */
+  gateways: Record<string, GatewayInfo>;
   online: number;
   warnings: string[];
   counters: Record<string, number>;
@@ -528,6 +567,16 @@ const low32 = (n: number) => ((Math.round(n) % 2 ** 32) + 2 ** 32) % 2 ** 32;
 const isUp = (p: Presence) => p === 'online' || p === 'suspect';
 /** A HIL fixture's peer: its HELLO (or its registry row) says role fixture (design m2-c1-hil D6). */
 const isFixture = (peer: Peer) => peer.hello?.role === 'fixture' || peer.device?.role === 'fixture';
+/** BEACON's b1 (design m2-c4-gateway D2): the gateway's channel changed lately (its 4 Hz period). b0 gateway_mode stays 0 at C4 (D3). */
+const BEACON_SWITCHING = 0x02;
+/** a.b.c.d as BEACON hub_ipv4 carries it (a << 24 | b << 16 | c << 8 | d); 0 for none. */
+function ipv4Number(ip: string | null): number {
+  const parts = ip?.split('.').map(Number) ?? [];
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) {
+    return 0;
+  }
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
 
 export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   readonly hubEpoch: number;
@@ -590,6 +639,10 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   #listenError: string | null = null;
   #otaListeners = new Set<(f: OtaFrame) => void>();
   #hooks = new Set<RouterHooks>();
+  /** Clock ms of the last BEACON per gateway port key, and the hub LATEST seq BEACONs take (one for every gateway). */
+  #beaconAt = new Map<string, number>();
+  #beaconSeq = 0;
+  #ipv4: { at: number; value: number } | null = null;
   #counters = {
     rx_bad: 0,
     not_for_hub: 0,
@@ -625,6 +678,39 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     /** get_state sent because a HEARTBEAT's state_seq was ahead of the hub; and of those, the ones that failed. */
     resync: 0,
     resync_failed: 0,
+    // The gateway link (design m2-c4-gateway D14-D16).
+    /** Hub broadcasts and node-broadcast fan-out written as one GW_TX FF×6 on a gateway (one per gateway each). */
+    bcast_gateway_writes: 0,
+    /** BEACONs written, one per gateway each (not broadcasts: no BCAST seq). */
+    beacons_sent: 0,
+    /**
+     * GW_RX envelopes dropped: from a MAC with no gateway session (a TCP node's air broadcast); the hub's own frame
+     * re-seeded by a node; another source's frame relayed by the session's node (the bridge forwards every air frame).
+     */
+    gateway_no_session: 0,
+    gateway_hub_echo: 0,
+    gateway_relayed: 0,
+    /** NET.TEST bench frames (`air bench`, design D19) the bridge forwarded: dropped, never fanned out or windowed. */
+    gateway_test_frames: 0,
+    /**
+     * Frames one ESP-NOW frame cannot carry (BULK, or over MTU.REALTIME) kept off a gateway session: sent on the
+     * device's next link instead (gateway_rerouted), or refused there (gateway_too_big: no other link, or #send's guard).
+     */
+    gateway_rerouted: 0,
+    gateway_too_big: 0,
+    gateway_bulk_unflagged: 0,
+    /** Handshakes over a gateway alone that asked no describe (a BULK RESULT cannot come back over the air). */
+    describe_skipped_gateway: 0,
+    /**
+     * Sessions ended for silence while another session of the device carried (3.5 heartbeat intervals with nothing
+     * received): a TCP session whose Wi-Fi went without a FIN, a gateway session whose node left the air.
+     */
+    tcp_silent_closed: 0,
+    gateway_silent_closed: 0,
+    /** Gateway sessions the node closed with a BYE over the air while it had another session (it stayed online). */
+    gateway_bye: 0,
+    /** RESULT UNSUPPORTED over a gateway session (a BULK CMD, or an answer over ~200 B): retried once on the next link. */
+    gateway_unsupported_retried: 0,
   };
 
   constructor(deps: RouterDeps) {
@@ -640,7 +726,17 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       onError: (e) => console.error(JSON.stringify({ event: 'router_error', message: (e as Error).message, stack: (e as Error).stack })),
     });
     const l = deps.links === false ? {} : (deps.links ?? {});
-    this.#links = new NodeLinks(this, { ...l, serial: deps.serial ?? null });
+    const c = this.#cfg;
+    this.#links = new NodeLinks(this, {
+      ...l,
+      serial: deps.serial ?? null,
+      gateway: {
+        timing: { pingMs: c.gatewayPingMs, downMs: c.gatewayDownMs, txTimeoutMs: c.gatewayTxTimeoutMs, maxInFlight: GATEWAY_MAX_IN_FLIGHT },
+        clock: this.#clock,
+        isGateway: (key) => this.#isGatewayPort(key),
+        onChange: (key, up, why) => this.#gatewayChanged(key, up, why),
+      },
+    });
   }
 
   // ---- lifecycle ----
@@ -881,11 +977,16 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
 
   sendOta(deviceId: string, kind: number, body: Uint8Array, opts: { ackReq?: boolean } = {}): { link: SessionKind; seq: number } {
     const peer = this.#peers.get(deviceId);
-    const session = peer && this.#best(peer);
+    // Never a gateway session at C4 (design m2-c4-gateway D14): OTA over ESP-NOW is C10's relay OTA, so the next
+    // link in #ranked order, or no route.
+    const session = peer && this.#ranked(peer).find((s) => s.ep.kind !== 'gateway');
     if (!peer || !session || !isUp(peer.presence)) {
-      throw new FrError('DEVICE_OFFLINE', `${peer?.alias ?? deviceId} has no hub link (${peer?.presence ?? 'unknown'})`, {
-        remediation: [{ tool: 'wait_for_device', args: { selector: peer?.alias ?? `id:${deviceId}`, state: 'online' } }],
-      });
+      const gatewayOnly = !!peer && isUp(peer.presence) && !!peer.sessions.gateway;
+      throw new FrError(
+        'DEVICE_OFFLINE',
+        gatewayOnly ? `${peer.alias} is reachable only through a gateway, which carries no OTA frames before M2-C10` : `${peer?.alias ?? deviceId} has no hub link (${peer?.presence ?? 'unknown'})`,
+        { remediation: [{ tool: 'wait_for_device', args: { selector: peer?.alias ?? `id:${deviceId}`, state: 'online' } }] },
+      );
     }
     // #best is TCP when the node has it (unless Wi-Fi went silent), else its USB line: the hub never sends
     // UDP (05 §5.12.2).
@@ -913,7 +1014,9 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
    * so the receiving nodes seed the ESP-NOW flood (ttl 2/1 over the flood rate: TCP-only), as the same bytes
    * to every node session that has its WELCOME: TCP and serial both for a node on both (#sendEvery). Kept for
    * repair while valid. `seeded` says which ttl it took; `sessions` counts the nodes it went to (one on two
-   * links once), 0 when no node has a session and nothing went out.
+   * links once), 0 when no node has a session and nothing went out. Gateways (design m2-c4-gateway D16): one GW_TX
+   * FF×6 per up gateway, not a copy on each node's gateway session; a node with such a session counts as reached
+   * when its gateway took it.
    */
   broadcast(frame: { cls: number; kind: number; port: number; body: Uint8Array }, opts: { validMs?: number } = {}): BroadcastSent {
     const now = this.#clock.now();
@@ -942,10 +1045,11 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     this.#bcast = rec.seq;
     let sessions = 0;
     const skew = this.#skew();
+    const aired = this.#gatewayBroadcast(this.#bcastBytes(rec, this.#airNet(this.#links.gateway.upKeys())), skew);
     for (const peer of this.#peers.values()) {
       // A fixture has no radio to seed with (design m2-c1-hil D6): T-FLOOD's sessions stay the nodes'.
-      const wrote = isFixture(peer) ? 0 : this.#sendEvery(peer, this.#bcastBytes(rec, peer.net), skew);
-      if (wrote) {
+      const wrote = isFixture(peer) ? 0 : this.#sendEvery(peer, this.#bcastBytes(rec, peer.net), skew, { gateway: false });
+      if (wrote || this.#heardOn(peer, aired)) {
         sessions++;
         this.#scale.bcast_session_writes += wrote;
       }
@@ -1063,17 +1167,59 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
    * writes until wifiSilentX10 passes, and a broadcast lost there is one the node never seeds, which a
    * repair (ttl_remaining 1) cannot make up for at the nodes that only hear it over the air. The node's BCAST
    * window takes the first copy and drops the other as DUP; fr_net counts a second hub copy neither as a
-   * seed nor toward K. The sessions that took it (0: none).
+   * seed nor toward K. The sessions that took it (0: none). `gateway: false`: not on a gateway session (a hub
+   * broadcast goes once per gateway instead, #gatewayBroadcast); a repair goes on it, unicast to the node.
    */
-  #sendEvery(peer: Peer, f: Framed, skew?: { wrote(): void }): number {
+  #sendEvery(peer: Peer, f: Framed, skew?: { wrote(): void }, opts: { gateway?: boolean } = {}): number {
     let sent = 0;
     for (const s of this.#sessionsOf(peer)) {
+      if (opts.gateway === false && s.ep.kind === 'gateway') {
+        continue;
+      }
       if (s.welcomed && this.#sendShared(s, f)) {
         sent++;
         skew?.wrote();
       }
     }
     return sent;
+  }
+
+  /**
+   * One envelope for every node behind a gateway (design m2-c4-gateway D16): a GW_TX FF×6 (tx_id 0) on each gateway
+   * that is up and holds at least one welcomed gateway session, the line made once (Framed.gwBroadcast). A gateway
+   * nobody holds a session on puts nothing on the air: the nodes around it have their own hub links and seed the
+   * flood themselves, so a plugged-in but unused gateway leaves router mode's seeds and transmissions unchanged. `room`: skip a gateway with that many GW_TX in flight (the
+   * fan-out's 16-of-32 rule, counted fanout_skipped_full). The gateways that took it.
+   */
+  #gatewayBroadcast(f: Framed, skew?: { wrote(): void }, room?: number): Set<string> {
+    const aired = new Set<string>();
+    const used = new Set<string>();
+    for (const s of this.#sessions.values()) {
+      if (s.ep.kind === 'gateway' && s.welcomed && !s.closed && s.ep.gateway) {
+        used.add(s.ep.gateway);
+      }
+    }
+    for (const key of this.#links.gateway.upKeys()) {
+      if (!used.has(key)) {
+        continue;
+      }
+      if (room !== undefined && this.#links.gateway.inFlight(key) >= room) {
+        this.#scale.fanout_skipped_full++;
+        continue;
+      }
+      if (this.#links.gateway.broadcast(key, f)) {
+        aired.add(key);
+        skew?.wrote();
+        this.#counters.bcast_gateway_writes++;
+      }
+    }
+    return aired;
+  }
+
+  /** The node has a welcomed gateway session through one of `aired` (a broadcast GW_TX reached it). */
+  #heardOn(peer: Peer, aired: Set<string>): boolean {
+    const s = peer.sessions.gateway;
+    return !!s && s.welcomed && !s.closed && aired.has(s.ep.gateway ?? '');
   }
 
   #pruneBroadcasts(now: number): void {
@@ -1122,21 +1268,24 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
    * it and none re-seeds it. Every session, as hub broadcasts go (design m2-c2 D18): a dual-link node whose
    * Wi-Fi died without a FIN keeps getting them over USB while TCP is still its best link; the node drops the
    * second copy as a DUP. A USB line that is not the node's best link takes a copy only while its queue has
-   * room (FANOUT_SERIAL_ROOM). Never to the fixture (design m2-c1-hil D6). Counted once per node.
+   * room (FANOUT_SERIAL_ROOM). Never to the fixture (design m2-c1-hil D6). Counted once per node. Gateway sessions
+   * get none: one GW_TX FF×6 per up gateway with fewer than FANOUT_SERIAL_ROOM in flight (design m2-c4-gateway D16).
    */
   #fanOut(from: Peer, bytes: Uint8Array): void {
     const t0 = performance.now();
     const out = new Framed(withRemaining(bytes, 1));
     const skew = this.#skew();
-    let wrote = false;
+    const aired = this.#gatewayBroadcast(out, skew, FANOUT_SERIAL_ROOM);
+    this.#scale.fanout_bytes += aired.size * out.envelope.length;
+    let wrote = aired.size > 0;
     for (const peer of this.#peers.values()) {
       if (peer === from || isFixture(peer)) {
         continue;
       }
       const best = this.#best(peer);
-      let took = false;
+      let took = this.#heardOn(peer, aired);
       for (const s of this.#sessionsOf(peer)) {
-        if (!s.welcomed) {
+        if (!s.welcomed || s.ep.kind === 'gateway') {
           continue;
         }
         if (s !== best && s.ep.kind === 'serial' && queuedOn(s.ep) >= FANOUT_SERIAL_ROOM) {
@@ -1178,7 +1327,14 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       this.#counters.forward_fixture++;
       return false;
     }
-    const s = target && target !== from ? this.#best(target) : undefined;
+    let s = target && target !== from ? this.#best(target) : undefined;
+    if (s && target && s.ep.kind === 'gateway' && !fitsAir(bytes)) {
+      // A BULK (or long) node frame cannot go on the air: the target's next link, or no route.
+      s = this.#offAir(target, s);
+      if (s) {
+        this.#counters.gateway_rerouted++;
+      }
+    }
     if (!s?.welcomed || !this.#send(s, withRemaining(bytes, remaining - 1))) {
       this.#counters.forward_no_route++;
       return false;
@@ -1282,7 +1438,30 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       heartbeat: peer.heartbeat,
       properties,
       instances: this.#capsOf(peer),
+      gw: this.#gwAlias(peer),
+      gateway: this.#gatewayInfo(peer.id),
     };
+  }
+
+  /** The alias of the gateway the device's gateway session goes through, null without one. */
+  #gwAlias(peer: Peer): string | null {
+    const key = peer.sessions.gateway?.ep.gateway;
+    return key ? (this.#peers.get(key)?.alias ?? key) : null;
+  }
+
+  /** One gateway's bridge with its alias and node sessions (null for a port that is no gateway). */
+  #gatewayInfo(key: string): GatewayInfo | null {
+    const view = this.#links.gateway.view(key);
+    if (!view) {
+      return null;
+    }
+    let sessions = 0;
+    for (const s of this.#sessions.values()) {
+      if (s.ep.kind === 'gateway' && s.ep.gateway === key) {
+        sessions++;
+      }
+    }
+    return { alias: this.#peers.get(key)?.alias ?? key, sessions, ...view };
   }
 
   /** The instances (port, capability) a device's firmware has, for command_send; null when unknown. */
@@ -1302,14 +1481,13 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   }
 
   status(): RouterStatus {
-    let tcp = 0;
-    let serial = 0;
+    const sessions = { tcp: 0, serial: 0, gateway: 0 };
     for (const s of this.#sessions.values()) {
-      if (s.ep.kind === 'tcp') {
-        tcp++;
-      } else {
-        serial++;
-      }
+      sessions[s.ep.kind]++;
+    }
+    const gateways: Record<string, GatewayInfo> = {};
+    for (const key of this.#links.gateway.keys()) {
+      gateways[key] = this.#gatewayInfo(key)!;
     }
     const warnings: string[] = [];
     if (this.#listenError) {
@@ -1323,7 +1501,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     return {
       links: this.#listening ? this.#links.status() : null,
       listen_error: this.#listenError,
-      sessions: { tcp, serial },
+      sessions,
+      gateways,
       online: this.online().length,
       warnings,
       counters: { ...this.#counters },
@@ -1427,6 +1606,12 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     }
     const env = d.value;
     const h = env.header;
+    if (from.kind === 'gateway' && h.cls === CLS.NET && h.kind === KIND.NET.TEST) {
+      // `air bench` frames between nodes (design D19) that the bridge heard: a bench's traffic, nothing the hub
+      // windows, forwards or fans out (an echo is addressed to a node; a run's frames are broadcasts).
+      this.#counters.gateway_test_frames++;
+      return;
+    }
     if (h.dst !== ADDR.HUB && h.dst !== ADDR.BROADCAST && !isNodeAddr(h.dst)) {
       // Groups (M2) and UNASSIGNED: nothing the hub delivers or forwards. A node addr goes on to #frame,
       // which windows it by its sender like any frame and forwards it (design c5 §4).
@@ -1437,12 +1622,22 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       this.#udp(env);
       return;
     }
+    if (from.kind === 'gateway' && h.src === ADDR.HUB) {
+      // The bridge forwards every air frame it hears (design m2-c4-gateway D8): this is the hub's own, re-seeded.
+      this.#counters.gateway_hub_echo++;
+      return;
+    }
     if (h.cls === CLS.PRESENCE && h.kind === KIND.PRESENCE.HELLO) {
       this.#hello(from, env);
       return;
     }
     const session = this.#sessions.get(from);
     if (session) {
+      if (from.kind === 'gateway' && h.src !== session.peer.addr) {
+        // Another source's frame the session's node relayed over the air: its own hub link brings it.
+        this.#counters.gateway_relayed++;
+        return;
+      }
       session.lastRx = this.#clock.now(); // the link carries, whatever the window makes of the frame
       this.#frame(session.peer, from.kind, env);
       return;
@@ -1461,7 +1656,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       this.#frame(this.#peer(from.remote), 'serial', env);
       return;
     }
-    this.#counters.no_session++;
+    // Through a gateway: mostly air broadcasts of nodes whose hub link is TCP (the bridge forwards them all).
+    this.#counters[from.kind === 'gateway' ? 'gateway_no_session' : 'no_session']++;
   }
 
   #udp(env: Envelope): void {
@@ -1523,6 +1719,11 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       return;
     }
     const hello = d.value;
+    if (ep.kind === 'gateway' && hex(hello.mac) !== ep.remote) {
+      // A gateway session is the MAC the bridge heard (design m2-c4-gateway D14): another device's HELLO, relayed.
+      this.#counters.rx_bad++;
+      return;
+    }
     const netId = this.#currentNetId();
     if (netId !== null && h.net !== 0 && h.net !== netId) {
       this.#counters.foreign_net++; // provisioned by another network
@@ -1590,6 +1791,14 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       link: ep.kind,
     };
     peer.hello = seen;
+    if (ep.kind === 'serial') {
+      // A gateway's USB line carries its bridge (design m2-c4-gateway D13): LINK_PING from the next tick.
+      if (seen.role === 'gateway') {
+        this.#links.gateway.attach(ep.remote);
+      } else if (this.#links.gateway.has(ep.remote)) {
+        this.#links.gateway.detach(ep.remote);
+      }
+    }
     try {
       peer.device = this.#deps.registry.touchHello(id, seen);
     } catch (e) {
@@ -1884,6 +2093,14 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       case KIND.PRESENCE.BYE: {
         const bye = decodePresenceBye(env.body);
         const reason = bye.ok ? (BYE_REASONS[bye.value.reason] ?? `bye_${bye.value.reason}`) : 'bye';
+        const gw = peer.sessions.gateway;
+        if (link === 'gateway' && gw && this.#sessionsOf(peer).some((s) => s !== gw)) {
+          // The node closes its gateway session this way once TCP is back and welcomed for 5 s (design m2-c4-gateway
+          // D12): that session ends, the device stays online on the others. A shutdown says BYE on those too.
+          this.#counters.gateway_bye++;
+          this.#endSession(gw, `BYE over the gateway (${reason})`);
+          break;
+        }
         this.#offline(peer, reason, { bye: true });
         break;
       }
@@ -2181,7 +2398,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       ucast_floor: seq,
       bcast_base: this.#bcast,
       hub_time_us: BigInt(Math.round(this.#clock.nowUs())),
-      net_mode: 0,
+      net_mode: 'router', // design m2-c4-gateway D3: the gateway session is a fallback link, not a mode
       channel: peer.channel,
     });
     this.#send(session, this.#encode(peer, seq, CLS.NET, KIND.NET.WELCOME, PORT.NODE, welcome));
@@ -2415,9 +2632,23 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
 
   async #describe(peer: Peer, session: Session): Promise<void> {
     const hash = peer.hello!.descriptor_hash;
+    // describe is BULK both ways, which no gateway carries (one ESP-NOW frame, 250 B): on the device's next link,
+    // or not at all over a gateway alone. Nothing is recorded then, so the next handshake on TCP or USB asks.
+    const via = this.#offAir(peer, session);
+    if (!via) {
+      this.#counters.describe_skipped_gateway++;
+      this.#note(peer, 'describe skipped: its only link is a gateway, which carries no BULK frame; asked again when TCP or USB comes');
+      return;
+    }
+    if (via !== session) {
+      this.#counters.gateway_rerouted++;
+    }
     try {
       this.#scale.describe_sent++;
-      const r = await this.#request(peer, session, PORT.NODE, NODE_DESCRIBE, EMPTY, { ack: 'result', timeoutMs: this.#cfg.handshakeCmdTimeoutMs, bulk: true });
+      const r = await this.#request(peer, via, PORT.NODE, NODE_DESCRIBE, EMPTY, { ack: 'result', timeoutMs: this.#cfg.handshakeCmdTimeoutMs, bulk: true });
+      if (r.details?.via === 'gateway') {
+        return; // the air's UNSUPPORTED, not the firmware's (never here: describe never goes over a gateway)
+      }
       if (r.status === STATUS.UNSUPPORTED || r.status === STATUS.FAILED) {
         // An older node, or one whose descriptor does not fit (fr_core answers FAILED for good): do not ask again.
         this.#descriptors.set(hash, null);
@@ -2458,6 +2689,9 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     if (now - this.#dirCheckAt >= this.#cfg.directoryCheckMs) {
       this.syncDirectory();
     }
+    // Gateways (design m2-c4-gateway D11, D15): LINK_PING and the down rule, then the BEACONs of those up.
+    this.#links.gateway.tick();
+    this.#beacons(now);
     for (const peer of this.#peers.values()) {
       const sessions = this.#sessionsOf(peer);
       if (!sessions.length || peer.lastRx === null) {
@@ -2471,6 +2705,19 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         // The silence may be Wi-Fi's alone: a USB node still holding its serial session gets a BYE there.
         this.#offline(peer, 'timeout', { byeSerial: true });
         continue;
+      }
+      // One link silent for as long as presence allows while another carries: a TCP session whose Wi-Fi went without
+      // a FIN (net wifi_down, the AP lost) would hold for minutes, taking writes (#best moves off it after 2
+      // intervals, see #wifiSilent); a gateway session whose node left the air (the node says BYE when it closes one,
+      // this is for a BYE lost on the air). Ended, so the next HELLO on that link starts fresh. USB is never aged: a
+      // node sends its heartbeats over Wi-Fi once UDP works.
+      const carries = (x: Session) => !x.closed && now - x.lastRx < offlineAt;
+      for (const kind of ['tcp', 'gateway'] as const) {
+        const s = peer.sessions[kind];
+        if (s && !carries(s) && sessions.some((x) => x !== s && carries(x))) {
+          this.#counters[kind === 'tcp' ? 'tcp_silent_closed' : 'gateway_silent_closed']++;
+          this.#endSession(s, `${kind === 'tcp' ? 'Wi-Fi' : 'gateway link'} silent for ${Math.round((now - s.lastRx) / 100) / 10} s`);
+        }
       }
       if (silent >= suspectAt) {
         if (peer.presence === 'online') {
@@ -2490,7 +2737,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       // it on a link, so every session gets a hub HEARTBEAT when nothing else went out for an interval
       // (with UDP blocked there are no echoes, and this is the TCP keepalive).
       for (const s of sessions) {
-        if (s.welcomed && now - s.lastTx >= iv) {
+        if (s.welcomed && !s.closed && now - s.lastTx >= iv) {
           this.#sendFrame(s, CLS.PRESENCE, KIND.PRESENCE.HEARTBEAT, PORT.NODE, encodePresenceHeartbeat({ uptime_s: Math.floor(process.uptime()) }));
         }
       }
@@ -2526,6 +2773,114 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         this.#waiting.delete(ep);
         ep.close();
       }
+    }
+  }
+
+  // ---- gateways (design m2-c4-gateway D11, D13-D16) ----
+
+  /**
+   * NET.BEACON through each up gateway (D11, D16): every beaconMs, every beaconFastMs for beaconFastForMs after its AP
+   * channel changed (flag b1 then). The hub builds it: the gateway's AP channel (its last GW_STATUS), hub epoch and
+   * time, the BCAST floor (the seq below the oldest broadcast still valid: none at or below it is delivered again)
+   * and watermark (the newest), where the node listener is, and gw_mac, the gateway it went out on. dst 0xFFFF but
+   * LATEST, in the hub's LATEST space (one counter for every gateway, so a node hearing two sees it rise): no BCAST
+   * seq, so it is no broadcast and never repaired, and ttl 1/1, so no node seeds it. Counted beacons_sent.
+   */
+  #beacons(now: number): void {
+    const gateways = this.#links.gateway.upGateways();
+    if (!gateways.length) {
+      return;
+    }
+    this.#pruneBroadcasts(now);
+    for (const g of gateways) {
+      const fast = g.channelChangedAt !== null && now - g.channelChangedAt < this.#cfg.beaconFastForMs;
+      if (now - (this.#beaconAt.get(g.key) ?? -Infinity) < (fast ? this.#cfg.beaconFastMs : this.#cfg.beaconMs)) {
+        continue;
+      }
+      const body = encodeNetBeacon({
+        channel: g.status?.ap_channel || g.status?.channel || 0,
+        flags: fast ? BEACON_SWITCHING : 0,
+        hub_epoch: this.hubEpoch,
+        bcast_floor: this.#bcastLog.length ? (this.#bcastLog[0].seq - 1) >>> 0 : this.#bcast,
+        // C8 (dual-homing, exec_at_hub_us): stamped here, at build time, so it is early by the write chain (the
+        // gateway's serial tail, USB) and the bridge's GW_TX FIFO wait, up to its 32-deep queue; GW_TX_DONE
+        // queued_us says how long that wait was. A node may take it as a coarse hub clock only until C8 stamps it
+        // later (or corrects by queued_us) before anything schedules against it.
+        hub_time_us: BigInt(Math.round(this.#clock.nowUs())),
+        hub_ipv4: this.#hubIpv4(now),
+        hub_port: this.#links.ports()?.tcp ?? 0,
+        beacon_interval_ms: this.#cfg.beaconMs, // the nominal period: a node counts 3 missed against it (D11)
+        bcast_watermark: this.#bcast,
+        gw_mac: Buffer.from(g.key, 'hex'),
+      });
+      const seq = this.#beaconSeq >= 0xffffffff ? 1 : this.#beaconSeq + 1;
+      const header: Header = { flags: FLAG.LATEST, cls: CLS.NET, kind: KIND.NET.BEACON, seq, net: this.#airNet([g.key]), src: ADDR.HUB, dst: ADDR.BROADCAST, epoch: this.hubEpoch, ttl: HUB_TTL, port: PORT.NODE };
+      // Never skipped for room (Infinity): a node that misses 3 counts the gateway lost (D11).
+      if (this.#links.gateway.broadcast(g.key, new Framed(encodeEnvelope({ header, body })), Infinity)) {
+        this.#beaconSeq = seq;
+        this.#beaconAt.set(g.key, now);
+        this.#counters.beacons_sent++;
+      }
+    }
+  }
+
+  /**
+   * The net of what the hub puts on the air through gateways (BEACON, a hub broadcast's GW_TX FF×6): the network
+   * record's net_id; without one (a private hub: the sim runner's, whose home must hold no record) the net the first
+   * of `gateways` said in its own HELLO, which is the fleet's (a FleetNode's net is its spec's), else 0, which a radio
+   * filtering on its own net 0 takes anyway. Unicast frames carry each device's own net from its HELLO.
+   */
+  #airNet(gateways: readonly string[]): number {
+    const net = this.#currentNetId();
+    if (net !== null) {
+      return net;
+    }
+    for (const key of gateways) {
+      const peer = this.#peers.get(key);
+      if (peer?.hello) {
+        return peer.net;
+      }
+    }
+    return 0;
+  }
+
+  /** BEACON hub_ipv4: the Mac's LAN IPv4, read again every 10 s (an interface can change while the hub runs). */
+  #hubIpv4(now: number): number {
+    if (!this.#ipv4 || now - this.#ipv4.at >= 10_000) {
+      let ip: string | null = null;
+      try {
+        ip = (this.#deps.hubIpv4 ?? hubIpv4)();
+      } catch {
+        ip = null;
+      }
+      this.#ipv4 = { at: now, value: ipv4Number(ip) };
+    }
+    return this.#ipv4.value;
+  }
+
+  /** A port's device is a gateway (its GW_* lines are taken, D13): its HELLO says so, else its registry row. */
+  #isGatewayPort(key: string): boolean {
+    const peer = this.#peers.get(key);
+    if (peer?.hello) {
+      return peer.hello.role === 'gateway';
+    }
+    try {
+      return (peer?.device ?? this.#deps.registry.get(key))?.role === 'gateway';
+    } catch {
+      this.#counters.registry_errors++;
+      return false;
+    }
+  }
+
+  /** A gateway came up (its first LINK_PONG: a BEACON at once) or went down (its node sessions closed already). */
+  #gatewayChanged(key: string, up: boolean, why: string): void {
+    if (up) {
+      this.#beaconAt.delete(key);
+    }
+    console.log(JSON.stringify({ event: up ? 'gateway_up' : 'gateway_down', gateway: key, why }));
+    const peer = this.#peers.get(key);
+    if (peer) {
+      this.#note(peer, up ? 'gateway bridge up (LINK_PONG)' : `gateway bridge down (${why})`);
     }
   }
 
@@ -2581,7 +2936,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
    * later; with one it HELLOs over USB at once (05 §5.11). A port that is gone (USB unplugged) gets none.
    */
   #endSession(s: Session, why: string, opts: { keep?: Endpoint; linger?: boolean; bye?: boolean } = {}): void {
-    if (opts.bye && s.ep.kind === 'serial' && s.welcomed && !s.ep.closed) {
+    // A node behind a gateway holds its session the same way (a gateway that is down has closed the endpoint).
+    if (opts.bye && (s.ep.kind === 'serial' || s.ep.kind === 'gateway') && s.welcomed && !s.ep.closed) {
       this.#sendFrame(s, CLS.PRESENCE, KIND.PRESENCE.BYE, PORT.NODE, encodePresenceBye({ reason: 0 }));
     }
     s.closed = true;
@@ -2701,21 +3057,39 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   }
 
   #sessionsOf(peer: Peer): Session[] {
-    return [peer.sessions.tcp, peer.sessions.serial].filter((s): s is Session => s !== undefined);
+    return [peer.sessions.tcp, peer.sessions.gateway, peer.sessions.serial].filter((s): s is Session => s !== undefined);
   }
 
   /**
-   * TCP when the node has it (05 §5.10 router mode), else its USB line; and the USB line while nothing came
-   * over Wi-Fi for more than 2 heartbeat intervals (wifiSilentX10). Wi-Fi can go quiet without a FIN (an AP
-   * gone, IP traffic stalled); presence counts frames from either link, so the device stays online through
-   * USB, and commands, OTA frames, PINGs and ACKs follow it there until Wi-Fi carries again.
+   * TCP when the node has it (05 §5.10 router mode), else its gateway session, else its USB line; and the USB line
+   * while nothing came over Wi-Fi for more than 2 heartbeat intervals (wifiSilentX10). Wi-Fi can go quiet without a
+   * FIN (an AP gone, IP traffic stalled); presence counts frames from either link, so the device stays online
+   * through USB, and commands, OTA frames, PINGs and ACKs follow it there until Wi-Fi carries again. A gateway
+   * session never wins over a welcomed TCP one that carries (design m2-c4-gateway D12, D14: the node keeps it only
+   * until TCP is back); while TCP is silent a welcomed gateway session wins, before USB (the order stays TCP,
+   * gateway, USB). A TCP session silent for 3.5 intervals while another carries is ended (tick, tcp_silent_closed).
    */
   #best(peer: Peer): Session | undefined {
-    const { tcp, serial } = peer.sessions;
-    if (tcp && serial && this.#wifiSilent(peer, tcp, this.#clock.now())) {
-      return serial;
+    const { tcp, gateway, serial } = peer.sessions;
+    if (tcp && (serial || gateway?.welcomed) && this.#wifiSilent(peer, tcp, this.#clock.now())) {
+      return gateway?.welcomed ? gateway : serial;
     }
-    return tcp ?? serial;
+    if (tcp?.welcomed) {
+      return tcp;
+    }
+    return gateway ?? tcp ?? serial;
+  }
+
+  /**
+   * Where a frame one ESP-NOW frame cannot carry (BULK, or over MTU.REALTIME: fitsAir) goes instead of `s`: `s`
+   * itself unless it is a gateway session, else the next ranked welcomed session that is not one; undefined when the
+   * device is reachable only through a gateway.
+   */
+  #offAir(peer: Peer, s: Session): Session | undefined {
+    if (s.ep.kind !== 'gateway') {
+      return s;
+    }
+    return this.#ranked(peer).find((x) => x.ep.kind !== 'gateway' && x.welcomed && !x.closed);
   }
 
   /** Nothing over the TCP session (or UDP) for more than wifiSilentX10 / 10 heartbeat intervals. */
@@ -2762,6 +3136,11 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     if (session.closed) {
       return false;
     }
+    if (session.ep.kind === 'gateway' && !fitsAir(bytes)) {
+      // The callers pick another link first (#offAir); this catches the rest (a node frame #forward could not reroute).
+      this.#counters.gateway_too_big++;
+      return false;
+    }
     const ok = session.ep.send(bytes);
     if (ok) {
       session.lastTx = this.#clock.now();
@@ -2777,6 +3156,10 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   /** One envelope framed once for many sessions (Framed): a hub broadcast, its repair, a node broadcast's fan-out. */
   #sendShared(session: Session, f: Framed): boolean {
     if (session.closed) {
+      return false;
+    }
+    if (session.ep.kind === 'gateway' && !fitsAir(f.envelope)) {
+      this.#counters.gateway_too_big++;
       return false;
     }
     const ok = sendFramed(session.ep, f);
@@ -2841,9 +3224,40 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     // args: over the realtime MTU it goes BULK, which a CMD carrying exec_at cannot (the node answers
     // INVALID_ARGS, D22).
     const extBytes = Math.max(7, ext.length ? 1 + ext.reduce((n, t) => n + 2 + t.value.length, 0) : 0);
-    const bulk = Boolean(opts.bulk) || 18 + extBytes + args.length > MTU.REALTIME;
+    let bulk = Boolean(opts.bulk) || 18 + extBytes + args.length > MTU.REALTIME;
     if (opts.execAt !== undefined && bulk) {
       return Promise.reject(new FrError('INVALID_ARGS', 'exec_at: a BULK command cannot carry exec_at'));
+    }
+    if (bulk && session.ep.kind === 'gateway') {
+      // No gateway carries it (one ESP-NOW frame, ≤ MTU.REALTIME, and the node drops BULK from the air): the device's
+      // next link, unless the caller named the gateway; with none, refused now rather than lost on the air.
+      const alt = opts.via ? undefined : this.#offAir(peer, session);
+      if (!alt && 18 + extBytes + args.length <= MTU.REALTIME) {
+        // Only the BULK flag (diag_exec, bind_list: an answer that may be long) keeps it off the air, and the frame
+        // itself fits one: sent realtime, so the node answers within one frame, or UNSUPPORTED when its answer
+        // would not fit (M2-C4 bench: `net wifi_down 0` and `stats bcast` over the gateway were refused here).
+        this.#counters.gateway_bulk_unflagged++;
+        bulk = false;
+      } else if (!alt) {
+        this.#counters.gateway_too_big++;
+        const key = session.ep.gateway ?? '';
+        const gw = this.#peers.get(key)?.alias ?? key;
+        const size = 18 + extBytes + args.length;
+        return Promise.reject(
+          new FrError(
+            opts.via ? 'INVALID_ARGS' : 'DEVICE_OFFLINE',
+            `${peer.alias} is reachable ${opts.via ? 'here' : 'only'} through gateway ${gw}, which carries one ESP-NOW frame (≤ ${MTU.REALTIME} B, no BULK): this command is ${size} B${opts.bulk ? ', BULK' : ''}`,
+            {
+              hint: opts.via ? 'send it without via, or over tcp or serial' : 'wait for its TCP or USB link, or send fewer args',
+              details: { device: peer.id, link: 'gateway', gateway: key, gateway_alias: gw, bytes: size, bulk: true, mtu: MTU.REALTIME },
+            },
+          ),
+        );
+      }
+      if (alt) {
+        this.#counters.gateway_rerouted++;
+        session = alt;
+      }
     }
     const seq = this.#nextSeq(peer);
     let bytes: Uint8Array;
@@ -2863,7 +3277,24 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     if (opts.ack === 'none') {
       return Promise.resolve({ status: STATUS.OK, fields: EMPTY, rtt_ms: 0, link, t_hub_us: Math.round(sentUs), sent_us: sentUs, rx_us: null });
     }
-    return this.#awaitAnswer(peer, session, seq, opts.timeoutMs, 'RESULT', { port, cmd: cmdId }, sentUs);
+    const answer = this.#awaitAnswer(peer, session, seq, opts.timeoutMs, 'RESULT', { port, cmd: cmdId }, sentUs);
+    if (link !== 'gateway') {
+      return answer;
+    }
+    // Over the air the node answers UNSUPPORTED to a BULK CMD (not run) and to a request whose answer would pass
+    // ~200 B (run, its answer dropped): once more on the device's next link, which carries either; with none (or the
+    // caller named the gateway) the UNSUPPORTED stands, saying why.
+    return answer.then((r) => {
+      if (r.status !== STATUS.UNSUPPORTED) {
+        return r;
+      }
+      const alt = opts.via ? undefined : this.#offAir(peer, session);
+      if (!alt || alt.closed) {
+        return { ...r, details: { via: 'gateway', reason: 'too_big', gateway: session.ep.gateway ?? null } };
+      }
+      this.#counters.gateway_unsupported_retried++;
+      return this.#request(peer, alt, port, cmdId, args, opts);
+    });
   }
 
   /** Waits for the RESULT or ACK answering the hub frame `seq` to `peer` (05 §5.8), as #result matches it. */

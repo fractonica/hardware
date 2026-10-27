@@ -62,6 +62,8 @@ interface Entry {
   repeat?: { text: string; count: number; since: number };
   /** onPortGone listeners were told this port is gone; cleared when a poll lists it again. */
   goneTold?: boolean;
+  /** A poll did not list it while its handle stayed open: back in the list, the handle is a dead one (M2-C4). */
+  vanished?: boolean;
   /** A serial lease (design c6 D4) holds the port: shown in port_list, with state `leased`. */
   lease?: PortLease;
   /** A serial lease is being granted (the node's BYE is going out): the port is promised, still open. */
@@ -229,12 +231,24 @@ export class SerialPortManager {
         e.path = cuPath(p.path);
         e.lastSeen = now;
         e.goneTold = false;
+        if (e.vanished && e.state === 'open') {
+          // Re-enumerated inside GONE_DEBOUNCE_MS with the old handle still open (macOS gave it no close): that
+          // handle reads nothing from the new device (M2-C4 bench: a gateway re-plugged after about 1 s sent no
+          // line for 6 min until a USB reset). Reopened.
+          await this.#close(e);
+          e.state = 'closed';
+          e.nextOpenAt = 0;
+        }
+        e.vanished = false;
         if ((e.state === 'closed' || e.state === 'busy_external' || e.state === 'error') && now >= e.nextOpenAt) {
           this.#open(e);
         }
       }
       this.#polledAt = now;
       for (const e of this.#entries.values()) {
+        if (!present.has(e.key) && e.state === 'open') {
+          e.vanished = true;
+        }
         if (!present.has(e.key) && !e.goneTold && !(e.state === 'open' && e.port?.isOpen)) {
           e.goneTold = true;
           this.#tellGone(e.key);
@@ -362,6 +376,11 @@ export class SerialPortManager {
     // `@fr1:` lines are envelopes of the serial node link, never collapsed: two identical ones are two
     // frames (a cached RESULT answering a duplicate request, a resent BYE), and the router decides.
     if (text.startsWith(SERIAL_PREFIX)) {
+      // A gateway's bridge lines (GW_RX for every air frame it hears, GW_STATUS each second, LINK_PONG...) go to the
+      // gateway link without becoming log lines (design m2-c4-gateway D13).
+      if (this.#logs.bridged?.(e.key, text)) {
+        return;
+      }
       this.#flushRepeats(e);
       e.repeat = undefined;
       e.lines++;

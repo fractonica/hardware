@@ -133,8 +133,8 @@ TEST(fr_net_skeleton_tracks_links)
 
 TEST(fr_net_c5_skeleton_espnow_link)
 {
-    // design c5 §2: LinkKind::espnow = 3, and every link array grows to four.
-    static_assert(fr::net::index_of(LinkKind::espnow) == 3 && fr::net::kLinkKinds == 4);
+    // design c5 §2: LinkKind::espnow = 3 (m2-c4-gateway D10 adds gateway = 4: five link kinds).
+    static_assert(fr::net::index_of(LinkKind::espnow) == 3 && fr::net::kLinkKinds == 5);
     frt::FakeCore core;
     StubHost host;
     fr::net::Net net(core, host, fr::net::Config{});
@@ -239,4 +239,23 @@ TEST(fr_net_c5_skeleton_binding_table)
     REQUIRE(third.directory().find(0x0034) != nullptr);
     CHECK_EQ(third.directory().find(0x0034)->mac[5], 0xf5);
     CHECK(third.directory().find(0x0035) == nullptr);
+}
+
+TEST(fr_net_m2c4_gateway_link_kind)
+{
+    // design m2-c4-gateway D10: LinkKind::gateway = 4 has its State::links row; attach() refuses a gateway Link
+    // until GatewayLink and the D12 rules exist, so nothing changes for the other links.
+    static_assert(fr::net::index_of(LinkKind::gateway) == 4 && fr::net::kLinkKinds == 5);
+    frt::FakeCore core;
+    StubHost host;
+    fr::net::Net net(core, host, fr::net::Config{});
+    StubLink gw(LinkKind::gateway);
+    gw.up_ = true;
+    net.attach(gw);
+    net.link_changed(LinkKind::gateway);
+    core.advance_ms(2000);
+    CHECK(!net.state().link(LinkKind::gateway).attached);
+    CHECK(!net.state().link(LinkKind::gateway).session);
+    CHECK(gw.sent.empty());  // no HELLO over it
+    CHECK(!net.state().hub_link());
 }

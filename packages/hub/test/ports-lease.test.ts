@@ -337,6 +337,23 @@ describe('serial_lease (design c6 D4)', () => {
   });
 });
 
+describe('a port that re-enumerates inside the gone debounce (M2-C4 bench)', () => {
+  it('closes the stale handle and opens the port again, instead of reading a dead handle', async () => {
+    const r = await leaseRig();
+    const listed = h.FakePort.listed;
+    const opens = () => h.FakePort.order.filter((o) => o.startsWith('open ')).length;
+    const before = opens();
+    h.FakePort.listed = []; // unplugged: the next poll lists nothing, and macOS sent the old handle no close
+    await r.serial.poll();
+    expect(r.serial.list()[0]).toMatchObject({ state: 'open' }); // still within GONE_DEBOUNCE_MS
+    h.FakePort.listed = listed; // plugged back in
+    await r.serial.poll();
+    await vi.waitFor(() => expect(opens()).toBe(before + 1));
+    expect(h.FakePort.order.some((o) => o.startsWith('close '))).toBe(true);
+    expect(r.serial.list()[0]).toMatchObject({ state: 'open' });
+  });
+});
+
 describe('the lease sweeper (every 1 s, design c6 D4)', () => {
   it('ends a lease whose holder exited (holder_gone) at the next sweep, and the hub reopens the port', async () => {
     const r = await leaseRig({ sweepMs: 20 });

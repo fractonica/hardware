@@ -1,0 +1,98 @@
+{
+  "schema": "fractonica/s2-record@1",
+  "q": "i",
+  "title": "a router channel change: HOME_CHANNEL_CHANGE and time to TCP back",
+  "started_at": "2026-10-27T15:10:02.482Z",
+  "finished_at": "2026-10-27T15:20:04.895Z",
+  "hub": "http://127.0.0.1:7420",
+  "devices": {
+    "gw-c6": {
+      "device_id": "f0f5bd09fdec",
+      "role": "gateway",
+      "profile": "c6g-gateway",
+      "fw_id": "5a3158a7aa11350192981fc161411f70ef502479583879fd12574927c60ddc45"
+    },
+    "pad-c3": {
+      "device_id": "1cdbd4175cc4",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-c3b": {
+      "device_id": "1cdbd416ba34",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-c6": {
+      "device_id": "58e6c5d55e64",
+      "role": "node",
+      "profile": "c6-pad",
+      "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a"
+    },
+    "pad-s3": {
+      "device_id": "94a99015cecc",
+      "role": "node",
+      "profile": "s3l-pad",
+      "fw_id": "21741d5b8fe3c24b5dca4027b607aea7784a1fccc12ea289c6ede26aa0b1c121"
+    }
+  },
+  "params": {
+    "pads": [
+      "pad-c3",
+      "pad-c3b",
+      "pad-c6",
+      "pad-s3"
+    ],
+    "gateway": "gw-c6",
+    "wait_s": 600
+  },
+  "results": {
+    "channel_before": {
+      "nodes": {
+        "pad-c3": 1,
+        "pad-c3b": 1,
+        "pad-c6": 1,
+        "pad-s3": 1
+      },
+      "gateway": 1
+    },
+    "channel_after": {
+      "gateway": 0,
+      "gateway_changed_ms_ago": 189036
+    },
+    "nodes": [
+      {
+        "alias": "pad-c3",
+        "logged": null,
+        "tcp_down_ms": 617,
+        "tcp_back_ms": null
+      },
+      {
+        "alias": "pad-c3b",
+        "logged": null,
+        "tcp_down_ms": 952,
+        "tcp_back_ms": null
+      },
+      {
+        "alias": "pad-c6",
+        "logged": null,
+        "tcp_down_ms": 254,
+        "tcp_back_ms": null
+      },
+      {
+        "alias": "pad-s3",
+        "logged": null,
+        "tcp_down_ms": 0,
+        "tcp_back_ms": null
+      }
+    ],
+    "change_basis": "first tcp down event"
+  },
+  "summary": {
+    "line": "pad-c3 no log tcp back ? ms; pad-c3b no log tcp back ? ms; pad-c6 no log tcp back ? ms; pad-s3 no log tcp back ? ms"
+  },
+  "warnings": [
+    "not every node logged the change and came back on TCP within the wait"
+  ]
+}

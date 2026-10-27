@@ -411,7 +411,10 @@ describe.skipIf(!existsSync(BIN))('a USB node whose Wi-Fi stalls: the C++ node w
     await until(() => r.router.info(mac)!.links[0] === 'serial', 3000, 'the USB line first');
     await new Promise((res) => setTimeout(res, 1000)); // past the 3.5 intervals that would be offline
     expect(r.router.presence(mac)).toBe('online');
-    expect(await node.state()).toMatchObject({ ip_blocked: true, serial_session: true, session: true });
+    // The hub ended the silent TCP session after 3.5 intervals while USB carried (tcp_silent_closed); the node's
+    // session over it is gone too.
+    expect(r.router.status().counters.tcp_silent_closed).toBe(1);
+    expect(await node.state()).toMatchObject({ ip_blocked: true, serial_session: true, session: false });
     expect((await send('status.toggle')).results).toMatchObject([{ status: 'ok', link: 'serial' }]);
     // OTA frames take it too.
     expect(r.router.sendOta(mac, KIND.OTA.ABORT, encodeOtaAbort({ job_id: 'none' })).link).toBe('serial');

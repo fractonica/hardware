@@ -348,7 +348,7 @@ describe.skipIf(!existsSync(BIN))('the C++ fr_net node against the router', () =
     node.send('udp_block 30');
     proxy!.silence(); // the AP is gone: nothing over Wi-Fi either way, and no FIN
     // After 2 silent intervals both ends send over USB (05 §5.10). The node's heartbeats there keep it
-    // online, and its TCP session times out at 3.5 intervals (the hub keeps its own: no FIN came).
+    // online, and its TCP session times out at 3.5 intervals (the hub ends its own then too: silent while USB carries).
     await until(() => r.router.info(mac)!.links[0] === 'serial', 3000, 'the USB line first');
     await eventually(async () => (await node.state()).session === false, 3000, 'the TCP session to time out at the node');
     expect(r.router.presence(mac)).toBe('online');
@@ -377,7 +377,10 @@ describe.skipIf(!existsSync(BIN))('the C++ fr_net node against the router', () =
     proxy!.silence('up');
     await until(() => r.router.info(mac)!.links[0] === 'serial', 3000, 'the USB line first');
     await new Promise((res) => setTimeout(res, 1000)); // past the 3.5 intervals that would be offline
-    expect(await node.state()).toMatchObject({ serial_session: true, session: true });
+    // The hub ends a TCP session silent for 3.5 intervals while USB carries (tcp_silent_closed), so the connection
+    // that only looked open at the node is gone there too.
+    expect(r.router.status().counters.tcp_silent_closed).toBe(1);
+    expect(await node.state()).toMatchObject({ serial_session: true, session: false });
     const send = (command: string) =>
       HANDLERS.command_send({ selector: r.registry.get(mac)!.alias, command, ack: 'result', timeout_s: 3, duplicate: false }, r.hub) as Promise<{ results: { status: string; link: string }[] }>;
     expect((await send('status.toggle')).results).toMatchObject([{ status: 'ok', link: 'serial' }]);

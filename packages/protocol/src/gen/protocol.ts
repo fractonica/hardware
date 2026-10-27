@@ -12,8 +12,8 @@ type Assert<T extends true> = T;
 type _Classes = Assert<Equal<typeof CLS, { readonly NET: 0; readonly PRESENCE: 1; readonly ACK: 2; readonly EVENT: 3; readonly CMD: 4; readonly RESULT: 5; readonly STATE: 6; readonly MSG: 7; readonly LOG: 8; readonly OTA: 9; readonly TIME: 10 }>>;
 type _Flags = Assert<Equal<typeof FLAG, { readonly SEC: 1; readonly ACK_REQ: 2; readonly FRAG: 4; readonly RELAYED: 8; readonly LATEST: 16; readonly URGENT: 32; readonly BULK: 64; readonly EXT: 128 }>>;
 type _SerialTypes = Assert<Equal<typeof SERIAL_TYPE, { readonly ENV: 1; readonly GW_RX: 16; readonly GW_TX: 17; readonly GW_TX_DONE: 18; readonly GW_STATUS: 19; readonly GW_CMD: 20; readonly GW_RSP: 21; readonly LINK_PING: 22; readonly LINK_PONG: 23 }>>;
-type _Ext = Assert<Equal<typeof EXT, { readonly TRACE_ID: 2; readonly VALID_MS: 3; readonly EXPIRE_AT_US: 4; readonly PORT_SEQ: 5; readonly EXEC_AT_US: 129 }>>;
-type _ExtSizes = Assert<Equal<typeof EXT_VALUE_SIZE, { readonly 2: 4; readonly 3: 2; readonly 4: 4; readonly 5: 2; readonly 129: 4 }>>;
+type _Ext = Assert<Equal<typeof EXT, { readonly TRACE_ID: 2; readonly VALID_MS: 3; readonly EXPIRE_AT_US: 4; readonly PORT_SEQ: 5; readonly EXEC_AT_US: 129; readonly EXEC_AT_HUB_US: 130 }>>;
+type _ExtSizes = Assert<Equal<typeof EXT_VALUE_SIZE, { readonly 2: 4; readonly 3: 2; readonly 4: 4; readonly 5: 2; readonly 129: 4; readonly 130: 4 }>>;
 type _Sizes = Assert<Equal<[typeof MAGIC_VER, typeof HEADER_SIZE, typeof TIME_PREFIX_SIZE, typeof RESULT_PREFIX_SIZE], [161, 18, 4, 7]>>;
 type _Serial = Assert<Equal<[typeof SERIAL_PREFIX, typeof SERIAL_MAX_LINE], ['@fr1:', 2048]>>;
 
@@ -30,7 +30,7 @@ export interface ClassInfo {
 }
 
 export const CLASSES: readonly ClassInfo[] = [
-  { code: 0, name: 'NET', prefix: 'none', kinds: { DISCOVER: 1, BEACON: 2, JOIN_REQ: 3, JOIN_ACCEPT: 4, CHANNEL_SWITCH: 5, NEIGHBORS: 6, WELCOME: 7, DIRECTORY: 8, RESOLVE: 9 }, alwaysLatest: false },
+  { code: 0, name: 'NET', prefix: 'none', kinds: { DISCOVER: 1, BEACON: 2, JOIN_REQ: 3, JOIN_ACCEPT: 4, CHANNEL_SWITCH: 5, NEIGHBORS: 6, WELCOME: 7, DIRECTORY: 8, RESOLVE: 9, TEST: 127 }, alwaysLatest: false },
   { code: 1, name: 'PRESENCE', prefix: 'none', kinds: { HELLO: 1, HEARTBEAT: 2, BYE: 3, PING: 4, PONG: 5 }, alwaysLatest: false },
   { code: 2, name: 'ACK', prefix: 'result', kinds: { ACK: 1, NACK: 2, SACK: 3 }, alwaysLatest: false },
   { code: 3, name: 'EVENT', prefix: 'time', kinds: 'capability', alwaysLatest: false },
@@ -47,7 +47,7 @@ export const CLS_NAME: Readonly<Record<number, string>> = { 0: 'NET', 1: 'PRESEN
 
 /** Kinds of the classes that carry protocol messages (EVENT, CMD, RESULT and STATE use member ids). */
 export const KIND = {
-  NET: { DISCOVER: 1, BEACON: 2, JOIN_REQ: 3, JOIN_ACCEPT: 4, CHANNEL_SWITCH: 5, NEIGHBORS: 6, WELCOME: 7, DIRECTORY: 8, RESOLVE: 9 },
+  NET: { DISCOVER: 1, BEACON: 2, JOIN_REQ: 3, JOIN_ACCEPT: 4, CHANNEL_SWITCH: 5, NEIGHBORS: 6, WELCOME: 7, DIRECTORY: 8, RESOLVE: 9, TEST: 127 },
   PRESENCE: { HELLO: 1, HEARTBEAT: 2, BYE: 3, PING: 4, PONG: 5 },
   ACK: { ACK: 1, NACK: 2, SACK: 3 },
   MSG: { MSG: 0 },
@@ -88,3 +88,18 @@ export type Role = keyof typeof Role;
 
 export const OtaState = { new: 0, pending_verify: 1, valid: 2, invalid: 3, aborted: 4, undefined: 255 } as const;
 export type OtaState = keyof typeof OtaState;
+
+export const NetMode = { router: 0, gateway: 1, dual: 2 } as const;
+export type NetMode = keyof typeof NetMode;
+
+export const GwOp = { none: 0, set_channel: 1, set_net: 2, set_rate: 3, peer_flush: 4, info: 5 } as const;
+export type GwOp = keyof typeof GwOp;
+
+export const GwRate = { peer_default: 0, robust: 1, fast: 2 } as const;
+export type GwRate = keyof typeof GwRate;
+
+export const GwTxOpt = { rate_mask: 3, no_retry: 4 } as const;
+export type GwTxOpt = keyof typeof GwTxOpt;
+
+export const GwTxStatus = { ok: 0, nak: 1, queue_full: 2, no_peer: 3, too_big: 4, radio_off: 5, stale: 6 } as const;
+export type GwTxStatus = keyof typeof GwTxStatus;

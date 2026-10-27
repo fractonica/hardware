@@ -662,7 +662,23 @@ void SimSerial::crash()
     net_ = nullptr;
     rx_ = nullptr;
     diag_ = nullptr;
+    frames_ = nullptr;
     ready_.clear();
+    gw_ready_.clear();
+}
+
+bool SimSerial::write_frame(uint8_t type, std::span<const uint8_t> body)
+{
+    if (!host_ || !write_) {
+        return false;
+    }
+    char line[fr::wire::kMaxLine + 1];
+    const size_t n = fr::wire::encode_line(type, body, std::span<char>(line, fr::wire::kMaxLine));
+    if (n == 0) {
+        return false;
+    }
+    write_(std::string_view(line, n));
+    return true;
 }
 
 fr::Status SimSerial::send(std::span<const uint8_t> envelope)
@@ -693,6 +709,23 @@ void SimSerial::on_line(std::string_view line)
     if (line.starts_with(fr::wire::kLinePrefix)) {
         uint8_t scratch[fr::wire::kMaxLineFrame];
         auto f = fr::wire::decode_line(line, scratch);
+        if (f && f->type != fr::wire::kSerialEnv && frames_ && host_ && !muted_) {
+            // A gateway's GW_* line: to the bridge on the core task, stamped now (core.cpp deliver_gw).
+            gw_ready_.push_back({f->type, core_.now(), std::vector<uint8_t>(f->body.begin(), f->body.end())});
+            if (!core_.post_net([this] {
+                    if (gw_ready_.empty()) {
+                        return;
+                    }
+                    GwFrame g = std::move(gw_ready_.front());
+                    gw_ready_.pop_front();
+                    if (frames_) {
+                        frames_(g.type, g.body, g.at);
+                    }
+                })) {
+                gw_ready_.pop_back();  // the network queue is full: dropped (the hub's txTimeoutMs settles a GW_TX)
+            }
+            return;
+        }
         if (!f || f->type != fr::wire::kSerialEnv || !host_ || muted_ || net_ == nullptr) {
             return;
         }

@@ -1,0 +1,175 @@
+{
+  "schema": "fractonica/s2-record@1",
+  "q": "f",
+  "title": "lwIP timers A/B: cpu idle at rest and under net stream 50",
+  "started_at": "2026-10-27T13:54:06.970Z",
+  "finished_at": "2026-10-27T14:16:06.898Z",
+  "hub": "http://127.0.0.1:7420",
+  "devices": {
+    "pad-c3": {
+      "device_id": "1cdbd4175cc4",
+      "role": "node",
+      "profile": "c3o-pad",
+      "fw_id": "00d59ced1c0d1bc5df6d36242c6151ef458a974bd08369d46a605980230c97c9"
+    },
+    "pad-s3": {
+      "device_id": "94a99015cecc",
+      "role": "node",
+      "profile": "s3l-pad",
+      "fw_id": "21741d5b8fe3c24b5dca4027b607aea7784a1fccc12ea289c6ede26aa0b1c121"
+    },
+    "gw-c6": {
+      "device_id": "f0f5bd09fdec",
+      "role": "gateway",
+      "profile": "c6g-gateway",
+      "fw_id": "5a3158a7aa11350192981fc161411f70ef502479583879fd12574927c60ddc45"
+    },
+    "pad-c6": {
+      "device_id": "58e6c5d55e64",
+      "role": "node",
+      "profile": "c6-pad",
+      "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a"
+    }
+  },
+  "params": {
+    "device": "pad-c6",
+    "build_a": "node/c6-pad/debug/52fdfa269132",
+    "build_b": "node/c6-pad/debug/df603ea33ea0",
+    "phase_min": 5,
+    "stream_hz": 50,
+    "build_restore": "node/c6-pad/debug/df603ea33ea0"
+  },
+  "results": {
+    "before": {
+      "fw_id": "df603ea33ea01025",
+      "build_id": "node/c6-pad/debug/df603ea33ea0",
+      "profile": "c6-pad"
+    },
+    "a": {
+      "build": "node/c6-pad/debug/52fdfa269132",
+      "ota": {
+        "job_id": "j_ae6cb6603b15",
+        "fw_id": "52fdfa269132d181a50f76f8c23b9271827febfde786c83dfdb8aeddf4ce0f2b",
+        "result": {
+          "job": "j_ae6cb6603b15",
+          "devices": [
+            {
+              "job": "j_26e1b2d0c9c1",
+              "parent": "j_ae6cb6603b15",
+              "device": "58e6c5d55e64",
+              "alias": "pad-c6",
+              "via": "wifi",
+              "build_id": "node/c6-pad/debug/52fdfa269132",
+              "fw_id": "52fdfa269132d181a50f76f8c23b9271827febfde786c83dfdb8aeddf4ce0f2b",
+              "version": "3e3a697-dirty.52fdfa26",
+              "size": 1324080,
+              "from_fw": "df603ea33ea01025",
+              "flags": 5,
+              "state": "SUCCEEDED",
+              "bytes": 1324080,
+              "attempt": 2,
+              "created_at": "2026-10-27T13:54:06.975Z",
+              "updated_at": "2026-10-27T13:54:49.227Z",
+              "started_at": "2026-10-27T13:54:06.977Z",
+              "ended_at": "2026-10-27T13:54:49.227Z",
+              "timings_ms": {
+                "offer": 59,
+                "download": 12138,
+                "reboot": 4753,
+                "verify": 3,
+                "total": 42250
+              }
+            }
+          ],
+          "counts": {
+            "succeeded": 1,
+            "already_current": 0,
+            "failed": 0,
+            "rolled_back": 0,
+            "timed_out": 0,
+            "cancelled": 0
+          }
+        }
+      },
+      "idle": {
+        "n": 30,
+        "idle_mean": 98.3,
+        "idle_min": 97.8,
+        "idle_max": 98.6
+      },
+      "stream_50": {
+        "n": 30,
+        "idle_mean": 93,
+        "idle_min": 92.6,
+        "idle_max": 93.3
+      }
+    },
+    "b": {
+      "build": "node/c6-pad/debug/df603ea33ea0",
+      "ota": {
+        "job_id": "j_ff519d040243",
+        "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a",
+        "result": {
+          "job": "j_ff519d040243",
+          "devices": [
+            {
+              "job": "j_9845c65dc627",
+              "parent": "j_ff519d040243",
+              "device": "58e6c5d55e64",
+              "alias": "pad-c6",
+              "via": "wifi",
+              "build_id": "node/c6-pad/debug/df603ea33ea0",
+              "fw_id": "df603ea33ea01025bbbf862f02ec3a26427428d5f1d8c63ed496c95c4f43727a",
+              "version": "3e3a697-dirty.df603ea3",
+              "size": 1324080,
+              "from_fw": "52fdfa269132d181",
+              "flags": 5,
+              "state": "SUCCEEDED",
+              "bytes": 1324080,
+              "attempt": 1,
+              "created_at": "2026-10-27T14:05:19.293Z",
+              "updated_at": "2026-10-27T14:05:36.815Z",
+              "started_at": "2026-10-27T14:05:19.294Z",
+              "ended_at": "2026-10-27T14:05:36.815Z",
+              "timings_ms": {
+                "offer": 20,
+                "download": 11827,
+                "reboot": 5672,
+                "verify": 2,
+                "total": 17521
+              }
+            }
+          ],
+          "counts": {
+            "succeeded": 1,
+            "already_current": 0,
+            "failed": 0,
+            "rolled_back": 0,
+            "timed_out": 0,
+            "cancelled": 0
+          }
+        }
+      },
+      "idle": {
+        "n": 30,
+        "idle_mean": 98.2,
+        "idle_min": 97.7,
+        "idle_max": 98.5
+      },
+      "stream_50": {
+        "n": 30,
+        "idle_mean": 92.8,
+        "idle_min": 92.3,
+        "idle_max": 93.1
+      }
+    },
+    "restored": {
+      "build": "node/c6-pad/debug/df603ea33ea0",
+      "already": true
+    }
+  },
+  "summary": {
+    "line": "idle A 98.3 % / B 98.2 %; under stream A 93 % / B 92.8 %"
+  },
+  "warnings": []
+}

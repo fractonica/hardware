@@ -25,7 +25,12 @@ function byName(name: string): GoldenVector {
 }
 
 function bodyTypes(): Set<string> {
-  const out = new Set<string>([...model.protocol.messages.map((m) => m.key), ...model.protocol.types.map((t) => t.name)]);
+  const out = new Set<string>([
+    ...model.protocol.messages.map((m) => m.key),
+    ...model.protocol.types.map((t) => t.name),
+    // Layout serial bodies (design m2-c4-gateway D1); the protobuf ones are protocol types.
+    ...model.protocol.serial.bodies.filter((b) => b.kind === 'layout').map((b) => b.name),
+  ]);
   for (const cap of model.capabilities) {
     if (cap.traits.length > 0) {
       out.add(`${cap.name}.traits`);
@@ -65,7 +70,7 @@ describe('golden vectors', () => {
 
   it('cover every class, system message, protocol type, member and the serial link frames', () => {
     const canonical = new Set(cases.filter((c) => !c.decodeOnly).map((c) => c.type));
-    const want = [...bodyTypes(), ...model.protocol.classes.map((c) => `envelope.${c.name}`), 'serial.ENV', 'serial.LINK_PING', 'serial.LINK_PONG'];
+    const want = [...bodyTypes(), ...model.protocol.classes.map((c) => `envelope.${c.name}`), ...model.protocol.serial.types.map((t) => `serial.${t.name}`)];
     expect(want.filter((t) => !canonical.has(t))).toEqual([]);
     // Serial lines both ways; every DecodeError a valid C2 input can hit has a case.
     expect(cases.filter((c) => c.kind === 'serial' && /host_to_node/.test(c.name)).length).toBeGreaterThan(0);
@@ -113,6 +118,18 @@ describe('golden vectors', () => {
       ['TIME.SYNC_REQ.max', '08 ffffffffffffffffff01'],
       ['NET.DIRECTORY.one_entry', '10 01 1a0a 08 12 12 06 a0b1c2d3e4f5'],
       ['NET.RESOLVE.max', '08 ffff03'],
+      // EXT 0x82 exec_at_hub_us (design m2-c4-gateway D4): block len 6, 82 04 then 0x80000001 LE
+      ['header.ext_exec_at_hub', 'a1 82 04 01 07000000 0201 0000 1200 0900 22 02 06 8204 01000080'],
+      // NET.WELCOME net_mode gateway (NetMode 1): field 5 varint
+      ['NET.WELCOME.gateway_mode', '08 09 28 01 30 01'],
+      // Serial bodies, little-endian (design m2-c4-gateway D1). GW_RX: mac, rssi -61 (c3), channel 6, rx_ts_us
+      // 123456789 (075bcd15), then the button.down envelope.
+      ['GW_RX.typical', 'a0b1c2d3e4f5 c3 06 15cd5b07 a1 20 03 01 0c000000 0201 feff 0000 0300 22 01 e8030000'],
+      ['GW_TX_DONE.typical', '0102 01 07 34080000'],
+      ['GW_TX_DONE.defaults', '0000 00 00 00000000'],
+      ['LINK_PING.typical', '90d00300'],
+      // GW_TX broadcast: tx_id 0, FF x6, tx_opts 0, then the BEACON envelope.
+      ['GW_TX.broadcast_beacon', `0000 ffffffffffff 00 ${byName('envelope.net.beacon').hex}`],
     ];
     for (const [name, hex] of hand) {
       expect(byName(name).hex, name).toBe(hex.replace(/\s+/g, ''));
@@ -120,7 +137,7 @@ describe('golden vectors', () => {
     // The ENV line of the button.down envelope, as in packages/protocol/test/wire.test.ts.
     expect(byName('serial.env.node_to_host.event_button_down').value).toMatchObject({ line: '@fr1:AaEgAwEMAAAAAgH-_wAAAwAiAegDAAA8Ig' });
     expect(Buffer.from(byName('serial.env.crlf').hex, 'hex').toString('latin1').endsWith('Ig\r\n')).toBe(true);
-    const long = (byName('serial.gw_status.max_line').value as { line: string }).line;
+    const long = (byName('serial.gw_rx.max_line').value as { line: string }).line;
     expect(long.length).toBe(model.protocol.serial.maxLine);
     expect(decodeSerialLine(long).ok).toBe(true);
   });

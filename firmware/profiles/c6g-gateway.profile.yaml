@@ -1,0 +1,8 @@
+profile: c6g-gateway
+board: nanoesp32c6-n4
+app: gateway                       # the node core + fr_gw, the ESP-NOW <-> serial bridge (design m2-c4-gateway D8)
+role: gateway                      # HELLO role 1 (CONFIG_FR_ROLE); role gateway <=> app gateway (D7)
+net: { link_profile: default }     # associates with the router like a node; its hub link is USB, not TCP (D8)
+test_pin: none
+caps:
+  status: { cap: fr.led, driver: led_ws2812, bind: leds.rgb, config: { max_brightness: 32 } }   # the bridge's state (D9)

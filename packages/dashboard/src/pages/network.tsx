@@ -109,7 +109,16 @@ function Lan() {
                 ),
               ],
               ['devices', `${s.devices.online} online of ${s.devices.registered}`],
-              ['sessions', s.links ? `tcp ${s.links.sessions.tcp} · serial ${s.links.sessions.serial}` : '–'],
+              ['sessions', s.links ? `tcp ${s.links.sessions.tcp} · gateway ${s.links.sessions.gateway ?? 0} · serial ${s.links.sessions.serial}` : '–'],
+              // Gateways (design m2-c4-gateway D15): up or down, LINK_PING round trip, node sessions through each.
+              [
+                'gateways',
+                Object.keys(s.links?.gateways ?? {}).length
+                  ? Object.entries(s.links!.gateways!)
+                      .map(([k, g]) => `${g.alias || k} ${g.up ? `up, rtt ${g.rtt_us ?? '–'} µs` : 'down'}, ${g.sessions} sessions`)
+                      .join(' · ')
+                  : '–',
+              ],
             ]}
           />
         ) : null}

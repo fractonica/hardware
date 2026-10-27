@@ -138,7 +138,7 @@ describe('hub_status router.scale (design m2-c2 D15, D16)', () => {
     expect(st.process.fds === null || st.process.fds > 0).toBe(true);
   });
 
-  it("p99 over every probe stays low through one stall, where latency_stats' worst-second p99 is the stall", async () => {
+  it("p99 over every probe stays low through one stall, in the histogram and in latency_stats since M2-C4 (D23); the worst-second p99 is the stall", async () => {
     const r = await open();
     const probes = () => status(r).router.scale.loop.count as number;
     // More than 101 probes in the run, so the one stalled probe is past the p99's rank (a loaded Mac fires the
@@ -150,11 +150,14 @@ describe('hub_status router.scale (design m2-c2 D15, D16)', () => {
     const after = status(r).router.scale.loop;
     const run = histDelta(after, before);
     const p99 = histQuantile(run, 0.99)!;
-    const worstSecond = routerLoopDelay(r.router, 60_000)!.p99_ms!;
-    console.log(`[measured] loop over ${run.count} probes with one 500 ms stall: p99 ${p99} ms, max ${run.max} ms; latency_stats p99 ${worstSecond} ms`);
+    const loop = routerLoopDelay(r.router, 60_000)!;
+    const worstSecond = loop.p99_max_s_ms!;
+    console.log(`[measured] loop over ${run.count} probes with one 500 ms stall: p99 ${p99} ms, max ${run.max} ms; latency_stats p99 ${loop.p99_ms} ms (worst second ${worstSecond} ms)`);
     expect(run.count).toBeGreaterThan(101);
     expect(run.max).toBeGreaterThanOrEqual(400);
     expect(worstSecond).toBeGreaterThanOrEqual(400);
+    expect(loop.max_ms!).toBeGreaterThanOrEqual(400);
+    expect(loop.p99_ms!).toBeLessThan(loop.max_ms! / 2);
     // The stall is one probe of more than 101: past the p99's rank, so it is not the p99.
     expect(p99).toBeLessThan(run.max / 2);
   }, 60_000);

@@ -7,8 +7,16 @@
 // unicast instead). Everything here runs on the core task; the radio behind it (esp_now_* on target, UDP on
 // the host) reports back through Scheduler::sent() and ::timer(), which the driver calls on the core task
 // after its callbacks posted. No heap.
+//
+// M2-C4 (design m2-c4-gateway D1, D19): a frame may carry its own rate (the gateway's GW_TX, `air bench`), set on its
+// peer before its attempts when the peer's differs; `air rate` changes the default rate of the unicast peers or the
+// broadcast peer; a frame's end tells its link retries and queue wait (last_done); churn() times throwaway peers. Of the
+// driver's 20 peer entries (05 §5.3), a node keeps one for its chosen gateway (pin(): outside the LRU, so binding
+// churn never evicts it) and one spare (`air churn`'s throwaway peer); a gateway's bridge takes all 19 beside the
+// broadcast peer as its LRU (set_bridge()).
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +25,7 @@
 
 #include "fr/base.hpp"
 #include "fr/net/air.hpp"
+#include "fr/net/us_histogram.hpp"
 
 namespace fr::net::air {
 
@@ -28,6 +37,8 @@ inline constexpr size_t kQueueFrames = 16;
 inline constexpr size_t kUrgentReserve = 4;
 /** 05 §5.3: 20 peer entries = the broadcast peer, gateways (M2) and up to 17 unicast peers. */
 inline constexpr size_t kUnicastPeers = 17;
+/** A gateway's bridge (design m2-c4-gateway D8): every entry beside the broadcast peer is its LRU's. */
+inline constexpr size_t kBridgePeers = 19;
 /** A peer used within this is never evicted (05 §5.3): churning add_peer/del_peer costs more than a flood. */
 inline constexpr TimeUs kPeerHoldUs = 1'000'000;
 /** FR_LINK_RETRIES, and their delays (05 §5.3: esp_timer one-shots, never FreeRTOS ticks). */
@@ -63,6 +74,14 @@ public:
     virtual void disarm() = 0;
     /** A frame's end (Net::air_sent): `ok` for a MAC-ACKed unicast or a broadcast that went out. */
     virtual void done(uint32_t token, bool ok) = 0;
+    /** The peer's rate from now on (esp_now_set_peer_rate_config; kBroadcastMac: the broadcast peer); peer_default is
+     * the rate add_peer gives (the robust one on target). False when the driver refused it. */
+    virtual bool set_rate(const Mac &mac, AirRate rate)
+    {
+        static_cast<void>(mac);
+        static_cast<void>(rate);
+        return true;
+    }
 
 protected:
     ~Radio() = default;
@@ -78,6 +97,13 @@ struct SchedStats {
     uint32_t evictions = 0;  // peers deleted to make room
     uint32_t guard = 0;      // attempts the guard failed: no send callback within kSendGuardUs
     uint32_t lost = 0;       // send callbacks never seen within kSendLostUs: the next send went anyway
+    uint32_t rate_fail = 0;  // set_rate refused (design m2-c4-gateway D19): the peer kept its rate
+};
+
+/** What `air rate` changed (design m2-c4-gateway D19). */
+struct RateChange {
+    uint32_t peers = 0;  // peer entries whose rate was set now (the broadcast peer counts one)
+    uint32_t failed = 0;  // ... of which the driver refused
 };
 
 class Scheduler
@@ -92,8 +118,10 @@ public:
      * follows): invalid_args when empty or above kMtu, busy when the queue is full for `prio` or `dst` would
      * need a peer slot that no peer unused for a second can free.
      */
-    Status send(const Mac &dst, std::span<const uint8_t> envelope, AirPrio prio, uint32_t token, TimeUs now)
+    Status send(const Mac &dst, std::span<const uint8_t> envelope, AirPrio prio, uint32_t token, TimeUs now,
+                AirRate rate = AirRate::peer_default)
     {
+        refused_no_peer_ = false;
         if (envelope.empty() || envelope.size() > kMtu) {
             ++stats_.refused;
             return std::unexpected(Err::invalid_args);
@@ -106,6 +134,7 @@ public:
         // The peer is taken now (and marked used), so a frame accepted here finds it at send time.
         if (!is_broadcast(dst) && !peer(dst, now)) {
             ++stats_.refused;
+            refused_no_peer_ = true;
             return std::unexpected(Err::busy);
         }
         Frame *f = nullptr;
@@ -117,8 +146,10 @@ public:
         }
         f->used = true;
         f->prio = prio;
+        f->rate = rate;
         f->order = ++order_;
         f->token = token;
+        f->queued_at = now;
         f->dst = dst;
         f->len = static_cast<uint8_t>(envelope.size());
         std::memcpy(f->bytes, envelope.data(), envelope.size());
@@ -191,16 +222,129 @@ public:
         }
         return n;
     }
+    /** Unicast peer entries in the driver now: the LRU's and the pinned one. */
     size_t peers() const
     {
-        size_t n = 0;
-        for (const Peer &p : peers_) {
-            n += p.live ? 1 : 0;
+        size_t n = pinned_.live ? 1 : 0;
+        for (size_t i = 0; i < limit_; ++i) {
+            n += peers_[i].live ? 1 : 0;
         }
         return n;
     }
+    /** Unicast entries the LRU may hold: kUnicastPeers on a node, kBridgePeers on a gateway. */
+    size_t peer_limit() const { return limit_; }
+
+    /**
+     * Design m2-c4-gateway D10 (node): keeps `mac`, the chosen gateway, in one of the two reserved peer entries, outside
+     * the LRU, so the bindings' unicast churn never evicts it; null (or another MAC) releases the one pinned before,
+     * which moves into the LRU when it has a free entry and is deleted otherwise. Its LRU entry, if it had one, moves
+     * over as it is (the driver's entry and rate stay). False when the driver refused a new entry (nothing pinned; its
+     * frames then take the LRU like any peer's). A gateway (set_bridge) pins nothing.
+     */
+    bool pin(const Mac *mac, TimeUs now)
+    {
+        if (mac != nullptr && pinned_.live && pinned_.mac == *mac) {
+            return true;
+        }
+        if (pinned_.live) {
+            Peer *free = nullptr;
+            for (size_t i = 0; i < limit_ && free == nullptr; ++i) {
+                free = peers_[i].live ? nullptr : &peers_[i];
+            }
+            if (free != nullptr) {
+                *free = pinned_;
+            } else {
+                radio_.del_peer(pinned_.mac);
+            }
+            pinned_.live = false;
+        }
+        if (mac == nullptr) {
+            return true;
+        }
+        if (bridge_ || is_broadcast(*mac)) {
+            return false;
+        }
+        for (size_t i = 0; i < limit_; ++i) {
+            if (peers_[i].live && peers_[i].mac == *mac) {
+                pinned_ = peers_[i];
+                pinned_.used = now;
+                peers_[i].live = false;
+                return true;
+            }
+        }
+        if (!radio_.add_peer(*mac)) {
+            return false;
+        }
+        ++stats_.peer_adds;
+        pinned_ = {.live = true, .mac = *mac, .used = now};
+        return true;
+    }
+    /** The MAC pinned now (null: none). */
+    const Mac *pinned() const { return pinned_.live ? &pinned_.mac : nullptr; }
+
+    /**
+     * Design m2-c4-gateway D8 (role gateway): the LRU takes kBridgePeers entries, the two reserved ones included (a
+     * gateway uses no gateway), and nothing stays pinned. Off again: back to kUnicastPeers, the peers beyond deleted.
+     */
+    void set_bridge(bool on)
+    {
+        if (on == bridge_) {
+            return;
+        }
+        bridge_ = on;
+        if (on) {
+            static_cast<void>(pin(nullptr, 0));
+            limit_ = kBridgePeers;
+            return;
+        }
+        for (size_t i = kUnicastPeers; i < limit_; ++i) {
+            if (peers_[i].live) {
+                radio_.del_peer(peers_[i].mac);
+                peers_[i].live = false;
+            }
+        }
+        limit_ = kUnicastPeers;
+    }
     bool in_flight() const { return inflight_ != kNone; }
     const SchedStats &stats() const { return stats_; }
+
+    /**
+     * `air rate` (design m2-c4-gateway D19): the rate a frame without its own takes, for unicast peers or the broadcast
+     * peer, set at once on every peer that has another (peer_default: the rate add_peer gives). A frame with its own
+     * rate still sets it on its peer for its attempts.
+     */
+    RateChange set_default_rate(bool broadcast, AirRate rate)
+    {
+        RateChange r;
+        default_rate_[broadcast ? 1 : 0] = rate;
+        const auto apply = [&](const Mac &mac, AirRate &cur) {
+            ++r.peers;
+            if (!radio_.set_rate(mac, rate)) {
+                ++r.failed;
+                ++stats_.rate_fail;
+                return;  // the peer kept its rate: the next frame to it tries again (apply_rate)
+            }
+            cur = rate;
+        };
+        if (broadcast) {
+            apply(kBroadcastMac, bcast_rate_);
+        } else {
+            for (size_t i = 0; i < limit_; ++i) {
+                if (peers_[i].live) {
+                    apply(peers_[i].mac, peers_[i].rate);
+                }
+            }
+            if (pinned_.live) {
+                apply(pinned_.mac, pinned_.rate);
+            }
+        }
+        return r;
+    }
+    AirRate default_rate(bool broadcast) const { return default_rate_[broadcast ? 1 : 0]; }
+    /** The last send() was refused busy for want of a peer slot, not of queue room (AirLink::refused_no_peer). */
+    bool refused_no_peer() const { return refused_no_peer_; }
+    /** How send `token` ended (AirLink::done_info): valid inside the done() call for it, {} for another token. */
+    AirDone last_done(uint32_t token) const { return token == done_token_ ? done_ : AirDone{}; }
 
 private:
     static constexpr size_t kNone = SIZE_MAX;
@@ -215,9 +359,12 @@ private:
     struct Frame {
         bool used = false;
         AirPrio prio = AirPrio::normal;
+        AirRate rate = AirRate::peer_default;  // its own, else the default for its kind of peer
         uint8_t len = 0;
         uint32_t order = 0;
         uint32_t token = 0;
+        TimeUs queued_at = 0;   // send()
+        TimeUs started_at = 0;  // its first attempt
         Mac dst{};
         uint8_t bytes[kMtu];
     };
@@ -226,15 +373,52 @@ private:
         bool live = false;
         Mac mac{};
         TimeUs used = 0;
+        AirRate rate = AirRate::peer_default;  // what the radio has for it (add_peer's)
     };
+
+    Peer *live_peer(const Mac &mac)
+    {
+        if (pinned_.live && pinned_.mac == mac) {
+            return &pinned_;
+        }
+        for (size_t i = 0; i < limit_; ++i) {
+            if (peers_[i].live && peers_[i].mac == mac) {
+                return &peers_[i];
+            }
+        }
+        return nullptr;
+    }
+
+    /** The frame's rate on its peer before an attempt, when the peer has another (design m2-c4-gateway D19). */
+    void apply_rate(const Frame &f)
+    {
+        const bool bc = is_broadcast(f.dst);
+        const AirRate want = f.rate != AirRate::peer_default ? f.rate : default_rate_[bc ? 1 : 0];
+        Peer *p = bc ? nullptr : live_peer(f.dst);
+        AirRate &cur = bc ? bcast_rate_ : p->rate;  // attempt() just took the peer
+        if (cur != want) {
+            // Only what the driver took is recorded: a refusal leaves the peer's rate as it was, so the next frame
+            // (or this one's link retry) asks again instead of going at a rate it never got.
+            if (radio_.set_rate(f.dst, want)) {
+                cur = want;
+            } else {
+                ++stats_.rate_fail;
+            }
+        }
+    }
 
     /** A peer entry for `mac`, marked used now: the existing one, a free one, or the LRU one if it is older
      * than kPeerHoldUs. False when none can be had (or the radio refused the add). */
     bool peer(const Mac &mac, TimeUs now)
     {
+        if (pinned_.live && pinned_.mac == mac) {
+            pinned_.used = now;
+            return true;
+        }
         Peer *free = nullptr;
         Peer *lru = nullptr;
-        for (Peer &p : peers_) {
+        for (size_t i = 0; i < limit_; ++i) {
+            Peer &p = peers_[i];
             if (p.live && p.mac == mac) {
                 p.used = now;
                 return true;
@@ -281,6 +465,7 @@ private:
         }
         inflight_ = best;
         attempts_ = 0;
+        frames_[best].started_at = now;
         attempt(now);
     }
 
@@ -303,6 +488,7 @@ private:
             ++stats_.lost;
             owed_ = 0;
         }
+        apply_rate(f);
         if (!radio_.transmit(f.dst, {f.bytes, f.len})) {
             failed_attempt(now);  // ESP_ERR_ESPNOW_NO_MEM and the like: as a failed send, no callback follows
             return;
@@ -334,6 +520,9 @@ private:
         // Settled before done(): Net may send again from inside it (the fallback chain), which kicks here.
         Frame &f = frames_[inflight_];
         const uint32_t token = f.token;
+        done_token_ = token;
+        done_ = {.retries = attempts_,
+                 .queued_us = static_cast<uint32_t>(std::clamp<TimeUs>(f.started_at - f.queued_at, 0, UINT32_MAX))};
         f.used = false;
         inflight_ = kNone;
         state_ = State::idle;
@@ -345,7 +534,10 @@ private:
 
     Radio &radio_;
     std::array<Frame, kQueueFrames> frames_{};
-    std::array<Peer, kUnicastPeers> peers_{};
+    std::array<Peer, kBridgePeers> peers_{};  // the LRU: the first limit_ entries
+    size_t limit_ = kUnicastPeers;
+    bool bridge_ = false;
+    Peer pinned_;  // a node's chosen gateway (pin())
     uint32_t order_ = 0;
     size_t inflight_ = kNone;
     State state_ = State::idle;
@@ -354,6 +546,47 @@ private:
     uint32_t owed_ = 0;   // send callbacks the driver still owes: sends that went out minus verdicts in
     TimeUs owed_at_ = 0;  // when the latest send went out
     SchedStats stats_;
+    std::array<AirRate, 2> default_rate_{AirRate::peer_default, AirRate::peer_default};  // unicast, broadcast
+    AirRate bcast_rate_ = AirRate::peer_default;  // what the radio has for the broadcast peer
+    bool refused_no_peer_ = false;
+    uint32_t done_token_ = 0;  // last_done()
+    AirDone done_;
 };
+
+/** `air churn <n>` (design m2-c4-gateway D19 (d)): what n throwaway peer adds and deletes took. */
+struct ChurnStats {
+    uint32_t n = 0;
+    uint32_t failed = 0;  // adds the radio refused (no delete follows)
+    UsHistogram add;
+    UsHistogram del;
+};
+
+/**
+ * Adds and deletes `n` throwaway peers one at a time (locally administered MACs no node has), timing each call on
+ * `now()` (esp_timer µs on target), into `out`. One peer entry beyond the scheduler's own is used at a time; the
+ * scheduler's table is untouched. Core task: the driver's other calls wait meanwhile, as they would for real churn.
+ */
+template <class Clock>
+void churn(Radio &radio, uint32_t n, Clock now, ChurnStats &out)
+{
+    out.n = n;
+    out.failed = 0;
+    out.add.clear();
+    out.del.clear();
+    for (uint32_t i = 0; i < n; ++i) {
+        const Mac mac{0x02, 0xF2, 0xC4, 0x5D, static_cast<uint8_t>(i >> 8), static_cast<uint8_t>(i)};
+        const TimeUs t0 = now();
+        const bool added = radio.add_peer(mac);
+        const TimeUs t1 = now();
+        if (!added) {
+            ++out.failed;
+            continue;
+        }
+        radio.del_peer(mac);
+        const TimeUs t2 = now();
+        out.add.add(static_cast<uint32_t>(std::clamp<TimeUs>(t1 - t0, 0, UINT32_MAX)));
+        out.del.add(static_cast<uint32_t>(std::clamp<TimeUs>(t2 - t1, 0, UINT32_MAX)));
+    }
+}
 
 }  // namespace fr::net::air

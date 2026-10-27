@@ -1,6 +1,7 @@
 // Fuzz targets for the generated codecs (T-CODEC, spec 05 §5.18): one per system message, capability
 // struct and property STATE body ("gen.<vector type>", from gen/decoders.inc), the full serial path
-// (line -> envelope -> message or capability body -> JSON) and the diag JSON argument encoder.
+// (line -> envelope -> message or capability body -> JSON, or line -> GW_*/LINK_* body) and the diag JSON
+// argument encoder.
 // A target's corpus is every golden vector of its type in vectors.inc order, error and decode-only ones
 // and envelope bodies included (every message and capability sample when a type has none); the TS twin
 // (packages/protocol/test/gen.fuzz.test.ts) builds the same list, since the corpus order picks cases.
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "cJSON.h"
@@ -205,6 +207,39 @@ void message_body(uint8_t cls, uint8_t kind, std::span<const uint8_t> body, frf:
     }
 }
 
+/** A serial body through the codec its frame type selects (design m2-c4-gateway D1). */
+template <class T, class Dec>
+bool try_serial(uint8_t type, std::span<const uint8_t> body, Dec dec, frf::Digest &d)
+{
+    bool match = false;
+    if constexpr (requires { T::kType; }) {
+        match = T::kType == type;
+    } else if constexpr (std::is_same_v<T, fr::proto::GwStatus>) {
+        match = type == fr::proto::kSerialTypeOfGwStatus;
+    } else if constexpr (std::is_same_v<T, fr::proto::GwCmd>) {
+        match = type == fr::proto::kSerialTypeOfGwCmd;
+    } else if constexpr (std::is_same_v<T, fr::proto::GwRsp>) {
+        match = type == fr::proto::kSerialTypeOfGwRsp;
+    }
+    if (match) {
+        roundtrip<T>(body, d, kEncode, dec, T::kMaxSize);
+    }
+    return match;
+}
+
+void serial_body(uint8_t type, std::span<const uint8_t> body, frf::Digest &d)
+{
+    bool hit = false;
+#define FR_GEN_DECODER(ident, type_name, T, decode) hit = hit || try_serial<T>(type, body, decode, d);
+#define FR_GEN_STATE_DECODER(ident, type_name, V, encode_fn, decode_fn, max_size)
+#include "decoders.inc"
+#undef FR_GEN_DECODER
+#undef FR_GEN_STATE_DECODER
+    if (!hit) {
+        d.u8(0xEE);
+    }
+}
+
 /** A capability body as JSON; the capability is picked by port, as a board's port table would. */
 void capability_body(const fr::wire::Header &h, std::span<const uint8_t> body, frf::Digest &d)
 {
@@ -238,6 +273,7 @@ FUZZ_TARGET(gen_serial_path, "gen.serial_path", serial_corpus)
     d.ok();
     d.u8(frame->type);
     if (frame->type != fr::wire::kSerialEnv) {
+        serial_body(frame->type, frame->body, d);
         return;
     }
     const auto env = fr::wire::unpack_envelope(frame->body);

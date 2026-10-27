@@ -976,7 +976,8 @@ function checkTestPin(inp: Inputs, insts: ResolvedInstance[], reserved: Map<numb
  * Profile-level rules: fr_core runs at most MAX_INSTANCES instances (it would leave the rest out), and a
  * fixture is serial only and drives no test pin (design m2-c1-hil D5, D6). The converse holds too: only a
  * fixture has its radio off, since the hub knows a radio-off device by its HELLO role alone (no join stage,
- * no OTA over Wi-Fi) and the build manifest does not carry `net`.
+ * no OTA over Wi-Fi) and the build manifest does not carry `net`. Role gateway and app gateway go together
+ * (design m2-c4-gateway D7).
  */
 function checkProfile(inp: Inputs, issues: Issues): void {
   const { profile } = inp;
@@ -994,6 +995,12 @@ function checkProfile(inp: Inputs, issues: Issues): void {
     }
   } else if (profile.net?.radio === 'off') {
     issues.add(pf, ['net', 'radio'], `net: { radio: off } is only for a role: fixture profile, not role ${profile.role ?? 'node'}: the hub knows a radio-off device by its HELLO role`);
+  }
+  // Design m2-c4-gateway D7: the gateway app (the node core + fr_gw) is the gateway role's image, and only its.
+  if (profile.role === 'gateway' && profile.app !== 'gateway') {
+    issues.add(pf, ['app'], `a role: gateway profile needs app: gateway, not app ${profile.app}`);
+  } else if (profile.app === 'gateway' && profile.role !== 'gateway') {
+    issues.add(pf, ['role'], `app: gateway needs role: gateway, not role ${profile.role ?? 'node'}`);
   }
 }
 

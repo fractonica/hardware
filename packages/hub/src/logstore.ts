@@ -285,6 +285,14 @@ export class LogStore {
   }
 
   /**
+   * A gateway bridge's `@fr1:` line (GW_*, LINK_*; FrameDecoder.bridge): handed to the frame decoder's tap and not
+   * stored. False for any other line (ENV frames included), which the caller appends as before.
+   */
+  bridged(device: string, raw: string): boolean {
+    return this.#frames !== null && raw.startsWith(SERIAL_PREFIX) && this.#frames.bridge(device, raw);
+  }
+
+  /**
    * Stores one line (source `serial` unless said) and returns it. The other source's copy of a line already stored
    * is not stored again (design m2-c2 D21, counted in logs_dup): the line it matched is returned instead, whose
    * port tells it apart.

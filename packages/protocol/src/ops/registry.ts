@@ -15,11 +15,25 @@ export { deviceSel } from './common.ts';
 export const SELECTOR_HELP =
   'device selector: alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3> | profile:<p> | role:<node|gateway|fixture> | online | offline | all; "," combines (alternatives within one kind, narrowing across kinds), "!" excludes; the HIL fixture is picked only by its alias, id:, mac: or role:fixture, never by all or a "!"-only selector';
 
+/**
+ * A gateway's bridge as this hub run sees it (design m2-c4-gateway D15, D17): hub_status `links.gateways[G]` and the
+ * gateway's own device_get `router.gateway`. Down after 1 s without a LINK_PONG; `status` is its last GW_STATUS.
+ */
+export const GatewayInfoSchema = z.looseObject({
+  alias: z.string(),
+  up: z.boolean(),
+  rtt_us: z.number().nullable(),
+  last_pong_ms_ago: z.number().nullable(),
+  status: z.record(z.string(), z.unknown()).nullable(),
+  /** Node sessions through it. */
+  sessions: z.number().int(),
+});
+
 /** What this hub run knows of a device's link (device_get `router`; the hub's router DeviceLinkInfo). */
 export const DeviceLinkInfoSchema = z.looseObject({
   presence: z.enum(PRESENCES),
-  /** Links with a session, best first. */
-  links: z.array(z.enum(['serial', 'tcp'])),
+  /** Links with a session, best first (gateway: through a gateway's bridge, design m2-c4-gateway D17). */
+  links: z.array(z.enum(['serial', 'tcp', 'gateway'])),
   udp_ms_ago: z.number().nullable(),
   udp_blocked: z.boolean(),
   epoch: z.number().int().nullable(),
@@ -35,6 +49,10 @@ export const DeviceLinkInfoSchema = z.looseObject({
   /** The property mirror: `<instance>.<property>` -> value. */
   properties: z.record(z.string(), z.unknown()),
   instances: z.array(z.looseObject({ name: z.string(), port: z.number().int(), cap: z.string(), cap_id: z.number().int() })).nullable(),
+  /** The alias of the gateway its gateway session goes through, null without one (design m2-c4-gateway D17). */
+  gw: z.string().nullable().optional(),
+  /** For a gateway: its bridge (GatewayInfoSchema); null for any other device. */
+  gateway: GatewayInfoSchema.nullable().optional(),
 });
 
 /** A capability instance as capability_list reports it: live from the router, else the build's manifest. */
@@ -92,7 +110,7 @@ export const REGISTRY_OPS = [
     kind: 'job',
     tier: 'mutate',
     summary:
-      'Provision a USB-attached board (first flash): probe it, register it (addr, alias, net), write the newest debug artifact of its profile plus fr_ident (Wi-Fi from network_set, hub host) in one write_flash, reset it, wait for its HELLO on serial, then report whether it joined over Wi-Fi (wifi: joined | not_joined; off for a radio-off profile such as the HIL fixture\'s). Example: --port 1cdbd416ba34 --profile c6-pad.',
+      'Provision a USB-attached board (first flash): probe it, register it (addr, alias, net), write the newest debug artifact of its profile plus fr_ident (Wi-Fi from network_set, hub host) in one write_flash, reset it, wait for its HELLO on serial, then report whether it joined over Wi-Fi (wifi: joined | not_joined, via: tcp, or gateway_status for a role: gateway profile, which opens no TCP and shows the AP in its GW_STATUS; off for a radio-off profile such as the HIL fixture\'s). Example: --port 1cdbd416ba34 --profile c6-pad.',
     input: z.object({
       port: portSel,
       profile: z.string().optional().describe('profile to flash; default: the registry profile, else the only one built for the probed chip'),

@@ -55,7 +55,7 @@ describe('emitCpp', () => {
     const caps = ['button', 'led', 'analog_in', 'fixture', 'node', 'ota', 'diag'];
     expect([...out.keys()].sort()).toEqual(
       [
-        ...['codec_support.hpp', 'protocol.hpp', 'protocol.cpp', 'messages.hpp', 'messages.cpp'].map((f) => `${CPP_PROTO_GEN_DIR}/${f}`),
+        ...['codec_support.hpp', 'protocol.hpp', 'protocol.cpp', 'messages.hpp', 'messages.cpp', 'serial.hpp', 'serial.cpp'].map((f) => `${CPP_PROTO_GEN_DIR}/${f}`),
         ...caps.flatMap((c) => [`${CPP_CAPS_GEN_DIR}/${c}.hpp`, `${CPP_CAPS_GEN_DIR}/${c}.cpp`]),
         ...['catalog.hpp', 'catalog.cpp', 'diag_json.hpp', 'diag_json.cpp'].map((f) => `${CPP_CAPS_GEN_DIR}/${f}`),
         `${CPP_HOST_GEN_DIR}/decoders.inc`,

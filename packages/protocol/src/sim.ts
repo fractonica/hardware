@@ -28,6 +28,10 @@ export type SimRate = (typeof SIM_RATES)[number];
 export const SIM_PROFILES = ['c6-pad', 'c3o-analog'] as const;
 export type SimProfile = (typeof SIM_PROFILES)[number];
 
+/** The HELLO roles a fleet node can play (design m2-c4-gateway D18): a pad, or a gateway's bridge. */
+export const SIM_ROLES = ['node', 'gateway'] as const;
+export type SimRole = (typeof SIM_ROLES)[number];
+
 /** How the medium's pair table is filled (D3). The router-mode gates are judged on one_room only (D10). */
 export const SIM_TOPOLOGIES = ['one_room', 'two_rooms', 'matrix', 'positions'] as const;
 export type SimTopology = (typeof SIM_TOPOLOGIES)[number];
@@ -203,6 +207,12 @@ export const FleetNodeSchema = z.strictObject({
   profile: z.enum(SIM_PROFILES).default('c6-pad'),
   /** A spare row (T2-CHURN-30's joins): provisioned, not started by `fleet start`, only by `fleet spawn <alias>`. */
   spare: z.boolean().default(false),
+  /**
+   * Its HELLO role (design m2-c4-gateway D18); absent: node. A gateway runs fr_gw's bridge over its radio and speaks
+   * GW_* to the hub on its bridge port, so it needs `usb`; it associates with the AP for its channel but opens no
+   * TCP or UDP to the hub.
+   */
+  role: z.enum(SIM_ROLES).optional(),
 });
 export type FleetNode = z.infer<typeof FleetNodeSchema>;
 
@@ -222,6 +232,11 @@ export const FleetSpecSchema = z
     nodes: z.array(FleetNodeSchema).min(1),
   })
   .superRefine((s, ctx) => {
+    for (const [i, n] of s.nodes.entries()) {
+      if (n.role === 'gateway' && !n.usb) {
+        ctx.addIssue({ code: 'custom', path: ['nodes', i, 'usb'], message: 'a gateway needs usb: its hub link is the bridge port' });
+      }
+    }
     for (const key of ['alias', 'mac', 'addr'] as const) {
       const seen = new Set<string | number>();
       for (const [i, n] of s.nodes.entries()) {

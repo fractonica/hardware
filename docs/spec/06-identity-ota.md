@@ -183,7 +183,7 @@ hub_ip,data,string,192.168.0.17
 |---|---|---|
 | Serial (esptool, compressed; the `flash_start` `app` plan) | USB-attached nodes, the gateway, recovery | 5.9 s (C3), 6.8 s (C6) |
 | **Wi-Fi HTTP pull** from `http://<hub IP of the node's TCP session>:7422/ota/<fw_id>.bin` (Range supported) | default for networked nodes | 15.6 s (C3), 18.8 s (C6) end to end, including the reboot, the health gate and the deploy's expectation; 40–52 s for three boards at once, two of them on marginal C3 links ([04 §4.6](04-boards.md)) |
-| ESP-NOW relay via the gateway (M2+) | ESP-NOW-only nodes | ~45–90 s at 1 Mbps; faster at ≥ 6 Mbps (estimate) |
+| ESP-NOW relay via the gateway (M2-C10) | ESP-NOW-only nodes | ~45–90 s at 1 Mbps; faster at ≥ 6 Mbps (estimate). Until C10 no OTA frame goes over a gateway (below) |
 | Delta OTA (`esp_delta_ota`, M3+) | ESP-NOW nodes, small changes | depends on patch size |
 
 The node-facing HTTP port (7422) serves an image only to the node it is OFFERED to, recognised by the source IP of that node's live TCP session ([08 §8.10](08-hub.md)).
@@ -326,7 +326,9 @@ Terminal: `SUCCEEDED`, `FAILED(code)`, `ROLLED_BACK {reason}`, `TIMED_OUT {code,
 - M1: a selector plus `max_parallel` (default 4) and `on_failure: halt|continue`. `halt` stops new devices before the failing child frees its slot; they end `CANCELLED halted`.
 - M3: canary and waves with soak time, a failure ratio, and an atomic commit across devices (`DEFER_COMMIT`, then a broadcast COMMIT) for breaking protocol changes.
 
-**Transport `auto`:** serial if the hub holds the device's USB port open (not closed, leased or held by another program), otherwise Wi-Fi, otherwise ESP-NOW relay (M2+). A fault build always goes over Wi-Fi. A USB gateway is flashed over serial, always last.
+**Transport `auto`:** serial if the hub holds the device's USB port open (not closed, leased or held by another program), otherwise Wi-Fi, otherwise ESP-NOW relay (M2-C10). A fault build always goes over Wi-Fi. A USB gateway is flashed over serial, always last.
+
+**Never over a gateway session until C10** (since M2-C4, [design m2-c4-gateway](../design/m2-c4-gateway.md) D16). A node's gateway session (05 §5.10) carries one ESP-NOW frame per envelope and nothing BULK, so the orchestrator's OTA frames never take it: `sendOta` uses the device's TCP or serial session, or answers `DEVICE_OFFLINE` when the gateway session is its only one. A node that reaches the hub only through a gateway (`net wifi_down`, the AP lost) cannot be updated until it is back on Wi-Fi or USB; relay OTA (CHUNK/SACK, 05 §5.7) comes with C10. At the M2-C4 bench the old image opened a gateway session the moment its TCP dropped for the reboot, and its HELLO over the gateway made the orchestrator report a false `ROLLED_BACK`; the "back on the old image" grace timer is now cancelled when the target image HELLOs.
 
 ## 6.8 Artifacts
 

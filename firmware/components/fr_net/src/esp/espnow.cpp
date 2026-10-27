@@ -1,7 +1,7 @@
 // fr:realtime
 // The ESP-NOW driver (design c5 §3, spec 05 §5.3): AirLink on the STA interface. esp_now_init runs after
 // esp_wifi_start (start_air() after start()); the broadcast peer is added then, unicast peers on demand by
-// the scheduler (air_sched.hpp: LRU, at most 17), each followed by esp_now_set_peer_rate_config at the
+// the scheduler (air_sched.hpp: LRU, at most 17, plus the chosen gateway pinned; a gateway's LRU 19), each followed by esp_now_set_peer_rate_config at the
 // robust rate. Every peer has channel 0, so it follows the radio, which the STA keeps on channel C.
 //
 // Three contexts meet here and only copy and post (05 §5.3, 03 §3.4):
@@ -14,6 +14,10 @@
 //     verdicts and timer to the scheduler, and through it starts the next send.
 // Posts coalesce (one service in the core queue at a time); a post refused by a full queue is offered again
 // from an esp_timer 1 ms later, so a verdict is never lost. No heap.
+//
+// M2-C4 (design m2-c4-gateway D1, D8, D19): a frame may name its rate (send_at; the scheduler sets it on the peer, the
+// fast one being 11g 6 Mbps), a send's end tells its link retries and queue wait (done_info), received frames carry
+// their receive stamp, and the S2 hooks `air rate` and `air churn` run here (air_set_rate, air_churn).
 #include <atomic>
 #include <cstring>
 
@@ -101,21 +105,27 @@ void update_up()
 }
 
 /**
- * 05 §5.3: the robust profile, set after every add_peer (the rate belongs to the peer entry, the broadcast
- * peer's included). Never a zero phymode: 0 is WIFI_PHY_MODE_LR, which receivers outside LR cannot hear.
- * On error the peer keeps the driver's default rate, counted.
+ * 05 §5.3: the robust profile (11b 1 Mbps long preamble), set after every add_peer (the rate belongs to the peer entry,
+ * the broadcast peer's included); `fast` is 11g 6 Mbps OFDM (design m2-c4-gateway D19 (c)). Never a zero phymode: 0 is
+ * WIFI_PHY_MODE_LR, which receivers outside LR cannot hear. False on error: the peer keeps the rate it had.
  */
-void set_rate(const uint8_t *mac)
+bool config_rate(const uint8_t *mac, AirRate rate)
 {
+    const bool fast = rate == AirRate::fast;
     esp_now_rate_config_t rc;
     std::memset(&rc, 0, sizeof(rc));
-    rc.phymode = WIFI_PHY_MODE_11B;
-    rc.rate = WIFI_PHY_RATE_1M_L;
+    rc.phymode = fast ? WIFI_PHY_MODE_11G : WIFI_PHY_MODE_11B;
+    rc.rate = fast ? WIFI_PHY_RATE_6M : WIFI_PHY_RATE_1M_L;
     rc.ersu = false;
     rc.dcm = false;
-    esp_err_t err = esp_now_set_peer_rate_config(mac, &rc);
-    if (err != ESP_OK && s_rate_fail.fetch_add(1, std::memory_order_relaxed) == 0) {
-        ESP_LOGW(TAG, "espnow: peer rate not set (%s); the driver default stays", esp_err_to_name(err));
+    return esp_now_set_peer_rate_config(mac, &rc) == ESP_OK;
+}
+
+/** The robust rate after an add_peer; on error the peer keeps the driver's default rate, counted. */
+void set_rate(const uint8_t *mac)
+{
+    if (!config_rate(mac, AirRate::robust) && s_rate_fail.fetch_add(1, std::memory_order_relaxed) == 0) {
+        ESP_LOGW(TAG, "espnow: peer rate not set; the driver default stays");
     }
 }
 
@@ -159,6 +169,7 @@ public:
             s_hooks.sent(token, ok);
         }
     }
+    bool set_rate(const Mac &mac, AirRate rate) override { return config_rate(mac.data(), rate); }
 };
 
 EspRadio s_radio;
@@ -176,6 +187,19 @@ public:
         }
         return s_sched.send(dst, envelope, prio, token, esp_timer_get_time());
     }
+    fr::Status send_at(const Mac &dst, std::span<const uint8_t> envelope, AirPrio prio, uint32_t token,
+                       AirRate rate) override
+    {
+        if (!up()) {
+            ++s_refused_down;
+            return std::unexpected(Err::failed);
+        }
+        return s_sched.send(dst, envelope, prio, token, esp_timer_get_time(), rate);
+    }
+    AirDone done_info(uint32_t token) const override { return s_sched.last_done(token); }
+    bool refused_no_peer() const override { return s_sched.refused_no_peer(); }
+    bool pin_peer(const Mac *mac) override { return s_sched.pin(mac, esp_timer_get_time()); }
+    void bridge_peers() override { s_sched.set_bridge(true); }
 };
 
 EspAir s_air;
@@ -242,6 +266,7 @@ void on_recv(const esp_now_recv_info_t *info, const uint8_t *data, int len)
         info->des_addr != nullptr && std::memcmp(info->des_addr, kBroadcastMac.data(), kBroadcastMac.size()) == 0;
     slot.meta.rssi = info->rx_ctrl != nullptr ? static_cast<int8_t>(info->rx_ctrl->rssi) : 0;
     slot.meta.channel = ch;
+    slot.meta.rx_at = esp_timer_get_time();  // GW_RX rx_ts_us, and the gateway session's TIME t2 (design m2-c4 D8, D10)
     s_rx_head.store(head + 1, std::memory_order_release);
     s_rx_ok.fetch_add(1, std::memory_order_relaxed);
     s_heard_s.store(detail::stamp_s(esp_timer_get_time()), std::memory_order_relaxed);
@@ -364,10 +389,44 @@ AirStatus air_status()
     a.rx = s_rx_ok.load(std::memory_order_relaxed);
     a.rx_bad = s_rx_bad.load(std::memory_order_relaxed);
     a.rx_lost = s_rx_lost.load(std::memory_order_relaxed);
-    a.rate_fail = s_rate_fail.load(std::memory_order_relaxed);
+    a.rate_fail = s_rate_fail.load(std::memory_order_relaxed) + st.rate_fail;
     a.guard = st.guard;
     a.lost = st.lost;
     return a;
+}
+
+std::expected<AirRateResult, Err> air_set_rate(AirRate rate, bool broadcast)
+{
+    if (!s_started.load(std::memory_order_acquire)) {
+        return std::unexpected(Err::failed);
+    }
+    const air::RateChange r = s_sched.set_default_rate(broadcast, rate);
+    ESP_LOGI(TAG, "espnow: %s rate %s (%u peers, %u refused)", broadcast ? "broadcast" : "unicast",
+             rate == AirRate::fast ? "11g 6 Mbps" : "11b 1 Mbps", static_cast<unsigned>(r.peers),
+             static_cast<unsigned>(r.failed));
+    return AirRateResult{.peers = r.peers, .failed = r.failed};
+}
+
+AirRate air_rate(bool broadcast)
+{
+    return s_sched.default_rate(broadcast);
+}
+
+std::expected<AirChurn, Err> air_churn(uint32_t n)
+{
+    if (!s_started.load(std::memory_order_acquire)) {
+        return std::unexpected(Err::failed);
+    }
+    static air::ChurnStats st;  // 2 KB: not on the core task's stack
+    air::churn(s_radio, n, [] { return esp_timer_get_time(); }, st);
+    return AirChurn{.n = st.n,
+                    .failed = st.failed,
+                    .add_p50_us = st.add.percentile(500),
+                    .add_p99_us = st.add.percentile(990),
+                    .add_max_us = st.add.max(),
+                    .del_p50_us = st.del.percentile(500),
+                    .del_p99_us = st.del.percentile(990),
+                    .del_max_us = st.del.max()};
 }
 
 }  // namespace fr::net::esp

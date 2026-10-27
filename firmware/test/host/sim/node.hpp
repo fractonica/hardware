@@ -50,6 +50,10 @@ class MemFlash;
 class HttpFetch;
 }
 
+namespace fr::gw {
+class Bridge;
+}
+
 namespace frsim {
 
 /** One node: its registry row and how the host runs it (the fleet spec's nodes[], fr_net_node's options). */
@@ -136,6 +140,13 @@ struct AirCounters {
     uint32_t acks = 0;
 };
 
+/** `air churn` (design m2-c4-gateway D19): µs per add and del of n throwaway peers. */
+struct AirChurnCounts {
+    uint32_t n = 0, failed = 0;
+    uint32_t add_p50_us = 0, add_p99_us = 0, add_max_us = 0;
+    uint32_t del_p50_us = 0, del_p99_us = 0, del_max_us = 0;
+};
+
 /**
  * What the node's commands and diag hooks do to its links, each host in its own way. udp_block, ip_block,
  * drop_hub_link and loss are Net's own hooks (Net::udp_block ...), the same everywhere, so they are not here.
@@ -163,6 +174,20 @@ public:
     virtual bool test_pin_wired() const { return false; }
     /** One pulse of `us` on the test pin. */
     virtual void test_pin_pulse(uint32_t us) { static_cast<void>(us); }
+    // Spike S2 (design m2-c4-gateway D19): the radio's `air rate` and `air churn`; false: this host cannot (unsupported).
+    virtual bool air_rate(fr::net::AirRate rate, bool broadcast, uint32_t &peers, uint32_t &failed)
+    {
+        static_cast<void>(rate);
+        static_cast<void>(broadcast);
+        peers = failed = 0;
+        return false;
+    }
+    virtual bool air_churn(uint32_t n, AirChurnCounts &out)
+    {
+        static_cast<void>(n);
+        out = {};
+        return false;
+    }
 
 protected:
     ~NodeLinks() = default;
@@ -361,6 +386,8 @@ public:
 
     /** The node's Net, its links, and its board ports (`inject` finds instances by name). */
     void bind(fr::net::Net &net, NodeLinks &links, std::span<const fr::PortEntry> ports);
+    /** A gateway node's bridge (design m2-c4-gateway D18): `stats gw` reads it; null (every other node): {"on":false}. */
+    void set_gateway(const fr::gw::Bridge *bridge) { gw_ = bridge; }
 
     std::expected<fr::cap::DiagExecResult, fr::Err> exec(const fr::cap::DiagExecArgs &args) override;
 
@@ -370,7 +397,7 @@ public:
 
     /** fr_diag's `stats` sections, in its order (diag.cpp kStatSections). */
     static constexpr std::string_view kSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs",
-                                                     "net_logs"};
+                                                     "net_logs", "gateway", "gw"};
 
 private:
     int info();
@@ -381,6 +408,10 @@ private:
     int stats(std::string_view args);
     int inject(std::string_view args);
     int neighbors(std::string_view args);
+    /** Spike S2 (design m2-c4-gateway D19): `air bench|rate|churn` (txpower: unsupported), `net stream`. */
+    int air(std::string_view args);
+    int bench_rx(std::string_view args);
+    int net_stream(std::string_view args);
     int put(std::string_view json);
 
     fr::Core &core_;
@@ -388,6 +419,7 @@ private:
     Out &out_;
     fr::net::Net *net_ = nullptr;
     NodeLinks *links_ = nullptr;
+    const fr::gw::Bridge *gw_ = nullptr;
     std::span<const fr::PortEntry> ports_;
     int test_pin_;
     fr::TimeUs boot_us_;  // the core's clock at this boot: `info` uptime_ms counts from it
@@ -782,7 +814,9 @@ struct FleetShared {
  * (`wifi_down`, `tcp 0`, Net's TCP hold and backoff), so power-on is a fresh boot; and it cancels a reboot under way,
  * so an explicit power cut in the reboot gap keeps the node off. M2-C3 (design m2-c3-inputs §8): the boot builds the
  * services and the port table of the spec's kit profile (kit_profile; the descriptor follows the table), and a
- * c3o-analog node's WaveAnalog outlives its boots as the world outside a board does.
+ * c3o-analog node's WaveAnalog outlives its boots as the world outside a board does. M2-C4 (design m2-c4-gateway D18): a
+ * node of role gateway runs fr_gw's bridge over its SimAir (Net::air_send_raw and Net's AirTap, as core.cpp wires it)
+ * and speaks GW_* on its bridge port to the hub; it associates with the AP for its channel but opens no TCP or UDP.
  */
 class FleetNode
 {
@@ -830,6 +864,7 @@ public:
 private:
     struct Boot;
     class Links;
+    class Gateway;
 
     void boot();
     void tick();
