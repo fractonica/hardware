@@ -122,11 +122,16 @@ export interface Registry {
 export type HubEvent = ProtocolHubEvent;
 
 export interface Events {
-  /** Synchronous: allocates the cursor from the shared Seq, notifies subscribers, enqueues persistence. */
-  publish(e: Omit<HubEvent, 'cursor' | 'seq'>): HubEvent;
+  /**
+   * Synchronous: allocates the cursor from the shared Seq, notifies subscribers, enqueues persistence. `thin`: a
+   * STATE of a streaming capability, whose rows the store may thin (design m2-c3-inputs D6; EventStore).
+   */
+  publish(e: Omit<HubEvent, 'cursor' | 'seq'>, opts?: { thin?: boolean }): HubEvent;
   subscribe(fn: (e: HubEvent) => void): () => void;
   /** Oldest first; `devices: null` is every device. */
   query(q: { afterSeq?: number; types?: string[]; devices?: string[] | null; excludeDevices?: string[]; limit: number }): HubEvent[];
+  /** Streaming STATEs replaced before being written (hub_status `events`; EventStore only). */
+  readonly stateThinned?: number;
 }
 
 /** An OTA-class frame from a node (05 §5.7, design c4 §3): ACCEPT, REJECT, STATUS or RESULT, on port 240. */
@@ -497,6 +502,12 @@ export interface Fixture extends HubPart {
    * `gated` runs once every device has passed the gates, before anything is pressed (op.called).
    */
   simulate(devices: Device[], input: OpInput<'input_simulate'>, gated?: () => void): Promise<unknown>;
+  /**
+   * The PWM setpoint of a DUT's bench-wired analog line (design m2-c3-inputs D5, D7): duty = round(mv / vdd_mv ·
+   * 10000) by `set_duty`; resolves with the per-device result (its `setpoint.at_hub_us`: when the duty was applied,
+   * in hub time), throws a gate's refusal.
+   */
+  setMv(dut: Device, instance: string, mv: number, opts?: { timeoutMs?: number }): Promise<unknown>;
   /** A DUT's diag `pin_pulse` answer (its clock at the falling edge): a sample on its own test_pin line (D10). */
   pinPulse(deviceId: string, atUs: number): void;
   /**

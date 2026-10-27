@@ -190,6 +190,7 @@ struct NetStatus {
     uint32_t exec_cancelled = 0;    // scheduled CMDs a new hub run's WELCOME dropped
     uint32_t exec_late_us_max = 0;  // the most a scheduled CMD ran after its time (not a counter)
     uint32_t rx_queue_us_max = 0;   // the longest wait of a hub-link envelope for the core task (not a counter)
+    uint32_t state_repeats_superseded = 0;  // M2-C3 (design m2-c3-inputs D6): STATE second copies a newer one replaced
     // Debug hooks in force.
     bool hub_link_dropped = false;
     bool udp_blocked = false;

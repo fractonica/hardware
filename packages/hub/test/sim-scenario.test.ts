@@ -30,7 +30,7 @@ const patched = (id: string, patch: (s: Record<string, any>) => void) => {
 describe('tests/sim/scenarios', () => {
   const all = loadScenarios(DIR);
 
-  it('holds the six gated scenarios and the four published ones, each valid', () => {
+  it('holds the six gated scenarios and the five published ones, each valid', () => {
     expect(all.map((l) => [l.file, l.problems])).toEqual(all.map((l) => [l.file, []]));
     const gated = all.filter((l) => !l.scenario!.published).map((l) => [l.scenario!.id, l.scenario!.gate]);
     expect(gated).toEqual([
@@ -41,7 +41,7 @@ describe('tests/sim/scenarios', () => {
       ['t2-nn-30', 'T2-NN-30'],
       ['t2-ota-30', 'T2-OTA-30'],
     ]);
-    expect(all.filter((l) => l.scenario!.published).map((l) => l.scenario!.id)).toEqual(['t2-flood-30-collisions', 't2-flood-30-long-frames', 't2-flood-30-two-rooms', 't2-flood-60']);
+    expect(all.filter((l) => l.scenario!.published).map((l) => l.scenario!.id)).toEqual(['t2-analog-30', 't2-flood-30-collisions', 't2-flood-30-long-frames', 't2-flood-30-two-rooms', 't2-flood-60']);
     // Every run names a module the runner can run and scale (D15's table has a row for each).
     for (const l of all) {
       for (const r of l.scenario!.runs) {
@@ -59,6 +59,7 @@ describe('tests/sim/scenarios', () => {
       't-input': (await import('../../../tests/e2e/t-input.ts')).parseArgs,
       't-ota': (await import('../../../tests/e2e/t-ota.ts')).parseArgs,
       't2-churn': (await import('../../../tests/sim/t2-churn.ts')).parseArgs,
+      't2-analog': (await import('../../../tests/sim/t2-analog.ts')).parseArgs,
       'flood-b-epoch': (await import('../../../tests/sim/lib/runner.ts')).parseEpochArgs,
       storm: () => null,
     };
@@ -103,6 +104,21 @@ describe('tests/sim/scenarios', () => {
     // The gated running phase presses as independent users (seeded offsets); only the published stress case is in lockstep.
     expect(s('t2-nn-30').runs.filter((r) => r.args.includes('--lockstep')).map((r) => [r.name, r.published])).toEqual([['running-lockstep', true]]);
     expect(s('t2-flood-60').nodes.count).toBe(60);
+  });
+
+  it('keeps T2-ANALOG-30 a published dry run on c3o-analog nodes, at report_hz 20 then 50 (design m2-c3-inputs §8)', () => {
+    const s = all.find((l) => l.scenario?.id === 't2-analog-30')!.scenario!;
+    expect(s).toMatchObject({ published: true, nodes: { count: 30, profile: 'c3o-analog' } });
+    expect(s.gate).toBeUndefined();
+    expect(s.runs.map((r) => [r.run, flagValues(r.args, '--report-hz').at(-1)])).toEqual([
+      ['t2-analog', '20'],
+      ['t2-analog', '50'],
+    ]);
+    // A 1,000 ms sine: past the 512 deadband in nearly every report period, so the nodes stream near report_hz.
+    expect(s.runs.map((r) => flagValues(r.args, '--period-ms').at(-1))).toEqual(['1000', '1000']);
+    // A profile the kit cannot play is refused by the schema, before fr_fleet would.
+    const bad = patched('t2-analog-30', (x) => (x.nodes.profile = 'c3o-pad'));
+    expect(bad.problems.join(' ')).toContain('nodes.profile');
   });
 
   it('names every node in each T-FLOOD and T-FLOOD-B run, so a node offline at its start fails it rather than dropping out', () => {
@@ -188,7 +204,7 @@ describe('the validator (topology-check.ts)', () => {
     expect(r.problems).toEqual([
       'run a (t-flood-b): --down names sim-31, a spare row that only a join starts',
       'run a (t-flood-b): --isolate sim-05 is not on the bridge (nodes.usb): t-flood-b refuses to isolate a node the hub holds no port for',
-      'run b (t-blink): no module t-blink (one of t-flood, t-flood-b, t-nn, t-input, t-ota, t2-churn, flood-b-epoch, storm)',
+      'run b (t-blink): no module t-blink (one of t-flood, t-flood-b, t-nn, t-input, t-ota, t2-churn, t2-analog, flood-b-epoch, storm)',
       'run c (t-flood): t-flood needs --cut (its default, pad-c3, is a bench board)',
       'run d (t-nn): --pair names sim-40, not a node of this fleet (sim-01 .. sim-31)',
       'run e (t-nn): --pairs 16 needs 32 started nodes; the fleet starts 30',

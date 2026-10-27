@@ -1,6 +1,7 @@
 // FleetNode (design m2-c2 D1, D7, D8): one node of fr_fleet, its links and its boots; and NodeOut, its output. See
 // node.hpp. A boot is fr_net_node's main() as objects: the same node classes, around a Net on the node's SimCore,
-// over SimTcp, SimUdp, SimSerial and SimAir instead of fr_net_node's blocking links and FakeAir.
+// over SimTcp, SimUdp, SimSerial and SimAir instead of fr_net_node's blocking links and FakeAir. M2-C3 (design
+// m2-c3-inputs §8): its services and port table are the kit profile's (c6-pad, c3o-analog).
 #include <sys/stat.h>
 
 #include <algorithm>
@@ -245,8 +246,10 @@ struct FleetNode::Boot {
           light(n.out_),
           button(button_src, fr::cap::ButtonConfig{}),
           led(light, fr::cap::LedConfig{.max_brightness = 64}),
+          analog(n.wave_ != nullptr ? std::make_unique<fr::AnalogInService>(*n.wave_, kit_analog_config(n.spec_->analog_report_hz))
+                                    : nullptr),
           diag(*n.core_, *n.spec_, n.out_),
-          ports(make_ports(button, led, diag)),
+          ports(make_ports(button, led, analog.get(), diag)),
           device(*n.core_, *n.spec_, ports, n.out_),
           cfg(make_cfg(*n.spec_)),
           net(*n.core_, device, cfg),
@@ -266,11 +269,18 @@ struct FleetNode::Boot {
         spec.version = flash.state().version;
         return true;
     }
-    static std::vector<fr::PortEntry> make_ports(fr::ButtonService &button, fr::LedService &led, NodeDiag &diag)
+    static std::vector<fr::PortEntry> make_ports(fr::ButtonService &button, fr::LedService &led, fr::AnalogInService *analog,
+                                                 NodeDiag &diag)
     {
-        // The c6-pad board table (schema/vectors Descriptor.c6_pad): boot button on 1, status LED on 2; fr.diag on
-        // 241 is a system port, outside the descriptor.
-        return {{0, "node", nullptr, true}, {1, "boot", &button, true}, {2, "status", &led, true}, {241, "diag", &diag, true}};
+        // The kit profile's table (KitProfile): c6-pad's (schema/vectors Descriptor.c6_pad) boot button on 1, status
+        // LED on 2, and c3o-analog's analog input on 3 (c3o-analog.slots.lock); fr.diag on 241 is a system port,
+        // outside the descriptor, which Device builds from this table.
+        std::vector<fr::PortEntry> p{{0, "node", nullptr, true}, {1, "boot", &button, true}, {2, "status", &led, true}};
+        if (analog != nullptr) {
+            p.push_back({3, "analog", analog, true});
+        }
+        p.push_back({241, "diag", &diag, true});
+        return p;
     }
     static fr::net::Config make_cfg(const NodeSpec &spec)
     {
@@ -289,11 +299,13 @@ struct FleetNode::Boot {
     QuietLight light;
     fr::ButtonService button;
     fr::LedService led;
+    std::unique_ptr<fr::AnalogInService> analog;  // c3o-analog only
     NodeDiag diag;
     std::vector<fr::PortEntry> ports;
     Device device;
     fr::net::Config cfg;
     fr::net::Net net;
+    CountingSink analog_sink{net};  // the analog port's STATEs on their way to Net
     FileBlob dir_blob;
     FileBlob bind_blob;
     fr::core::NetStores stores;
@@ -321,6 +333,14 @@ FleetNode::FleetNode(FleetShared &shared, std::unique_ptr<NodeSpec> spec, std::s
       links_(std::make_unique<Links>(*this))
 {
     ::mkdir(dir_.c_str(), 0700);
+    // What HELLO, the descriptor and fr_ota's CHECK say follows the kit profile (the fleet spec names only the profile).
+    if (const KitProfile *k = kit_profile(spec_->profile)) {
+        spec_->board = std::string(k->board);
+        spec_->chip = k->chip;
+        if (k->analog) {
+            wave_ = std::make_unique<WaveAnalog>(*core_, spec_->rng_seed);
+        }
+    }
     if (shared.arrival) {
         tcp_->set_arrival([this](std::span<const uint8_t> env, TimeUs at) { shared_.arrival(*spec_, env, at); });
     }
@@ -369,9 +389,9 @@ void FleetNode::boot()
     b.device.set_links(*links_);
     b.net.attach_stores(b.stores.directory(), b.stores.bindings());
     for (fr::PortEntry &p : b.ports) {
-        p.cap->attach(p.port, p.name, b.net);
+        p.cap->attach(p.port, p.name, p.cap == b.analog.get() ? static_cast<fr::cap::Sink &>(b.analog_sink) : b.net);
     }
-    if (!b.led.init(*core_) || !b.button.init(*core_)) {
+    if (!b.led.init(*core_) || !b.button.init(*core_) || (b.analog != nullptr && !b.analog->init(*core_))) {
         out_.emit(R"({"ev":"error","what":"service init failed"})");
     }
     b.diag.bind(b.net, *links_, b.ports);
@@ -627,6 +647,11 @@ void FleetNode::set_ip(bool up)
     }
 }
 
+std::span<const uint8_t> FleetNode::descriptor() const
+{
+    return boot_ != nullptr ? boot_->device.descriptor() : std::span<const uint8_t>{};
+}
+
 bool FleetNode::tcp_session() const
 {
     return boot_ != nullptr && boot_->net.state().link(LinkKind::tcp).session;
@@ -659,6 +684,20 @@ FleetNode::Answer FleetNode::command(std::string_view line)
         return {.ok = false, .fields = R"(,"error":"powered off")"};
     }
     Boot &b = *boot_;
+    if (line.starts_with("analog report_hz")) {
+        // fr.analog_in has no config command: the rate is the next boot's, as a profile change is a new image on target.
+        uint32_t hz = 0;
+        std::string_view rest = line.substr(16);
+        if (b.analog == nullptr || !parse_u32(next_word(rest), 1, 200, hz) || !rest.empty()) {
+            return {.ok = false, .fields = b.analog == nullptr ? R"(,"error":"no analog input")" : R"(,"error":"usage: analog report_hz <1-200>")"};
+        }
+        const bool changed = hz != spec_->analog_report_hz;
+        spec_->analog_report_hz = static_cast<uint16_t>(hz);
+        if (changed) {
+            b.device.reboot(false);  // BYE now, the restart at the next tick
+        }
+        return {.ok = true, .fields = sformat(R"(,"report_hz":%u,"reboot":%s)", hz, changed ? "true" : "false")};
+    }
     if (line.starts_with("diag ")) {
         // NodeDiag's answer, as fr.diag.exec gives it (the hub's diag_exec `response`).
         const auto r = b.diag.exec({.line = line.substr(5)});
@@ -674,7 +713,10 @@ FleetNode::Answer FleetNode::command(std::string_view line)
                 .diag = b.diag,
                 .ota = b.ota_bound ? &b.ota : nullptr,
                 .button = &b.button,
-                .logs = spec_->net_log || spec_->usb ? &b.logs : nullptr};
+                .logs = spec_->net_log || spec_->usb ? &b.logs : nullptr,
+                .wave = wave_.get(),
+                .analog = b.analog.get(),
+                .analog_sink = b.analog != nullptr ? &b.analog_sink : nullptr};
     out_.begin_capture();
     const Commands::Result r = Commands::run(ctx, line, shared_.pace != nullptr ? shared_.pace->load() : 1.0);
     const std::vector<std::string> lines = out_.end_capture();

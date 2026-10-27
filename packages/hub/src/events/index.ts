@@ -4,6 +4,16 @@
 // table is a ring trimmed like logs (main.ts runs a RingRetention on it). The store also remembers when
 // cursors were handed out (mintCursor), which dates a wait's `since` (09 §9.2). Each write's duration goes into
 // a 1 s window (flushMs), which hub_status shows as router.scale.events_flush_ms (design m2-c2 D16).
+//
+// STATE thinning (design m2-c3-inputs D6): every EVENT and every other row is written, but a STATE (`part:
+// 'state'`) the publisher marks `thin` (the router marks a streaming capability's: one with a `report_hz`
+// config, fr.analog_in) at most once per (device, instance, member) per STATE_ROW_MS. Other STATEs (an LED's
+// `on`, a button's `pressed`) are all written: T-HIL and T-LED read every change back from the store, and they
+// change at command rate, not at a sampling rate. The first in a window is queued at
+// once and opens the window; a later one in it becomes the window's pending row, replacing an earlier pending
+// one, and is queued when the window ends (opening the next), so the last value is always stored. A pending row
+// keeps the seq and cursor its subscribers saw, and query() and tail() already return it, so a wait that reads
+// the backlog after the STATE was published still finds it. Subscribers and the router's mirror see every STATE.
 
 import { performance } from 'node:perf_hooks';
 
@@ -13,7 +23,7 @@ import type { Events, HubContext, HubEvent, Lifecycle, Seq } from '../context.ts
 import type { Db } from '../db.ts';
 import { nowUs } from '../ring.ts';
 import { WindowStat } from '../router/scale.ts';
-import { sqliteGlob } from './match.ts';
+import { matchTypes, sqliteGlob } from './match.ts';
 
 export { matchType, matchTypes, matchWhere, parseTypes } from './match.ts';
 
@@ -41,6 +51,8 @@ interface Row {
 type Body = Omit<HubEvent, 'cursor' | 'seq' | 'type' | 'device' | 't_hub_us'>;
 
 const FLUSH_MS = 50;
+/** One STATE row per (device, instance, member) per this long, at most (D6). */
+export const STATE_ROW_MS = 1000;
 /** Cursors whose mint time is kept (the newest distinct seqs handed out); older ones are dated by rows. */
 const MINTS_KEPT = 1024;
 
@@ -55,6 +67,10 @@ export class EventStore implements Events, Lifecycle {
   #mints = new Map<number, number>();
   /** How long each batched write took (ms), in 1 s windows (design m2-c2 D16 events_flush_ms). */
   readonly flushMs = new WindowStat('ms');
+  /** STATE windows by `<device>\0<type>`: the row to write when it ends (the newest since the window's first), or null. */
+  #stateWindows = new Map<string, { pending: Row | null; timer: NodeJS.Timeout }>();
+  /** STATE rows left out by thinning (a pending row that a newer one replaced), since start. */
+  stateThinned = 0;
 
   constructor(db: Db, seq: Seq, run: number) {
     this.#db = db;
@@ -64,17 +80,28 @@ export class EventStore implements Events, Lifecycle {
 
   start(): void {}
 
-  /** Writes what is queued; call before the db closes. */
+  /** Writes what is queued, the STATE windows' pending rows included; call before the db closes. */
   stop(): void {
+    for (const w of this.#stateWindows.values()) {
+      clearTimeout(w.timer);
+      if (w.pending) {
+        this.#pending.push(w.pending);
+      }
+    }
+    this.#stateWindows.clear();
     this.flush();
   }
 
-  publish(e: Omit<HubEvent, 'cursor' | 'seq'>): HubEvent {
+  publish(e: Omit<HubEvent, 'cursor' | 'seq'>, opts: { thin?: boolean } = {}): HubEvent {
     const seq = this.#seq.next();
     const event: HubEvent = { ...e, seq, cursor: formatCursor({ run: this.run, seq }) };
     const { cursor: _c, seq: _s, type, device, t_hub_us, ...body } = event;
-    this.#pending.push({ seq, run: this.run, ts_us: nowUs(), t_hub_us: Math.round(t_hub_us), type, device: device ?? null, json: JSON.stringify(body) });
-    this.#timer ??= setTimeout(() => this.flush(), FLUSH_MS);
+    const row: Row = { seq, run: this.run, ts_us: nowUs(), t_hub_us: Math.round(t_hub_us), type, device: device ?? null, json: JSON.stringify(body) };
+    if (opts.thin && e.part === 'state') {
+      this.#thin(row);
+    } else {
+      this.#queue(row);
+    }
     for (const fn of this.#listeners) {
       try {
         fn(event);
@@ -84,6 +111,42 @@ export class EventStore implements Events, Lifecycle {
       }
     }
     return event;
+  }
+
+  #queue(row: Row): void {
+    this.#pending.push(row);
+    this.#timer ??= setTimeout(() => this.flush(), FLUSH_MS);
+  }
+
+  /** A STATE row (D6): queued now when its key has no window open, else the window's pending row. */
+  #thin(row: Row): void {
+    const key = `${row.device ?? ''}\0${row.type}`;
+    const w = this.#stateWindows.get(key);
+    if (w) {
+      if (w.pending) {
+        this.stateThinned++;
+      }
+      w.pending = row;
+      return;
+    }
+    this.#queue(row);
+    this.#openWindow(key);
+  }
+
+  /** A window from now: at its end the pending row (if any) is queued and opens the next, else the key closes. */
+  #openWindow(key: string): void {
+    const w = {
+      pending: null as Row | null,
+      timer: setTimeout(() => {
+        this.#stateWindows.delete(key);
+        if (w.pending) {
+          this.#queue(w.pending);
+          this.#openWindow(key);
+        }
+      }, STATE_ROW_MS),
+    };
+    w.timer.unref?.();
+    this.#stateWindows.set(key, w);
   }
 
   subscribe(fn: (e: HubEvent) => void): () => void {
@@ -140,7 +203,38 @@ export class EventStore implements Events, Lifecycle {
     return this.#select(q, 'DESC').reverse();
   }
 
+  /**
+   * The STATE windows' pending rows that match `q` (not in the table yet), so a read sees the newest value of a
+   * property the moment it was published; the window still writes it later, with the same seq.
+   */
+  #pendingStates(q: EventQuery): Row[] {
+    const out: Row[] = [];
+    for (const w of this.#stateWindows.values()) {
+      const r = w.pending;
+      if (
+        r &&
+        (!q.devices || (r.device !== null && q.devices.includes(r.device))) &&
+        (!q.excludeDevices?.length || r.device === null || !q.excludeDevices.includes(r.device)) &&
+        (q.afterSeq === undefined || r.seq > q.afterSeq) &&
+        (!q.types?.length || matchTypes(q.types, r.type))
+      ) {
+        out.push(r);
+      }
+    }
+    return out;
+  }
+
   #select(q: EventQuery, order: 'ASC' | 'DESC'): HubEvent[] {
+    const rows = this.#selectRows(q, order);
+    const extra = this.#pendingStates(q);
+    if (!extra.length) {
+      return rows.map(toEvent);
+    }
+    const all = [...rows, ...extra].sort((a, b) => (order === 'ASC' ? a.seq - b.seq : b.seq - a.seq));
+    return all.slice(0, q.limit).map(toEvent);
+  }
+
+  #selectRows(q: EventQuery, order: 'ASC' | 'DESC'): Row[] {
     this.flush();
     const where: string[] = [];
     const args: unknown[] = [];
@@ -164,7 +258,7 @@ export class EventStore implements Events, Lifecycle {
       args.push(...q.types.map(sqliteGlob));
     }
     const sql = `SELECT seq, run, t_hub_us, type, device, json FROM events ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY seq ${order} LIMIT ?`;
-    return (this.#db.prepare(sql).all(...args, q.limit) as Row[]).map(toEvent);
+    return this.#db.prepare(sql).all(...args, q.limit) as Row[];
   }
 }
 

@@ -422,6 +422,31 @@ describe('test_only capabilities (design m2-c1-hil D3)', () => {
   });
 });
 
+describe('ordered capabilities (design m2-c3-inputs D8)', () => {
+  const BUTTON = 'schema/capabilities/button.cap.yaml';
+
+  it('fr.button is ordered, every other capability not; the catalog says so and its hash follows', () => {
+    const m = model();
+    expect(m.capabilities.filter((c) => c.ordered).map((c) => c.name)).toEqual(['fr.button']);
+    expect((buildCatalog(m).capabilities as any[]).find((c) => c.name === 'fr.button').ordered).toBe(true);
+    expect((buildCatalog(m).capabilities as any[]).find((c) => c.name === 'fr.led')).not.toHaveProperty('ordered');
+    const unordered = buildModel(edited(BUTTON, (y) => delete y.ordered));
+    expect(unordered.ok && unordered.model.capabilities.find((c) => c.name === 'fr.button')?.ordered).toBe(false);
+    expect(unordered.ok && catalogHash(unordered.model)).not.toBe(catalogHash(m));
+  });
+
+  it('refuses ordered on a capability without events, and a flag that is not a boolean', () => {
+    expect(issuesOf(edited('schema/capabilities/ota.cap.yaml', (y) => (y.ordered = true)))).toEqual([
+      { file: 'schema/capabilities/ota.cap.yaml', path: 'ordered', message: "fr.ota has no events; ordered applies to a capability's events" },
+    ]);
+    expect(issuesOf(edited(BUTTON, (y) => (y.ordered = 'yes'))).map((i) => i.path)).toEqual(['ordered']);
+  });
+
+  it('knows EXT port_seq: a non-critical u16 at 0x05', () => {
+    expect(model().protocol.extTlvs.find((t) => t.name === 'port_seq')).toEqual({ type: 0x05, name: 'port_seq', valueType: 'u16', critical: false });
+  });
+});
+
 describe('names', () => {
   it('lists reserved instance names (spec 03 §3.6)', () => {
     for (const n of ['node', 'ota', 'diag', 'hub', 'registry', 'on', 'state', 'has']) {

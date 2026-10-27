@@ -11,6 +11,7 @@
 #include <string>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/rmt_rx.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -19,6 +20,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "hal/gpio_ll.h"
+#include "soc/gpio_sig_map.h"
 #include "soc/gpio_struct.h"
 
 gpio_dev_t GPIO = {};
@@ -73,7 +75,25 @@ struct Pin {
     bool lose_irqs = false;
     int isr_calls = 0;
     bool last = false;  // the net's level as of the last update()
+    int ledc = -1;      // the LEDC channel the GPIO matrix routes to it; -1: its output register
+    // GPIO_FUNCn_OEN_SEL clear: while a peripheral (LEDC) is routed to the pin, the output enable is that
+    // peripheral's (LEDC's is always on) and GPIO_ENABLE (oe) is ignored. ledc_channel_config clears OEN_SEL
+    // (esp_rom_gpio_connect_out_signal); gpio_ll_set_output_enable_ctrl(.., false, ..) sets it.
+    bool oen_periph = false;
     std::vector<Write> writes;
+};
+
+/** An S3 low-speed LEDC timer and channel. */
+struct LedcTimer {
+    uint32_t freq_hz = 0;
+    int bits = 0;
+};
+struct LedcChannel {
+    bool configured = false;
+    int gpio = -1;
+    int timer = 0;
+    uint32_t duty = 0;     // set by ledc_set_duty
+    uint32_t applied = 0;  // ... and output since ledc_update_duty
 };
 
 struct Registered {
@@ -102,6 +122,9 @@ struct Sim {
     std::array<int, 4> logs{};
     std::vector<std::unique_ptr<rmt_channel_t>> rmt;
     std::array<int, kPins> rmt_fail{};  // rmt_fail_receives before the channel exists
+    std::array<LedcTimer, LEDC_TIMER_MAX> ledc_timers{};
+    std::array<LedcChannel, LEDC_CHANNEL_MAX> ledc{};
+    int ledc_timer_configs = 0;
 };
 
 Sim &sim()
@@ -125,6 +148,13 @@ Pin &pin(int n)
     return sim().pins[static_cast<size_t>(n)];
 }
 
+/** The output enable the pad sees: the routed peripheral's while OEN_SEL is clear, else GPIO_ENABLE. On
+ * SIG_GPIO_OUT_IDX the pad always takes GPIO_ENABLE. */
+bool oe_effective(const Pin &p)
+{
+    return (p.ledc >= 0 && p.oen_periph) || p.oe;
+}
+
 bool net_level(const Pin &p)
 {
     if (p.drive_ext == Drive::short_low) {
@@ -132,6 +162,9 @@ bool net_level(const Pin &p)
     }
     if (p.drive_ext == Drive::short_high) {
         return true;
+    }
+    if (p.ledc >= 0 && oe_effective(p)) {
+        return sim().ledc[static_cast<size_t>(p.ledc)].applied > 0;  // a PWM waveform: high while its duty is not 0
     }
     if (p.oe && p.out == 0) {
         return false;
@@ -265,7 +298,7 @@ bool level(int gpio)
 
 bool output_enabled(int gpio)
 {
-    return pin(gpio).oe;
+    return oe_effective(pin(gpio));
 }
 
 bool open_drain(int gpio)
@@ -414,6 +447,8 @@ void cpu_reset()
     s.isr = 0;
     s.masked = false;
     s.rmt.clear();  // the RMT peripheral is reset at boot by its driver; its channels were RAM
+    // LEDC is not reset (esp_restart_noos resets MCPWM, not LEDC): its timers and channels run on, as the GPIO matrix
+    // routes them, until a driver configures them again.
 }
 
 void panic()
@@ -472,6 +507,37 @@ int logs(char level)
     const char *const kLevels = "EWID";
     const char *at = std::strchr(kLevels, level);
     return at != nullptr && *at != '\0' ? sim().logs[static_cast<size_t>(at - kLevels)] : 0;
+}
+
+int ledc_channel(int gpio)
+{
+    return pin(gpio).ledc;
+}
+
+int ledc_duty(int ch)
+{
+    const LedcChannel &c = sim().ledc.at(static_cast<size_t>(ch));
+    return c.configured ? static_cast<int>(c.applied) : -1;
+}
+
+int ledc_timer_of(int ch)
+{
+    return sim().ledc.at(static_cast<size_t>(ch)).timer;
+}
+
+uint32_t ledc_freq_hz(int t)
+{
+    return sim().ledc_timers.at(static_cast<size_t>(t)).freq_hz;
+}
+
+int ledc_bits(int t)
+{
+    return sim().ledc_timers.at(static_cast<size_t>(t)).bits;
+}
+
+int ledc_timer_configs()
+{
+    return sim().ledc_timer_configs;
 }
 
 bool rmt_armed(int gpio)
@@ -613,6 +679,26 @@ void esp_sim_gpio_intr_disable(uint32_t gpio_num)
     pin(static_cast<int>(gpio_num)).intr_ena = false;
 }
 
+void esp_sim_gpio_output_enable(uint32_t gpio_num)
+{
+    pin(static_cast<int>(gpio_num)).oe = true;
+    update(static_cast<int>(gpio_num));
+}
+
+void esp_sim_gpio_output_enable_ctrl(uint32_t gpio_num, bool ctrl_by_periph)
+{
+    pin(static_cast<int>(gpio_num)).oen_periph = ctrl_by_periph;
+    update(static_cast<int>(gpio_num));
+}
+
+void esp_sim_gpio_matrix_out(uint32_t gpio_num, uint32_t signal_idx)
+{
+    if (signal_idx == SIG_GPIO_OUT_IDX) {
+        pin(static_cast<int>(gpio_num)).ledc = -1;  // other signals are not modelled: LEDC's come from ledc_channel_config
+    }
+    update(static_cast<int>(gpio_num));
+}
+
 esp_err_t gpio_config(const gpio_config_t *cfg)
 {
     for (int n = 0; n < esp_sim::kPins; ++n) {
@@ -625,6 +711,9 @@ esp_err_t gpio_config(const gpio_config_t *cfg)
         auto &p = pin(n);
         p.ie = (cfg->mode & GPIO_MODE_INPUT) != 0;
         p.oe = (cfg->mode & GPIO_MODE_OUTPUT) != 0;
+        if (p.oe) {
+            p.ledc = -1;  // gpio_output_enable connects SIG_GPIO_OUT_IDX
+        }
         p.od = (cfg->mode & 0x4) != 0;
         p.pu = cfg->pull_up_en == GPIO_PULLUP_ENABLE;
         p.pd = cfg->pull_down_en == GPIO_PULLDOWN_ENABLE;
@@ -865,5 +954,64 @@ esp_err_t rmt_receive(rmt_channel_handle_t rx_channel, void *buffer, size_t buff
     rx_channel->buf = buffer;
     rx_channel->buf_symbols = buffer_size / sizeof(uint32_t);
     rx_channel->cfg = *config;
+    return ESP_OK;
+}
+
+esp_err_t ledc_timer_config(const ledc_timer_config_t *timer_conf)
+{
+    if (timer_conf == nullptr || timer_conf->speed_mode != LEDC_LOW_SPEED_MODE || timer_conf->timer_num >= LEDC_TIMER_MAX ||
+        timer_conf->freq_hz == 0 || timer_conf->duty_resolution < 1 || timer_conf->duty_resolution > 14) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ++sim().ledc_timer_configs;
+    sim().ledc_timers[timer_conf->timer_num] = {.freq_hz = timer_conf->freq_hz,
+                                                .bits = static_cast<int>(timer_conf->duty_resolution)};
+    return ESP_OK;
+}
+
+esp_err_t ledc_channel_config(const ledc_channel_config_t *ledc_conf)
+{
+    if (ledc_conf == nullptr || ledc_conf->speed_mode != LEDC_LOW_SPEED_MODE || ledc_conf->channel >= LEDC_CHANNEL_MAX ||
+        ledc_conf->timer_sel >= LEDC_TIMER_MAX || !GPIO_IS_VALID_OUTPUT_GPIO(ledc_conf->gpio_num)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_sim::LedcChannel &c = sim().ledc[ledc_conf->channel];
+    c = {.configured = true,
+         .gpio = ledc_conf->gpio_num,
+         .timer = static_cast<int>(ledc_conf->timer_sel),
+         .duty = ledc_conf->duty,
+         .applied = ledc_conf->duty};
+    auto &p = pin(ledc_conf->gpio_num);
+    p.ledc = static_cast<int>(ledc_conf->channel);
+    p.oe = true;          // ledc_set_pin: the channel's signal through the GPIO matrix, output enabled ...
+    p.oen_periph = true;  // ... by LEDC (OEN_SEL clear): GPIO_ENABLE no longer turns it off
+    update(ledc_conf->gpio_num);
+    return ESP_OK;
+}
+
+esp_err_t ledc_set_duty(ledc_mode_t speed_mode, ledc_channel_t channel, uint32_t duty)
+{
+    if (speed_mode != LEDC_LOW_SPEED_MODE || channel >= LEDC_CHANNEL_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_sim::LedcChannel &c = sim().ledc[channel];
+    if (!c.configured) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    c.duty = duty;
+    return ESP_OK;
+}
+
+esp_err_t ledc_update_duty(ledc_mode_t speed_mode, ledc_channel_t channel)
+{
+    if (speed_mode != LEDC_LOW_SPEED_MODE || channel >= LEDC_CHANNEL_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_sim::LedcChannel &c = sim().ledc[channel];
+    if (!c.configured) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    c.applied = c.duty;
+    update(c.gpio);
     return ESP_OK;
 }

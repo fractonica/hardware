@@ -40,7 +40,7 @@ boot_uart_tx: 43
 en_access: J1-3
 rf: { max_tx_power_qdbm: null, antenna: pcb }
 test_pin: null                # a fixture has none
-resources: { rmt_tx: 4, rmt_rx: 4, ledc_timers: 4, ledc_channels: 8, i2c: 2 }
+resources: { rmt_tx: 4, rmt_rx: 4, ledc_timers: 4, ledc_channels: 8, i2c: 2, adc1_channel: 10 }   # ADC1: GPIO1-10
 defaults:
   status: { cap: fr.led, driver: led_ws2812, bind: leds.rgb }
 detection:

@@ -294,7 +294,9 @@ export const HANDLERS: Record<OpName, Handler> = {
       ...(hub.advert ? { advert: hub.advert.status() } : {}),
       ...(hub.staticSite ? { dashboard: hub.staticSite.dashboard() } : {}),
       ...(hub.sleepGuard ? { sleep_guard: { active: hub.sleepGuard.active() } } : {}),
-      ...(router ? { router: { counters: router.counters, scale: router.scale } } : {}),
+      ...(router ? { router: { counters: router.counters, scale: router.scale, reorder: router.reorder } } : {}),
+      // STATE rows the event store thinned (design m2-c3-inputs D6): streaming STATEs replaced before being written.
+      ...(hub.events?.stateThinned !== undefined ? { events: { state_thinned: hub.events.stateThinned } } : {}),
       // Scale (design m2-c2 D16): /ws, REST calls per op, and the process.
       ...(ws ? { ws } : {}),
       rest: restStats(hub).view(),

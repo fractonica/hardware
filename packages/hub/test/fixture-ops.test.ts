@@ -82,7 +82,9 @@ describe('op.called (D9)', () => {
       code: 'INVALID_ARGS',
       details: { reason: 'fixture_internal' },
     });
-    expect((await b.op('input_simulate', { selector: 'pad-c3', instance: 'status', gesture: 'click', layer: 'gpio' }, 'mcp')).error.code).toBe('NOT_FOUND');
+    expect((await b.op('input_simulate', { selector: 'pad-c3', instance: 'analog', gesture: 'click', layer: 'gpio' }, 'mcp')).error.code).toBe('NOT_FOUND');
+    // A gesture on an LED instance (m2-c3-inputs D7: invalid_input).
+    expect((await b.op('input_simulate', { selector: 'pad-c3', instance: 'status', gesture: 'click', layer: 'gpio' }, 'mcp')).error).toMatchObject({ code: 'INVALID_ARGS', details: { reason: 'invalid_input' } });
     expect((await b.op('binding_set', { from: 'pad-c3.boot.down', to: 'fix-s3.status.blink' }, 'mcp')).error.details.reason).toBe('fixture_internal');
     expect(b.called()).toEqual([]);
     expect(b.fixture.presses).toHaveLength(0);

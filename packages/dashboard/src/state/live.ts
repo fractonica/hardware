@@ -1,8 +1,10 @@
 // The live store (design c6 §5): what `/ws` delivers, kept for the pages. A Zustand vanilla store with
 // pure updates, so it is tested in node; React reads it through useStore (hooks.ts). Logs never come
 // here: they go straight into xterm (log-term.tsx).
-// - A ring of the newest RING_MAX events (no snapshots), the newest event per device, and the property
-//   mirror per device from `part:'state'` events (snapshots included, 08 §8.7 state class).
+// - A ring of the newest RING_MAX events (no snapshots, no STATE), the newest event per device, and the
+//   property mirror per device from `part:'state'` events (snapshots included, 08 §8.7 state class) with the
+//   last HISTORY_MAX values of each property for a sparkline. A streaming STATE (fr.analog_in at 20 Hz, design
+//   m2-c3-inputs D6) updates the mirror and its history only, so it never pushes events out of the ring.
 // - A device "flashes" for FLASH_MS after a capability EVENT (`part:'event'`) that is new: not a snapshot,
 //   not a re-read backlog, at most FLASH_MAX_AGE_MS old. Its tile carries `data-flash` meanwhile.
 // - Time (clock.ts): events are aged by hub time (`now.hub` against t_hub_us), and the store's own timers
@@ -22,6 +24,8 @@ import type { ConnState, WsJob } from '../api/ws.ts';
 import type { Now } from './clock.ts';
 
 export const RING_MAX = 2000;
+/** Values kept per property (device, `<instance>.<property>`) for its sparkline. */
+export const HISTORY_MAX = 120;
 export const FLASH_MS = 900;
 /** A capability event older than this by hub time (a reconnect's backlog) flashes nothing. */
 export const FLASH_MAX_AGE_MS = 2000;
@@ -63,6 +67,12 @@ export interface PropValue {
   t_hub_us: number;
 }
 
+/** One past value of a property. */
+export interface PropPoint {
+  t_hub_us: number;
+  value: unknown;
+}
+
 export interface LiveData {
   conn: ConnState;
   /** Newest last, at most RING_MAX. */
@@ -74,6 +84,8 @@ export interface LiveData {
   flashUntil: Readonly<Record<string, number>>;
   /** Device id -> `<instance>.<property>` -> value. */
   properties: Readonly<Record<string, Readonly<Record<string, PropValue>>>>;
+  /** Device id -> `<instance>.<property>` -> its last HISTORY_MAX values, oldest first. */
+  history: Readonly<Record<string, Readonly<Record<string, readonly PropPoint[]>>>>;
   prompts: Readonly<Record<string, Prompt>>;
   /** Prompt id -> when an event last said it began or ended (hub ms), for reconcilePrompts. */
   promptSeen: Readonly<Record<string, { at: number; done: boolean }>>;
@@ -145,6 +157,9 @@ export function applyEvents(s: LiveData, batch: readonly HubEvent[], info: { sna
   let lastByDevice: Record<string, HubEvent> | null = null;
   let flashUntil: Record<string, number> | null = null;
   let properties: Record<string, Record<string, PropValue>> | null = null;
+  let history: Record<string, Record<string, readonly PropPoint[]>> | null = null;
+  /** History arrays this batch made (appended to in place after that; the store's own are never touched). */
+  const fresh = new Set<readonly PropPoint[]>();
   let prompts: Record<string, Prompt> | null = null;
   let promptSeen: Record<string, { at: number; done: boolean }> | null = null;
   let jobs: Record<string, JobLive> | null = null;
@@ -160,15 +175,32 @@ export function applyEvents(s: LiveData, batch: readonly HubEvent[], info: { sna
       const member = e.member ?? e.type.slice(e.type.indexOf('.') + 1);
       const value = e.fields && member in e.fields ? e.fields[member] : e.fields;
       properties[e.device] = { ...properties[e.device], [e.type]: { value, t_hub_us: e.t_hub_us } };
+      history ??= { ...s.history };
+      const byKey = history[e.device] === s.history[e.device] ? { ...s.history[e.device] } : (history[e.device] as Record<string, readonly PropPoint[]>);
+      history[e.device] = byKey;
+      const prev = byKey[e.type] ?? [];
+      if (prev.at(-1)?.t_hub_us !== e.t_hub_us) {
+        // A copy once per batch, trimmed to HISTORY_MAX with the new point.
+        const points = (fresh.has(prev) ? prev : prev.slice(-(HISTORY_MAX - 1))) as PropPoint[];
+        if (points.length >= HISTORY_MAX) {
+          points.shift();
+        }
+        points.push({ t_hub_us: e.t_hub_us, value });
+        fresh.add(points);
+        byKey[e.type] = points;
+      }
     }
     if (info.snapshot) {
       continue; // a current value, not a new event
     }
     maxSeq = e.seq;
-    (events ??= [...s.events]).push(e);
     if (e.device) {
       (lastByDevice ??= { ...s.lastByDevice })[e.device] = e;
     }
+    if (e.part === 'state') {
+      continue; // the mirror and its history only, never the ring
+    }
+    (events ??= [...s.events]).push(e);
     const ageMs = now - e.t_hub_us / 1000;
     if (e.part === 'event' && e.device && !info.backfill && Math.abs(ageMs) <= FLASH_MAX_AGE_MS) {
       (flashUntil ??= { ...s.flashUntil })[e.device] = now + FLASH_MS;
@@ -204,12 +236,15 @@ export function applyEvents(s: LiveData, batch: readonly HubEvent[], info: { sna
   const out: Partial<LiveData> = {};
   if (events) {
     out.events = events.length > RING_MAX ? events.slice(-RING_MAX) : events;
+  }
+  if (maxSeq !== s.maxSeq) {
     out.maxSeq = maxSeq;
   }
   Object.assign(out, {
     ...(lastByDevice ? { lastByDevice } : {}),
     ...(flashUntil ? { flashUntil } : {}),
     ...(properties ? { properties } : {}),
+    ...(history ? { history } : {}),
     ...(prompts ? { prompts } : {}),
     ...(promptSeen ? { promptSeen } : {}),
     ...(jobs ? { jobs } : {}),
@@ -248,6 +283,7 @@ export function createLiveStore(): LiveStore {
     lastByDevice: {},
     flashUntil: {},
     properties: {},
+    history: {},
     prompts: {},
     promptSeen: {},
     jobs: {},

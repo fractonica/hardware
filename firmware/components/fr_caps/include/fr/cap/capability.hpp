@@ -25,12 +25,14 @@ inline constexpr TimeUs kNowUs = -1;
 /**
  * Implemented by fr_core: turns emissions into EVENT/STATE envelopes. `at` is when the event or change
  * happened on the esp_timer clock (an ISR's edge timestamp, say), which becomes the envelope's t_us (its
- * low 32 bits); kNowUs (any negative value) means now.
+ * low 32 bits); kNowUs (any negative value) means now. `ordered` is the capability's kOrdered (design
+ * m2-c3-inputs D8): the event's port is ordered, so the sink stamps EXT port_seq and keeps it on one route.
  */
 class Sink
 {
 public:
-    virtual void event(uint8_t port, uint8_t event_id, Priority prio, std::span<const uint8_t> fields, TimeUs at) = 0;
+    virtual void event(uint8_t port, uint8_t event_id, Priority prio, std::span<const uint8_t> fields, TimeUs at,
+                       bool ordered = false) = 0;
     virtual void property(uint8_t port, uint8_t prop_id, std::span<const uint8_t> value, TimeUs at) = 0;
 
 protected:

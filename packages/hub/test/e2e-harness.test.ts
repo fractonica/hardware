@@ -523,7 +523,7 @@ function node(args: string[], env: Record<string, string>): Promise<{ code: numb
   });
 }
 
-/** Every M1 gate module (spec 11 §11.1), what it needs, and one of its own flags its --help must name. */
+/** Every target-tier gate module (spec 11 §11.1; T-VBAT since M2-C3), what it needs, and one of its own flags its --help must name. */
 const GATES = [
   ['t-agent.ts', 'T-AGENT', { human: true, usb: true }, '--since c:<run>.<seq>'],
   ['t-codec.ts', 'T-CODEC', {}, '--cases 1000000'],
@@ -537,6 +537,7 @@ const GATES = [
   ['t-ports.ts', 'T-PORTS', { human: true, usb: true }, '--no-reprovision'],
   ['t-pres.ts', 'T-PRES', { human: true, usb: true }, '--udp-block-s 30'],
   ['t-prov.ts', 'T-PROV', { usb: true }, '--allow-erase'],
+  ['t-vbat.ts', 'T-VBAT', { human: true }, '--meter-mv'],
 ] as const;
 
 /** `fn` over `items`, at most `n` at a time (36 module loads at once would starve a loaded Mac). */

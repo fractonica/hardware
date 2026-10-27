@@ -40,11 +40,13 @@ export const EXT = {
   TRACE_ID: 0x02,
   VALID_MS: 0x03,
   EXPIRE_AT_US: 0x04,
+  /** u16: the per-port EVENT counter of an `ordered` capability (from 1 at boot); the hub restores order by it. */
+  PORT_SEQ: 0x05,
   EXEC_AT_US: 0x81,
 } as const;
 
 /** Value size in bytes of each known EXT type; a known TLV of any other length is `bad_ext`. */
-export const EXT_VALUE_SIZE = { 0x02: 4, 0x03: 2, 0x04: 4, 0x81: 4 } as const;
+export const EXT_VALUE_SIZE = { 0x02: 4, 0x03: 2, 0x04: 4, 0x05: 2, 0x81: 4 } as const;
 
 export const EXT_CRITICAL = 0x80;
 /** TLV bytes one header can carry: the block's `len` is a u8. */

@@ -76,8 +76,9 @@ const ESP_LOG_LINE = /^[EWIDV] \(\d+\) /;
  *   --pin-target. `--pin-listen` also takes `level 0|1`, a fixture's open-drain line holding the boot button down
  *   (line `pin_in` {level, at_us}; wired-AND with a pulse).
  * - `--fixture 1`: the virtual fixture (role fixture, board esp32s3-devkitc1-n16r8, profile s3k-fixture, chip 9):
- *   status (fr.led) on port 1 and fr.fixture ch0-ch11 on 2-13 (ch0-ch3 open-drain BOOT lines, ch4-ch5 LED level
- *   taps, ch6-ch7 WS2812 taps, ch8-ch11 test_pin taps), each FixtureService on a fake line, no boot button.
+ *   status (fr.led) on port 1 and fr.fixture ch0-ch13 on 2-15 (ch0-ch3 open-drain BOOT lines, ch4-ch5 LED level
+ *   taps, ch6-ch7 WS2812 taps, ch8-ch11 test_pin taps, ch12-ch13 pwm analog lines), each FixtureService on a fake
+ *   line, no boot button.
  *   `--line <ch>=<port>` wires a channel: a driving line sends its wire's `level` to a pad's --pin-listen port, an
  *   input line listens on it (0: any free one) for a pad's taps. Lines `line` {name, port, drive, decode, pull}
  *   (linePort()); stdin `line <ch> <port>` rewires a driving line (line `line` {name, port, ok}), `lines` prints

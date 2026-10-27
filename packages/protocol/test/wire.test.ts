@@ -12,6 +12,7 @@ import {
   descriptorHash,
   encodeSerialLine,
   EXT,
+  EXT_VALUE_SIZE,
   extTlv,
   extValue,
   FLAG,
@@ -310,6 +311,26 @@ describe('header', () => {
     expect(() => packHeader({ ...withExt, ext: Array.from({ length: 64 }, () => extTlv(EXT.TRACE_ID, 1)) })).toThrow(/max 255/);
     expect(() => extTlv(0x10, 1)).toThrow(RangeError);
     expect(() => extTlv(EXT.VALID_MS, 0x10000)).toThrow(RangeError);
+  });
+
+  it('round-trips EXT port_seq, the u16 an ordered port\'s EVENT carries (design m2-c3-inputs D8)', () => {
+    expect(EXT.PORT_SEQ).toBe(0x05);
+    expect(EXT_VALUE_SIZE[EXT.PORT_SEQ]).toBe(2);
+    const h: Header = { ...HEADER, flags: FLAG.URGENT | FLAG.EXT, ext: [extTlv(EXT.PORT_SEQ, 0xffff)] };
+    const packed = packHeader(h);
+    expect(hex(packed)).toBe(`${HEADER_HEX.replace(/^a1 20/, 'a1 a0')} 04 05 02 ff ff`);
+    const d = unpackHeader(packed);
+    expect(d).toEqual({ ok: true, value: h });
+    expect(d.ok && extValue(d.value, EXT.PORT_SEQ)).toBe(0xffff);
+    expect(d.ok && extValue(d.value, EXT.TRACE_ID)).toBeUndefined();
+    // On an EVENT the time prefix follows the block.
+    const e = unpackEnvelope(bytes(`${hex(packed)} e8 03 00 00`));
+    expect(e.ok && e.value.prefix).toEqual({ type: 'time', t_us: 1000 });
+    expect(e.ok && extValue(e.value.header, EXT.PORT_SEQ)).toBe(0xffff);
+    // A u16: wider values and other sizes are refused both ways.
+    expect(() => extTlv(EXT.PORT_SEQ, 0x10000)).toThrow(RangeError);
+    expect(() => packHeader({ ...h, ext: [{ type: EXT.PORT_SEQ, value: bytes('01 00 00 00') }] })).toThrow(/bad_ext/);
+    expect(unpackHeader(bytes(`${HEADER_HEX.replace(/^a1 20/, 'a1 a0')} 03 05 01 01`))).toEqual({ ok: false, error: 'bad_ext' });
   });
 
   it('finds the class prefix after the EXT block', () => {

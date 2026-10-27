@@ -40,6 +40,8 @@ import {
   encodeSerialLine,
   type Envelope,
   EXT,
+  extTlv,
+  type ExtTlv,
   extValue,
   type FaultKind,
   FLAG,
@@ -485,11 +487,13 @@ export class FakeNode {
   }
 
   /** A capability EVENT: realtime is URGENT + Q1, normal is Q1, bulk is Q0 (05 §5.8). */
-  event(port: number, id: number, fields: Uint8Array = new Uint8Array(0), opts: { prio?: 'realtime' | 'normal' | 'bulk'; tUs?: number } = {}): number {
+  /** `portSeq`: EXT port_seq (design m2-c3-inputs D8), as fr_net stamps an ordered capability's events. */
+  event(port: number, id: number, fields: Uint8Array = new Uint8Array(0), opts: { prio?: 'realtime' | 'normal' | 'bulk'; tUs?: number; portSeq?: number } = {}): number {
     const prio = opts.prio ?? 'normal';
     const prefix = { type: 'time' as const, t_us: (opts.tUs ?? this.nodeNowUs()) >>> 0 };
     const path = prio === 'realtime' ? (this.udpOk ? 'udp' : 'dual') : prio === 'normal' ? (this.udpOk ? 'session' : 'dual') : 'session';
-    return this.#emit(CLS.EVENT, id, port, fields, { ackReq: prio !== 'bulk', urgent: prio === 'realtime', prefix }, path);
+    const ext = opts.portSeq !== undefined ? [extTlv(EXT.PORT_SEQ, opts.portSeq)] : undefined;
+    return this.#emit(CLS.EVENT, id, port, fields, { ackReq: prio !== 'bulk', urgent: prio === 'realtime', prefix, ext }, path);
   }
 
   /** A STATE (LATEST space); remembered for get_state. */
@@ -1307,10 +1311,10 @@ export class FakeNode {
 
   // ---- send ----
 
-  #encode(seq: number, cls: number, kind: number, port: number, body: Uint8Array, flags: number, prefix?: Envelope['prefix'], dst: number = ADDR.HUB, ttl = 0x22): Uint8Array {
+  #encode(seq: number, cls: number, kind: number, port: number, body: Uint8Array, flags: number, prefix?: Envelope['prefix'], dst: number = ADDR.HUB, ttl = 0x22, ext?: ExtTlv[]): Uint8Array {
     const o = this.opts;
     return encodeEnvelope({
-      header: { flags, cls, kind, seq, net: o.net, src: o.addr, dst, epoch: o.epoch, ttl, port },
+      header: { flags: ext?.length ? flags | FLAG.EXT : flags, cls, kind, seq, net: o.net, src: o.addr, dst, epoch: o.epoch, ttl, port, ...(ext?.length ? { ext } : {}) },
       ...(prefix ? { prefix } : {}),
       body,
     });
@@ -1321,12 +1325,12 @@ export class FakeNode {
     kind: number,
     port: number,
     body: Uint8Array,
-    o: { ackReq?: boolean; urgent?: boolean; latest?: boolean; prefix?: Envelope['prefix'] },
+    o: { ackReq?: boolean; urgent?: boolean; latest?: boolean; prefix?: Envelope['prefix']; ext?: ExtTlv[] },
     path: 'session' | 'udp' | 'dual',
   ): number {
     const seq = o.latest ? ++this.#latestSeq : ++this.#seq;
     const flags = (o.ackReq ? FLAG.ACK_REQ : 0) | (o.urgent ? FLAG.URGENT : 0) | (o.latest ? FLAG.LATEST : 0);
-    const bytes = this.#encode(seq, cls, kind, port, body, flags, o.prefix);
+    const bytes = this.#encode(seq, cls, kind, port, body, flags, o.prefix, ADDR.HUB, 0x22, o.ext);
     if (this.link === 'serial') {
       this.#write('serial', bytes);
     } else if (this.opts.addr === ADDR.UNASSIGNED) {
@@ -1767,7 +1771,8 @@ export interface NetRig extends Rig {
    * A provisioned device (a registry row with its addr and alias) and its FakeNode, whose firmware has
    * `caps` (default: a button `boot` on port 1 and an LED `status` on port 2, through the descriptor).
    */
-  pad(o: Omit<FakeNodeOptions, 'hub' | 'addr' | 'alias'> & { addr: number; alias: string; caps?: { port: number; cap_id: number; name: string }[] }): FakeNode;
+  /** `caps`: the instances it describes (default PAD_CAPS), not HELLO's caps bits. */
+  pad(o: Omit<FakeNodeOptions, 'hub' | 'addr' | 'alias' | 'caps'> & { addr: number; alias: string; caps?: { port: number; cap_id: number; name: string }[] }): FakeNode;
 }
 
 /** The button + LED pad of the C5 gates (pad-c6.boot.down -> pad-c3.status.blink). */

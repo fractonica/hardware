@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0xdc34c43b;
+export const CATALOG_HASH = 0x41558ed8;
 
 // ---- fr.button ----
 
@@ -124,8 +124,19 @@ export type AnalogInFilter = 'none' | 'ema' | 'median3';
 
 export type AnalogInDirection = 'rising' | 'falling';
 
+/** fr.analog_in.read RESULT fields. */
+export interface AnalogInReadResult {
+  mv: number;
+  raw: number;
+  value: number;
+  injected: boolean;
+}
+
 /** fr.analog_in commands, as methods of an instance. */
-export interface AnalogInClient {}
+export interface AnalogInClient {
+  /** The current reading, unfiltered and filtered. Answered from the last sample; never touches the ADC. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  read(opts?: CallOptions): Promise<CmdResult<AnalogInReadResult>>;
+}
 
 /** fr.analog_in.crossed event fields (realtime). */
 export interface AnalogInCrossedFields {
@@ -141,7 +152,7 @@ export interface AnalogInEvents {
 
 /** fr.analog_in properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
 export interface AnalogInState {
-  /** 0..65535, after calibration and filter */
+  /** 0..65535 over [min_mv, max_mv], after calibration and filter */
   value: number;
 }
 
@@ -387,7 +398,7 @@ export type CapName = keyof CapClients;
 export const CAP_META: Readonly<Record<string, CapMeta>> = {
   'fr.button': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['down', 'up', 'click', 'long_press'], props: ['pressed'] },
   'fr.led': { commands: { set: { method: 'set', delivery: 'fast', args: true }, toggle: { method: 'toggle', delivery: 'reliable' }, blink: { method: 'blink', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' } }, events: ['effect_done'], props: ['on', 'brightness', 'color'] },
-  'fr.analog_in': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['crossed'], props: ['value'] },
+  'fr.analog_in': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true }, read: { method: 'read', delivery: 'reliable' } }, events: ['crossed'], props: ['value'] },
   'fr.node': { commands: { identify: { method: 'identify', delivery: 'reliable', args: true }, describe: { method: 'describe', delivery: 'reliable' }, reboot: { method: 'reboot', delivery: 'reliable', args: true }, set_alias: { method: 'setAlias', delivery: 'reliable', args: true }, set_groups: { method: 'setGroups', delivery: 'reliable', args: true }, net_set: { method: 'netSet', delivery: 'reliable', args: true }, get_state: { method: 'getState', delivery: 'reliable' }, bind_set: { method: 'bindSet', delivery: 'reliable', args: true }, bind_clear: { method: 'bindClear', delivery: 'reliable', args: true }, bind_list: { method: 'bindList', delivery: 'reliable' } }, events: ['boot', 'binding_fired'], props: [] },
   'fr.ota': { commands: {}, events: [], props: [] },
   'fr.diag': { commands: { exec: { method: 'exec', delivery: 'reliable', args: true } }, events: ['mark'], props: [] },

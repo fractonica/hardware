@@ -25,12 +25,16 @@ public:
      * `hub_mute 0|1`, `wifi_down <s>`, `loss <pct> <s> [both|tx|rx]`, `air_loss <pct>`, `msg <dst|broadcast> <topic>
      * [data…]`, `msg_reliable <dst> <topic> [data…]`, `bind <hex>`, `unbind <slot|all>`, `bindings`, `neighbors`,
      * `directory`, `inject <gesture>`, `bye`, and (M2-C2, D20) `log <E|W|I|D|V> <tag> <text…>` and `log_rate <lines/s>`
-     * (the log source's generator, scaled by `pace`).
+     * (the log source's generator, scaled by `pace`). M2-C3 (design m2-c3-inputs §5, §8), on a c3o-analog node:
+     * `inject <inst> value=<0-65535> [hold_ms=<0-60000>]` (NodeDiag's line), and `analog` (its `analog` line: the
+     * input's mode and mV, the service's value, the STATEs it reported this boot), `analog hold <mV>`, `analog
+     * wave <period_ms> <lo_mV> <hi_mV>` (a sine, its phase from the node's seed) and `analog ramp …` (a triangle).
      */
     static Result run(NodeCtx &ctx, std::string_view line, double pace = 1);
 };
 
-/** `state`: Net's view, the C5 and C6 parts, and (M2-C1) fr_ota's health bits and the hub session. */
+/** `state`: Net's view, the C5 and C6 parts, (M2-C1) fr_ota's health bits and the hub session, and (M2-C3)
+ * state_repeats_superseded. */
 void print_state(Out &out, const fr::net::Net &net, const AirCounters *air, uint32_t health);
 /** `neighbors`: the neighbour table. */
 void print_neighbors(Out &out, const fr::net::Net &net, fr::TimeUs now);

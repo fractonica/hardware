@@ -26,9 +26,9 @@
 // the bot, inside the 10 s grace; the runner's exit handler kills both groups if it dies.
 
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 
 import { type FleetAnswer, FLEET_SPEC_SCHEMA, type FleetReady, type FleetSpec, FleetSpecSchema, type Job, type SimRun, type SimScenario, SimScenarioSchema, simAliases, simMac } from '@fractonica/protocol';
 
@@ -162,6 +162,45 @@ export const startFleetDefault: StartFleet = async (o) => {
 export function fleetBinOf(sourceDir: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const bin = env.FR_FLEET_BIN ? resolve(env.FR_FLEET_BIN) : join(sourceDir, 'build', 'host-fleet', 'fr_fleet');
   return existsSync(bin) ? bin : null;
+}
+
+/** The sources fr_fleet is built from (firmware/test/host/CMakeLists.txt): a newer file means a stale binary. */
+const FLEET_SOURCES = ['firmware/components', 'firmware/test/host/sim', 'firmware/test/host/shim', 'hardware/drivers'];
+
+/**
+ * Why the checkout's own build/host-fleet/fr_fleet is older than its sources, else null (M2-C3: the first T2-ANALOG-30
+ * dry run ran a binary from before the kit learnt c3o-analog, and every node sat silent). FR_FLEET_BIN, a binary
+ * elsewhere, is the caller's to keep current.
+ */
+export function fleetStaleness(sourceDir: string, bin: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.FR_FLEET_BIN || resolve(bin) !== resolve(sourceDir, 'build', 'host-fleet', 'fr_fleet') || !existsSync(bin)) {
+    return null;
+  }
+  const built = statSync(bin).mtimeMs;
+  let newest = { path: '', ms: 0 };
+  const walk = (dir: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const n of names) {
+      const p = join(dir, n);
+      const st = statSync(p);
+      if (st.isDirectory()) {
+        if (n !== 'build' && !n.startsWith('.')) {
+          walk(p);
+        }
+      } else if (/\.(c|cc|cpp|h|hpp|inc)$|^CMakeLists\.txt$/.test(n) && st.mtimeMs > newest.ms) {
+        newest = { path: p, ms: st.mtimeMs };
+      }
+    }
+  };
+  for (const d of FLEET_SOURCES) {
+    walk(join(sourceDir, d));
+  }
+  return newest.ms > built ? `${relative(sourceDir, newest.path)} is newer than build/host-fleet/fr_fleet` : null;
 }
 
 /** fr_fleet's state dir and spec of one scenario run (temp; a SIGKILLed run's is pruned after an hour, D14). */
@@ -519,6 +558,10 @@ export const MODULES: Record<string, ModuleRun> = {
       evidence: (name, data) => env.evidence.write(name, data),
     });
   },
+  't2-analog': async (ctx, args, env) => {
+    const { parseArgs, runAnalog } = await import('../t2-analog.ts');
+    return runAnalog(ctx, parseArgs(args), { fleet: env.fleet, nodes: env.started, evidence: (name, data) => env.evidence.write(name, data) });
+  },
   'flood-b-epoch': (ctx, args, env) => runEpochCheck(ctx, args, env),
   storm: (ctx, args, env) => runStormStep(ctx, args, env),
 };
@@ -683,6 +726,8 @@ export interface RunnerDeps {
   /** The preflight (D15); `skip` when --no-preflight. */
   preflight(signal: AbortSignal): Promise<PreflightResult>;
   fleetBin(sourceDir: string): string | null;
+  /** Why the binary is older than its sources, else null (default fleetStaleness). */
+  fleetStale?(sourceDir: string, bin: string): string | null;
   /** Where the evidence dirs go (default <checkout>/build/sim-runs). */
   evidenceRoot(sourceDir: string): string;
   /** How long a storm may take before the runner stops waiting (all online), by node count. */
@@ -700,6 +745,7 @@ export const DEFAULT_DEPS: RunnerDeps = {
   modules: MODULES,
   preflight: (signal) => preflight({ loadavg: () => loadavg()[0], cores: cpus().length, sample: sampleLag, now: Date.now }, { signal }),
   fleetBin: (src) => fleetBinOf(src),
+  fleetStale: (src, bin) => fleetStaleness(src, bin),
   evidenceRoot: (src) => join(src, 'build', 'sim-runs'),
   stormTimeoutS: (n) => Math.min(110, 30 + n),
 };
@@ -818,6 +864,10 @@ export async function runScenario(loaded: LoadedScenario, o: ScenarioRunOptions,
   const bin = deps.fleetBin(o.sourceDir);
   if (!bin) {
     return [entry(null, 'error', { code: 'ENV_MISSING', reason: `no fr_fleet (FR_FLEET_BIN, or build/host-fleet/fr_fleet): ${FLEET_REMEDY}`, ...(published ? { published } : {}) })];
+  }
+  const stale = deps.fleetStale?.(o.sourceDir, bin) ?? null;
+  if (stale) {
+    return [entry(null, 'error', { code: 'ENV_MISSING', reason: `stale fr_fleet: ${stale}; ${FLEET_REMEDY}`, ...(published ? { published } : {}) })];
   }
   const evidence = new Evidence(deps.evidenceRoot(o.sourceDir), s.id);
   const log = (line: string) => {

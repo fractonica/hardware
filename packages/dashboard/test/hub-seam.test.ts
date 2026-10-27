@@ -140,7 +140,8 @@ describe('dashboard against a real hub (web side)', () => {
 
     const up = publish(h.rig, 'boot.up', PAD_C6, { part: 'event', member: 'up' });
     const state = publish(h.rig, 'status.on', PAD_C3, { part: 'state', member: 'on', fields: { on: true } });
-    await until('live events', () => seqs(store).includes(state.seq));
+    // A STATE updates the mirror, not the ring (design m2-c3-inputs D6).
+    await until('live events', () => seqs(store).includes(up.seq) && store.getState().maxSeq >= state.seq);
     expect(store.getState().properties[PAD_C3]?.['status.on']?.value).toBe(true);
     expect(isFlashing(store.getState(), PAD_C3, clock.now())).toBe(false); // a state is no input
 
@@ -152,7 +153,8 @@ describe('dashboard against a real hub (web side)', () => {
     const after = publish(h.rig, 'device.offline', PAD_C3);
     await until('a live event after the reconnect', () => seqs(store).includes(after.seq));
     // In order, no hole, no repeat (the hub may add its own hub.* events, such as a loop-delay warning).
-    const mine = [...old, between!, up, state, missed, after].map((e) => e.seq);
+    const mine = [...old, between!, up, missed, after].map((e) => e.seq);
+    expect(seqs(store)).not.toContain(state.seq);
     expect(seqs(store).filter((s) => mine.includes(s))).toEqual(mine);
     expect(new Set(seqs(store)).size).toBe(seqs(store).length);
     expect(store.getState().lastByDevice[PAD_C3]?.type).toBe('device.offline');

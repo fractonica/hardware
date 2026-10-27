@@ -216,18 +216,19 @@ describe.skipIf(!existsSync(BIN))('the virtual fixture (M2-C1)', () => {
       return Array.from({ length: f.n }, (_, i) => (f.levels >> i) & 1);
     });
 
-  it('says HELLO role fixture with s3k-fixture\'s table: status on 1, ch0-ch11 on 2-13, every line released', async () => {
+  it('says HELLO role fixture with s3k-fixture\'s table: status on 1, ch0-ch13 on 2-15, every line released', async () => {
     const r = await serialRig();
     const { fixture } = await bench(r);
     expect(r.registry.get(FIXTURE)!.role).toBe('fixture');
     const info = r.router.info(FIXTURE)!;
     expect(info.links).toEqual(['serial']);
-    expect(info.instances?.map((c) => `${c.port}:${c.name}`)).toEqual(['1:status', ...Array.from({ length: 12 }, (_, i) => `${i + 2}:ch${i}`)]);
+    expect(info.instances?.map((c) => `${c.port}:${c.name}`)).toEqual(['1:status', ...Array.from({ length: 14 }, (_, i) => `${i + 2}:ch${i}`)]);
     fixture.send('lines');
     await until(() => fixture.of('lines').length === 1, 2000, 'lines');
     const lines = fixture.of('lines')[0].items as { name: string; level: boolean; pressing: boolean }[];
     expect(lines.filter((l) => l.pressing)).toEqual([]);
-    expect(lines.filter((l) => !l.level).map((l) => l.name)).toEqual(['ch6', 'ch7']); // WS2812 lines idle low
+    // WS2812 lines idle low, and a pwm line reads duty > 0 (design m2-c3-inputs §3): duty 0 at init.
+    expect(lines.filter((l) => !l.level).map((l) => l.name)).toEqual(['ch6', 'ch7', 'ch12', 'ch13']);
     expect((await diag(r, FIXTURE, 'info')).response).toMatchObject({ test_pin: -1 });
   }, 30_000);
 
@@ -257,6 +258,24 @@ describe.skipIf(!existsSync(BIN))('the virtual fixture (M2-C1)', () => {
     expect(await cmd('ch0', 'release')).toMatchObject({ status: 'ok' });
     await until(() => events(r, padMac, 'boot.up').length === 3, 3000, 'released');
     expect(await cmd('ch0', 'read')).toMatchObject({ status: 'ok', fields: { level: true } });
+  }, 30_000);
+
+  it('sets a pwm line\'s duty (design m2-c3-inputs §3): set_duty answers at_us, read.level is duty > 0, release is duty 0', async () => {
+    const r = await serialRig();
+    const { fixture, cmd } = await bench(r);
+    const res = await cmd('ch12', 'set_duty', { duty: 5000 });
+    expect(res).toMatchObject({ status: 'ok', fields: { at_us: expect.any(Number) } });
+    await until(() => fixture.of('duty').length === 1, 2000, 'the duty line');
+    expect(fixture.of('duty')[0]).toMatchObject({ name: 'ch12', duty: 5000, at_us: res.fields?.at_us });
+    expect(await cmd('ch12', 'read')).toMatchObject({ status: 'ok', fields: { level: true } });
+    expect(await cmd('ch12', 'press', { segments_us: [80_000] })).toMatchObject({ status: 'unsupported' });
+    expect(await cmd('ch0', 'set_duty', { duty: 5000 })).toMatchObject({ status: 'unsupported' });
+    expect(await cmd('ch12', 'release')).toMatchObject({ status: 'ok' });
+    await until(() => fixture.of('duty').length === 2, 2000, 'duty 0');
+    expect(fixture.of('duty')[1]).toMatchObject({ name: 'ch12', duty: 0 });
+    const read = await cmd('ch12', 'read');
+    expect(read.status).toBe('ok');
+    expect(read.fields?.level ?? false).toBe(false); // false is the field's default: not on the wire
   }, 30_000);
 
   it("releases a held line 2 s after the hub's last frame when its USB host leaves, whatever the press asked", async () => {

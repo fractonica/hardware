@@ -24,16 +24,18 @@
 // reads a changed registry, or the tick, catches every other change); a node broadcast fanned out to every
 // session of every other node, as hub broadcasts go (a non-best USB line only while its queue has room); every
 // envelope that goes to many sessions framed once (links Framed); and the counters and 1 s windows of hub_status
-// router.scale.
+// router.scale. M2-C3 (design m2-c3-inputs D9): EVENTs that carry EXT port_seq (ordered capabilities) are
+// published in port_seq order per (device, port), a gap held up to 50 ms (reorder.ts; hub_status router.reorder).
 //
 // Everything on the receive path runs synchronously in the tick the envelope arrived in (spec 08 §8.2
-// rule 2); only the handshake and commands await answers.
+// rule 2); only the handshake and commands await answers, and the reorder buffer's hold timer publishes later.
 
 import { performance } from 'node:perf_hooks';
 
-import { CLS, type DeviceRole, EXT, type Envelope, extTlv, type ExtTlv, FLAG, FrError, fnv1a32, type Header, packEnvelope } from '@fractonica/protocol';
+import { CLS, type DeviceRole, EXT, type Envelope, extTlv, type ExtTlv, extValue, FLAG, FrError, fnv1a32, type Header, packEnvelope } from '@fractonica/protocol';
 import {
   ADDR,
+  CATALOG,
   decodeEnvelope,
   decodeMember,
   decodeLogLine,
@@ -98,6 +100,7 @@ import type { SerialPortManager } from '../serial.ts';
 import { CapDirectory, descriptorCaps, instanceAt, type PortCap } from './caps.ts';
 import { type ClockInfo, type ClockView, NodeClock, rttOf, type SyncSample } from './clock.ts';
 import { BINDING_PATHS, type DeviceLatency, LatencyRecorder, type LoopDelay, LoopMonitor } from './latency.ts';
+import { ReorderBuffer, type ReorderCounters } from './reorder.ts';
 import { createScaleCounters, HIST_BOUNDS, type ScaleCounters, type ScaleView, type ScaleWindows, scaleWindows } from './scale.ts';
 import { cmp16, cmp32, ReplayWindow } from './window.ts';
 
@@ -326,6 +329,8 @@ export interface RouterStatus {
   counters: Record<string, number>;
   /** The scale counters, windows and loop histogram (design m2-c2 D15, D16). */
   scale: ScaleView;
+  /** The reorder buffer of ordered ports (design m2-c3-inputs D9): its counters and the events held now. */
+  reorder: ReorderCounters & { holding: number };
 }
 
 type SessionKind = Exclude<LinkName, 'udp'>;
@@ -462,6 +467,12 @@ function commandId(cap: string, name: string): number {
   return id;
 }
 
+/**
+ * Capabilities whose STATE is a sampled stream (design m2-c3-inputs D6): those with a `report_hz` config
+ * (fr.analog_in). Their STATE rows are thinned in the event store; every other capability's are all stored.
+ */
+const STREAMING_CAPS: ReadonlySet<number> = new Set(CATALOG.capabilities.filter((c) => c.config.some((f) => f.name === 'report_hz')).map((c) => c.id));
+
 const NODE_GET_STATE = commandId('fr.node', 'get_state');
 const NODE_SET_ALIAS = commandId('fr.node', 'set_alias');
 const NODE_DESCRIBE = commandId('fr.node', 'describe');
@@ -540,6 +551,11 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   /** Active TIME profiles per device id (timeProfile): the fastest resync and the largest burst win. */
   #profiles = new Map<string, Set<Required<TimeProfile>>>();
   #capListeners = new Set<(e: CapEventSeen) => void>();
+  /**
+   * EVENTs of ordered ports (EXT port_seq; design m2-c3-inputs D9), per (device, port): delivered to #publishCap
+   * in port_seq order, each with the arrival µs it came with.
+   */
+  #reorder: ReorderBuffer<{ peer: Peer; link: LinkName; env: Envelope; rxUs: number }>;
   /** When the envelope being handled arrived (set by envelope() for its synchronous receive path), else null. */
   #rxUs: number | null = null;
   /** Descriptor caps by descriptor_hash (firmware the hub has no manifest for). */
@@ -619,6 +635,10 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     this.#scale = deps.scale ?? createScaleCounters();
     this.#windows = scaleWindows(this.#scale);
     this.#caps = new CapDirectory(deps.db);
+    this.#reorder = new ReorderBuffer((x) => this.#publishHeld(x.peer, x.link, x.env, x.rxUs), {
+      nowUs: () => this.#clock.nowUs(),
+      onError: (e) => console.error(JSON.stringify({ event: 'router_error', message: (e as Error).message, stack: (e as Error).stack })),
+    });
     const l = deps.links === false ? {} : (deps.links ?? {});
     this.#links = new NodeLinks(this, { ...l, serial: deps.serial ?? null });
   }
@@ -660,6 +680,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   }
 
   async stop(): Promise<void> {
+    this.#reorder.stop(); // held events were ACKed: they go out before the event store stops (main.ts)
     this.#stopped = true;
     if (this.#ticker) {
       clearInterval(this.#ticker);
@@ -1307,6 +1328,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       warnings,
       counters: { ...this.#counters },
       scale: this.scale(),
+      reorder: { ...this.#reorder.counters, holding: this.#reorder.holding() },
     };
   }
 
@@ -1515,6 +1537,9 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     if (previous && previous.peer !== peer) {
       this.#endSession(previous, 'another device on this link', { keep: ep });
     }
+    // A HELLO releases the ordered ports' held events (D9) now, on the clock and epoch they came with; a new
+    // epoch also restarts each port's sequence at 1, a same-epoch HELLO keeps it (the node's counters carry on).
+    this.#reorder.reset(peer.id, peer.epoch !== null && h.epoch !== peer.epoch);
     if (peer.epoch !== null && h.epoch !== peer.epoch) {
       // A new boot (or a regressed epoch after an NVS wipe, 05 §5.8): a new clock and sequence space,
       // and the node's old sessions are gone with its old boot.
@@ -1616,6 +1641,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         this.#counters.old_epoch++;
         return;
       }
+      this.#reorder.reset(peer.id, true); // before the old epoch's clock goes
       if (this.#sessionsOf(peer).length) {
         // The node rebooted and its HELLO has not been seen on this path: its sessions are gone.
         this.#offline(peer, 'restarted');
@@ -1673,12 +1699,20 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       case CLS.PRESENCE:
         this.#presenceFrame(peer, link, env);
         break;
-      case CLS.EVENT:
+      case CLS.EVENT: {
         if (h.flags & FLAG.ACK_REQ) {
           this.#ack(peer, h, STATUS.OK);
         }
-        this.#publishCap(peer, link, env, 'event');
+        // An ordered port's event (EXT port_seq, D8-D9) goes through the reorder buffer: published now when it
+        // is next in its port's sequence, else held until the gap fills or the hold ends.
+        const portSeq = extValue(h, EXT.PORT_SEQ);
+        if (portSeq === undefined) {
+          this.#publishCap(peer, link, env, 'event');
+        } else {
+          this.#reorder.push(peer.id, h.port, portSeq, { peer, link, env, rxUs: this.#arrival() });
+        }
         break;
+      }
       case CLS.STATE:
         this.#publishCap(peer, link, env, 'state');
         break;
@@ -2003,6 +2037,20 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
 
   // ---- events from frames ----
 
+  /**
+   * An EVENT the reorder buffer releases (D9): published with its own arrival µs, so t_hub_us before the clock
+   * is known, `late`, `replayed` and the input latency are as if it had not been held; only the order changes.
+   */
+  #publishHeld(peer: Peer, link: LinkName, env: Envelope, rxUs: number): void {
+    const outer = this.#rxUs;
+    this.#rxUs = rxUs;
+    try {
+      this.#publishCap(peer, link, env, 'event');
+    } finally {
+      this.#rxUs = outer;
+    }
+  }
+
   #publishCap(peer: Peer, link: LinkName, env: Envelope, part: 'event' | 'state'): void {
     const h = env.header;
     const tUs = env.prefix.type === 'time' ? env.prefix.t_us : 0;
@@ -2049,21 +2097,25 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       const input = synced && !replayed && h.port >= PORT.CAP_FIRST && h.port <= PORT.CAP_LAST;
       this.#sampleEvent(peer, link, type, fields, input ? now - tHub : null);
     }
-    const event = this.#deps.events.publish({
-      type,
-      device: peer.id,
-      alias: peer.alias,
-      t_hub_us: tHub,
-      t_dev_us: tUs,
-      epoch: h.epoch,
-      fields,
-      // Which half of the capability and which member (design c6 §3.3): /app sends `evt` or `state` by it.
-      part,
-      member: name,
-      ...(late ? { late: true } : {}),
-      ...(replayed ? { replayed: true } : {}),
-      ...(part === 'state' && this.#resyncBrought(peer, h.seq, tUs, now) ? { resync: true } : {}),
-    });
+    const event = this.#deps.events.publish(
+      {
+        type,
+        device: peer.id,
+        alias: peer.alias,
+        t_hub_us: tHub,
+        t_dev_us: tUs,
+        epoch: h.epoch,
+        fields,
+        // Which half of the capability and which member (design c6 §3.3): /app sends `evt` or `state` by it.
+        part,
+        member: name,
+        ...(late ? { late: true } : {}),
+        ...(replayed ? { replayed: true } : {}),
+        ...(part === 'state' && this.#resyncBrought(peer, h.seq, tUs, now) ? { resync: true } : {}),
+      },
+      // A streaming capability's STATE rows are thinned in the store (m2-c3-inputs D6); the bus still has every one.
+      { thin: part === 'state' && !!inst && STREAMING_CAPS.has(inst.cap_id) },
+    );
     // After the bus (D7: /app and /ws first), with what it does not carry: the link and the arrival µs.
     if (this.#capListeners.size) {
       const seen: CapEventSeen = { event, link, rx_us: now, t_us: tUs };

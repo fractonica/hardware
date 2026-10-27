@@ -1,26 +1,40 @@
 capability: fr.analog_in
 id: 0x0005
-version: "0.1"
+version: "1.0"
 summary: An analog input sampled on the node and reported as a normalised, rate-limited value.
 doc: |
-  `value` is a LATEST property (latest wins, never retried), so a fast stream never queues
-  behind itself. Use `crossed` events for thresholds that must not be missed.
+  `value` is a LATEST property (latest wins, never retried), so a fast stream never queues behind itself.
+  It is the input's calibrated voltage mapped from [min_mv, max_mv] onto 0..65535 and clamped.
+  Use `crossed` events for thresholds that must not be missed: they are reliable and carry hysteresis.
 types:
   Filter:    { enum: { none: 0, ema: 1, median3: 2 } }
   Direction: { enum: { rising: 0, falling: 1 } }
 traits:
-  resolution_bits: { id: 1, type: u8 }               # derived from the driver (12 on C3/C6/S3 ADC1)
+  resolution_bits: { id: 1, type: u8 }      # from the driver (12 on C3/C6/S3 ADC1)
+  full_scale_mv:   { id: 2, type: u16 }     # from the driver: the top of the attenuation's range (2500 on the C3 at 12 dB)
 config:
   sample_hz:  { type: u16, default: 200, range: [1, 1000], unit: Hz }
-  report_hz:  { type: u16, default: 50,  range: [1, 200],  unit: Hz, doc: "max STATE rate" }
-  deadband:   { type: u16, default: 64,  range: [0, 4096], doc: "in normalised units/16; smaller changes are not reported" }
-  filter:     { type: Filter, default: ema }
-  raw_min:    { type: u16, default: 0 }
-  raw_max:    { type: u16, default: 4095 }
-  thresholds: { type: "array<u16>", max: 4, doc: "normalised thresholds that emit `crossed`" }
+  report_hz:  { type: u16, default: 20,  range: [1, 200],  unit: Hz, doc: "max STATE rate. Provisional until S2 (C4)" }
+  deadband:   { type: u16, default: 512, range: [0, 32768], doc: "in value units; a change smaller than this since the last report is not reported. Provisional until S2" }
+  filter:     { type: Filter, default: ema, doc: "ema: alpha 1/4" }
+  min_mv:     { type: u16, default: 0,    unit: mV, doc: "maps to value 0" }
+  max_mv:     { type: u16, default: 2500, unit: mV, doc: "maps to value 65535; must exceed min_mv" }
+  hysteresis: { type: u16, default: 1024, range: [0, 16384], doc: "in value units, for `crossed`" }
+  thresholds: { type: "array<u16>", max: 4, doc: "value thresholds that emit `crossed`" }
 properties:
-  value: { id: 1, type: u16, doc: "0..65535, after calibration and filter" }
+  value: { id: 1, type: u16, doc: "0..65535 over [min_mv, max_mv], after calibration and filter" }
 events:
   crossed: { id: 1, priority: realtime, fields: { index: { id: 1, type: u8 }, direction: { id: 2, type: Direction }, value: { id: 3, type: u16 } } }
 commands:
-  inject: { id: 1, visibility: test, delivery: reliable, fields: { value: { id: 1, type: u16 } } }
+  read:
+    id: 2
+    delivery: reliable
+    doc: The current reading, unfiltered and filtered. Answered from the last sample; never touches the ADC.
+    result: { mv: { id: 1, type: u16 }, raw: { id: 2, type: u16 }, value: { id: 3, type: u16 }, injected: { id: 4, type: bool } }
+  inject:
+    id: 1
+    visibility: test
+    delivery: reliable
+    doc: Holds `value` in place of the ADC for hold_ms (0 means 1,000 ms; at most 60,000). A newer inject replaces it.
+    fields: { value: { id: 1, type: u16 }, hold_ms: { id: 2, type: u16 } }
+    examples: [ { value: 32768 }, { value: 0, hold_ms: 5000 } ]

@@ -44,6 +44,7 @@ inline constexpr uint8_t kClsTime = 0x0A;
 inline constexpr uint8_t kExtTraceId = 0x02;     // u32, latency tracing
 inline constexpr uint8_t kExtValidMs = 0x03;     // u16, lifetime of a hub broadcast
 inline constexpr uint8_t kExtExpireAtUs = 0x04;  // u32, destination clock: not executed after it
+inline constexpr uint8_t kExtPortSeq = 0x05;     // u16, per-port EVENT counter of an ordered capability
 inline constexpr uint8_t kExtExecAtUs = 0x81;    // u32, destination clock: execute then (critical)
 inline constexpr uint8_t kExtCritical = 0x80;
 /** TLV bytes one header can carry: the block's `len` is a u8. */
@@ -56,6 +57,7 @@ constexpr size_t ext_value_size(uint8_t type)
 {
     switch (type) {
     case kExtValidMs:
+    case kExtPortSeq:
         return 2;
     case kExtTraceId:
     case kExtExpireAtUs:

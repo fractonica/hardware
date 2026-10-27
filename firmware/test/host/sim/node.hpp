@@ -35,7 +35,9 @@
 #include "fr/net/air.hpp"
 #include "fr/net/log_source.hpp"
 #include "fr/net/net.hpp"
+#include "fr/hal/analog.hpp"
 #include "fr/ota/ota.hpp"
+#include "fr/services/analog_in_service.hpp"
 #include "fr/services/button_service.hpp"
 #include "protocol.hpp"  // generated fr::proto constants (kAddrUnassigned, Role)
 #include "sim/executor.hpp"
@@ -96,7 +98,28 @@ struct NodeSpec {
     bool fault_health = false;
     /** LOG frames over TCP (design m2-c2 D20): a LogSource attached, so HELLO caps say net_log. */
     bool net_log = false;
+    /** M2-C3 (design m2-c3-inputs §8): c3o-analog's fr.analog_in report_hz (07 §7.3's provisional default 20); the
+     * fleet's `analog report_hz <n>` sets it and reboots the node into it. */
+    uint16_t analog_report_hz = 20;
 };
+
+/**
+ * A profile the kit can play (design m2-c3-inputs §8): its board and chip id (what HELLO, the descriptor and fr_ota's
+ * CHECK say), and its port table. c6-pad: boot (fr.button) 1, status (fr.led) 2. c3o-analog: the same plus analog
+ * (fr.analog_in) 3, as c3o-analog.slots.lock has them. fr.diag on 241 is a system port in both, outside the descriptor.
+ */
+struct KitProfile {
+    std::string_view name;
+    std::string_view board;
+    uint8_t chip;  // the image chip id: C3 5, C6 13
+    bool analog;   // fr.analog_in `analog` on port 3
+};
+/** The kit profile `name`, or null for one the kit cannot play. */
+const KitProfile *kit_profile(std::string_view name);
+/** The kit's profile names, for an error message ("c6-pad, c3o-analog"). */
+std::string kit_profile_names();
+/** c3o-analog's fr.analog_in config (its profile: thresholds 16384, 32768, 49152; the cap defaults else), at `report_hz`. */
+fr::cap::AnalogInConfig kit_analog_config(uint16_t report_hz);
 
 /** The driver's counters, as `stats espnow` and `state`'s `medium` report them (diag::EspnowStatus). */
 struct AirCounters {
@@ -147,6 +170,85 @@ protected:
 
 /** The board manifest's test_pin (spec 04 §4.3) of the boards a pad plays; -1 for none (the fixture board). */
 int board_test_pin(std::string_view board);
+
+/**
+ * The analog input of a c3o-analog fleet node (design m2-c3-inputs §8) in place of its ADC channel: a waveform on the
+ * core's clock. It is the world outside the node, so the FleetNode keeps it across boots. `wave` is a sine from lo to
+ * hi whose phase is drawn from the node's seed (30 nodes are not in step), `ramp` a triangle with the same phase,
+ * `hold` a constant (the start: 0 mV). A reading's raw is its mV on a 12-bit scale over full_scale_mv, the C3's
+ * 2,500 mV at 12 dB (design D3). No noise: the deadband never has to hide any. Core task only.
+ */
+class WaveAnalog final : public fr::hal::AnalogSource
+{
+public:
+    enum class Mode : uint8_t { hold, sine, ramp };
+    static constexpr uint16_t kFullScaleMv = 2500;
+    static constexpr uint32_t kMinPeriodMs = 10;
+    static constexpr uint32_t kMaxPeriodMs = 600'000;
+    static constexpr uint16_t kMaxMv = 3300;
+
+    WaveAnalog(fr::Core &core, uint32_t seed);
+
+    void hold(uint16_t mv);
+    /** A sine or ramp from now on; false (nothing changed) for a period outside 10..600,000 ms, lo > hi or hi > 3,300. */
+    bool wave(Mode m, uint32_t period_ms, uint16_t lo_mv, uint16_t hi_mv);
+    /** The input at `t`, in mV. */
+    uint16_t mv_at(fr::TimeUs t) const;
+    Mode mode() const { return mode_; }
+    uint32_t period_ms() const { return period_ms_; }
+    uint16_t lo_mv() const { return lo_; }
+    uint16_t hi_mv() const { return hi_; }
+    /** The phase drawn from the seed, in [0, 1) of a period. */
+    double phase() const { return phase_; }
+    /** Conversions the service asked for, since the node was made. */
+    uint32_t reads() const { return reads_; }
+
+    // fr::hal::AnalogSource
+    fr::Status init(fr::Core &) override { return {}; }
+    fr::Status read(fr::hal::AnalogReading &out) override;
+    uint8_t resolution_bits() const override { return 12; }
+    uint16_t full_scale_mv() const override { return kFullScaleMv; }
+    fr::hal::Selftest selftest() override { return {true, "waveform"}; }
+
+private:
+    fr::Core &core_;
+    double phase_;
+    Mode mode_ = Mode::hold;
+    uint32_t period_ms_ = 0;
+    uint16_t lo_ = 0;
+    uint16_t hi_ = 0;
+    fr::TimeUs t0_ = 0;  // the wave's start: its phase counts from here
+    uint32_t reads_ = 0;
+};
+
+/**
+ * Counts the STATE reports of one port on their way to Net (T2-ANALOG-30's delivery share: what the node reported
+ * against what an SDK client got), everything else passed through as is.
+ */
+class CountingSink final : public fr::cap::Sink
+{
+public:
+    explicit CountingSink(fr::cap::Sink &next) : next_(next) {}
+
+    void event(uint8_t port, uint8_t event_id, fr::cap::Priority prio, std::span<const uint8_t> fields, fr::TimeUs at,
+               bool ordered) override
+    {
+        ++events_;
+        next_.event(port, event_id, prio, fields, at, ordered);
+    }
+    void property(uint8_t port, uint8_t prop_id, std::span<const uint8_t> value, fr::TimeUs at) override
+    {
+        ++states_;
+        next_.property(port, prop_id, value, at);
+    }
+    uint32_t states() const { return states_; }
+    uint32_t events() const { return events_; }
+
+private:
+    fr::cap::Sink &next_;
+    uint32_t states_ = 0;
+    uint32_t events_ = 0;
+};
 
 class Device;
 
@@ -246,7 +348,9 @@ private:
  * fr.diag on port 241 (design c6 §6 S6): the fr.diag.exec lines T-INPUT and T-LAT send over the hub link, with
  * fr_diag's answers: `pin_pulse <us>` (the board's test pin, where NodeLinks wires it), `net` (Net's hooks, `loss`
  * and `wifi_down` included), `stats [section]` and `info`; M2-C2 (D11) adds `inject <inst> <gesture>` and `neighbors
- * [from]` in fr_diag's shapes. fr_diag's serial command channel (`#<id> <line>`) answers the same (serial_line()).
+ * [from]` in fr_diag's shapes, M2-C3 (design m2-c3-inputs §5) `inject <inst> value=<n> [hold_ms=<n>]` (an
+ * fr.analog_in instance's inject) and `stats`' state_repeats_superseded. fr_diag's serial command channel
+ * (`#<id> <line>`) answers the same (serial_line()).
  */
 class NodeDiag final : public fr::cap::Diag
 {
@@ -466,6 +570,10 @@ struct NodeCtx {
     fr::ButtonService *button = nullptr;
     /** `log <L> <tag> <text>`; null without a log source. */
     KitLogs *logs = nullptr;
+    /** M2-C3: a c3o-analog node's input, its service and the STATEs that service reported this boot; null without. */
+    WaveAnalog *wave = nullptr;
+    fr::AnalogInService *analog = nullptr;
+    const CountingSink *analog_sink = nullptr;
 };
 
 // ---- the fleet (design m2-c2 D1, D7, D8) ----
@@ -672,7 +780,9 @@ struct FleetShared {
  * boot is destroyed the GET in flight is shut down, the strand quiesced, the core crashed (its posts and timers
  * dropped, its generation bumped) and the radio's queue and deliveries dropped. What is RAM on a board goes with it
  * (`wifi_down`, `tcp 0`, Net's TCP hold and backoff), so power-on is a fresh boot; and it cancels a reboot under way,
- * so an explicit power cut in the reboot gap keeps the node off.
+ * so an explicit power cut in the reboot gap keeps the node off. M2-C3 (design m2-c3-inputs §8): the boot builds the
+ * services and the port table of the spec's kit profile (kit_profile; the descriptor follows the table), and a
+ * c3o-analog node's WaveAnalog outlives its boots as the world outside a board does.
  */
 class FleetNode
 {
@@ -692,6 +802,8 @@ public:
     /** The hub's address (`fleet start`): its node TCP, UDP and HTTP ports. */
     void set_hub(const std::string &host, uint16_t tcp, uint16_t udp, uint16_t http);
     bool powered() const { return boot_ != nullptr; }
+    /** This boot's descriptor (empty while off): its port table's, as describe answers it. */
+    std::span<const uint8_t> descriptor() const;
     /** Started at least once (`fleet start` or `spawn`). */
     bool started() const { return started_; }
     void power_on();
@@ -700,7 +812,10 @@ public:
     bool usb(bool attach);
     /** `ap off|on` reached this node. */
     void ap_changed(bool up);
-    /** One control command for this node (Commands' table, plus diag, power, usb). */
+    /**
+     * One control command for this node (Commands' table, plus diag, power, usb, and on a c3o-analog node
+     * `analog report_hz <1-200>`: the rate for the next boot, then a BYE reboot into it).
+     */
     Answer command(std::string_view line);
 
     SimCore &core() { return *core_; }
@@ -733,6 +848,7 @@ private:
     std::unique_ptr<SimTcp> tcp_;
     std::unique_ptr<SimUdp> udp_;
     std::unique_ptr<SimSerial> serial_;
+    std::unique_ptr<WaveAnalog> wave_;  // a c3o-analog node's input (across boots); null on another profile
     std::unique_ptr<Links> links_;
     std::unique_ptr<Boot> boot_;
     bool started_ = false;

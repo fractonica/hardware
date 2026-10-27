@@ -84,6 +84,14 @@ describe('emitTs', () => {
     expect(CATALOG.capabilities.map((c) => c.name)).toEqual(CAPS.filter((c) => !c.testOnly).map((c) => c.name));
   });
 
+  it('marks an ordered capability in CAPS and CATALOG (design m2-c3-inputs D8)', () => {
+    expect(CAPS.filter((c) => c.ordered).map((c) => c.name)).toEqual(model.capabilities.filter((c) => c.ordered).map((c) => c.name));
+    expect(CAPS.find((c) => c.name === 'fr.button')?.ordered).toBe(true);
+    expect(CAPS.find((c) => c.name === 'fr.led')).not.toHaveProperty('ordered');
+    expect(CATALOG.capabilities.find((c) => c.name === 'fr.button')?.ordered).toBe(true);
+    expect(CATALOG.capabilities.filter((c) => c.ordered).map((c) => c.name)).toEqual(['fr.button']);
+  });
+
   it('the generated tables mirror the model', () => {
     expect(CAPS.map((c) => [c.id, c.name, c.version])).toEqual(model.capabilities.map((c) => [c.id, c.name, c.version]));
     for (const cap of model.capabilities) {

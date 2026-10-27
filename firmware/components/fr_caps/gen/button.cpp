@@ -331,7 +331,7 @@ void Button::encode_traits(fr::wire::Writer &w) const
 void Button::emit_down(const ButtonDown &, TimeUs at)
 {
     if (sink_ != nullptr) {
-        sink_->event(port_, kEventDown, Priority::realtime, {}, at);
+        sink_->event(port_, kEventDown, Priority::realtime, {}, at, kOrdered);
     }
 }
 
@@ -343,7 +343,7 @@ void Button::emit_up(const ButtonUp &e, TimeUs at)
     uint8_t buf[ButtonUp::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventUp, Priority::realtime, w.bytes(), at);
+    sink_->event(port_, kEventUp, Priority::realtime, w.bytes(), at, kOrdered);
 }
 
 void Button::emit_click(const ButtonClick &e, TimeUs at)
@@ -354,7 +354,7 @@ void Button::emit_click(const ButtonClick &e, TimeUs at)
     uint8_t buf[ButtonClick::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventClick, Priority::normal, w.bytes(), at);
+    sink_->event(port_, kEventClick, Priority::normal, w.bytes(), at, kOrdered);
 }
 
 void Button::emit_long_press(const ButtonLongPress &e, TimeUs at)
@@ -365,7 +365,7 @@ void Button::emit_long_press(const ButtonLongPress &e, TimeUs at)
     uint8_t buf[ButtonLongPress::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventLongPress, Priority::normal, w.bytes(), at);
+    sink_->event(port_, kEventLongPress, Priority::normal, w.bytes(), at, kOrdered);
 }
 
 void Button::report_pressed(bool v, TimeUs at)

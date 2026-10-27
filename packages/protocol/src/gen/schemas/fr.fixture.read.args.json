@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:fractonica:schema:fr.fixture.read.args",
   "title": "fr.fixture.read arguments",
+  "description": "On a pwm line `level` is true while the duty is above 0.",
   "type": "object",
   "properties": {},
   "additionalProperties": false

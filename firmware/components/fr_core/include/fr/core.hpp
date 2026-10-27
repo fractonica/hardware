@@ -1,4 +1,5 @@
 // Node runtime (spec 03 §3.4-3.5, design c2 §5, c3 §3). The app's main does, in order:
+//   fr::core::set_battery({...});                // the board's kBattery, when kHasBattery (vbat_mv)
 //   fr::Core &core = fr::core::start();          // NVS, identity, boot epoch, hub link core, fr_serial + diag
 //   fr::board::attach(fr::core::sink());         // generated: ports and names, before any emission
 //   fr::board::init(core);                       // generated: drivers -> services, failures per port
@@ -80,6 +81,22 @@ template <class Instances>
     }
     run_ports({table, n}, selftest, left_out);
 }
+
+/** The board's battery input (fr/board.hpp kBattery; design m2-c3-inputs D11). fr_core cannot include the
+ * generated board header (fr_board depends on fr_core), so the app's main hands it over. */
+struct Battery {
+    int8_t gpio;             // -1: none (HEARTBEAT vbat_mv stays 0, "not measured")
+    uint16_t divider_milli;  // battery mV = pin mV * divider_milli / 1000
+    uint16_t low_mv;         // HEARTBEAT low_batt when 0 < vbat_mv < low_mv
+};
+
+/**
+ * Makes the vitals measure vbat_mv: once per heartbeat, 8 conversions on `gpio` through the shared ADC1 unit
+ * (fr/platform/adc1.hpp, 12 dB, curve fitting), averaged, times the divider. Call before start(): the core task
+ * start() creates reads it without a lock (the vitals), and start() does not reset it. Without it (or with gpio
+ * -1) vbat_mv stays 0. A pin the ADC refuses is logged once and reads 0.
+ */
+void set_battery(const Battery &battery);
 
 /** Identity loaded by start(), including this boot's epoch (and a later fr.node.set_alias). */
 const fr_identity_t &identity();

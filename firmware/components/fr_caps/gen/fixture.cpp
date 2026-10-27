@@ -14,6 +14,8 @@ const char *to_name(FixtureDrive v)
         return "open_drain";
     case FixtureDrive::nfet_gate:
         return "nfet_gate";
+    case FixtureDrive::pwm:
+        return "pwm";
     }
     return nullptr;
 }
@@ -30,6 +32,10 @@ bool from_name(std::string_view s, FixtureDrive &out)
     }
     if (s == "nfet_gate") {
         out = FixtureDrive::nfet_gate;
+        return true;
+    }
+    if (s == "pwm") {
+        out = FixtureDrive::pwm;
         return true;
     }
     return false;
@@ -289,6 +295,84 @@ bool valid(const FixtureReadResult &)
     return true;
 }
 
+size_t encode(const FixtureSetDutyArgs &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.duty != 0) {
+        w.field_uint(1, v.duty);
+    }
+    return w.size() - start;
+}
+
+std::expected<FixtureSetDutyArgs, fr::wire::DecodeErr> decode_fixture_set_duty_args(std::span<const uint8_t> in)
+{
+    FixtureSetDutyArgs v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.duty = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const FixtureSetDutyArgs &a, const FixtureSetDutyArgs &b)
+{
+    return a.duty == b.duty;
+}
+
+bool valid(const FixtureSetDutyArgs &v)
+{
+    return v.duty <= 10000;
+}
+
+size_t encode(const FixtureSetDutyResult &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.at_us != 0) {
+        w.field_uint(1, v.at_us);
+    }
+    return w.size() - start;
+}
+
+std::expected<FixtureSetDutyResult, fr::wire::DecodeErr> decode_fixture_set_duty_result(std::span<const uint8_t> in)
+{
+    FixtureSetDutyResult v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.at_us = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const FixtureSetDutyResult &a, const FixtureSetDutyResult &b)
+{
+    return a.at_us == b.at_us;
+}
+
+bool valid(const FixtureSetDutyResult &)
+{
+    return true;
+}
+
 size_t encode(const FixtureEdges &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -479,6 +563,23 @@ Status Fixture::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
         }
         return {};
     }
+    case kCmdSetDuty: {
+        const auto a = decode_fixture_set_duty_args(args);
+        if (!a || !valid(*a)) {
+            return std::unexpected(Err::invalid_args);
+        }
+        const auto r = set_duty(*a);
+        if (!r) {
+            return std::unexpected(r.error());
+        }
+        encode(*r, reply.fields());
+        // Fields beyond the caller's buffer (realtime or bulk): FAILED with no fields, never truncated ones.
+        if (reply.fields().overflow()) {
+            reply.clear();
+            return std::unexpected(Err::failed);
+        }
+        return {};
+    }
     default:
         return std::unexpected(Err::unsupported);
     }
@@ -502,7 +603,7 @@ void Fixture::emit_edges(const FixtureEdges &e, TimeUs at)
     uint8_t buf[FixtureEdges::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventEdges, Priority::normal, w.bytes(), at);
+    sink_->event(port_, kEventEdges, Priority::normal, w.bytes(), at, kOrdered);
 }
 
 void Fixture::emit_frame(const FixtureFrame &e, TimeUs at)
@@ -513,7 +614,7 @@ void Fixture::emit_frame(const FixtureFrame &e, TimeUs at)
     uint8_t buf[FixtureFrame::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventFrame, Priority::normal, w.bytes(), at);
+    sink_->event(port_, kEventFrame, Priority::normal, w.bytes(), at, kOrdered);
 }
 
 void Fixture::report_level(bool v, TimeUs at)

@@ -37,6 +37,7 @@
 **Top-level keys:**
 - `capability`, `id`, `version` (`"major.minor"`; minor is additive only), `summary`, `doc`, `maps_to`;
 - `test_only` (since M2-C1): a test instrument's capability (`fr.fixture`). Firmware codecs, the hub's decoders and the golden vectors carry it. Everything an app or client sees leaves it out: the app-facing catalog and `catalog_hash` (so provisioning a fixture changes neither), the SDK facades (`packages/sdk/src/gen/caps.ts`), `fr codegen client` and the dashboard's capability lists. Only standard and project capabilities may set it, not system ones;
+- `ordered` (since M2-C3, default false; [design m2-c3-inputs](../design/m2-c3-inputs.md) D8, approved): the capability's events are delivered in order per port. The generated `emit_*` hand `Sink::event` `ordered = true` (C++ `kOrdered`); Net stamps each such event with EXT `0x05 port_seq` and sends it on one route, and the hub's reorder buffer restores the order ([05 §5.8](05-network.md) Ordering). A capability with no events may not set it. `CAPS` (`CapInfo.ordered`) and the catalog carry it. `fr.button` is `ordered` (since M2-C3); `fr.led`, `fr.analog_in` and `fr.fixture` are not;
 - `types` (enums), `traits`, `config`, `properties`, `commands`, `events`.
 
 **Members:**
@@ -143,39 +144,58 @@ System capabilities are generated like the others. Since C3 the node implements 
 
 `fr.display` (`text`, `clear`, `fill_rect`, `set_brightness`) is M2. Its first driver is the SSD1306 0.42" OLED on your C3 boards. `fr.audio_out` (`tone`, `play`, `stop`, `set_volume`) comes later. Both are drafted in [research/hal-capabilities-sdk.md](../research/hal-capabilities-sdk.md).
 
-**`fr.analog_in` (M2, draft)** covers potentiometers, sliders, FSRs and other analog sensors:
+**`fr.analog_in` 1.0** (since M2-C3, [design m2-c3-inputs](../design/m2-c3-inputs.md) D1–D4) covers potentiometers, sliders, FSRs and other analog sensors. `schema/capabilities/analog_in.cap.yaml` as built:
 
 ```yaml
 capability: fr.analog_in
 id: 0x0005
-version: "0.1"
+version: "1.0"
 summary: An analog input sampled on the node and reported as a normalised, rate-limited value.
 doc: |
-  `value` is a LATEST property (latest wins, never retried), so a fast stream never queues
-  behind itself. Use `crossed` events for thresholds that must not be missed.
+  `value` is a LATEST property (latest wins, never retried), so a fast stream never queues behind itself.
+  It is the input's calibrated voltage mapped from [min_mv, max_mv] onto 0..65535 and clamped.
+  Use `crossed` events for thresholds that must not be missed: they are reliable and carry hysteresis.
 types:
   Filter:    { enum: { none: 0, ema: 1, median3: 2 } }
   Direction: { enum: { rising: 0, falling: 1 } }
 traits:
-  resolution_bits: { id: 1, type: u8 }               # derived from the driver (12 on C3/C6/S3 ADC1)
+  resolution_bits: { id: 1, type: u8 }      # from the driver (12 on C3/C6/S3 ADC1)
+  full_scale_mv:   { id: 2, type: u16 }     # from the driver: the top of the attenuation's range (2500 on the C3 at 12 dB)
 config:
   sample_hz:  { type: u16, default: 200, range: [1, 1000], unit: Hz }
-  report_hz:  { type: u16, default: 50,  range: [1, 200],  unit: Hz, doc: "max STATE rate" }
-  deadband:   { type: u16, default: 64,  range: [0, 4096], doc: "in normalised units/16; smaller changes are not reported" }
-  filter:     { type: Filter, default: ema }
-  raw_min:    { type: u16, default: 0 }
-  raw_max:    { type: u16, default: 4095 }
-  thresholds: { type: "array<u16>", max: 4, doc: "normalised thresholds that emit `crossed`" }
+  report_hz:  { type: u16, default: 20,  range: [1, 200],  unit: Hz, doc: "max STATE rate. Provisional until S2 (C4)" }
+  deadband:   { type: u16, default: 512, range: [0, 32768], doc: "in value units; a change smaller than this since the last report is not reported. Provisional until S2" }
+  filter:     { type: Filter, default: ema, doc: "ema: alpha 1/4" }
+  min_mv:     { type: u16, default: 0,    unit: mV, doc: "maps to value 0" }
+  max_mv:     { type: u16, default: 2500, unit: mV, doc: "maps to value 65535; must exceed min_mv" }
+  hysteresis: { type: u16, default: 1024, range: [0, 16384], doc: "in value units, for `crossed`" }
+  thresholds: { type: "array<u16>", max: 4, doc: "value thresholds that emit `crossed`" }
 properties:
-  value: { id: 1, type: u16, doc: "0..65535, after calibration and filter" }
+  value: { id: 1, type: u16, doc: "0..65535 over [min_mv, max_mv], after calibration and filter" }
 events:
   crossed: { id: 1, priority: realtime, fields: { index: { id: 1, type: u8 }, direction: { id: 2, type: Direction }, value: { id: 3, type: u16 } } }
 commands:
-  inject: { id: 1, visibility: test, delivery: reliable, fields: { value: { id: 1, type: u16 } } }
+  read:
+    id: 2
+    delivery: reliable
+    doc: The current reading, unfiltered and filtered. Answered from the last sample; never touches the ADC.
+    result: { mv: { id: 1, type: u16 }, raw: { id: 2, type: u16 }, value: { id: 3, type: u16 }, injected: { id: 4, type: bool } }
+  inject:
+    id: 1
+    visibility: test
+    delivery: reliable
+    doc: Holds `value` in place of the ADC for hold_ms (0 means 1,000 ms; at most 60,000). A newer inject replaces it.
+    fields: { value: { id: 1, type: u16 }, hold_ms: { id: 2, type: u16 } }
+    examples: [ { value: 32768 }, { value: 0, hold_ms: 5000 } ]
 ```
 
-- **First driver:** `adc_oneshot` on ADC1. On the C3 that is GPIO0–4; GPIO5 (ADC2) is disabled by default in IDF.
-- **Load at the target scale:** 30 nodes × 50 Hz STATE ≈ 1,500 small UDP frames/s through the AP in router mode. Spike S2 measures this. `report_hz` and `deadband` are the levers.
+- **The range is in calibrated mV.** `value` maps `[min_mv, max_mv]` onto 0..65535, clamped. The hub converts value ↔ mV with the instance's `min_mv`/`max_mv` from the build manifest (`input_simulate {mv}`, [09 §9.4](09-agent-api.md)). The 0.1 draft's `raw_min`/`raw_max` are gone; no firmware shipped it.
+- **Service** (`AnalogInService` over `hal::AnalogSource`): one core timer at `sample_hz`; each sample is filtered (EMA α = 1/4, or the median of the last 3) and mapped. A change is reported when it is at least `deadband` from the last report and at least 1/`report_hz` after it; a change held back by the rate limit is reported when the period ends, so the last value always arrives. `crossed` flips at `threshold ± hysteresis/2`; the first sample sets each threshold's side without an event. `read` answers from the last sample; while an `inject` holds, the ADC is not read and `read.injected` is true. Config is checked at init and by codegen: `max_mv > min_mv`, thresholds strictly ascending.
+- **First driver: `adc_oneshot`** (§7.8): ADC1 only (codegen refuses ADC2 pins, and on the C3 GPIO5; on the C3 that leaves GPIO0–4), 12 dB attenuation, curve-fitting calibration. **Each reading averages 8 conversions:** at the M2-C3 bench one C3 conversion with Wi-Fi on spread 25–60 mV p-p at a steady 1.2 V, more than the default deadband (512 = 19.5 mV over 2,500 mV) and hysteresis band (1024 = 39 mV), and T-ANALOG failed on it; with 8, p10–p90 was about 10 mV and T-ANALOG passed ([04 §4.6](04-boards.md), [11 §11.6](11-roadmap.md) "M2-C3 result"). `full_scale_mv` is 2,500 on the C3 and 3,300 on C6 and S3 at 12 dB (*inferred*; the C3's calibration logs `raw 4095 = 2915 mV` on the bench). It shares one ADC1 unit with the vitals' battery reader.
+- **`report_hz` 20 and `deadband` 512 are provisional** (proposed, awaiting your approval) until S2 (C4) measures the analog load through the real AP; T2-ANALOG-30's pass rule and the fleet-safe defaults come with it ([11 §11.6](11-roadmap.md)).
+- **Load at the target scale** (T2-ANALOG-30 dry run, M2-C3, the AP model; [10 §10.5](10-testing.md)): 30 nodes streaming a 1 s sine at `report_hz` 20 reached 20.0 Hz each, AP `planning_pct` 23.52 %; at 50 Hz (about 1,500 small UDP frames/s) they reached 46 Hz each (0.92 of `report_hz`), `planning_pct` 35.91 %, over C2's 35 % rule. Every STATE was delivered in both. Model output until S2 calibrates the medium. `report_hz` and `deadband` are the levers.
+- **Streaming STATE** (since M2-C3): a capability with a `report_hz` config is streaming. Its STATE is thinned in the hub's event store to 1 row per property per second ([08 §8.7](08-hub.md)); a superseded UDP repeat is dropped for every STATE ([05 §5.8](05-network.md)).
+- **Profile `c3o-analog`** (opt-in, never a pad profile): boot 1, status 2, `analog` on GPIO3 (`bind: gpio.3`) with `thresholds: [16384, 32768, 49152]`. Array config in a profile (`array<u16>`) is checked against the element type and `max`.
 
 ## 7.4 Node descriptor
 
@@ -295,7 +315,7 @@ class LightOutput {                     // gpio, ledc, ws2812…
 
 **Capability base** (`fr_caps/include/fr/cap/capability.hpp`, hand-written):
 - `Capability`: `cap_id()`, `version()`, `type_name()`, `dispatch(cmd_id, args, Reply&)`, `report_all()` (re-report every property, for `get_state`), `encode_traits(Writer&)` (descriptor traits), and `attach(port, name, Sink&)`, which the runtime calls before `init()`.
-- `Sink`, implemented by `fr_net`'s `Net`: `event(port, event_id, priority, fields, at)` and `property(port, prop_id, value, at)` turn emissions into envelopes ([03 §3.3](03-firmware.md)).
+- `Sink`, implemented by `fr_net`'s `Net`: `event(port, event_id, priority, fields, at, ordered = false)` and `property(port, prop_id, value, at)` turn emissions into envelopes ([03 §3.3](03-firmware.md)). Since M2-C3 an `ordered` capability's `emit_*` pass `ordered = true`, and Net stamps EXT `port_seq` and keeps the port on one route (§7.3, [05 §5.8](05-network.md)).
 - `Reply`: the RESULT fields that dispatch fills, into a buffer the caller provides. `Net` sizes it by the link the request came on: `kRealtimeCapacity` 200 B (the realtime budget) over UDP, `kBulkCapacity` 1,445 B over TCP or serial (the 1,470 B bulk MTU less the 18 B header and the 7 B RESULT prefix, so the RESULT envelope fits the MTU and may go BULK). `StaticReply<N>` carries its own buffer.
 
 **L3 interfaces** are generated. This is the shape of `fr::cap::Led`:
@@ -342,7 +362,9 @@ Both are host-testable with a fake HAL and a fake clock.
 | `led_gpio` | `hal::LightOutput` | GPIO (LEDC when dimmable) | `active_level`-aware (the C3 Super Mini LED is active-low); lights fully whenever `on`. `selftest`: drive both levels and read the pad back |
 | `led_ws2812` | `hal::LightOutput` (rgb, dimmable) | `espressif/led_strip` `==3.1.0~1` (the first 3.x that builds on IDF 6.1), RMT, 1 pixel, GRB | `max_brightness` default 64 (`cap_config`). `selftest`: re-send the colour and check that the data line idles low |
 
-Since M2-C1 the HIL fixture adds `fixture_gpio` (open-drain or MOSFET-gate presses from ISR-dispatched esp_timers, any-edge capture in an IRAM ISR) and `fixture_ws2812_rx` (WS2812 decode on RMT RX), both `hal::FixtureLine` for `fr.fixture`, S3 only, bound to bare pins (`binds: gpio`) ([design m2-c1-hil](../design/m2-c1-hil.md) D4).
+Since M2-C1 the HIL fixture adds `fixture_gpio` (open-drain or MOSFET-gate presses from ISR-dispatched esp_timers, any-edge capture in an IRAM ISR) and `fixture_ws2812_rx` (WS2812 decode on RMT RX), both `hal::FixtureLine` for `fr.fixture`, S3 only, bound to bare pins (`binds: gpio`) ([design m2-c1-hil](../design/m2-c1-hil.md) D4). Since M2-C3 `fr.fixture` is 0.2: `fixture_gpio` also drives `drive: pwm` lines, an analog setpoint through an RC on LEDC (low-speed mode, 20 kHz, 11-bit, one timer for both lines, a channel each), set by the new command `set_duty {duty}` (id 4, reliable, idempotent; 1/10,000 of full scale, 0..10,000 mapped to 0..2,048 LEDC steps, 2,048 being fully on) → RESULT `{at_us}`, when the duty was applied. `set_duty` is `UNSUPPORTED` on any other drive and `press` on a pwm line; `release` sets duty 0, and `read.level` is true while the duty is above 0. Duty is 0 at init and on every release path ([09 §9.7](09-agent-api.md); [design m2-c3-inputs](../design/m2-c3-inputs.md) D5).
+
+Since M2-C3 `fr.analog_in` adds **`adc_oneshot`** (`hal::AnalogSource`; esp32c3/c6/s3; `binds: gpio`, a pin of the board's `pins.adc1`, never an ADC2 pin or the `battery` input; `resources: {gpio: 1, adc1_channel: 1}`; `traits: {resolution_bits: 12}`): one ADC1 channel through IDF `adc_oneshot` at 12 dB with curve-fitting calibration, read on the core task, each reading the mean of 8 conversions (§7.3). One ADC1 unit per firmware (`fr::platform::adc1_unit()`), shared with the vitals' battery reader ([05 §5.7](05-network.md)).
 
 Each driver ships `hardware/drivers/<driver>/driver.yaml` (`schema: fractonica/driver@1`), which declares:
 - `id`, `summary`, `implements` and `class` (the C++ class; header `include/fr/drv/<id>.hpp`);

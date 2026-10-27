@@ -33,6 +33,7 @@ ext_tlv:   # type u8 | len u8 | value (LE); types >= 0x80 are critical. The wire
   0x02: { name: trace_id, type: u32 }
   0x03: { name: valid_ms, type: u16 }
   0x04: { name: expire_at_us, type: u32 }
+  0x05: { name: port_seq, type: u16 }      # per-port event counter of an `ordered` capability (design m2-c3-inputs D8)
   0x81: { name: exec_at_us, type: u32, critical: true }
 
 addresses:

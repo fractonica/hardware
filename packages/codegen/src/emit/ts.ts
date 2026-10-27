@@ -771,6 +771,8 @@ export interface CapInfo {
   readonly section: 'standard' | 'system' | 'project';
   /** A test instrument's capability (test_only: true, fr.fixture): not in CATALOG, the SDK or client output. */
   readonly testOnly?: true;
+  /** ordered: true (design m2-c3-inputs D8): its events carry EXT port_seq, and the hub delivers them in that order. */
+  readonly ordered?: true;
   readonly traits: Codec<any>;
   readonly commands: readonly CapCommandInfo[];
   readonly events: readonly CapEventInfo[];
@@ -1650,6 +1652,9 @@ function emitCap(model: Model, cap: Capability, names: Names): GeneratedFile {
   if (cap.testOnly) {
     c.line('testOnly: true,');
   }
+  if (cap.ordered) {
+    c.line('ordered: true,');
+  }
   c.line(`traits: ${traits},`);
   for (const [key, rows] of [
     ['commands', commands],
@@ -1796,6 +1801,8 @@ export interface CatalogCapability {
   readonly name: string;
   readonly version: string;
   readonly section: 'standard' | 'system' | 'project';
+  /** Its events carry EXT port_seq; the hub delivers them in port_seq order (design m2-c3-inputs D8). */
+  readonly ordered?: true;
   readonly summary: string;
   readonly doc?: string;
   readonly maps_to?: Readonly<Record<string, string>>;

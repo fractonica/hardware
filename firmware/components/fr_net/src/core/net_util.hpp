@@ -58,5 +58,9 @@ constexpr uint8_t ttl_both(uint8_t n)
 /** Byte offsets of the relay-mutable header fields (05 §5.6): `flags` (RELAYED) and `ttl`. */
 inline constexpr size_t kOffFlags = 1;
 inline constexpr size_t kOffTtl = 16;
+/** ... and of the fields a STATE repeat is matched by (design m2-c3-inputs D6): `cls`, `kind` and `port`. */
+inline constexpr size_t kOffCls = 2;
+inline constexpr size_t kOffKind = 3;
+inline constexpr size_t kOffPort = 17;
 
 }  // namespace fr::net::util

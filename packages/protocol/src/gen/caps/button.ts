@@ -221,6 +221,7 @@ export const BUTTON_CAP: $.CapInfo = {
   name: 'fr.button',
   version: { major: 1, minor: 0 },
   section: 'standard',
+  ordered: true,
   traits: { fields: [{ name: 'long_press' }, { name: 'multi_press_max', range: [1, 5] }], maxSize: 5, encode: encodeButtonTraits, decode: decodeButtonTraits },
   commands: [
     { id: 1, name: 'inject', delivery: 'reliable', idempotent: false, visibility: 'test', args: { fields: [{ name: 'gesture', members: ButtonGesture }], maxSize: 3, encode: encodeButtonInjectArgs, decode: decodeButtonInjectArgs }, result: null },

@@ -14,9 +14,9 @@ import { join } from 'node:path';
 import { type SimRun, type SimScenario, SimScenarioSchema, simAlias, simAliases } from '@fractonica/protocol';
 import { parse } from 'yaml';
 
-/** The modules a run may name: the bench modules, the churn driver, and the runner's own steps. */
+/** The modules a run may name: the bench modules, the churn driver and T2-ANALOG-30's run, and the runner's own steps. */
 export const BENCH_MODULES = ['t-flood', 't-flood-b', 't-nn', 't-input', 't-ota'] as const;
-export const SIM_MODULES = ['t2-churn'] as const;
+export const SIM_MODULES = ['t2-churn', 't2-analog'] as const;
 /** The runner's own steps (runner.ts): T2-FLOOD-B-30 (c)'s epoch check, and a storm again at another stagger. */
 export const RUNNER_STEPS = ['flood-b-epoch', 'storm'] as const;
 export const RUN_MODULES: readonly string[] = [...BENCH_MODULES, ...SIM_MODULES, ...RUNNER_STEPS];

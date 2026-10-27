@@ -70,7 +70,7 @@ struct RecordingSink final : fr::cap::Sink {
     uint8_t id = 0;
     size_t len = 0;
     fr::TimeUs at = 0;
-    void event(uint8_t p, uint8_t e, fr::cap::Priority, std::span<const uint8_t> f, fr::TimeUs t) override
+    void event(uint8_t p, uint8_t e, fr::cap::Priority, std::span<const uint8_t> f, fr::TimeUs t, bool) override
     {
         port = p;
         id = e;

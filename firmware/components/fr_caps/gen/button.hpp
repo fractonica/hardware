@@ -118,6 +118,7 @@ class Button : public Capability
 public:
     static constexpr uint16_t kId = 0x0001;
     static constexpr Version kVersion{1, 0};
+    static constexpr bool kOrdered = true;  // true: its events carry EXT port_seq (YAML ordered)
 
     // Member ids (the envelope `kind`).
     static constexpr uint8_t kCmdInject = 1;

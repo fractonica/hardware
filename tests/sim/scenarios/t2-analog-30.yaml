@@ -1,0 +1,33 @@
+# T2-ANALOG-30, the dry run (design m2-c3-inputs §8): 30 c3o-analog fleet nodes, each streaming a seeded sine through
+# its fr.analog_in (tests/sim/t2-analog.ts), at the provisional report_hz 20 and then at 50 (the kit reboots every node
+# into the rate). The sine is 1,000 ms, 300..2,200 mV: fast enough that nearly every report period moves the value past
+# the 512 deadband (19.5 mV), so the nodes stream near report_hz (~46-47 and ~19-20 Hz; a 4,000 ms sine left the 50 Hz
+# run at ~39 Hz and the 20 Hz run at ~18 Hz, its slow top and bottom inside the deadband). Each run publishes the rate
+# it reached per node (achieved_hz: reports / wave_s) next to report_hz. Published: STATE delivery share, mirror
+# convergence after the waves stop (the last value within 500 ms), router stale, hub and fleet lag p99, the AP's
+# planning_pct, the event store's rows. Not gated: its pass rule is written after S2 (C4), with the fleet-safe
+# report_hz and deadband.
+schema: fractonica/sim-scenario@1
+id: t2-analog-30
+summary: 30 c3o-analog nodes streaming a seeded sine at report_hz 20, then 50 (dry run until S2)
+nodes:
+  count: 30
+  profile: c3o-analog
+  hb_ms: 1000
+seed: 1
+medium:
+  topology: one_room
+  rssi_dbm: [-85, -45]
+  loss: [0.001, 0.015]
+  rate: { broadcast: 1M, unicast: 1M }
+  collisions: true
+  capture_db: 10
+ap: { channel: 6, uplink_ms: [0.5, 3], downlink_ms: [0.5, 3], udp_loss: 0 }
+runs:
+  - name: stream-20hz
+    run: t2-analog
+    args: [--report-hz, '20', --wave-s, '60', --period-ms, '1000', --lo-mv, '300', --hi-mv, '2200']
+  - name: stream-50hz
+    run: t2-analog
+    args: [--report-hz, '50', --wave-s, '60', --period-ms, '1000', --lo-mv, '300', --hi-mv, '2200']
+published: true

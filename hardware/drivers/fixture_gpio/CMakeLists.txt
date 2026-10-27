@@ -4,7 +4,7 @@
 idf_component_register(SRCS "src/fixture_gpio.cpp"
                        INCLUDE_DIRS "include"
                        REQUIRES fr_core
-                       PRIV_REQUIRES esp_driver_gpio esp_timer
+                       PRIV_REQUIRES esp_driver_gpio esp_driver_ledc esp_timer
                        LDFRAGMENTS "linker.lf")
 
 # Design m2-c1-hil D11 item 1: the panic hook. Every panic lets go of the lines in __wrap_esp_panic_handler

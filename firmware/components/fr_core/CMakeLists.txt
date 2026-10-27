@@ -1,11 +1,13 @@
 # Core task, input slots, timers, fr_worker, L1 HAL contracts, L2 services, boot, the hub link wiring and
 # fr_app_desc (spec 03 §3.3-3.5, 06 §6.8, design c2 §5, c3 §3, c4 §2). src/services is IDF-free: the host
 # suite (firmware/test/host) builds the same files (the services and the node descriptor).
-idf_component_register(SRCS "src/app_desc.cpp"
+idf_component_register(SRCS "src/adc1.cpp"
+                            "src/app_desc.cpp"
                             "src/core.cpp"
                             "src/esp_core.cpp"
                             "src/esp_worker.cpp"
                             "src/input_slot_isr.cpp"
+                            "src/services/analog_in_service.cpp"
                             "src/services/button_service.cpp"
                             "src/services/descriptor.cpp"
                             "src/services/fixture_service.cpp"
@@ -18,9 +20,11 @@ idf_component_register(SRCS "src/app_desc.cpp"
                        # fr_serial and fr_diag sit below fr_core: start() brings them up. fr_net runs the hub
                        # link; it requires fr_core in turn (a cycle IDF links by repeating the libraries), as
                        # fr_ota does (its Kconfig also holds FR_TEST_FAULT_HEALTH, which fr_app_desc reports).
-                       # esp_driver_gpio: the T-LAT test pin (src/test_pin.cpp, design c6 D24).
+                       # esp_driver_gpio: the T-LAT test pin (src/test_pin.cpp, design c6 D24). esp_adc: the shared
+                       # ADC1 unit (src/adc1.cpp, fr/platform/adc1.hpp) and the vitals' vbat_mv (design m2-c3-inputs
+                       # D3, D11); adc_oneshot, the one other includer of fr/platform/adc1.hpp, requires it itself.
                        PRIV_REQUIRES fr_serial fr_diag fr_net fr_ota app_update esp_app_format esp_partition
-                                     esp_system esp_timer espcoredump nvs_flash esp_driver_gpio
+                                     esp_system esp_timer espcoredump nvs_flash esp_driver_gpio esp_adc
                        LDFRAGMENTS "linker.lf")
 
 # fr_app_desc is referenced by nothing: without this the linker would leave app_desc.cpp's object out of

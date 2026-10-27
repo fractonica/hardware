@@ -2,8 +2,8 @@
 //
 // The host suite builds hardware/drivers/fixture_gpio/src/fixture_gpio.cpp and
 // hardware/drivers/fixture_ws2812_rx/src/ws2812_rx.cpp unchanged against idf/ (FR_HOST_SHIM), so FixtureService's
-// tests run the drivers' own press sequencing, stale-alarm checks, readback, edge ring, RMT receive path and
-// reset-path releases instead of a copy of them. Each idf/ header declares only what those two files use, with
+// tests run the drivers' own press sequencing, stale-alarm checks, readback, edge ring, RMT receive path, LEDC pwm
+// lines (M2-C3) and reset-path releases instead of a copy of them. Each idf/ header declares only what those two files use, with
 // IDF v6.1's names and answers; esp_sim.cpp implements them on FakeCore's clock and timers. This header is the
 // tests' side: the net each pin sits on, alarm faults, restarts, panics and boots.
 //
@@ -62,6 +62,7 @@ void set_pull(int gpio, Pull p);
 void set_drive(int gpio, Drive d);
 /** The level the net has now (what an input reads). */
 bool level(int gpio);
+/** The output enable the pad sees: GPIO_ENABLE, or the routed LEDC channel's while OEN_SEL is clear. */
 bool output_enabled(int gpio);
 bool open_drain(int gpio);
 bool pull_up(int gpio);
@@ -122,6 +123,24 @@ size_t shutdown_handlers();
 void limit_shutdown_handlers(size_t free_slots);
 /** ESP_LOGx lines so far at `level` ('E', 'W', 'I', 'D'). */
 int logs(char level);
+
+// ---- LEDC (design m2-c3-inputs §3: fixture_gpio's pwm lines) ----
+// A pin routed to an LEDC channel reads high while that channel's duty is above 0. A CPU reset leaves LEDC running
+// (esp_restart_noos does not reset it on the S3), and the GPIO matrix keeps the pin on it. ledc_channel_config
+// clears OEN_SEL, so GPIO_ENABLE (gpio_ll_output_disable) alone does not turn the output off: only
+// gpio_ll_set_output_enable_ctrl(.., false, ..) or routing SIG_GPIO_OUT_IDX does.
+
+/** The LEDC channel `gpio` outputs through the GPIO matrix; -1 when it outputs its own register (SIG_GPIO_OUT_IDX). */
+int ledc_channel(int gpio);
+/** The duty, in LEDC steps, channel `ch` outputs as of its last ledc_update_duty; -1 when it was never configured. */
+int ledc_duty(int ch);
+/** The timer channel `ch` runs on. */
+int ledc_timer_of(int ch);
+/** Timer `t` as ledc_timer_config last set it: its frequency (0: never configured) and duty resolution in bits. */
+uint32_t ledc_freq_hz(int t);
+int ledc_bits(int t);
+/** ledc_timer_config calls so far. */
+int ledc_timer_configs();
 
 // ---- RMT RX ----
 /** The channel on `gpio` has a receive armed. */

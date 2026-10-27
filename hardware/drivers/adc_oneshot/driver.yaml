@@ -1,0 +1,18 @@
+# Driver manifest (design m2-c3-inputs D3; spec 07 §7.8). `fr gen firmware` validates profiles against it and
+# fills fr::drv::AdcOneshot::Config from the instance's `bind: gpio.<n>`, which must be one of the board's
+# pins.adc1 (never an ADC2 pin, never the battery input).
+schema: fractonica/driver@1
+id: adc_oneshot
+summary: One ADC1 channel through IDF adc_oneshot at 12 dB with curve-fitting calibration; read on the core task.
+implements: hal.AnalogSource
+class: fr::drv::AdcOneshot              # header: include/fr/drv/adc_oneshot.hpp
+targets: [esp32c3, esp32c6, esp32s3]
+binds: gpio                             # a bare pin: bind gpio.<n> (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as AdcOneshot::Config
+  gpio: { type: gpio, from: bind }
+# fr.analog_in traits its service reports: 12-bit ADC1 on C3, C6 and S3. full_scale_mv comes from the target
+# (codegen ADC1_FULL_SCALE_MV: 2500 on the C3, 3300 on C6 and S3 at 12 dB), as resolution_bits()/full_scale_mv() do.
+traits: { resolution_bits: 12 }
+resources: { gpio: 1, adc1_channel: 1 } # one ADC1 channel of the unit it shares with the vbat reader (fr::platform::adc1_unit)
+dependencies: {}

@@ -66,6 +66,8 @@ export const BenchSchema = z.strictObject({
       .string()
       .regex(/^[0-9a-f]{16,64}$/, 'expected a hex fw_id (16 to 64 digits)')
       .nullable(),
+    /** The fixture's 3V3 rail in mV (M2-C3): a pwm line's duty for a setpoint is round(mv / vdd_mv * 10000). */
+    vdd_mv: z.number().int().min(1000).max(5500).default(3300),
   }),
   /** By device id. */
   duts: z.record(z.string().regex(HEX12, 'expected a 12-hex device id'), BenchDutSchema),

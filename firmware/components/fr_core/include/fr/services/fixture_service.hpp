@@ -31,6 +31,11 @@ namespace fr {
  * hub_heard_at: the session flag would outlive a dead hub by the session timeout, and drop_hub_link keeps it set),
  * and within 100 ms of a WELCOME of another hub run than the press's.
  *
+ * PWM setpoints (design m2-c3-inputs §3): a pwm line takes `set_duty` (0..10,000, answered with the time the line
+ * applied it) and refuses `press` (UNSUPPORTED); `release` sets it to duty 0, as the driver's release-all and reset
+ * paths do. Its `level` (the property and `read`) is duty > 0. A setpoint holds until changed or released: the D11
+ * hub rule is about presses, which a DUT's BOOT line feels, and a held voltage on an ADC input is harmless.
+ *
  * Traits: `drive` and `decode`, from the config.
  */
 class FixtureService final : public cap::Fixture, private hal::EdgeSink
@@ -51,6 +56,8 @@ public:
     std::expected<cap::FixturePressResult, Err> press(const cap::FixturePressArgs &args) override;
     Status release() override;
     std::expected<cap::FixtureReadResult, Err> read() override;
+    /** A pwm line's duty (design m2-c3-inputs §3); UNSUPPORTED on any other drive, INVALID_ARGS beyond 10,000. */
+    std::expected<cap::FixtureSetDutyResult, Err> set_duty(const cap::FixtureSetDutyArgs &args) override;
     bool level() const override { return level_; }
     cap::FixtureTraits traits() const override { return traits_; }
 
@@ -61,6 +68,8 @@ private:
     void flush();
     /** µs until the hub check (D11 item 3) is due while a press runs; UINT32_MAX when none runs. */
     uint32_t hub_check_us(TimeUs now) const;
+    /** A pwm line's duty is now `duty` (applied at `at`): `level` follows duty > 0. */
+    void duty_changed(uint16_t duty, TimeUs at);
 
     hal::FixtureLine &line_;
     cap::FixtureConfig cfg_;
@@ -75,6 +84,7 @@ private:
     uint32_t dropped_ = 0;     // since init (read)
     uint32_t bad_frames_ = 0;  // since init (read)
     uint16_t press_epoch_ = 0;  // the hub run the running press came from (LinkInfo::hub_epoch at press())
+    uint16_t duty_ = 0;         // a pwm line's duty as last applied (set_duty, release)
 };
 
 }  // namespace fr

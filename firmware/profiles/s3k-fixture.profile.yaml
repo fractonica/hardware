@@ -19,4 +19,6 @@ caps:
   ch9:    { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.16, config: { pull: up } }
   ch10:   { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.17, config: { pull: up } }
   ch11:   { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.18, config: { pull: up } }
-  # Reserved in the bench, with no instance yet: ch12 gpio.11 and ch13 gpio.12 (M2-C3, drive: pwm), ch14 gpio.21 (EN, nfet_gate only).
+  ch12:   { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.11, config: { drive: pwm } }   # analog setpoints through an RC (M2-C3)
+  ch13:   { cap: fr.fixture, driver: fixture_gpio,      bind: gpio.12, config: { drive: pwm } }
+  # Reserved in the bench, with no instance yet: ch14 gpio.21 (EN, nfet_gate only).

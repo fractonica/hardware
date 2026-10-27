@@ -33,18 +33,20 @@ struct Frame {
     Priority prio;
     std::vector<uint8_t> body;
     fr::TimeUs at;
+    bool ordered = false;
 };
 
 class RecordingSink final : public fr::cap::Sink
 {
 public:
-    void event(uint8_t port, uint8_t event_id, Priority prio, std::span<const uint8_t> fields, fr::TimeUs at) override
+    void event(uint8_t port, uint8_t event_id, Priority prio, std::span<const uint8_t> fields, fr::TimeUs at,
+               bool ordered) override
     {
-        frames.push_back({true, port, event_id, prio, {fields.begin(), fields.end()}, at});
+        frames.push_back({true, port, event_id, prio, {fields.begin(), fields.end()}, at, ordered});
     }
     void property(uint8_t port, uint8_t prop_id, std::span<const uint8_t> value, fr::TimeUs at) override
     {
-        frames.push_back({false, port, prop_id, Priority::normal, {value.begin(), value.end()}, at});
+        frames.push_back({false, port, prop_id, Priority::normal, {value.begin(), value.end()}, at, false});
     }
 
     std::vector<Frame> frames;
@@ -388,6 +390,27 @@ TEST(emit_and_report_go_to_the_sink)
     CHECK_BYTES(sink.frames[1].body, from_hex("08 50"));
     CHECK(sink.frames[2].prio == Priority::normal);
     CHECK_EQ(sink.frames[2].id, fr::cap::Button::kEventLongPress);
+}
+
+TEST(emit_hands_the_sink_the_ordered_flag)
+{
+    // Design m2-c3-inputs D8: fr.button is `ordered: true`, so its events reach the Sink with ordered set (Net
+    // stamps port_seq); fr.led is not.
+    static_assert(fr::cap::Button::kOrdered && !fr::cap::Led::kOrdered);
+    RecordingSink sink;
+    FakeButton button;
+    FakeLed led;
+    button.attach(1, "boot", sink);
+    led.attach(2, "status", sink);
+    button.emit_down({});
+    button.emit_up({.held_ms = 80});
+    led.emit_effect_done({.effect = fr::cap::LedEffect::blink});
+    button.report_pressed(true);
+    REQUIRE_EQ(sink.frames.size(), 4);
+    CHECK(sink.frames[0].ordered);
+    CHECK(sink.frames[1].ordered);
+    CHECK(!sink.frames[2].ordered);
+    CHECK(!sink.frames[3].ordered);  // a STATE is never ordered
 }
 
 TEST(emit_and_report_hand_the_sink_when_it_happened)

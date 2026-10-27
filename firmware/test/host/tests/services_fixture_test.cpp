@@ -1,5 +1,6 @@
 // FixtureService's own logic against FakeCore and a fake fixture line (design m2-c1-hil D3, D4; spec 07 §7.7): config
-// and traits, the refusals it makes before the line, edge batching, `dropped`, `level` and frames. The fake is a plain
+// and traits, the refusals it makes before the line, edge batching, `dropped`, `level` and frames; M2-C3 (design
+// m2-c3-inputs §3) pwm lines: set_duty, its refusals, `level` as duty > 0, release to duty 0. The fake is a plain
 // hold of the segments' total, not the drivers' sequencing: presses, the cap release, BUSY, the D11 hub rule and the
 // reset paths run on the real fixture_gpio over the IDF shim (fixture_gpio_sim_test.cpp), frames on the real
 // fixture_ws2812_rx (fixture_ws2812_rx_sim_test.cpp). Captures go through fixture_gpio's EdgeRing and an input slot, as
@@ -76,10 +77,25 @@ public:
 
     fr::Status release() override
     {
-        if (mode.drive != fr::hal::FixtureDrive::none) {
+        if (mode.drive == fr::hal::FixtureDrive::pwm) {
+            if (fail_release) {
+                return std::unexpected(fr::Err::failed);  // the LEDC write failed: the duty stays
+            }
+            duty = 0;
+        } else if (mode.drive != fr::hal::FixtureDrive::none) {
             end();
         }
         return {};
+    }
+
+    std::expected<uint32_t, fr::Err> set_duty(uint16_t d) override
+    {
+        ++duty_calls;
+        if (mode.drive != fr::hal::FixtureDrive::pwm) {
+            return std::unexpected(fr::Err::unsupported);
+        }
+        duty = d;
+        return low32(core_->now()) - 7;  // applied a little before the call returned
     }
 
     bool pressing() const override { return running_; }
@@ -131,8 +147,11 @@ public:
     fr::hal::FixtureLineMode mode{};
     bool input = true;
     bool fail_init = false;
+    bool fail_release = false;
     int inits = 0;
     int presses = 0;
+    uint16_t duty = 0;  // a pwm line's, as last set
+    int duty_calls = 0;
 
 private:
     void write(bool pressed)
@@ -519,4 +538,124 @@ TEST(fixture_read_reports_the_line_and_its_counts)
     CHECK_EQ(rd->edges, 1u);
     CHECK_EQ(rd->dropped, 0u);
     CHECK_EQ(rd->bad_frames, 0u);
+}
+
+// ---- pwm setpoints (design m2-c3-inputs §3) ----
+
+TEST(fixture_set_duty_on_a_pwm_line)
+{
+    Rig r(config(FixtureDrive::pwm));
+    REQUIRE(r.init());
+    CHECK(r.line.mode.drive == fr::hal::FixtureDrive::pwm);
+    CHECK(r.svc.traits().drive == FixtureDrive::pwm);
+    CHECK(!r.svc.level());  // duty 0 at init
+    CHECK(!r.svc.read()->level);
+    const TimeUs t0 = r.core.now();
+    r.core.advance_ms(1);
+    auto res = r.svc.set_duty({.duty = 5000});
+    REQUIRE(res);
+    CHECK_EQ(res->at_us, low32(r.core.now()) - 7);  // the line's stamp: when the duty was applied
+    CHECK_EQ(r.line.duty, 5000);
+    CHECK(r.svc.level());
+    CHECK(r.svc.read()->level);
+    // `level` goes 1 at the applied stamp; the same setpoint again (idempotent) reports nothing new.
+    CHECK_EQ(levels(r.sink, t0), "1@993");
+    REQUIRE(r.svc.set_duty({.duty = 5000}));
+    REQUIRE(r.svc.set_duty({.duty = 10000}));  // fully on
+    CHECK_EQ(r.line.duty, 10000);
+    CHECK_EQ(levels(r.sink, t0), "1@993");
+    // Beyond full scale: refused before the line.
+    const int calls = r.line.duty_calls;
+    res = r.svc.set_duty({.duty = 10001});
+    REQUIRE(!res);
+    CHECK(res.error() == fr::Err::invalid_args);
+    CHECK_EQ(r.line.duty_calls, calls);
+    // Duty 0 is released: level 0.
+    REQUIRE(r.svc.set_duty({.duty = 0}));
+    CHECK(!r.svc.level());
+    CHECK_EQ(levels(r.sink, t0), "1@993 0@993");
+}
+
+TEST(fixture_release_sets_a_pwm_line_to_duty_0)
+{
+    Rig r(config(FixtureDrive::pwm));
+    REQUIRE(r.init());
+    REQUIRE(r.svc.set_duty({.duty = 2500}));
+    const TimeUs t0 = r.core.now();
+    r.core.advance_ms(10);
+    CHECK(r.svc.release());
+    CHECK_EQ(r.line.duty, 0);
+    CHECK(!r.svc.level());
+    CHECK(!r.svc.read()->level);
+    const auto p = r.sink.properties();
+    REQUIRE(!p.empty());
+    CHECK_EQ(p.back().at - t0, 10'000);  // reported at the release
+    CHECK(r.svc.release());  // idempotent: nothing more reported
+    CHECK_EQ(r.sink.properties().size(), p.size());
+}
+
+TEST(fixture_failed_release_of_a_pwm_line_keeps_its_level)
+{
+    Rig r(config(FixtureDrive::pwm));
+    REQUIRE(r.init());
+    REQUIRE(r.svc.set_duty({.duty = 2500}));
+    const size_t n = r.sink.properties().size();
+    r.line.fail_release = true;
+    const auto st = r.svc.release();
+    REQUIRE(!st);
+    CHECK(st.error() == fr::Err::failed);
+    CHECK_EQ(r.line.duty, 2500);  // the line still outputs it ...
+    CHECK(r.svc.level());         // ... so `level` stays 1 and nothing is reported
+    CHECK(r.svc.read()->level);
+    CHECK_EQ(r.sink.properties().size(), n);
+    r.line.fail_release = false;
+    CHECK(r.svc.release());
+    CHECK(!r.svc.level());
+    CHECK_EQ(r.sink.properties().size(), n + 1);
+}
+
+TEST(fixture_press_refused_on_a_pwm_line)
+{
+    Rig r(config(FixtureDrive::pwm));
+    REQUIRE(r.init());
+    const auto res = r.svc.press(segs({80'000}));
+    REQUIRE(!res);
+    CHECK(res.error() == fr::Err::unsupported);
+    CHECK_EQ(r.line.presses, 0);
+}
+
+TEST(fixture_set_duty_unsupported_on_other_drives)
+{
+    for (const auto &cfg : {config(FixtureDrive::none), config(FixtureDrive::open_drain),
+                            config(FixtureDrive::nfet_gate), config(FixtureDrive::none, FixtureDecode::ws2812)}) {
+        Rig r(cfg);
+        REQUIRE(r.init());
+        const auto res = r.svc.set_duty({.duty = 5000});
+        REQUIRE(!res);
+        CHECK(res.error() == fr::Err::unsupported);
+        CHECK_EQ(r.line.duty_calls, 0);  // refused before the line
+    }
+}
+
+TEST(fixture_set_duty_through_dispatch)
+{
+    Rig r(config(FixtureDrive::pwm));
+    REQUIRE(r.init());
+    auto call = [&](uint16_t duty, fr::cap::StaticReply<> &reply) {
+        uint8_t buf[fr::cap::FixtureSetDutyArgs::kMaxSize];
+        fr::wire::Writer w(buf, sizeof(buf));
+        fr::cap::encode(fr::cap::FixtureSetDutyArgs{.duty = duty}, w);
+        return r.svc.dispatch(fr::cap::Fixture::kCmdSetDuty, w.bytes(), reply);
+    };
+    fr::cap::StaticReply<> ok;
+    REQUIRE(call(7500, ok));
+    const auto res = fr::cap::decode_fixture_set_duty_result(ok.bytes());
+    REQUIRE(res);
+    CHECK_EQ(res->at_us, low32(r.core.now()) - 7);
+    CHECK_EQ(r.line.duty, 7500);
+    fr::cap::StaticReply<> bad;
+    const fr::Status st = call(10001, bad);
+    REQUIRE(!st);
+    CHECK(st.error() == fr::Err::invalid_args);
+    CHECK_EQ(r.line.duty, 7500);
 }

@@ -2,7 +2,8 @@
 // tools/net_node.cpp. The test pin and the Wi-Fi switch are the host's (NodeLinks), the espnow counters its radio's.
 // M2-C2 adds `inject <inst> <gesture>` (fr_diag's run_call: the instance's own inject through the generated
 // dispatch, answered {ok, status, fields}) and `neighbors [from]` (sorted by MAC, paged by `next`), so the bench
-// gates' fleet diag (tests/sim/lib/fleet-diag.ts) gets the shapes the boards give.
+// gates' fleet diag (tests/sim/lib/fleet-diag.ts) gets the shapes the boards give. M2-C3 (design m2-c3-inputs §5,
+// D6) adds the analog form `inject <inst> value=<n> [hold_ms=<n>]` and `stats`' state_repeats_superseded.
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -245,8 +246,10 @@ int NodeDiag::stats(std::string_view args)
                       R"("cmds_scheduled":%u,"exec_late":%u,"exec_cancelled":%u,"exec_late_us_max":%u,"rx_queue_us_max":%u,)",
                       s.cmds, s.cmds_refused, s.hook_drops, s.loss_tx, s.loss_rx, s.cmds_scheduled, s.exec_late,
                       s.exec_cancelled, s.exec_late_us_max, s.rx_queue_us_max) +
-              sformat(R"("dup":%u,"old":%u,"cached_replies":%u,"sessions_lost":%u,"events_dropped":%u,"delivery_failed":%u)",
-                      s.dup, s.old, s.cached_replies, s.sessions_lost, s.events_dropped, s.delivery_failed);
+              sformat(R"("dup":%u,"old":%u,"cached_replies":%u,"sessions_lost":%u,"events_dropped":%u,"delivery_failed":%u,)"
+                      R"("state_repeats_superseded":%u)",
+                      s.dup, s.old, s.cached_replies, s.sessions_lost, s.events_dropped, s.delivery_failed,
+                      s.state_repeats_superseded);
         std::vector<std::string> parts;
         for (const std::string_view name : kSections) {
             parts.push_back(sformat(R"("%.*s":)", static_cast<int>(name.size()), name.data()) + section(name));
@@ -272,17 +275,48 @@ int NodeDiag::stats(std::string_view args)
     return put(out);
 }
 
+namespace {
+
+/** `<key>=<n>` with n <= max (fr_diag's parse_kv). */
+bool parse_kv(std::string_view word, std::string_view key, uint32_t max, uint32_t &out)
+{
+    if (word.size() <= key.size() + 1 || !word.starts_with(key) || word[key.size()] != '=') {
+        return false;
+    }
+    return parse_u32(word.substr(key.size() + 1), 0, max, out);
+}
+
+// fr_diag's (diag.cpp kInjectUsage): the button form takes a gesture, the analog form (m2-c3-inputs §5) a value.
+constexpr const char *kInjectUsage = "usage: inject <inst> <gesture> | inject <inst> value=<0-65535> [hold_ms=<0-60000>]";
+
+}  // namespace
+
 /**
- * `inject <inst> <gesture>` as fr_diag's: the instance's `inject` command through the generated JSON codec and its
- * dispatch, as a CMD from the hub would run it (so the gesture's events and the bindings they fire go through Net
- * like a real press), answered {"ok":true,"status":<ok or the error>,"fields":{...}}.
+ * `inject <inst> <gesture>` and (M2-C3) `inject <inst> value=<n> [hold_ms=<n>]` as fr_diag's: the instance's `inject`
+ * command through the generated JSON codec and its dispatch, as a CMD from the hub would run it (so the gesture's
+ * events and the bindings they fire go through Net like a real press, and a held value reports as a sample would),
+ * answered {"ok":true,"status":<ok or the error>,"fields":{...}}. hold_ms 0 or absent: the service's 1,000 ms.
  */
 int NodeDiag::inject(std::string_view args)
 {
     const std::string_view inst = next_word(args);
-    const std::string_view gesture = next_word(args);
-    if (inst.empty() || gesture.empty() || !args.empty() || gesture.size() >= 24) {
-        return fail("invalid_args", "usage: inject <inst> <gesture>");
+    const std::string_view first = next_word(args);
+    cJSON *json = nullptr;
+    if (first.starts_with("value=")) {
+        uint32_t value = 0;
+        uint32_t hold_ms = 0;
+        const std::string_view second = next_word(args);
+        if (inst.empty() || !parse_kv(first, "value", 65535, value) || (!second.empty() && !parse_kv(second, "hold_ms", 60000, hold_ms)) ||
+            !args.empty()) {
+            return fail("invalid_args", kInjectUsage);
+        }
+        json = cJSON_CreateObject();
+        cJSON_AddNumberToObject(json, "value", value);
+        if (!second.empty()) {
+            cJSON_AddNumberToObject(json, "hold_ms", hold_ms);
+        }
+    } else if (inst.empty() || first.empty() || !args.empty() || first.size() >= 24) {
+        return fail("invalid_args", kInjectUsage);
     }
     const fr::PortEntry *p = nullptr;
     for (const fr::PortEntry &e : ports_) {
@@ -291,11 +325,14 @@ int NodeDiag::inject(std::string_view args)
         }
     }
     if (p == nullptr) {
+        cJSON_Delete(json);
         const std::string detail = sformat("no instance '%.*s'", static_cast<int>(inst.size()), inst.data());
         return fail("not_found", detail.c_str());
     }
-    cJSON *json = cJSON_CreateObject();
-    cJSON_AddStringToObject(json, "gesture", std::string(gesture).c_str());
+    if (json == nullptr) {
+        json = cJSON_CreateObject();
+        cJSON_AddStringToObject(json, "gesture", std::string(first).c_str());
+    }
     uint8_t buf[fr::cap::Reply::kRealtimeCapacity];
     fr::wire::Writer w(buf, sizeof(buf));
     uint8_t cmd_id = 0;

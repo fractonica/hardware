@@ -1,6 +1,7 @@
 capability: fr.button
 id: 0x0001
 version: "1.0"
+ordered: true                   # events carry EXT port_seq; the hub restores their order (design m2-c3-inputs D8)
 summary: Momentary push button with debounced edges and gesture recognition.
 doc: |
   `down` fires on the debounced leading edge and is the lowest-latency signal — bind game

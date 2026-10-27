@@ -37,10 +37,13 @@ cJSON *to_json(const LedSetArgs &v);
 cJSON *to_json(const LedBlinkArgs &v);
 cJSON *to_json(const LedEffectDone &v);
 cJSON *to_json(const AnalogInInjectArgs &v);
+cJSON *to_json(const AnalogInReadResult &v);
 cJSON *to_json(const AnalogInCrossed &v);
 cJSON *to_json(const FixturePressArgs &v);
 cJSON *to_json(const FixturePressResult &v);
 cJSON *to_json(const FixtureReadResult &v);
+cJSON *to_json(const FixtureSetDutyArgs &v);
+cJSON *to_json(const FixtureSetDutyResult &v);
 cJSON *to_json(const FixtureEdges &v);
 cJSON *to_json(const FixtureFrame &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
@@ -368,6 +371,7 @@ cJSON *to_json(const AnalogInTraits &v)
     cJSON *o = cJSON_CreateObject();
     bool ok = o != nullptr;
     ok = ok && add(o, "resolution_bits", json_number(v.resolution_bits));
+    ok = ok && add(o, "full_scale_mv", json_number(v.full_scale_mv));
     return finish(o, ok);
 }
 
@@ -460,6 +464,18 @@ cJSON *to_json(const AnalogInInjectArgs &v)
     cJSON *o = cJSON_CreateObject();
     bool ok = o != nullptr;
     ok = ok && add(o, "value", json_number(v.value));
+    ok = ok && add(o, "hold_ms", json_number(v.hold_ms));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AnalogInReadResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "mv", json_number(v.mv));
+    ok = ok && add(o, "raw", json_number(v.raw));
+    ok = ok && add(o, "value", json_number(v.value));
+    ok = ok && add(o, "injected", json_bool(v.injected));
     return finish(o, ok);
 }
 
@@ -498,6 +514,22 @@ cJSON *to_json(const FixtureReadResult &v)
     ok = ok && add(o, "edges", json_number(v.edges));
     ok = ok && add(o, "dropped", json_number(v.dropped));
     ok = ok && add(o, "bad_frames", json_number(v.bad_frames));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const FixtureSetDutyArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "duty", json_number(v.duty));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const FixtureSetDutyResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "at_us", json_number(v.at_us));
     return finish(o, ok);
 }
 
@@ -750,6 +782,8 @@ Status args_analog_in_inject(const cJSON *obj, fr::wire::Writer &w)
         const std::string_view key = it->string != nullptr ? it->string : "";
         if (key == "value") {
             ok = from_json_uint(it, 0xFFFF, v.value);
+        } else if (key == "hold_ms") {
+            ok = from_json_uint(it, 0xFFFF, v.hold_ms);
         } else {
             ok = false;  // unknown key
         }
@@ -759,6 +793,14 @@ Status args_analog_in_inject(const cJSON *obj, fr::wire::Writer &w)
     }
     encode(v, w);
     return encoded(w);
+}
+
+Status args_analog_in_read(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
 }
 
 Status args_fixture_press(const cJSON *obj, fr::wire::Writer &w)
@@ -795,6 +837,25 @@ Status args_fixture_read(const cJSON *obj)
         return std::unexpected(Err::invalid_args);
     }
     return {};
+}
+
+Status args_fixture_set_duty(const cJSON *obj, fr::wire::Writer &w)
+{
+    FixtureSetDutyArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "duty") {
+            ok = from_json_uint(it, 0xFFFF, v.duty);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
 }
 
 Status args_node_identify(const cJSON *obj, fr::wire::Writer &w)
@@ -1130,12 +1191,16 @@ cJSON *analog_in_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
         switch (id) {
         case AnalogIn::kCmdInject:
             return json_of(decode_analog_in_inject_args(body));
+        case AnalogIn::kCmdRead:
+            return json_empty(body);
         }
         break;
     case fr::wire::kClsResult:
         switch (id) {
         case AnalogIn::kCmdInject:
             return json_empty(body);
+        case AnalogIn::kCmdRead:
+            return json_of(decode_analog_in_read_result(body));
         }
         break;
     case fr::wire::kClsEvent:
@@ -1173,6 +1238,8 @@ cJSON *fixture_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
             return json_empty(body);
         case Fixture::kCmdRead:
             return json_empty(body);
+        case Fixture::kCmdSetDuty:
+            return json_of(decode_fixture_set_duty_args(body));
         }
         break;
     case fr::wire::kClsResult:
@@ -1183,6 +1250,8 @@ cJSON *fixture_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
             return json_empty(body);
         case Fixture::kCmdRead:
             return json_of(decode_fixture_read_result(body));
+        case Fixture::kCmdSetDuty:
+            return json_of(decode_fixture_set_duty_result(body));
         }
         break;
     case fr::wire::kClsEvent:
@@ -1392,6 +1461,9 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
         if (name == "inject") {
             id = AnalogIn::kCmdInject;
             s = args_analog_in_inject(obj, w);
+        } else if (name == "read") {
+            id = AnalogIn::kCmdRead;
+            s = args_analog_in_read(obj);
         }
         break;
     case Fixture::kId:
@@ -1404,6 +1476,9 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
         } else if (name == "read") {
             id = Fixture::kCmdRead;
             s = args_fixture_read(obj);
+        } else if (name == "set_duty") {
+            id = Fixture::kCmdSetDuty;
+            s = args_fixture_set_duty(obj, w);
         }
         break;
     case Node::kId:

@@ -1,5 +1,6 @@
 // fr_net_node's stdin command table and state printers (design m2-c2 D2), moved out of tools/net_node.cpp with the
 // same parsing (a command is matched by its prefix, `arg` is the number after its first space) and the same lines.
+// M2-C3 (design m2-c3-inputs §5, §8): a c3o-analog node's `analog` lines and `inject <inst> value=<n>`.
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -86,6 +87,52 @@ bool msg(NodeCtx &ctx, std::string_view args, bool reliable)
     return static_cast<bool>(st);
 }
 
+/** `{"ev":"analog",...}`: a c3o-analog node's input (WaveAnalog) and its service, the STATEs it reported this boot. */
+void print_analog(NodeCtx &ctx)
+{
+    const WaveAnalog &w = *ctx.wave;
+    const char *mode = w.mode() == WaveAnalog::Mode::sine ? "wave" : w.mode() == WaveAnalog::Mode::ramp ? "ramp" : "hold";
+    const auto r = ctx.analog != nullptr ? ctx.analog->read() : std::expected<fr::cap::AnalogInReadResult, fr::Err>{};
+    ctx.out.emit(R"({"ev":"analog","mode":"%s","period_ms":%u,"lo_mv":%u,"hi_mv":%u,"phase":%.4f,"mv":%u,"value":%u,)"
+                 R"("injected":%s,"reports":%u,"report_hz":%u,"reads":%u})",
+                 mode, w.period_ms(), unsigned{w.lo_mv()}, unsigned{w.hi_mv()}, w.phase(), unsigned{w.mv_at(ctx.core.now())},
+                 ctx.analog != nullptr ? unsigned{ctx.analog->value()} : 0u, r && r->injected ? "true" : "false",
+                 ctx.analog_sink != nullptr ? ctx.analog_sink->states() : 0u, unsigned{ctx.spec.analog_report_hz}, w.reads());
+}
+
+/**
+ * `analog`, `analog hold <mv>`, `analog wave|ramp <period_ms> <lo_mv> <hi_mv>` (design m2-c3-inputs §8): the input
+ * of a c3o-analog node, answered with its `analog` line; false without one or for bad numbers.
+ */
+bool analog(NodeCtx &ctx, std::string_view args)
+{
+    if (ctx.wave == nullptr) {
+        return false;
+    }
+    const std::string_view what = next_word(args);
+    bool ok = true;
+    if (what == "hold") {
+        uint32_t mv = 0;
+        ok = parse_u32(next_word(args), 0, WaveAnalog::kMaxMv, mv) && args.empty();
+        if (ok) {
+            ctx.wave->hold(static_cast<uint16_t>(mv));
+        }
+    } else if (what == "wave" || what == "ramp") {
+        uint32_t period = 0;
+        uint32_t lo = 0;
+        uint32_t hi = 0;
+        ok = parse_u32(next_word(args), WaveAnalog::kMinPeriodMs, WaveAnalog::kMaxPeriodMs, period) &&
+             parse_u32(next_word(args), 0, WaveAnalog::kMaxMv, lo) && parse_u32(next_word(args), 0, WaveAnalog::kMaxMv, hi) &&
+             args.empty() &&
+             ctx.wave->wave(what == "wave" ? WaveAnalog::Mode::sine : WaveAnalog::Mode::ramp, period, static_cast<uint16_t>(lo),
+                            static_cast<uint16_t>(hi));
+    } else if (!what.empty()) {
+        ok = false;
+    }
+    print_analog(ctx);
+    return ok;
+}
+
 /** `log <E|W|I|D|V> <tag> <text…>` (design m2-c2 D20): one line through the node's log source. */
 bool log_line(NodeCtx &ctx, std::string_view args)
 {
@@ -163,6 +210,14 @@ Commands::Result Commands::run(NodeCtx &ctx, std::string_view line, double pace)
         print_neighbors(ctx.out, ctx.net, ctx.core.now());
     } else if (cmd == "directory") {
         print_directory(ctx.out, ctx.net);
+    } else if (cmd.starts_with("inject ") && cmd.find(" value=") != std::string::npos) {
+        // `inject <inst> value=<n> [hold_ms=<n>]` (design m2-c3-inputs §5): an fr.analog_in instance's inject, as
+        // fr_diag's line runs it (NodeDiag::inject: the generated codec and dispatch).
+        const auto a = ctx.diag.exec({.line = std::string_view(cmd)});
+        r.ok = a && a->json.find(R"("status":"ok")") != std::string_view::npos;
+        ctx.out.emit(R"({"ev":"inject","ok":%s})", r.ok ? "true" : "false");
+    } else if (cmd == "analog" || cmd.starts_with("analog ")) {
+        r.ok = analog(ctx, std::string_view(cmd).substr(6));
     } else if (cmd.starts_with("inject ")) {
         // A gesture on the boot button, as the hub's input_simulate: its events, and the bindings they fire, go
         // through Net like a real press (T-NN without a hub). The fixture has none.
@@ -192,12 +247,12 @@ void print_state(Out &out, const fr::net::Net &net, const AirCounters *air, uint
     const auto &ser = s.link(LinkKind::serial);
     out.emit(R"({"ev":"state","serial_session":%s,"serial_tx":%u,"serial_rx":%u,"session":%s,"udp_ok":%s,"time_synced":%s,"hub_epoch":%u,"tcp_tx":%u,"tcp_rx":%u,"udp_tx":%u,)"
              R"("udp_retries":%u,"rx_drop":%u,"cmds":%u,"dup":%u,"old":%u,"cached_replies":%u,"sessions_lost":%u,)"
-             R"("events_dropped":%u,"delivery_failed":%u,"udp_blocked":%s,"ip_blocked":%s,"hook_drops":%u,%s,%s,)"
+             R"("events_dropped":%u,"delivery_failed":%u,"state_repeats_superseded":%u,"udp_blocked":%s,"ip_blocked":%s,"hook_drops":%u,%s,%s,)"
              R"("health":%u,"hub_session":%s})",
              ser.session ? "true" : "false", ser.tx, ser.rx, tcp.session ? "true" : "false", udp.udp_ok ? "true" : "false",
              s.time_synced() ? "true" : "false", unsigned{s.hub_epoch}, tcp.tx, tcp.rx, udp.tx, udp.retries,
              tcp.rx_drop + udp.rx_drop, s.cmds, s.dup, s.old, s.cached_replies, s.sessions_lost, s.events_dropped,
-             s.delivery_failed, s.udp_blocked ? "true" : "false", s.ip_blocked ? "true" : "false", s.hook_drops,
+             s.delivery_failed, s.state_repeats_superseded, s.udp_blocked ? "true" : "false", s.ip_blocked ? "true" : "false", s.hook_drops,
              c5_state(net, air).c_str(), c6_state(s).c_str(), health, s.hub_link() ? "true" : "false");
 }
 

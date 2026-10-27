@@ -6,6 +6,8 @@
 // adds each instance's traits to the manifest and the board's T-LAT test_pin to sdkconfig.board. M2-C1
 // (design m2-c1-hil D5) adds bare-pin `gpio.<n>` binds for the HIL fixture's lines, the profile's `role`,
 // `net.radio` and `test_pin: none`, the drivers' own `sdkconfig` lines, and fr_core's 16-instance limit.
+// M2-C3 (design m2-c3-inputs D3, D4, D5, D11) adds array config from a profile, fr.analog_in (its service, the
+// ADC1 pin rules and the adc1_channel budget), fixture pwm lines, and the board's `battery` (kBattery).
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -44,17 +46,39 @@ export interface ServiceFacts {
   timers: number;
   /**
    * Traits the service derives from its effective config, as its constructor does (design c6 D13): they win
-   * over the capability's trait defaults and the driver's `traits:`.
+   * over the capability's trait defaults and the driver's `traits:`. `ctx` is what else the service learns from
+   * its driver at init: the target, and the driver.yaml `traits:` (design m2-c3-inputs D4: full_scale_mv).
    */
-  traits?: (config: Readonly<Record<string, JsonScalar>>) => Record<string, JsonScalar>;
+  traits?: (config: Readonly<Record<string, CapValue>>, ctx: TraitContext) => Record<string, JsonScalar>;
 }
+
+/** What ServiceFacts.traits knows beyond the config: the board's IDF target and the driver's declared traits. */
+export interface TraitContext {
+  target: string;
+  driverTraits: Readonly<Record<string, JsonScalar>>;
+}
+
+/**
+ * A capability config value from a profile: a JSON scalar, or a list of integers for an `array<T>` entry of an
+ * integer type (design m2-c3-inputs D4: fr.analog_in thresholds).
+ */
+export type CapValue = JsonScalar | number[];
+
+/**
+ * The top of ADC1's range at 12 dB attenuation, per target (design m2-c3-inputs D3; *inferred* from the IDF
+ * adc_oneshot docs, and logged by adc_oneshot from its calibration scheme at init): fr.analog_in's
+ * full_scale_mv when its driver does not declare one.
+ */
+export const ADC1_FULL_SCALE_MV: Readonly<Record<string, number>> = { esp32c3: 2500, esp32c6: 3300, esp32s3: 3300 };
 
 /**
  * The L2 service behind each capability (design c2 §5): ButtonService takes three timers (lockout, long press,
  * click gap) and derives both of its traits from config; LedService takes one (effect phases) and reports what
  * its driver's features() say, which driver.yaml `traits:` declares. FixtureService (design m2-c1-hil D3, D5)
  * takes one (the edges batch flush; the press esp_timers are its driver's own) and derives drive and decode
- * from config. A capability without an entry has no primitive-driver path yet.
+ * from config. AnalogInService (design m2-c3-inputs D2, D4) takes one (the sample timer) and reports its
+ * driver's resolution_bits (driver.yaml `traits:`) and full_scale_mv (the driver's, else ADC1's on the target).
+ * A capability without an entry has no primitive-driver path yet.
  */
 export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
   'fr.button': {
@@ -75,16 +99,51 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
     timers: 1,
     traits: (c) => ({ drive: String(c.drive ?? 'none'), decode: String(c.decode ?? 'level') }),
   },
+  'fr.analog_in': {
+    implements: 'hal.AnalogSource',
+    service: 'fr::AnalogInService',
+    header: 'fr/services/analog_in_service.hpp',
+    timers: 1,
+    traits: (_c, { target, driverTraits }): Record<string, JsonScalar> => {
+      const mv = driverTraits.full_scale_mv ?? ADC1_FULL_SCALE_MV[target];
+      return mv === undefined ? {} : { full_scale_mv: mv };
+    },
+  },
 };
 
 /** The HIL fixture's capability: its lines' `drive` decides the power-up glitch rule (design m2-c1-hil D5). */
 const FIXTURE_CAP = 'fr.fixture';
 
-/** Fixture drives that pull a line at all; neither may sit on a pin that glitches at power-up (D11 item 7). */
-const DRIVING = ['open_drain', 'nfet_gate'];
+/**
+ * Fixture drives that drive a line at all; none may sit on a pin that glitches at power-up (D11 item 7), except
+ * the ones GLITCH_EXEMPT_DRIVES names.
+ */
+const DRIVING = ['open_drain', 'nfet_gate', 'pwm'];
+
+/**
+ * Fixture drives the glitch-pin rule exempts (design m2-c3-inputs §3): a pwm line drives too, but only an analog
+ * input through its RC, where a 60 µs glitch arrives as a few mV for microseconds. The bench check requires the rc.
+ */
+export const GLITCH_EXEMPT_DRIVES: readonly string[] = ['pwm'];
+
+/** fr.analog_in: its config's cross-field rules and its ADC1 pin rules (design m2-c3-inputs D3, D4). */
+const ANALOG_CAP = 'fr.analog_in';
+
+/** The board resource an ADC1 channel draws (design m2-c3-inputs D3): a driver that declares it binds ADC1 pins only. */
+const ADC1_RESOURCE = 'adc1_channel';
+
+/** ADC2 pins of targets whose ADC1 list could be mistaken for them: the C3's GPIO5 is ADC2_CH0 (design D3). */
+const ADC2_PINS: Readonly<Record<string, readonly number[]>> = { esp32c3: [5] };
 
 /** The fr.fixture driver that decodes WS2812 (RMT RX); fixture_gpio takes every other line (design m2-c1-hil D4). */
 const FIXTURE_RMT_DRIVER = 'fixture_ws2812_rx';
+
+/**
+ * What a fixture_gpio pwm line draws beyond driver.yaml's `resources`, which cannot depend on the config (design
+ * m2-c3-inputs §3): an LEDC channel each, and one LEDC timer that every pwm line of the firmware shares.
+ */
+const FIXTURE_GPIO_DRIVER = 'fixture_gpio';
+const PWM_LINE_RESOURCES = { channel: 'ledc_channels', timer: 'ledc_timers' } as const;
 
 /**
  * The fr.fixture config the drivers refuse at init, so that port would report FAILED at boot (design m2-c1-hil
@@ -92,7 +151,7 @@ const FIXTURE_RMT_DRIVER = 'fixture_ws2812_rx';
  * (fixture_gpio.cpp init); fixture_ws2812_rx returns invalid_args unless it is decode ws2812, drive none and
  * no pull (ws2812_rx.cpp init). Each problem names the config key it is about.
  */
-function fixtureLineProblems(driver: string, config: Record<string, JsonScalar>): [key: 'drive' | 'decode' | 'pull', message: string][] {
+function fixtureLineProblems(driver: string, config: Record<string, CapValue>): [key: 'drive' | 'decode' | 'pull', message: string][] {
   const drive = String(config.drive ?? 'none');
   const decode = String(config.decode ?? 'level');
   const pull = String(config.pull ?? 'none');
@@ -114,6 +173,31 @@ function fixtureLineProblems(driver: string, config: Record<string, JsonScalar>)
   }
   if (pull !== 'none' && drive !== 'none') {
     out.push(['pull', `pull: ${pull} is only for an input line (drive: none); a line with drive ${drive} has no pulls`]);
+  }
+  // A pwm line (design m2-c3-inputs §3) is an LEDC output: no edge capture, so nothing to decode.
+  if (drive === 'pwm' && decode !== 'level') {
+    out.push(['decode', `a drive: pwm line decodes nothing: it needs decode: level, not ${decode}`]);
+  }
+  return out;
+}
+
+/**
+ * fr.analog_in config AnalogInService refuses at init with invalid_config (design m2-c3-inputs D2, D4): the mV
+ * range must not be empty and the thresholds must be strictly ascending. Each problem names its config key.
+ */
+function analogInProblems(config: Record<string, CapValue>): [key: 'max_mv' | 'thresholds', message: string][] {
+  const out: [key: 'max_mv' | 'thresholds', message: string][] = [];
+  const min = Number(config.min_mv ?? 0);
+  const max = Number(config.max_mv ?? 0);
+  if (max <= min) {
+    out.push(['max_mv', `max_mv ${max} must exceed min_mv ${min}`]);
+  }
+  const t = config.thresholds;
+  if (Array.isArray(t)) {
+    const i = t.findIndex((v, n) => n > 0 && v <= t[n - 1]);
+    if (i > 0) {
+      out.push(['thresholds', `thresholds must be strictly ascending: ${t[i]} follows ${t[i - 1]}`]);
+    }
   }
   return out;
 }
@@ -169,7 +253,8 @@ const RawProfile = z.strictObject({
       driver: z.string(),
       // A board entry, or a bare pin for a driver that binds `gpio` (design m2-c1-hil D5: the fixture lines).
       bind: z.string().regex(/^([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|gpio\.\d{1,2})$/, 'expected <section>.<entry>, e.g. leds.status, or gpio.<n>'),
-      config: z.record(z.string(), jsonScalar).optional(),
+      // A list of integers sets an array<T> capability config entry (design m2-c3-inputs D4).
+      config: z.record(z.string(), z.union([jsonScalar, z.array(z.number())])).optional(),
     }),
   ),
 });
@@ -203,6 +288,8 @@ const RawBoard = z.looseObject({
     free: z.array(int).optional(),
     /** Pins that drive a level for about 60 µs at chip power-up (design m2-c1-hil D5, D11): no open_drain or nfet_gate line. */
     power_up_glitch: z.array(int).optional(),
+    /** Free ADC1 pins (design m2-c3-inputs D3): the only ones a driver drawing an adc1_channel may bind. */
+    adc1: z.array(int).optional(),
   }),
   headers: RawHeaders.optional(),
   /** The UART TX the ROM log prints on at every boot (design m2-c1-hil D5); the bench never wires it. */
@@ -213,6 +300,13 @@ const RawBoard = z.looseObject({
   rf: z.looseObject({ max_tx_power_qdbm: int.min(8).max(84).nullable().optional() }).optional(),
   /** The T-LAT loopback pin (04 §4.3, design c6 D24): CONFIG_FR_TEST_PIN; none without it. */
   test_pin: gpioNum.nullable().optional(),
+  /**
+   * The battery input (design m2-c3-inputs D11): an ADC1 pin behind a divider (`divider` = battery mV / pin mV),
+   * and `low_mv`, below which HEARTBEAT says low_batt. Rendered as kBattery; the pin must stay in pins.reserved.
+   */
+  battery: z
+    .strictObject({ gpio: gpioNum, divider: z.number().min(1).max(65), low_mv: int.min(0).max(0xffff) })
+    .optional(),
 });
 type RawBoard = z.infer<typeof RawBoard>;
 export type BoardManifest = RawBoard;
@@ -300,7 +394,7 @@ export interface ManifestCap {
   version: string;
   driver: string;
   /** Effective service config: capability YAML defaults, then driver cap_config, then the profile. */
-  config: Record<string, JsonScalar>;
+  config: Record<string, CapValue>;
   /**
    * Every trait of the capability as the firmware's descriptor reports it (design c6 D13): its default (or zero
    * value), then the driver's `traits:`, then what the service derives from `config`.
@@ -659,8 +753,30 @@ function checkDriverValue(f: RawDriverField, v: unknown): string | null {
 
 // ---- capability config ----
 
-function checkCapValue(e: ConfigEntry, v: unknown): string | null {
+/** C++ element types of the array<T> config a profile may set (integers only, design m2-c3-inputs D4). */
+const ARRAY_ELEMENT_CPP: Readonly<Record<string, string>> = { u8: 'uint8_t', u16: 'uint16_t', u32: 'uint32_t', i8: 'int8_t', i16: 'int16_t', i32: 'int32_t' };
+
+function checkCapValue(e: Pick<ConfigEntry, 'type' | 'typeName' | 'range'>, v: unknown): string | null {
   const t = e.type;
+  if (t.kind === 'array') {
+    const el = t.element;
+    if (el.kind !== 'scalar' || ARRAY_ELEMENT_CPP[el.name] === undefined) {
+      return `${e.typeName} config is not settable from a profile`;
+    }
+    if (!Array.isArray(v)) {
+      return `expected a list of ${el.name} (at most ${t.max}), got ${JSON.stringify(v)}`;
+    }
+    if (v.length > t.max) {
+      return `${v.length} elements, but ${e.typeName} takes at most ${t.max}`;
+    }
+    for (const [i, x] of v.entries()) {
+      const p = checkCapValue({ type: { kind: 'scalar', name: el.name }, typeName: el.name }, x);
+      if (p) {
+        return `element ${i}: ${p}`;
+      }
+    }
+    return null;
+  }
   if (t.kind === 'enum') {
     return typeof v === 'string' && t.def.members.some((m) => m.name === v) ? null : `expected one of ${t.def.members.map((m) => m.name).join(', ')}, got ${JSON.stringify(v)}`;
   }
@@ -696,8 +812,16 @@ function zeroValue(f: Field): JsonScalar {
 }
 
 /** C++ literal for a capability config value. */
-function capLiteral(cap: Capability, e: ConfigEntry, v: JsonScalar): string {
+function capLiteral(cap: Capability, e: ConfigEntry, v: CapValue): string {
   const t = e.type;
+  if (t.kind === 'array') {
+    // codec_support.hpp's Array has a constexpr initializer_list constructor; checkCapValue took only integers.
+    const el = t.element.kind === 'scalar' ? ARRAY_ELEMENT_CPP[t.element.name] : undefined;
+    return `fr::proto::Array<${el}, ${t.max}>{${(v as number[]).join(', ')}}`;
+  }
+  if (Array.isArray(v)) {
+    throw new Error(`capLiteral: ${e.name} is not an array`); // checkCapValue refused it
+  }
   if (t.kind === 'enum') {
     return `fr::cap::${cap.pascalName}${t.def.name}::${cppIdent(String(v))}`;
   }
@@ -723,7 +847,7 @@ interface ResolvedInstance {
   /** Driver Config fields in driver.yaml order. */
   driverConfig: { name: string; field: RawDriverField; value: JsonScalar }[];
   /** Capability config entries that have a value, in YAML order. */
-  capConfig: { entry: ConfigEntry; value: JsonScalar }[];
+  capConfig: { entry: ConfigEntry; value: CapValue }[];
   /** Every capability trait, as ManifestCap.traits. */
   traits: Record<string, JsonScalar>;
   pins: number[];
@@ -873,9 +997,16 @@ function checkProfile(inp: Inputs, issues: Issues): void {
   }
 }
 
-/** The header facts (design m2-c1-hil D5): each GPIO on one header position at most, and en_access names an EN. */
+/**
+ * The header facts (design m2-c1-hil D5): each GPIO on one header position at most, and en_access names an EN.
+ * The battery input (design m2-c3-inputs D11) stays in pins.reserved, so no instance can claim it.
+ */
 function checkBoardFacts(board: RawBoard, issues: Issues): void {
   const bf = boardFile(board.id);
+  const bat = board.battery?.gpio;
+  if (bat !== undefined && !Object.values(board.pins.reserved ?? {}).some((list) => list.includes(bat))) {
+    issues.add(bf, ['battery', 'gpio'], `battery GPIO${bat} must be in pins.reserved, so no instance claims it`);
+  }
   const seen = new Map<number, string>();
   for (const [name, list] of Object.entries(board.headers ?? {})) {
     if (!Array.isArray(list)) {
@@ -1046,7 +1177,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         ok = false;
         continue;
       }
-      capConfig.push({ entry: e, value: value as JsonScalar });
+      capConfig.push({ entry: e, value: value as CapValue });
     }
     for (const key of Object.keys(driver.cap_config ?? {})) {
       if (cap && !cap.config.some((e) => e.name === key)) {
@@ -1074,13 +1205,21 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       traits[key] = value;
     }
     if (service?.traits) {
-      Object.assign(traits, service.traits(Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value]))));
+      const ctx: TraitContext = { target: board.idf_target, driverTraits: ownTraits ?? {} };
+      Object.assign(traits, service.traits(Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value])), ctx));
     }
     // A fixture line's drive, decode and pull must be ones its driver takes (design m2-c1-hil D4). The
     // instance is still well formed, so its pins are checked below as well.
     if (c.cap === FIXTURE_CAP && cap && driver.implements === service?.implements) {
       for (const [key, message] of fixtureLineProblems(driver.id, Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value])))) {
         issues.add(pf, settings[key] !== undefined ? [...at, 'config', key] : [...at, 'driver'], message);
+      }
+    }
+    // fr.analog_in's cross-field rules (design m2-c3-inputs D4): its service would refuse them at init.
+    if (c.cap === ANALOG_CAP && cap) {
+      for (const [key, message] of analogInProblems(Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value])))) {
+        const at2 = settings[key] !== undefined ? [...at, 'config', key] : key === 'max_mv' && settings.min_mv !== undefined ? [...at, 'config', 'min_mv'] : at;
+        issues.add(pf, at2, message);
       }
     }
 
@@ -1091,13 +1230,18 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
 
   // Pins: never a reserved pin, never two instances on one pin, a warning for strapping pins. A bare-pin bind
   // (design m2-c1-hil D5) must be in pins.free and is refused on a strapping pin, and a fixture line that
-  // drives (open_drain, nfet_gate) never sits on a pin that glitches at power-up (D11 item 7).
+  // drives (open_drain, nfet_gate) never sits on a pin that glitches at power-up (D11 item 7); pwm is exempt
+  // (GLITCH_EXEMPT_DRIVES). A driver drawing an adc1_channel binds one of the board's pins.adc1, never an ADC2
+  // pin nor the battery input (design m2-c3-inputs D3, D11).
   const reserved = new Map<number, string>();
   for (const [group, list] of Object.entries(board.pins.reserved ?? {})) {
     for (const p of list) {
       reserved.set(p, group);
     }
   }
+  const adc1 = new Set(board.pins.adc1 ?? []);
+  const adc2 = ADC2_PINS[board.idf_target] ?? [];
+  const batteryPin = board.battery?.gpio;
   const strapping = new Set(board.pins.strapping ?? []);
   const glitch = new Set(board.pins.power_up_glitch ?? []);
   const claimed = new Map<number, string>();
@@ -1123,8 +1267,17 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       if (bare && group === undefined && !strapping.has(pin) && !(board.pins.free ?? []).includes(pin)) {
         issues.add(pf, where, `GPIO${pin} (${inst.bind}) is not in pins.free of ${board.id}`);
       }
-      if (typeof drive === 'string' && DRIVING.includes(drive) && glitch.has(pin)) {
+      if (typeof drive === 'string' && DRIVING.includes(drive) && !GLITCH_EXEMPT_DRIVES.includes(drive) && glitch.has(pin)) {
         issues.add(pf, where, `GPIO${pin} (${inst.bind}) drives a level at power-up (pins.power_up_glitch), so no line with drive ${drive} may use it`);
+      }
+      if ((inst.driver.resources?.[ADC1_RESOURCE] ?? 0) > 0) {
+        if (pin === batteryPin) {
+          issues.add(pf, where, `GPIO${pin} (${inst.bind}) is the battery input of ${board.id} (battery.gpio); driver ${inst.driver.id} may not sample it`);
+        } else if (adc2.includes(pin)) {
+          issues.add(pf, where, `GPIO${pin} (${inst.bind}) is an ADC2 pin on ${board.idf_target}; driver ${inst.driver.id} samples ADC1 only`);
+        } else if (!adc1.has(pin)) {
+          issues.add(pf, where, `GPIO${pin} (${inst.bind}) is not in pins.adc1 of ${board.id}, which driver ${inst.driver.id} needs (ADC1 only)`);
+        }
       }
     }
   }
@@ -1135,9 +1288,14 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
 
   // Peripheral budgets (RMT, LEDC, ...) against the board's resources, fr_core's pools against CORE_POOLS.
   const need = new Map<string, { total: number; users: string[] }>();
+  const pwmLines: string[] = [];
   for (const inst of out) {
     const uses = { ...inst.driver.resources };
     uses.timer = (uses.timer ?? 0) + inst.service.timers;
+    if (inst.driver.id === FIXTURE_GPIO_DRIVER && inst.capConfig.find((c) => c.entry.name === 'drive')?.value === 'pwm') {
+      uses[PWM_LINE_RESOURCES.channel] = (uses[PWM_LINE_RESOURCES.channel] ?? 0) + 1;
+      pwmLines.push(inst.name);
+    }
     for (const [res, n] of Object.entries(uses)) {
       if (res === PIN_RESOURCE || n === 0) {
         continue;
@@ -1147,6 +1305,12 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       r.users.push(inst.name);
       need.set(res, r);
     }
+  }
+  if (pwmLines.length > 0) {
+    const t = need.get(PWM_LINE_RESOURCES.timer) ?? { total: 0, users: [] };
+    t.total += 1; // one LEDC timer shared by every pwm line, on top of what other drivers declare
+    t.users.push(...pwmLines);
+    need.set(PWM_LINE_RESOURCES.timer, t);
   }
   for (const [res, r] of [...need.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     const pool = CORE_POOLS[res];
@@ -1177,6 +1341,24 @@ function emitComponentCmake(profile: string, insts: ResolvedInstance[]): string 
   ].join('\n');
 }
 
+/**
+ * kBattery (design m2-c3-inputs D11): the board's battery input for the vitals' vbat_mv. Every profile gets it;
+ * a board without `battery` has kHasBattery false and gpio -1, and its HEARTBEAT keeps vbat_mv 0 (not measured).
+ */
+function emitBattery(board: RawBoard): string[] {
+  const b = board.battery;
+  return [
+    '/** The battery input (board `battery`): battery mV = pin mV * divider_milli / 1000; low_batt below low_mv. */',
+    'struct Battery {',
+    '    int8_t gpio;  // -1: the board has none',
+    '    uint16_t divider_milli;',
+    '    uint16_t low_mv;',
+    '};',
+    `inline constexpr bool kHasBattery = ${b ? 'true' : 'false'};`,
+    `inline constexpr Battery kBattery{${b ? `${b.gpio}, ${Math.round(b.divider * 1000)}, ${b.low_mv}` : '-1, 0, 0'}};`,
+  ];
+}
+
 function emitBoardHpp(inp: Inputs, insts: ResolvedInstance[]): string {
   const services = [...new Set(insts.map((i) => i.service.header))].sort();
   return [
@@ -1201,6 +1383,8 @@ function emitBoardHpp(inp: Inputs, insts: ResolvedInstance[]): string {
     `inline constexpr const char *kBoard = "${inp.board.id}";`,
     `inline constexpr const char *kTarget = "${inp.board.idf_target}";`,
     `inline constexpr size_t kInstanceCount = ${insts.length};`,
+    '',
+    ...emitBattery(inp.board),
     '',
     '/** One capability instance of the profile (the system instances node, ota and diag are not listed). */',
     'struct Instance {',

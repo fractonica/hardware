@@ -5,7 +5,8 @@
 // glitch and strapping rules (with each strap's level, pins.strapping_levels), and the fixture profile's
 // role, radio and test pin. One exception is allowed and printed as a note: an input tap (no drive, no pull)
 // on a fixture glitch pin may reach a DUT strap that needs high or no level and is not its BOOT strap (D12).
-// The hub reads the same file with @fractonica/host readBench.
+// M2-C3 (design m2-c3-inputs §3) adds the analog lines: a fixture_gpio channel with drive pwm, an rc, and the
+// glitch-pin exemption that rc earns (glitchExempt). The hub reads the same file with @fractonica/host readBench.
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -46,8 +47,16 @@ export interface BenchesCheck {
 /** A line's fixture drive: the wired channel's config, or for a reserved line what its role and `via` imply. */
 type Drive = 'none' | 'open_drain' | 'nfet_gate' | 'pwm';
 
-/** Drives that pull the line; neither may sit on a fixture pin that glitches at power-up (D11 item 7). */
-const DRIVING: readonly Drive[] = ['open_drain', 'nfet_gate'];
+/** Drives that drive the line; none may sit on a fixture pin that glitches at power-up (D11 item 7), but pwm with an rc. */
+const DRIVING: readonly Drive[] = ['open_drain', 'nfet_gate', 'pwm'];
+
+/**
+ * The glitch-pin exemption (design m2-c3-inputs §3): a pwm line reaches an analog input through its RC, where the
+ * 60 µs power-up glitch arrives as a few mV for microseconds; harmless for an ADC, so it may use a glitch pin.
+ */
+function glitchExempt(drive: Drive, line: BenchLine): boolean {
+  return drive === 'pwm' && line.role === 'analog' && line.rc !== undefined;
+}
 
 /** Push-pull drives: they may reach a DUT button or strapping pin only through a MOSFET (D7, D12). */
 const PUSH_PULL: readonly Drive[] = ['nfet_gate', 'pwm'];
@@ -57,8 +66,8 @@ const VIA_DRIVE = { direct: 'open_drain', nfet: 'nfet_gate' } as const;
 /** The roles `via` is for: the lines that may go through a MOSFET (D7, D12). Any other line has no `via`. */
 const VIA_ROLES: readonly BenchLine['role'][] = ['button', 'en'];
 
-/** The roles whose fixture line drives or pulls: only fixture_gpio does either (D4), so they need its channels. */
-const GPIO_ROLES: readonly BenchLine['role'][] = ['button', 'en', 'test_pin'];
+/** The roles whose fixture line drives or pulls: only fixture_gpio does either (D4; pwm, M2-C3), so they need its channels. */
+const GPIO_ROLES: readonly BenchLine['role'][] = ['button', 'en', 'test_pin', 'analog'];
 
 /** The DUT board's BOOT strap: the pin its BOOT button pulls low to select download mode. */
 function bootStrap(board: BoardManifest): number | undefined {
@@ -275,8 +284,9 @@ function checkInto(sourceDir: string, name: string, model: Model, c: Collector):
         }
         // A reserved line drives as its role and via say: BOOT open_drain (or nfet_gate), EN nfet_gate, analog PWM (M2-C3).
         drive ??= line.role === 'en' ? 'nfet_gate' : line.role === 'button' ? (line.via ? VIA_DRIVE[line.via] : 'open_drain') : line.role === 'analog' ? 'pwm' : 'none';
-        if ((DRIVING.includes(drive) || line.role === 'en') && (fb.pins.power_up_glitch ?? []).includes(fpin)) {
-          add([...at, 'fixture_gpio'], `fixture GPIO${fpin} drives a level at power-up (pins.power_up_glitch), so no line with drive ${drive} may use it`);
+        if ((DRIVING.includes(drive) || line.role === 'en') && !glitchExempt(drive, line) && (fb.pins.power_up_glitch ?? []).includes(fpin)) {
+          const why = drive === 'pwm' ? ' (a pwm line may, only as an analog line through an rc)' : '';
+          add([...at, 'fixture_gpio'], `fixture GPIO${fpin} drives a level at power-up (pins.power_up_glitch), so no line with drive ${drive} may use it${why}`);
         }
       }
 
@@ -378,15 +388,23 @@ function checkInto(sourceDir: string, name: string, model: Model, c: Collector):
           if (!line.rc) {
             add([...at, 'rc'], 'an analog line needs an rc (its filter)');
           }
+          // The setpoint is an LEDC duty through the RC (design m2-c3-inputs §3).
+          if (channel && drive !== 'pwm') {
+            add([...at, 'channel'], `an analog line needs drive: pwm on ${line.channel}, which has ${drive}`);
+          }
           dutInst();
           break;
+      }
+      // A pwm channel sets an analog input's voltage; on any other line it would drive a DUT pin push-pull.
+      if (channel && drive === 'pwm' && line.role !== 'analog') {
+        add([...at, 'channel'], `${line.channel} has drive: pwm, which only an analog line takes; this line's role is ${line.role}`);
       }
       // `via` says how a button or en line reaches the DUT; on any other role it would only exempt it below.
       if (line.via !== undefined && !VIA_ROLES.includes(line.role)) {
         add([...at, 'via'], `via applies only to button and en lines; this line's role is ${line.role}`);
       }
       if (channel && GPIO_ROLES.includes(line.role) && channel.driver !== 'fixture_gpio') {
-        add([...at, 'channel'], `a ${line.role} line needs a fixture_gpio channel; ${line.channel} is ${channel.driver}`);
+        add([...at, 'channel'], `${line.role === 'analog' || line.role === 'en' ? 'an' : 'a'} ${line.role} line needs a fixture_gpio channel; ${line.channel} is ${channel.driver}`);
       }
       const viaMosfet = VIA_ROLES.includes(line.role) && line.via === 'nfet';
       if (drive !== undefined && PUSH_PULL.includes(drive) && !viaMosfet && (line.role === 'button' || strap)) {

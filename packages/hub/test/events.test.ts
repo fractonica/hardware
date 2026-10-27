@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { FrError } from '@fractonica/protocol';
 
@@ -140,6 +140,91 @@ describe('EventStore', () => {
     events.flush();
     expect(cursorTimeUs(db, line.seq)).toBe(line.ts_us);
     expect(cursorTimeUs(db, e.seq + 5)).toBeGreaterThanOrEqual(line.ts_us);
+  });
+});
+
+describe('STATE thinning (design m2-c3-inputs D6)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const rows = (db: Db) => db.prepare('SELECT seq, type, device, json FROM events ORDER BY seq').all() as { seq: number; type: string; device: string; json: string }[];
+  const value = (r: { json: string }) => (JSON.parse(r.json) as { fields: { value: number } }).fields.value;
+
+  it('writes every EVENT, and a streaming STATE at most once per (device, instance, member) a second: the first at once, the last at the window end', () => {
+    vi.useFakeTimers();
+    const { db, events, publish } = hubWith();
+    const seen: HubEvent[] = [];
+    events.subscribe((e) => seen.push(e));
+    const state = (dev: string, type: string, v: number) => events.publish({ type, device: dev, t_hub_us: nowUs(), part: 'state', member: 'value', fields: { value: v } }, { thin: true });
+    const first = state(A, 'analog.value', 1);
+    for (let v = 2; v <= 10; v++) {
+      vi.advanceTimersByTime(50);
+      state(A, 'analog.value', v);
+      publish('boot.down', A, { part: 'event', member: 'down' });
+    }
+    state(B, 'analog.value', 100); // another device: its own window
+    state(A, 'status.on', 0); // another member: its own window
+    vi.advanceTimersByTime(60);
+    events.flush();
+    expect(rows(db).filter((r) => r.type === 'boot.down')).toHaveLength(9);
+    expect(rows(db).filter((r) => r.type === 'analog.value').map((r) => [r.device, value(r)])).toEqual([
+      [A, 1],
+      [B, 100],
+    ]);
+    expect(rows(db).find((r) => r.type === 'analog.value')!.seq).toBe(first.seq);
+    // Subscribers saw every STATE.
+    expect(seen.filter((e) => e.type === 'analog.value')).toHaveLength(11);
+    // The window ends 1 s after the first row: the last value is written, with the seq it was published with.
+    const last = seen.filter((e) => e.type === 'analog.value' && e.device === A).at(-1)!;
+    vi.advanceTimersByTime(1000 - 510);
+    events.flush();
+    const a = rows(db).filter((r) => r.type === 'analog.value' && r.device === A);
+    expect(a.map(value)).toEqual([1, 10]);
+    expect(a[1].seq).toBe(last.seq);
+    expect(events.stateThinned).toBe(8);
+    // That row opened the next window: a STATE right after it waits for its end, then nothing more is pending.
+    state(A, 'analog.value', 11);
+    vi.advanceTimersByTime(999);
+    events.flush();
+    expect(rows(db).filter((r) => r.type === 'analog.value' && r.device === A).map(value)).toEqual([1, 10]);
+    vi.advanceTimersByTime(1);
+    events.flush();
+    expect(rows(db).filter((r) => r.type === 'analog.value' && r.device === A).map(value)).toEqual([1, 10, 11]);
+    vi.advanceTimersByTime(1000);
+    // The window closed quiet: the next STATE is written at once.
+    state(A, 'analog.value', 12);
+    vi.advanceTimersByTime(60);
+    expect(rows(db).filter((r) => r.type === 'analog.value' && r.device === A).map(value)).toEqual([1, 10, 11, 12]);
+  });
+
+  it('writes every STATE the publisher does not mark thin (an LED, a button: T-HIL reads each change back)', () => {
+    vi.useFakeTimers();
+    const { db, events, publish } = hubWith();
+    for (const on of [true, false, true, false]) {
+      publish('status.on', A, { part: 'state', member: 'on', fields: { on } });
+      vi.advanceTimersByTime(100);
+    }
+    events.flush();
+    expect(rows(db).map((r) => r.type)).toEqual(['status.on', 'status.on', 'status.on', 'status.on']);
+  });
+
+  it('reads see a pending STATE before its row is written; stop writes it', () => {
+    vi.useFakeTimers();
+    const db = freshDb();
+    const { events, publish } = hubWith({ db });
+    const state = (v: number) => events.publish({ type: 'analog.value', device: A, t_hub_us: nowUs(), part: 'state', member: 'value', fields: { value: v } }, { thin: true });
+    state(1);
+    const pending = state(2);
+    publish('boot.down', A, { part: 'event' });
+    expect(events.query({ limit: 10 }).map((e) => e.fields?.value ?? e.type)).toEqual([1, 2, 'boot.down']);
+    expect(events.query({ limit: 10, afterSeq: pending.seq - 1, types: ['analog.*'], devices: [A] })).toEqual([pending]);
+    expect(events.query({ limit: 10, devices: [B] })).toEqual([]);
+    expect(events.query({ limit: 1, afterSeq: 1 }).map((e) => e.seq)).toEqual([pending.seq]);
+    expect(events.tail({ limit: 2 }).map((e) => e.seq)).toEqual([pending.seq, pending.seq + 1]);
+    events.flush();
+    expect(rows(db).map((r) => r.type)).toEqual(['analog.value', 'boot.down']);
+    events.stop();
+    expect(rows(db).filter((r) => r.type === 'analog.value').map(value)).toEqual([1, 2]);
   });
 });
 

@@ -18,6 +18,7 @@ const AnalogInDirectionNames = $.enumNames(AnalogInDirection);
 /** Descriptor traits. */
 export interface AnalogInTraits {
   resolution_bits: number;
+  full_scale_mv: number;
 }
 
 /** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
@@ -25,16 +26,21 @@ export function encodeAnalogInTraits(v: Partial<AnalogInTraits> = {}): Uint8Arra
   const w = new Writer();
   const f1 = $.int(v.resolution_bits ?? 0, 0, 255, 'resolution_bits');
   if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.full_scale_mv ?? 0, 0, 65535, 'full_scale_mv');
+  if (f2 !== 0) w.fieldUint(2, f2);
   return w.finish();
 }
 
 export function decodeAnalogInTraits(bytes: Uint8Array): Decoded<AnalogInTraits> {
   const r = new Reader(bytes);
-  const v: AnalogInTraits = { resolution_bits: 0 };
+  const v: AnalogInTraits = { resolution_bits: 0, full_scale_mv: 0 };
   while (r.next()) {
     switch (r.field) {
       case 1:
         v.resolution_bits = r.readUint(255);
+        break;
+      case 2:
+        v.full_scale_mv = r.readUint(65535);
         break;
       default:
         r.skip();
@@ -47,25 +53,28 @@ export function decodeAnalogInTraits(bytes: Uint8Array): Decoded<AnalogInTraits>
 export interface AnalogInConfig {
   /** (Hz; 1..1000; default 200) */
   sample_hz: number;
-  /** max STATE rate (Hz; 1..200; default 50) */
+  /** max STATE rate. Provisional until S2 (C4) (Hz; 1..200; default 20) */
   report_hz: number;
-  /** in normalised units/16; smaller changes are not reported (0..4096; default 64) */
+  /** in value units; a change smaller than this since the last report is not reported. Provisional until S2 (0..32768; default 512) */
   deadband: number;
-  /** (default ema) */
+  /** ema: alpha 1/4 (default ema) */
   filter: AnalogInFilter | number;
-  /** (default 0) */
-  raw_min: number;
-  /** (default 4095) */
-  raw_max: number;
-  /** normalised thresholds that emit `crossed` (<= 4 items) */
+  /** maps to value 0 (mV; default 0) */
+  min_mv: number;
+  /** maps to value 65535; must exceed min_mv (mV; default 2500) */
+  max_mv: number;
+  /** in value units, for `crossed` (0..16384; default 1024) */
+  hysteresis: number;
+  /** value thresholds that emit `crossed` (<= 4 items) */
   thresholds: number[];
 }
 
-export const ANALOG_IN_CONFIG_DEFAULTS: Readonly<AnalogInConfig> = { sample_hz: 200, report_hz: 50, deadband: 64, filter: 'ema', raw_min: 0, raw_max: 4095, thresholds: [] };
+export const ANALOG_IN_CONFIG_DEFAULTS: Readonly<AnalogInConfig> = { sample_hz: 200, report_hz: 20, deadband: 512, filter: 'ema', min_mv: 0, max_mv: 2500, hysteresis: 1024, thresholds: [] };
 
-/** fr.analog_in.inject arguments (command 1, reliable, test hooks only). */
+/** fr.analog_in.inject arguments (command 1, reliable, test hooks only). Holds `value` in place of the ADC for hold_ms (0 means 1,000 ms; at most 60,000). A newer inject replaces it. */
 export interface AnalogInInjectArgs {
   value: number;
+  hold_ms: number;
 }
 
 /** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
@@ -73,16 +82,67 @@ export function encodeAnalogInInjectArgs(v: Partial<AnalogInInjectArgs> = {}): U
   const w = new Writer();
   const f1 = $.int(v.value ?? 0, 0, 65535, 'value');
   if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.hold_ms ?? 0, 0, 65535, 'hold_ms');
+  if (f2 !== 0) w.fieldUint(2, f2);
   return w.finish();
 }
 
 export function decodeAnalogInInjectArgs(bytes: Uint8Array): Decoded<AnalogInInjectArgs> {
   const r = new Reader(bytes);
-  const v: AnalogInInjectArgs = { value: 0 };
+  const v: AnalogInInjectArgs = { value: 0, hold_ms: 0 };
   while (r.next()) {
     switch (r.field) {
       case 1:
         v.value = r.readUint(65535);
+        break;
+      case 2:
+        v.hold_ms = r.readUint(65535);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** fr.analog_in.read RESULT fields. */
+export interface AnalogInReadResult {
+  mv: number;
+  raw: number;
+  value: number;
+  injected: boolean;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeAnalogInReadResult(v: Partial<AnalogInReadResult> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.mv ?? 0, 0, 65535, 'mv');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.raw ?? 0, 0, 65535, 'raw');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.value ?? 0, 0, 65535, 'value');
+  if (f3 !== 0) w.fieldUint(3, f3);
+  const f4 = $.bool(v.injected ?? false, 'injected');
+  if (f4) w.fieldBool(4, f4);
+  return w.finish();
+}
+
+export function decodeAnalogInReadResult(bytes: Uint8Array): Decoded<AnalogInReadResult> {
+  const r = new Reader(bytes);
+  const v: AnalogInReadResult = { mv: 0, raw: 0, value: 0, injected: false };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.mv = r.readUint(65535);
+        break;
+      case 2:
+        v.raw = r.readUint(65535);
+        break;
+      case 3:
+        v.value = r.readUint(65535);
+        break;
+      case 4:
+        v.injected = r.readBool();
         break;
       default:
         r.skip();
@@ -133,7 +193,7 @@ export function decodeAnalogInCrossed(bytes: Uint8Array): Decoded<AnalogInCrosse
 
 /** fr.analog_in.value STATE body (property 1; the value is field 1). */
 export interface AnalogInValueState {
-  /** 0..65535, after calibration and filter */
+  /** 0..65535 over [min_mv, max_mv], after calibration and filter */
   value: number;
 }
 
@@ -164,11 +224,12 @@ export function decodeAnalogInValueState(bytes: Uint8Array): Decoded<AnalogInVal
 export const ANALOG_IN_CAP: $.CapInfo = {
   id: 0x0005,
   name: 'fr.analog_in',
-  version: { major: 0, minor: 1 },
+  version: { major: 1, minor: 0 },
   section: 'standard',
-  traits: { fields: [{ name: 'resolution_bits' }], maxSize: 3, encode: encodeAnalogInTraits, decode: decodeAnalogInTraits },
+  traits: { fields: [{ name: 'resolution_bits' }, { name: 'full_scale_mv' }], maxSize: 7, encode: encodeAnalogInTraits, decode: decodeAnalogInTraits },
   commands: [
-    { id: 1, name: 'inject', delivery: 'reliable', idempotent: false, visibility: 'test', args: { fields: [{ name: 'value' }], maxSize: 4, encode: encodeAnalogInInjectArgs, decode: decodeAnalogInInjectArgs }, result: null },
+    { id: 1, name: 'inject', delivery: 'reliable', idempotent: false, visibility: 'test', args: { fields: [{ name: 'value' }, { name: 'hold_ms' }], maxSize: 8, encode: encodeAnalogInInjectArgs, decode: decodeAnalogInInjectArgs }, result: null },
+    { id: 2, name: 'read', delivery: 'reliable', idempotent: false, visibility: 'public', args: $.EMPTY_CODEC, result: { fields: [{ name: 'mv' }, { name: 'raw' }, { name: 'value' }, { name: 'injected' }], maxSize: 14, encode: encodeAnalogInReadResult, decode: decodeAnalogInReadResult } },
   ],
   events: [
     { id: 1, name: 'crossed', priority: 'realtime', codec: { fields: [{ name: 'index' }, { name: 'direction', members: AnalogInDirection }, { name: 'value' }], maxSize: 10, encode: encodeAnalogInCrossed, decode: decodeAnalogInCrossed } },

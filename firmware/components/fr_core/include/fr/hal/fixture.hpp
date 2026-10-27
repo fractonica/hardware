@@ -1,6 +1,7 @@
 // L1 HIL fixture line contract (spec 07 §7.7; design m2-c1-hil D4): one wired line of the fixture board. A
 // driver (fixture_gpio, fixture_ws2812_rx) drives and captures its pin; FixtureService turns that into
-// fr.fixture commands, events and the `level` property.
+// fr.fixture commands, events and the `level` property. M2-C3 (design m2-c3-inputs §3) adds pwm lines: an analog
+// setpoint through an RC, set by set_duty.
 #pragma once
 
 #include <cstdint>
@@ -18,7 +19,11 @@ enum class FixtureDrive : uint8_t {
     none,        // GPIO_MODE_INPUT: never drives (LED and test_pin taps)
     open_drain,  // GPIO_MODE_INPUT_OUTPUT_OD, no pulls: pulls a DUT BOOT line low, reads its own line back
     nfet_gate,   // push-pull, idle low, only ever wired to a MOSFET gate: high = press
+    pwm,         // a PWM output (fixture_gpio: LEDC) into an RC, set by set_duty; duty 0 is released; no capture
 };
+
+/** set_duty's full scale: duty is in 1/10,000 of it (fr.fixture set_duty). */
+inline constexpr uint16_t kFixtureDutyMax = 10'000;
 
 /** What a line captures (fr.fixture `decode`). */
 enum class FixtureDecode : uint8_t {
@@ -77,12 +82,22 @@ public:
      * Err::busy while a press runs or when the line does not read released; Err::unsupported on drive none.
      */
     virtual std::expected<FixturePress, Err> press(std::span<const uint32_t> segments_us, uint32_t cap_us) = 0;
-    /** Stops a running press and releases the line; idempotent. */
+    /** Stops a running press and releases the line; idempotent. A pwm line goes to duty 0. */
     virtual Status release() = 0;
     /** Whether a press is running. */
     virtual bool pressing() const = 0;
-    /** The level the pin reads now (open_drain: the line itself, read back). */
+    /** The level the pin reads now (open_drain: the line itself, read back); a pwm line's is duty > 0. */
     virtual bool level() const = 0;
+    /**
+     * A pwm line's duty, `duty` in 1/10,000 of full scale (0..kFixtureDutyMax; 0 is released, kFixtureDutyMax fully
+     * on); answers when it was applied (esp_timer µs, low 32 bits). Err::unsupported on any other drive (and from a
+     * driver without pwm lines), invalid_args beyond kFixtureDutyMax.
+     */
+    virtual std::expected<uint32_t, Err> set_duty(uint16_t duty)
+    {
+        static_cast<void>(duty);
+        return std::unexpected(Err::unsupported);
+    }
     /**
      * Hands every edge and frame captured since the last drain to the sink, on the core task. The driver
      * runs it soon after a capture (never from its ISR); the service may also call it, before a flush or

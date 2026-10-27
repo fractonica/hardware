@@ -6,6 +6,10 @@
 // GPIO block) through an early init function. src/fixture_gpio.cpp implements it; the host suite builds that
 // same file over an IDF shim (firmware/test/host/shim) and runs FixtureService on it
 // (firmware/test/host/tests/fixture_gpio_sim_test.cpp).
+//
+// M2-C3 (design m2-c3-inputs §3): a pwm line is an LEDC output (low-speed mode, 20 kHz, 11-bit, one LEDC timer shared
+// by every pwm line, a channel each) into the RC of a DUT's analog input. It has no edge interrupt and no press; its
+// duty is 0 at init, on release and on every reset path, where the pin goes back to a plain GPIO output driven low.
 #pragma once
 
 #include <array>
@@ -38,6 +42,18 @@ public:
     static constexpr uint32_t kGuardUs = 5'000;
     /** How long press() waits for the ISR to capture its own press edge on an open_drain line. */
     static constexpr uint32_t kReadbackUs = 100;
+    /** pwm lines (design m2-c3-inputs §3): the LEDC timer's frequency and duty resolution, and the lines one node
+     * runs (the S3's low-speed LEDC channels). */
+    static constexpr uint32_t kPwmHz = 20'000;
+    static constexpr uint8_t kPwmBits = 11;
+    static constexpr size_t kMaxPwmLines = 8;
+
+    /** set_duty's 1/10,000 of full scale in LEDC steps, rounded: 0..2,048, where 2,048 (2^11, the top LEDC takes)
+     * holds the output high all period, so 10,000 is fully on rather than one step short of it. */
+    static constexpr uint32_t pwm_steps(uint16_t duty)
+    {
+        return (uint32_t{duty} * (1u << kPwmBits) + hal::kFixtureDutyMax / 2) / hal::kFixtureDutyMax;
+    }
 
     /**
      * A press as the segment timer runs it. Boundary i ends segment i, `ends[i]` after the first press edge;
@@ -89,11 +105,13 @@ public:
     /**
      * Whether a line takes the any-edge interrupt: decode level lines that read their pin (input taps, and
      * open_drain lines reading back their own presses). An nfet_gate line reports its write stamps instead,
-     * and decode ws2812 is fixture_ws2812_rx's (RMT RX: its ~800 kHz bit edges would flood the ISR).
+     * decode ws2812 is fixture_ws2812_rx's (RMT RX: its ~800 kHz bit edges would flood the ISR), and a pwm line's
+     * 20 kHz output has no edges worth capturing (design m2-c3-inputs §3).
      */
     static constexpr bool edge_irq(const hal::FixtureLineMode &mode)
     {
-        return mode.decode == hal::FixtureDecode::level && mode.drive != hal::FixtureDrive::nfet_gate;
+        return mode.decode == hal::FixtureDecode::level && mode.drive != hal::FixtureDrive::nfet_gate &&
+               mode.drive != hal::FixtureDrive::pwm;
     }
 
     // Stores the configuration and notes the pin for release_at_boot(): hardware is touched in init() (spec 03 §3.4).
@@ -104,6 +122,9 @@ public:
     Status release() override;
     bool pressing() const override;
     bool level() const override;
+    /** A pwm line's LEDC duty (pwm_steps), updated at once; the stamp is taken when ledc_update_duty returned. The
+     * output takes it at the start of its next 50 µs period. */
+    std::expected<uint32_t, Err> set_duty(uint16_t duty) override;
     void drain() override;
     hal::Selftest selftest() override;
 
@@ -111,15 +132,21 @@ public:
     // On the S3 a software restart and a panic's restart are CPU resets, which keep the GPIO block: a line pressed
     // then would stay driven through the panic output, the coredump, the bootloader and boot until init().
 
-    /** Turns the output of every constructed line's pin off, whatever a CPU reset left it driving: open_drain and
-     * nfet_gate lines then read released (the DUT's pull-up, the gate's pull-down). An ESP_SYSTEM_INIT_FN runs it
-     * at boot, once the generated board's constructors have noted the pins and before app_main. */
+    /** Turns the output of every constructed line's pin off, whatever a CPU reset left it driving: GPIO_ENABLE
+     * cleared, the output enable taken from GPIO_ENABLE (OEN_SEL set) and the pin routed to its output register
+     * (SIG_GPIO_OUT_IDX). open_drain and nfet_gate lines then read released (the DUT's pull-up, the gate's
+     * pull-down), and a pwm line is taken off the LEDC output, which a CPU reset keeps running and whose output
+     * enable (OEN_SEL clear after ledc_channel_config) GPIO_ENABLE alone does not override: the pin floats, its RC
+     * held at 0 V, until init() drives duty 0. An ESP_SYSTEM_INIT_FN runs it at boot, once the generated board's
+     * constructors have noted the pins and before app_main. */
     static void release_at_boot();
-    /** Stops every press and writes every driving line released, under the lock: the shutdown handler that
-     * esp_restart runs (reboot, OTA, rollback), which init() registers. */
+    /** Stops every press and writes every driving line released, under the lock, and takes every pwm line off LEDC
+     * to a GPIO output driven low (duty 0): the shutdown handler that esp_restart runs (reboot, OTA, rollback), which
+     * init() registers. */
     static void release_for_restart();
-    /** Writes every driving line released without the lock (the other CPU is stalled, interrupts are off): the
-     * panic hook (__wrap_esp_panic_handler), before the backtrace and the coredump. */
+    /** Writes every driving line released, pwm lines low through the GPIO matrix as release_for_restart, without the
+     * lock (the other CPU is stalled, interrupts are off): the panic hook (__wrap_esp_panic_handler), before the
+     * backtrace and the coredump. */
     static void release_for_panic();
 
 private:
@@ -138,6 +165,12 @@ private:
     void step_locked(bool &pushed);
     /** The pin reads its idle level: open_drain high (nobody holds the DUT's BOOT), nfet_gate's gate low. */
     bool released_locked() const;
+    /** pwm: the LEDC timer (once, for every pwm line) and this line's channel at duty 0. */
+    Status init_pwm();
+    /** pwm: sets and updates the channel's duty in LEDC steps; the core task. */
+    bool apply_steps(uint32_t steps);
+    /** pwm: the pin back on the GPIO output register, driven low (IRAM, no lock, no LEDC driver call). */
+    void pwm_pin_low() const;
 
     Config cfg_;
     hal::FixtureLineMode mode_{};
@@ -160,6 +193,9 @@ private:
     volatile uint32_t edge_us_ = 0;
     volatile bool edge_level_ = false;
     volatile uint32_t isr_count_ = 0;
+    // pwm (design m2-c3-inputs §3): the line's LEDC channel and its duty as last applied, on the core task.
+    int8_t ledc_ch_ = -1;
+    volatile uint16_t duty_ = 0;
     char detail_[112] = {};
 };
 

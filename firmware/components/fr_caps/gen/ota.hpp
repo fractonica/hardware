@@ -23,6 +23,7 @@ class Ota : public Capability
 public:
     static constexpr uint16_t kId = 0x00F1;
     static constexpr Version kVersion{1, 0};
+    static constexpr bool kOrdered = false;  // true: its events carry EXT port_seq (YAML ordered)
 
     uint16_t cap_id() const final { return kId; }
     Version version() const final { return kVersion; }

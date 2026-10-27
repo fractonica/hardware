@@ -179,8 +179,11 @@ export const AppDescSchema = z.object({
 });
 export type AppDesc = z.infer<typeof AppDescSchema>;
 
-/** A config or trait value of a capability instance (a JSON scalar). */
-export const CapValueSchema = z.union([z.boolean(), z.number(), z.string()]);
+/**
+ * A config or trait value of a capability instance: a JSON scalar, or a list of integers for an array<T> config
+ * entry (design m2-c3-inputs D4: fr.analog_in thresholds).
+ */
+export const CapValueSchema = z.union([z.boolean(), z.number(), z.string(), z.array(z.number())]);
 
 /** One capability instance of a build, from the generated fr_manifest.json (design c2 §6). */
 export const ManifestCapSchema = z.looseObject({

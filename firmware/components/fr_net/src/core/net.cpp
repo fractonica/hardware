@@ -17,6 +17,10 @@
 // M2-C2 (design m2-c2 D20): the same timer drains the LogSource (log.cpp), and HELLO says net_log while one is
 // attached. The TCP session's WELCOME, TIME answers, get_state RESULT, hub frames and end are what the drain's
 // settle and 1 KB window rules follow.
+//
+// M2-C3 (design m2-c3-inputs D6, D8, D10): an ordered capability's EVENTs get the port's next port_seq in EXT and
+// the URGENT route (send_event), and schedule_repeat lets a newer STATE supersede the pending second copy of an
+// older one of the same property.
 #include "fr/net/net.hpp"
 
 #include <algorithm>
@@ -217,6 +221,7 @@ void Net::reset_stats()
     state_.loss_tx = state_.loss_rx = 0;
     state_.cmds_scheduled = state_.exec_late = state_.exec_cancelled = 0;
     state_.exec_late_us_max = state_.rx_queue_us_max = 0;
+    state_.state_repeats_superseded = 0;
     state_.relay = {};
     state_.bcast = {};  // state() reads the watermark from the window
     state_.bindings = {};
@@ -301,17 +306,21 @@ void Net::loss(uint8_t pct, uint32_t seconds, LossDir dir)
 
 // ---- capability emissions ----
 
-void Net::event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields, TimeUs at)
+void Net::event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields, TimeUs at,
+                bool ordered)
 {
     // fr.node.boot is normally Net's own (on_welcome); the age exemption holds whoever emits it.
     const bool exempt = port == fr::proto::kPortNode && event_id == cap::Node::kEventBoot;
+    // Design m2-c3-inputs D8: every event of an ordered port counts, also one that finds no path to the hub or is
+    // too old to send (its bindings ran), so the hub's reorder buffer sees a gap exactly where an event is missing.
+    const std::optional<uint16_t> port_seq = ordered ? next_port_seq(port) : std::nullopt;
     // 07 §7.11: the bindings run first, so a node -> node reaction never waits for the hub path. What they
     // report (node.binding_fired) is held until the triggering EVENT itself has gone, so the hub sees the
     // cause before its effect.
     ++fired_hold_;
     run_bindings(true, port, event_id, {});
     --fired_hold_;
-    send_event(port, event_id, prio, fields, at, exempt);
+    send_event(port, event_id, prio, fields, at, exempt, port_seq);
     if (fired_hold_ == 0) {
         flush_fired();
     }
@@ -1458,7 +1467,8 @@ uint8_t Net::wifi_route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) co
 }
 
 std::span<const uint8_t> Net::build(uint8_t flags, uint8_t cls, uint8_t kind, uint32_t seq, uint16_t dst, uint8_t port,
-                                    std::span<const uint8_t> prefix, std::span<const uint8_t> body, uint8_t ttl)
+                                    std::span<const uint8_t> prefix, std::span<const uint8_t> body, uint8_t ttl,
+                                    ExtView ext)
 {
     Writer w(tx_buf_, sizeof(tx_buf_));
     pack_header({.flags = flags,
@@ -1470,7 +1480,8 @@ std::span<const uint8_t> Net::build(uint8_t flags, uint8_t cls, uint8_t kind, ui
                  .dst = dst,
                  .epoch = epoch_,
                  .ttl = ttl != 0 ? ttl : ttl_,
-                 .port = port},
+                 .port = port,
+                 .ext = ext},
                 w);
     w.raw(prefix);
     w.raw(body);
@@ -1526,11 +1537,25 @@ bool Net::transmit_on(LinkKind k, std::span<const uint8_t> envelope)
 }
 
 void Net::send_event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields, TimeUs at,
-                     bool exempt)
+                     bool exempt, std::optional<uint16_t> port_seq)
 {
     const TimeUs now = core_.now();
     const TimeUs t = at < 0 ? now : at;
-    const size_t len = kHeaderSize + kTimePrefixSize + fields.size();
+    // Design m2-c3-inputs D8: an ordered port's count rides in EXT (5 bytes: the block's len, then the TLV). The
+    // one TLV (`type | len | u16 LE`, as ExtBuilder::add_value writes it) in 4 bytes of its own, not an ExtBuilder's
+    // 255 on the core task's stack for every EVENT.
+    static_assert(ext_value_size(kExtPortSeq) == 2);
+    uint8_t ext_tlv[4] = {};
+    ExtView ext;
+    if (port_seq) {
+        ext_tlv[0] = kExtPortSeq;
+        ext_tlv[1] = 2;
+        ext_tlv[2] = static_cast<uint8_t>(*port_seq);
+        ext_tlv[3] = static_cast<uint8_t>(*port_seq >> 8);
+        ext = ExtView({ext_tlv, sizeof(ext_tlv)});
+    }
+    const size_t ext_len = port_seq ? 1 + ext.bytes().size() : 0;
+    const size_t len = kHeaderSize + ext_len + kTimePrefixSize + fields.size();
     // realtime/normal EVENTs are Q1 (ACK_REQ, 05 §5.8), realtime ones URGENT too; bulk ones, and any
     // too large for a realtime slot, go BULK without ACK_REQ (TCP or serial only).
     uint8_t flags = kFlagBulk;
@@ -1538,7 +1563,11 @@ void Net::send_event(uint8_t port, uint8_t event_id, cap::Priority prio, std::sp
         flags = kFlagAckReq | (prio == cap::Priority::realtime ? kFlagUrgent : 0);
     }
     const bool q1 = (flags & kFlagAckReq) != 0;
-    const uint8_t via = route(kClsEvent, event_id, flags, len);
+    // D10: a Q1 event of an ordered port takes the URGENT route whatever its priority (UDP alone with udp_ok, UDP +
+    // TCP before it), so it races only its own retries, never the port's other events on another link. The frame
+    // itself keeps its flags: URGENT stays the capability's realtime priority.
+    const uint8_t route_flags = port_seq && q1 ? flags | kFlagUrgent : flags;
+    const uint8_t via = route(kClsEvent, event_id, route_flags, len);
     // No path to the hub, or (05 §5.11 "stale input") a Q1 event older than FR_EVENT_MAX_AGE_MS.
     if (via == 0 || (q1 && !exempt && now - t > ms_us(cfg_.event_max_age_ms))) {
         ++state_.events_dropped;
@@ -1548,7 +1577,8 @@ void Net::send_event(uint8_t port, uint8_t event_id, cap::Priority prio, std::sp
     Writer pw(prefix, sizeof(prefix));
     pack_time_prefix(low32(t), pw);
     const uint32_t seq = ++seq_;
-    auto env = build(flags, kClsEvent, event_id, seq, fr::proto::kAddrHub, port, pw.bytes(), fields);
+    auto env = build(port_seq ? flags | kFlagExt : flags, kClsEvent, event_id, seq, fr::proto::kAddrHub, port,
+                     pw.bytes(), fields, 0, ext);
     if (env.empty()) {
         ++state_.events_dropped;  // beyond the bulk MTU
         return;
@@ -1557,6 +1587,20 @@ void Net::send_event(uint8_t port, uint8_t event_id, cap::Priority prio, std::sp
     if (q1) {
         track(env, seq, took, t, exempt);
     }
+}
+
+std::optional<uint16_t> Net::next_port_seq(uint8_t port)
+{
+    for (size_t i = 0; i < port_seq_n_; ++i) {
+        if (port_seqs_[i].port == port) {
+            return ++port_seqs_[i].last;  // u16: after 65,535 events of one port it wraps to 0
+        }
+    }
+    if (port_seq_n_ == port_seqs_.size()) {
+        return std::nullopt;
+    }
+    port_seqs_[port_seq_n_++] = {.port = port, .last = 1};
+    return uint16_t{1};
 }
 
 Net::Pending *Net::take_slot(bool evict)
@@ -1612,9 +1656,24 @@ void Net::track(std::span<const uint8_t> envelope, uint32_t seq, uint8_t via, Ti
 
 void Net::schedule_repeat(std::span<const uint8_t> envelope)
 {
+    if (envelope.size() > kRtSize) {
+        return;
+    }
+    // Design m2-c3-inputs D6: a stream of STATEs (fr.analog_in value) changes faster than kStateRepeatMs. A second
+    // copy still pending for the same port and prop now carries this newer value, at the time it was due: no repeat
+    // of an older value ever follows a newer one, and the stream keeps one pending repeat per property.
+    for (Pending &q : outbox_) {
+        if (q.used && q.repeat && q.bytes[kOffCls] == envelope[kOffCls] && q.bytes[kOffKind] == envelope[kOffKind] &&
+            q.bytes[kOffPort] == envelope[kOffPort]) {
+            q.len = static_cast<uint16_t>(envelope.size());
+            std::memcpy(q.bytes, envelope.data(), envelope.size());
+            ++state_.state_repeats_superseded;
+            return;
+        }
+    }
     // 05 §5.8 "Double send": UDP may lose the first copy; the hub drops the second by its LATEST seq.
     // A full outbox skips it (Q1 frames keep their slots).
-    Pending *p = envelope.size() <= kRtSize ? take_slot(false) : nullptr;
+    Pending *p = take_slot(false);
     if (p == nullptr) {
         return;
     }

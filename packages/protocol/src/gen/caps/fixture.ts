@@ -5,7 +5,7 @@ import { Reader, Writer, type Decoded } from '../../wire/index.ts';
 
 import * as $ from '../support.ts';
 
-export const FixtureDrive = { none: 0, open_drain: 1, nfet_gate: 2 } as const;
+export const FixtureDrive = { none: 0, open_drain: 1, nfet_gate: 2, pwm: 3 } as const;
 export type FixtureDrive = keyof typeof FixtureDrive;
 
 const FixtureDriveNames = $.enumNames(FixtureDrive);
@@ -58,7 +58,7 @@ export function decodeFixtureTraits(bytes: Uint8Array): Decoded<FixtureTraits> {
 
 /** Profile-time service parameters (`config:`); never on the wire. */
 export interface FixtureConfig {
-  /** nfet_gate: push-pull to a MOSFET gate only, high = press (default none) */
+  /** nfet_gate: push-pull to a MOSFET gate only, high = press; pwm: an analog setpoint through an RC (set_duty) (default none) */
   drive: FixtureDrive | number;
   /** (default level) */
   decode: FixtureDecode | number;
@@ -72,7 +72,7 @@ export interface FixtureConfig {
 
 export const FIXTURE_CONFIG_DEFAULTS: Readonly<FixtureConfig> = { drive: 'none', decode: 'level', pull: 'none', cap_ms: 15000, flush_us: 2000 };
 
-/** fr.fixture.press arguments (command 1, reliable). Drive the line by segments (press, release, press, ...); RESULT at the first press edge. BUSY while a press runs or when the line does not read released; UNSUPPORTED on drive none. */
+/** fr.fixture.press arguments (command 1, reliable). Drive the line by segments (press, release, press, ...); RESULT at the first press edge. BUSY while a press runs or when the line does not read released; UNSUPPORTED on drive none or pwm. */
 export interface FixturePressArgs {
   /** (<= 16 items) */
   segments_us: number[];
@@ -181,6 +181,63 @@ export function decodeFixtureReadResult(bytes: Uint8Array): Decoded<FixtureReadR
         break;
       case 4:
         v.bad_frames = r.readUint(0xffffffff);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** fr.fixture.set_duty arguments (command 4, reliable). Sets a pwm line's LEDC duty, in 1/10,000 of full scale; RESULT when it was applied. UNSUPPORTED on any drive but pwm. */
+export interface FixtureSetDutyArgs {
+  /** (0..10000) */
+  duty: number;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeFixtureSetDutyArgs(v: Partial<FixtureSetDutyArgs> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.duty ?? 0, 0, 65535, 'duty');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  return w.finish();
+}
+
+export function decodeFixtureSetDutyArgs(bytes: Uint8Array): Decoded<FixtureSetDutyArgs> {
+  const r = new Reader(bytes);
+  const v: FixtureSetDutyArgs = { duty: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.duty = r.readUint(65535);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** fr.fixture.set_duty RESULT fields. */
+export interface FixtureSetDutyResult {
+  at_us: number;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeFixtureSetDutyResult(v: Partial<FixtureSetDutyResult> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.at_us ?? 0, 0, 0xffffffff, 'at_us');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  return w.finish();
+}
+
+export function decodeFixtureSetDutyResult(bytes: Uint8Array): Decoded<FixtureSetDutyResult> {
+  const r = new Reader(bytes);
+  const v: FixtureSetDutyResult = { at_us: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.at_us = r.readUint(0xffffffff);
         break;
       default:
         r.skip();
@@ -311,7 +368,7 @@ export function decodeFixtureLevelState(bytes: Uint8Array): Decoded<FixtureLevel
 export const FIXTURE_CAP: $.CapInfo = {
   id: 0x0006,
   name: 'fr.fixture',
-  version: { major: 0, minor: 1 },
+  version: { major: 0, minor: 2 },
   section: 'standard',
   testOnly: true,
   traits: { fields: [{ name: 'drive', members: FixtureDrive }, { name: 'decode', members: FixtureDecode }], maxSize: 6, encode: encodeFixtureTraits, decode: decodeFixtureTraits },
@@ -319,6 +376,7 @@ export const FIXTURE_CAP: $.CapInfo = {
     { id: 1, name: 'press', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'segments_us' }], maxSize: 82, encode: encodeFixturePressArgs, decode: decodeFixturePressArgs }, result: { fields: [{ name: 'at_us' }, { name: 'total_us' }], maxSize: 12, encode: encodeFixturePressResult, decode: decodeFixturePressResult } },
     { id: 2, name: 'release', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: null },
     { id: 3, name: 'read', delivery: 'reliable', idempotent: false, visibility: 'public', args: $.EMPTY_CODEC, result: { fields: [{ name: 'level' }, { name: 'edges' }, { name: 'dropped' }, { name: 'bad_frames' }], maxSize: 20, encode: encodeFixtureReadResult, decode: decodeFixtureReadResult } },
+    { id: 4, name: 'set_duty', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'duty', range: [0, 10000] }], maxSize: 4, encode: encodeFixtureSetDutyArgs, decode: decodeFixtureSetDutyArgs }, result: { fields: [{ name: 'at_us' }], maxSize: 6, encode: encodeFixtureSetDutyResult, decode: decodeFixtureSetDutyResult } },
   ],
   events: [
     { id: 1, name: 'edges', priority: 'normal', codec: { fields: [{ name: 'n' }, { name: 'levels' }, { name: 'dt_us' }, { name: 'dropped' }], maxSize: 176, encode: encodeFixtureEdges, decode: decodeFixtureEdges } },

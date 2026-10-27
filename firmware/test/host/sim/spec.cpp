@@ -248,6 +248,11 @@ bool parse_node(const cJSON *n, NodeSpec &out, std::string &error)
         error = "alias and a 12-hex mac are required";
         return false;
     }
+    if (kit_profile(out.profile) == nullptr) {
+        // Its port table and descriptor are the kit's (design m2-c3-inputs §8): a profile it cannot play is refused.
+        error = "profile: the kit plays " + kit_profile_names() + ", not " + out.profile;
+        return false;
+    }
     if (udp != "shared" && udp != "own") {
         error = "udp: expected shared or own";
         return false;

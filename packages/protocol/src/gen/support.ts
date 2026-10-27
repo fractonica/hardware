@@ -73,6 +73,8 @@ export interface CapInfo {
   readonly section: 'standard' | 'system' | 'project';
   /** A test instrument's capability (test_only: true, fr.fixture): not in CATALOG, the SDK or client output. */
   readonly testOnly?: true;
+  /** ordered: true (design m2-c3-inputs D8): its events carry EXT port_seq, and the hub delivers them in that order. */
+  readonly ordered?: true;
   readonly traits: Codec<any>;
   readonly commands: readonly CapCommandInfo[];
   readonly events: readonly CapEventInfo[];

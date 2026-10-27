@@ -6,6 +6,7 @@
 # hardware/bench/lab.bench.yaml is the rig AS WIRED and changes with the bench (2026-10-24: the two C3 boards'
 # line sets are swapped, and fw_id is pinned), so tests of the live file stay value-agnostic.
 # Never edit this copy to follow the rig; change it only with the design's §2.3 table.
+# M2-C3 (design m2-c3-inputs §3) wires the two analog lines: s3k-fixture has ch12/ch13 (drive: pwm) now.
 #
 schema: fractonica/bench@1
 id: lab
@@ -21,14 +22,14 @@ duts:
       boot:     { role: button,   dut_gpio: 9,  channel: ch0,  fixture_gpio: 42, via: direct, series_ohm: 1000 }
       status:   { role: led,      dut_gpio: 8,  channel: ch4,  fixture_gpio: 4,  active_level: low, series_ohm: 10000 }
       test_pin: { role: test_pin, dut_gpio: 10, channel: ch8,  fixture_gpio: 15, series_ohm: 1000 }
-      analog:   { role: analog,   dut_gpio: 3,  channel: ch12, fixture_gpio: 11, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 }, wired: false }   # M2-C3
+      analog:   { role: analog,   dut_gpio: 3,  channel: ch12, fixture_gpio: 11, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 } }   # M2-C3
   1cdbd416ba34:                    # pad-c3b: C3 OLED board #1
     profile: c3o-pad
     lines:
       boot:     { role: button,   dut_gpio: 9,  channel: ch1,  fixture_gpio: 41, via: direct, series_ohm: 1000 }
       status:   { role: led,      dut_gpio: 8,  channel: ch5,  fixture_gpio: 5,  active_level: low, series_ohm: 10000 }
       test_pin: { role: test_pin, dut_gpio: 10, channel: ch9,  fixture_gpio: 16, series_ohm: 1000 }
-      analog:   { role: analog,   dut_gpio: 3,  channel: ch13, fixture_gpio: 12, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 }, wired: false }   # M2-C3
+      analog:   { role: analog,   dut_gpio: 3,  channel: ch13, fixture_gpio: 12, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 } }   # M2-C3
   58e6c5d55e64:                    # pad-c6: C6 Super Mini
     profile: c6-pad
     lines:

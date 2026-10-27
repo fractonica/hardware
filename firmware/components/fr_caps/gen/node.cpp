@@ -693,7 +693,7 @@ void Node::emit_boot(const NodeBoot &e, TimeUs at)
     uint8_t buf[NodeBoot::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventBoot, Priority::normal, w.bytes(), at);
+    sink_->event(port_, kEventBoot, Priority::normal, w.bytes(), at, kOrdered);
 }
 
 void Node::emit_binding_fired(const NodeBindingFired &e, TimeUs at)
@@ -704,7 +704,7 @@ void Node::emit_binding_fired(const NodeBindingFired &e, TimeUs at)
     uint8_t buf[NodeBindingFired::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventBindingFired, Priority::normal, w.bytes(), at);
+    sink_->event(port_, kEventBindingFired, Priority::normal, w.bytes(), at, kOrdered);
 }
 
 }  // namespace fr::cap

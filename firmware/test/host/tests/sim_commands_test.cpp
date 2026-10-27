@@ -127,7 +127,7 @@ TEST(sim_commands_diag_answers_as_fr_diag_inject_and_neighbors_included)
     has(run(n, "diag inject boot click"), R"("response":{"ok":true,"status":"ok","fields":{}})");
     has(run(n, "diag inject boot nonsense"), R"("response":{"ok":false,"error":"invalid_args")");
     has(run(n, "diag inject nope click"), R"("response":{"ok":false,"error":"not_found","detail":"no instance 'nope'"})");
-    has(run(n, "diag inject boot"), R"("response":{"ok":false,"error":"invalid_args","detail":"usage: inject <inst> <gesture>"})");
+    has(run(n, "diag inject boot"), R"("response":{"ok":false,"error":"invalid_args","detail":"usage: inject <inst> <gesture> | inject <inst> value=<0-65535> [hold_ms=<0-60000>]"})");
     // neighbors [from]: sorted by MAC, paged from `from`.
     const std::string all = run(n, "diag neighbors");
     has(all, R"("response":{"ok":true,"count":2,"neighbors":[{"mac":"02f200000002","addr":2,"rssi":)");

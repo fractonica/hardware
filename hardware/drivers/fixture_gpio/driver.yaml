@@ -2,7 +2,7 @@
 # and fills fr::drv::FixtureGpio::Config from the instance's `bind: gpio.<n>`.
 schema: fractonica/driver@1
 id: fixture_gpio
-summary: One HIL fixture line on a GPIO; open-drain or MOSFET-gate presses from ISR-dispatched esp_timers, any-edge capture in an IRAM ISR.
+summary: One HIL fixture line on a GPIO; open-drain or MOSFET-gate presses from ISR-dispatched esp_timers, any-edge capture in an IRAM ISR, or a pwm setpoint on LEDC.
 implements: hal.FixtureLine
 class: fr::drv::FixtureGpio             # header: include/fr/drv/fixture_gpio.hpp
 targets: [esp32s3]                      # the fixture board (esp32s3-devkitc1-n16r8)
@@ -11,6 +11,8 @@ accepts_kinds: [gpio]
 config:                                 # same order as FixtureGpio::Config
   gpio: { type: gpio, from: bind }
 resources: { gpio: 1 }                  # the press esp_timers are the driver's own, not fr_core's pool
+# A drive: pwm line (design m2-c3-inputs §3) also takes an LEDC channel, and all of them one shared LEDC timer: codegen
+# budgets those by the line's config (board.ts PWM_LINE_RESOURCES), which `resources` here cannot express.
 # Into sdkconfig.board of every profile that binds it (design m2-c1-hil D4, D5, D11 item 1):
 #  - the press and release esp_timers dispatch from the IRAM alarm ISR (ESP_TIMER_ISR), which IDF leaves off;
 #  - a task watchdog timeout panics (IDF default: a warning only), so a wedged fixture reboots, its lines let go

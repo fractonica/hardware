@@ -12,8 +12,8 @@ type Assert<T extends true> = T;
 type _Classes = Assert<Equal<typeof CLS, { readonly NET: 0; readonly PRESENCE: 1; readonly ACK: 2; readonly EVENT: 3; readonly CMD: 4; readonly RESULT: 5; readonly STATE: 6; readonly MSG: 7; readonly LOG: 8; readonly OTA: 9; readonly TIME: 10 }>>;
 type _Flags = Assert<Equal<typeof FLAG, { readonly SEC: 1; readonly ACK_REQ: 2; readonly FRAG: 4; readonly RELAYED: 8; readonly LATEST: 16; readonly URGENT: 32; readonly BULK: 64; readonly EXT: 128 }>>;
 type _SerialTypes = Assert<Equal<typeof SERIAL_TYPE, { readonly ENV: 1; readonly GW_RX: 16; readonly GW_TX: 17; readonly GW_TX_DONE: 18; readonly GW_STATUS: 19; readonly GW_CMD: 20; readonly GW_RSP: 21; readonly LINK_PING: 22; readonly LINK_PONG: 23 }>>;
-type _Ext = Assert<Equal<typeof EXT, { readonly TRACE_ID: 2; readonly VALID_MS: 3; readonly EXPIRE_AT_US: 4; readonly EXEC_AT_US: 129 }>>;
-type _ExtSizes = Assert<Equal<typeof EXT_VALUE_SIZE, { readonly 2: 4; readonly 3: 2; readonly 4: 4; readonly 129: 4 }>>;
+type _Ext = Assert<Equal<typeof EXT, { readonly TRACE_ID: 2; readonly VALID_MS: 3; readonly EXPIRE_AT_US: 4; readonly PORT_SEQ: 5; readonly EXEC_AT_US: 129 }>>;
+type _ExtSizes = Assert<Equal<typeof EXT_VALUE_SIZE, { readonly 2: 4; readonly 3: 2; readonly 4: 4; readonly 5: 2; readonly 129: 4 }>>;
 type _Sizes = Assert<Equal<[typeof MAGIC_VER, typeof HEADER_SIZE, typeof TIME_PREFIX_SIZE, typeof RESULT_PREFIX_SIZE], [161, 18, 4, 7]>>;
 type _Serial = Assert<Equal<[typeof SERIAL_PREFIX, typeof SERIAL_MAX_LINE], ['@fr1:', 2048]>>;
 

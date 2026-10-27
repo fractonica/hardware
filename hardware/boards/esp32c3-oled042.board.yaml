@@ -28,7 +28,7 @@ boot_uart_tx: 21              # U0TXD: the ROM log prints on it at every boot
 en_access: null               # EN is on no header
 rf: { max_tx_power_qdbm: 34, antenna: ceramic }   # 8.5 dBm: board #2 never finished WPA2 auth at full power (C3 checkpoint)
 test_pin: 10
-resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
+resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1, adc1_channel: 5 }   # ADC1: GPIO0-4 (GPIO5 is ADC2)
 defaults:
   boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,    driver: led_gpio,    bind: leds.status }

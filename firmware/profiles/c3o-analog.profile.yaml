@@ -1,0 +1,11 @@
+profile: c3o-analog
+board: esp32c3-oled042
+app: node
+net: { link_profile: default }
+# T-ANALOG (design m2-c3-inputs D4, §8): c3o-pad plus an analog input on GPIO3, which the bench's RC line feeds
+# from a fixture pwm channel. Opt-in, never a pad profile; boot, status and the test pin stay where c3o-pad has them.
+caps:
+  boot:   { cap: fr.button,    driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,       driver: led_gpio,    bind: leds.status }
+  analog: { cap: fr.analog_in, driver: adc_oneshot, bind: gpio.3,
+            config: { thresholds: [16384, 32768, 49152] } }

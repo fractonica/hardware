@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.analog_in.read.args",
+  "title": "fr.analog_in.read arguments",
+  "description": "The current reading, unfiltered and filtered. Answered from the last sample; never touches the ADC.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

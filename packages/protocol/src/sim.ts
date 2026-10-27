@@ -21,6 +21,13 @@ const u32 = z.number().int().min(0).max(0xffffffff);
 export const SIM_RATES = ['1M', '6M'] as const;
 export type SimRate = (typeof SIM_RATES)[number];
 
+/**
+ * The profiles fr_fleet's nodes can play (design m2-c3-inputs §8): its port table and descriptor follow the profile.
+ * c6-pad: boot 1, status 2; c3o-analog adds fr.analog_in `analog` on 3, a seeded waveform in place of the ADC.
+ */
+export const SIM_PROFILES = ['c6-pad', 'c3o-analog'] as const;
+export type SimProfile = (typeof SIM_PROFILES)[number];
+
 /** How the medium's pair table is filled (D3). The router-mode gates are judged on one_room only (D10). */
 export const SIM_TOPOLOGIES = ['one_room', 'two_rooms', 'matrix', 'positions'] as const;
 export type SimTopology = (typeof SIM_TOPOLOGIES)[number];
@@ -98,7 +105,7 @@ export type SimRun = z.infer<typeof SimRunSchema>;
 /** The scenario's nodes: `count` started at the storm, then `spares` provisioned rows only a join starts. */
 export const SimNodesSchema = z.strictObject({
   count: z.number().int().min(1).max(250),
-  profile: z.string().min(1).default('c6-pad'),
+  profile: z.enum(SIM_PROFILES).default('c6-pad'),
   hb_ms: z.number().int().min(100).max(60_000).default(1000),
   /** The OTA health deadline (fr_net_node's --health-ms); T2-OTA-30 sets 10 s. */
   health_ms: z.number().int().min(1000).max(600_000).default(60_000),
@@ -192,8 +199,8 @@ export const FleetNodeSchema = z.strictObject({
   radio: z
     .strictObject({ channel: z.number().int().min(1).max(13).default(6), bcast_rate: z.enum(SIM_RATES).default('1M'), ucast_rate: z.enum(SIM_RATES).default('1M') })
     .prefault({}),
-  /** The profile its HELLO, descriptor and OTA CHECK say (the registry row's). */
-  profile: z.string().min(1).default('c6-pad'),
+  /** The profile its HELLO, descriptor and OTA CHECK say (the registry row's), and its port table (SIM_PROFILES). */
+  profile: z.enum(SIM_PROFILES).default('c6-pad'),
   /** A spare row (T2-CHURN-30's joins): provisioned, not started by `fleet start`, only by `fleet spawn <alias>`. */
   spare: z.boolean().default(false),
 });

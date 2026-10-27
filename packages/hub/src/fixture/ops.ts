@@ -19,7 +19,8 @@
 //     there are refused); line_low (a BOOT line pressed at idle with no press running, by readback or by
 //     `boot.pressed`; a test_pin line low: that DUT is unpowered or stuck).
 // `wired: false` lines are reserved: level null, state reserved, no problem. A line also says its state
-// (reserved, idle, active while a press runs, low, unknown), its drive and its edge, drop, frame and bad-frame
+// (reserved, idle, active while a press runs or, on an analog line, while its duty is above 0, low, unknown), its
+// drive (an analog line: pwm, with the `duty` this hub run last applied, null before any), and its edge, drop, frame and bad-frame
 // counts (bad_frames: WS2812 frames that were not 24 bits, never published as hil.frame; edges: as the fixture
 // reported them), and on decode: level lines `glitches {repeats, pulses, corrections}`: what the timeline's
 // glitch filter dropped (repeated edges, phases under GLITCH_US) and put in from the `level` STATE.
@@ -202,6 +203,11 @@ export function benchStatus(src: StatusSource): BenchStatus {
       } else {
         state = level === null && drive !== 'nfet_gate' ? 'unknown' : 'idle';
       }
+    } else if (line.role === 'analog') {
+      // Active while a setpoint drives it (m2-c3-inputs D5): by the duty this hub last applied, else by its level
+      // (duty > 0).
+      const duty = src.driver.duty(line.channel);
+      state = duty !== null ? (duty > 0 ? 'active' : 'idle') : level === null ? 'unknown' : level ? 'active' : 'idle';
     } else if (line.role === 'test_pin') {
       if (level === false && isUp(presence(ref.dut))) {
         state = 'low';
@@ -225,6 +231,7 @@ export function benchStatus(src: StatusSource): BenchStatus {
       problem,
       state,
       drive: lineDrive(line),
+      ...(lineDrive(line) === 'pwm' ? { duty: line.wired ? src.driver.duty(line.channel) : null } : {}),
       ...(line.wired ? src.timeline.stats(line.channel) : {}),
     };
   });

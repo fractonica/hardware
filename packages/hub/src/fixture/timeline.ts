@@ -43,8 +43,14 @@ export interface BenchLineRef {
   entry: BenchDut;
 }
 
-/** What drives a button or EN line (D3 Drive): `via: nfet` is a MOSFET gate (high = press), else open drain. */
-export function lineDrive(line: BenchLine): 'open_drain' | 'nfet_gate' | 'none' {
+/**
+ * What drives a line (D3 Drive): a button or EN line `via: nfet` is a MOSFET gate (high = press), else open drain;
+ * an analog line is a PWM setpoint through its RC (design m2-c3-inputs D5); the rest are inputs.
+ */
+export function lineDrive(line: BenchLine): 'open_drain' | 'nfet_gate' | 'pwm' | 'none' {
+  if (line.role === 'analog') {
+    return 'pwm';
+  }
   if (line.role !== 'button' && line.role !== 'en') {
     return 'none';
   }
@@ -526,8 +532,9 @@ export class Timeline {
       }
       if (e.part === 'event' && (e.member === 'edges' || e.member === 'frame')) {
         this.#reading(map, ref, e);
-      } else if (e.part === 'state' && e.member === 'level' && typeof e.fields?.level === 'boolean' && ref.line.decode !== 'ws2812' && lineDrive(ref.line) !== 'nfet_gate') {
-        // An nfet_gate line's edges are its write stamps, not a capture (D4), so its `level` is no check on them.
+      } else if (e.part === 'state' && e.member === 'level' && typeof e.fields?.level === 'boolean' && ref.line.decode !== 'ws2812' && lineDrive(ref.line) !== 'nfet_gate' && lineDrive(ref.line) !== 'pwm') {
+        // An nfet_gate line's edges are its write stamps, not a capture (D4), so its `level` is no check on them; a
+        // pwm line's `level` says only that its duty is above 0 (m2-c3-inputs D5): no transition of the DUT's pin.
         this.#levelState(map, ref, e, e.fields.level);
       }
       return;

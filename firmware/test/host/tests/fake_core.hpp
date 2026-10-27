@@ -294,7 +294,7 @@ public:
     explicit RecordingSink(const fr::Core &core) : core_(core) {}
 
     void event(uint8_t port, uint8_t event_id, fr::cap::Priority prio, std::span<const uint8_t> fields,
-               fr::TimeUs at) override
+               fr::TimeUs at, bool /*ordered*/) override
     {
         record(true, port, event_id, prio, fields, at);
     }

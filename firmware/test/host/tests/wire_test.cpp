@@ -396,6 +396,34 @@ TEST(header_ext_rejections)
     CHECK(ext("04 7f 02 aa bb").has_value());                              // unknown non-critical
 }
 
+TEST(header_ext_port_seq)
+{
+    // An ordered port's EVENT (design m2-c3-inputs D8): port_seq is a non-critical u16 that Net stamps.
+    CHECK_EQ(ext_value_size(kExtPortSeq), 2u);
+    CHECK(kExtPortSeq < kExtCritical);
+    ExtBuilder b;
+    CHECK(b.add_value(kExtPortSeq, 0xFFFF));
+    Header h = example_header();
+    h.flags |= kFlagExt;
+    h.ext = b.view();
+    std::vector<uint8_t> buf(kMaxHeaderSize);
+    Writer w(buf);
+    pack_header(h, w);
+    const auto in = from_hex("a1 a0 03 01 0c 00 00 00 02 01 fe ff 00 00 03 00 22 01 04 05 02 ff ff");
+    CHECK_BYTES(w.bytes(), in);
+    const auto back = unpack_header(in);
+    REQUIRE(back.has_value());
+    CHECK(*back == h);
+    CHECK_EQ(back->ext.value(kExtPortSeq).value_or(0), 0xFFFFu);
+    CHECK(!back->ext.value(kExtTraceId).has_value());
+
+    // A u16: the builder refuses a wider value or another size, and the decoder a TLV of another size.
+    CHECK(!b.add_value(kExtPortSeq, 0x10000));
+    CHECK(!b.add(kExtPortSeq, from_hex("01 00 00 00")));
+    CHECK_EQ(unpack_header(from_hex("a1 a0 03 01 0c 00 00 00 02 01 fe ff 00 00 03 00 22 01 03 05 01 01")).error(),
+             DecodeErr::bad_ext);
+}
+
 TEST(envelope_prefix_follows_the_ext_block)
 {
     // RESULT with a trace id: the prefix starts after the block.

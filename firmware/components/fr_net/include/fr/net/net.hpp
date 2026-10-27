@@ -13,6 +13,9 @@
 //
 // M2-C2 (design m2-c2 D17, D19, D20) adds LOG frames over TCP from a LogSource (log.cpp), the flood-rate refund of a
 // send the driver refused, and the adoption of a newer hub run heard over the air while no session is up.
+//
+// M2-C3 (design m2-c3-inputs D6, D8, D10): an ordered capability's events carry EXT port_seq and take the URGENT
+// route, and a STATE's pending second copy is replaced by a newer STATE of the same property (superseded).
 #pragma once
 
 #include <algorithm>
@@ -21,12 +24,14 @@
 #include <cstdint>
 #include <expected>
 #include <iterator>
+#include <optional>
 #include <span>
 #include <string_view>
 
 #include "fr/base.hpp"
 #include "fr/cap/capability.hpp"
 #include "fr/core/core.hpp"
+#include "fr/envelope.hpp"
 #include "fr/net/air.hpp"
 #include "fr/net/link.hpp"
 #include "fr/net/log_source.hpp"
@@ -354,6 +359,8 @@ struct State {
     uint32_t exec_cancelled = 0;    // scheduled CMDs a new hub run's WELCOME, or an adopted run (D19), dropped unrun
     uint32_t exec_late_us_max = 0;  // the most a scheduled CMD ran after its time, in µs (not a counter)
     uint32_t rx_queue_us_max = 0;   // the longest a hub-link envelope waited between its link task and Net (µs)
+    // M2-C3 (design m2-c3-inputs D6); reset_stats() zeroes it.
+    uint32_t state_repeats_superseded = 0;  // STATE second copies replaced by a newer STATE of the same port and prop
     // C5 (design c5 §2 diag stats; the per-topic MSG counts are Net::msg_stats()); reset_stats() zeroes them.
     RelayStats relay;
     BcastStats bcast;
@@ -380,6 +387,9 @@ public:
     static constexpr size_t kLatestPairs = 8;
     /** Delay of an on-change STATE's second copy (05 §5.8 "Double send"). */
     static constexpr uint32_t kStateRepeatMs = 20;
+    /** Ports with an EXT port_seq counter (design m2-c3-inputs D8): every board instance (fr_core's kMaxInstances)
+     * could be ordered. An ordered port beyond them sends without port_seq, so the hub never holds its events. */
+    static constexpr size_t kOrderedPortsMax = 16;
     /** udp_ok lasts this many heartbeat intervals after an echo (05 §5.10). */
     static constexpr uint32_t kUdpOkIntervals = 3;
     /** A USB node whose TCP session heard nothing from the hub for more than this many tenths of an interval
@@ -556,8 +566,11 @@ public:
 
     // cap::Sink: capability emissions become EVENT/STATE envelopes to the hub. An EVENT first runs the
     // bindings on it (07 §7.11: right after the local emission, before and independent of the hub send).
-    void event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields,
-               TimeUs at) override;
+    // `ordered` (design m2-c3-inputs D8, D10): the port's event counter counts it, whether or not it reaches the
+    // hub (no path, too old: the bindings still ran), and its hub envelope carries the count as EXT port_seq; a Q1
+    // one takes the URGENT route (UDP alone with udp_ok, UDP + TCP before) without being marked URGENT.
+    void event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields, TimeUs at,
+               bool ordered = false) override;
     void property(uint8_t port, uint8_t prop_id, std::span<const uint8_t> value, TimeUs at) override;
 
 private:
@@ -574,7 +587,8 @@ private:
         TimeUs last_rx = 0;         // last hub frame on this link (05 §5.11 keepalive)
     };
 
-    /** A Q1 frame awaiting the hub's ACK, or an on-change STATE's second copy (`repeat`). */
+    /** A Q1 frame awaiting the hub's ACK, or an on-change STATE's second copy (`repeat`). The bytes are what went
+     * out first: a retry, a TCP copy or the repeat sends them unchanged (an EVENT's port_seq included). */
     struct Pending {
         bool used = false;
         bool repeat = false;
@@ -733,15 +747,23 @@ private:
     uint8_t wifi_route(uint8_t cls, uint8_t kind, uint8_t flags, size_t len) const;
     /** Nothing from the hub over the TCP session for more than kWifiSilentX10 / 10 intervals. */
     bool wifi_silent() const;
-    /** The envelope in tx_buf_ (valid until the next build); `ttl` 0 is this node's (ttl_default both halves). */
+    /** The envelope in tx_buf_ (valid until the next build); `ttl` 0 is this node's (ttl_default both halves).
+     * `ext` goes out as the header's TLV block when `flags` has kFlagExt. */
     std::span<const uint8_t> build(uint8_t flags, uint8_t cls, uint8_t kind, uint32_t seq, uint16_t dst, uint8_t port,
-                                   std::span<const uint8_t> prefix, std::span<const uint8_t> body, uint8_t ttl = 0);
+                                   std::span<const uint8_t> prefix, std::span<const uint8_t> body, uint8_t ttl = 0,
+                                   fr::wire::ExtView ext = {});
     /** Sends over every link in `via` (kVia* bits); returns the links it took, a TCP fallback included. */
     uint8_t transmit(uint8_t via, std::span<const uint8_t> envelope);
     bool transmit_on(LinkKind k, std::span<const uint8_t> envelope);
+    /** An EVENT to the hub; `port_seq` (an ordered port's, design m2-c3-inputs D8) goes in EXT and routes it as
+     * URGENT (D10). */
     void send_event(uint8_t port, uint8_t event_id, cap::Priority prio, std::span<const uint8_t> fields, TimeUs at,
-                    bool exempt);
+                    bool exempt, std::optional<uint16_t> port_seq = std::nullopt);
+    /** The next port_seq of ordered port `port`, from 1 per boot; nullopt when kOrderedPortsMax ports have one. */
+    std::optional<uint16_t> next_port_seq(uint8_t port);
     void track(std::span<const uint8_t> envelope, uint32_t seq, uint8_t via, TimeUs at, bool exempt);
+    /** 05 §5.8 "Double send", and design m2-c3-inputs D6: a pending second copy of the same port and prop is
+     * superseded (its slot takes these bytes, keeping its time), so no repeat of an older value follows a newer one. */
     void schedule_repeat(std::span<const uint8_t> envelope);
     void fail_pending(uint8_t via);
     void service_pending(Pending &p, TimeUs now);
@@ -956,6 +978,15 @@ private:
     // Per-boot sequence spaces (05 §5.8): ordinary and LATEST, both from 1.
     uint32_t seq_ = 0;
     uint32_t latest_seq_ = 0;
+    // Per-boot event counters of the ordered ports (design m2-c3-inputs D8: EXT port_seq), the last one used, in
+    // the order the ports first emitted. Neither a WELCOME nor a new hub run restarts them: the hub's reorder
+    // buffer forgets its expectation at a HELLO instead.
+    struct PortSeq {
+        uint8_t port = 0;
+        uint16_t last = 0;
+    };
+    std::array<PortSeq, kOrderedPortsMax> port_seqs_{};
+    size_t port_seq_n_ = 0;
 
     // Hub frames: windows on (0x0000, UNICAST) and (0x0000, BCAST) and LATEST last_seq, for hub_epoch.
     ReplayWindow<kWindowBits> ucast_;

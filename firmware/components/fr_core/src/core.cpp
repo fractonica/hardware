@@ -36,6 +36,7 @@
 #include "fr/net/net.hpp"
 #include "fr/ota/esp.hpp"
 #include "fr/ota/ota.hpp"
+#include "fr/platform/adc1.hpp"
 #include "fr/serial.hpp"
 #include "fr/serial_line.hpp"
 #include "led.hpp"       // generated fr::cap::Led (identify blinks the first LED)
@@ -162,6 +163,47 @@ size_t s_descriptor_len = 0;
 // Counters for diag `stats`; the reader and fr_net tasks write rx_dropped, the core task env_bad.
 std::atomic<uint32_t> s_rx_dropped{0};
 uint32_t s_env_bad = 0;
+
+// HEARTBEAT vbat_mv (design m2-c3-inputs D11): the board's battery input from set_battery() (gpio -1: none,
+// vbat_mv stays 0, "not measured"). Set before start() creates the core task, then read by it only: the channel is
+// configured at the first measurement.
+Battery s_battery{-1, 0, 0};
+std::optional<platform::Adc1Channel> s_bat_ch;
+bool s_bat_failed = false;
+TimeUs s_vbat_at = 0;
+uint32_t s_vbat_mv = 0;
+constexpr int kVbatSamples = 8;
+
+/** 8 conversions on the battery pin, averaged, times the divider; 0 when the board has none or it failed. */
+uint32_t measure_vbat_mv()
+{
+    if (s_battery.gpio < 0 || s_bat_failed) {
+        return 0;
+    }
+    if (!s_bat_ch) {
+        auto ch = platform::adc1_channel(s_battery.gpio);  // logs why it refused
+        if (!ch) {
+            ESP_LOGE(TAG, "vbat: battery input GPIO%d unusable; vbat_mv stays 0", static_cast<int>(s_battery.gpio));
+            s_bat_failed = true;
+            return 0;
+        }
+        s_bat_ch = *ch;
+    }
+    uint32_t sum = 0;
+    uint32_t n = 0;
+    for (int i = 0; i < kVbatSamples; ++i) {
+        int raw = 0;
+        int mv = 0;
+        if (platform::adc1_read(*s_bat_ch, raw, mv) && mv >= 0) {
+            sum += static_cast<uint32_t>(mv);
+            ++n;
+        }
+    }
+    if (n == 0) {
+        return 0;
+    }
+    return static_cast<uint32_t>((uint64_t{sum} * s_battery.divider_milli + n * 500) / (uint64_t{n} * 1000));
+}
 
 net::Config net_config()
 {
@@ -702,6 +744,15 @@ public:
         net::Vitals v;
         v.free_heap_kb = esp_get_free_heap_size() / 1024;
         v.ota_busy = s_ota.busy();  // HEARTBEAT ota_busy (06 §6.6)
+        // vbat_mv (design m2-c3-inputs D11): measured once per heartbeat. Net also asks for vitals on the
+        // ESP-NOW heartbeat and on every relay decision (for ota_busy); those reuse the last measurement.
+        const TimeUs now = esp_timer_get_time();
+        if (s_battery.gpio >= 0 && (s_vbat_at == 0 || now - s_vbat_at >= TimeUs{CONFIG_FR_HEARTBEAT_MS} * 500)) {
+            s_vbat_at = now;
+            s_vbat_mv = measure_vbat_mv();
+        }
+        v.vbat_mv = s_vbat_mv;
+        v.low_batt = s_vbat_mv > 0 && s_vbat_mv < s_battery.low_mv;
         return v;
     }
 
@@ -1006,6 +1057,7 @@ public:
         n.exec_cancelled = st.exec_cancelled;
         n.exec_late_us_max = st.exec_late_us_max;
         n.rx_queue_us_max = st.rx_queue_us_max;
+        n.state_repeats_superseded = st.state_repeats_superseded;
         n.hub_link_dropped = st.hub_link_dropped;
         n.udp_blocked = st.udp_blocked;
         n.ip_blocked = st.ip_blocked;
@@ -1474,6 +1526,15 @@ net::LinkInfo link_info()
 bool hub_session()
 {
     return s_net && s_net->hub_link();
+}
+
+void set_battery(const Battery &battery)
+{
+    s_battery = battery;
+    if (battery.gpio >= 0) {
+        ESP_LOGI(TAG, "vbat: GPIO%d x%u/1000, low below %u mV", static_cast<int>(battery.gpio),
+                 static_cast<unsigned>(battery.divider_milli), static_cast<unsigned>(battery.low_mv));
+    }
 }
 
 const fr_identity_t &identity()

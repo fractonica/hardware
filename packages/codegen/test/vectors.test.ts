@@ -86,6 +86,11 @@ describe('golden vectors', () => {
       // magic a1, flags URGENT, EVENT, kind 1, seq 12, net 0x0102, src fffe, dst 0, epoch 3, ttl 0x22, port 1
       ['header.button_down', 'a1 20 03 01 0c000000 0201 feff 0000 0300 22 01'],
       ['envelope.event.button_down', 'a1 20 03 01 0c000000 0201 feff 0000 0300 22 01 e8030000'],
+      // EXT (flags a0): block len 4, port_seq (05) len 2 = 1 (design m2-c3-inputs D8)
+      ['header.ext_port_seq', 'a1 a0 03 01 0c000000 0201 feff 0000 0300 22 01 04 0502 0100'],
+      // button.up with port_seq 2, then the time prefix 81000 (0x00013c68) and held_ms 80
+      ['envelope.event.button_up_port_seq', 'a1 a0 03 02 0d000000 0201 feff 0000 0300 22 01 04 0502 0200 683c0100 08 50'],
+      ['fr.fixture.set_duty.args.full_scale', '08 904e'],
       // RESULT prefix: req_epoch 9, req_seq 5, status 0; no body
       ['envelope.result.led_blink_ok', 'a1 00 05 03 0f000000 0201 1200 0000 0300 22 02 0900 05000000 00'],
       // 200 = c8 01; blink fields have non-zero defaults and are always written

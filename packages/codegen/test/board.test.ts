@@ -8,6 +8,7 @@ import { parse, stringify } from 'yaml';
 
 import {
   generateFirmware,
+  GLITCH_EXEMPT_DRIVES,
   headerPositions,
   listDrivers,
   loadBoardManifest,
@@ -410,7 +411,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: button_gpio, fixture_gpio, fixture_ws2812_rx, led_gpio, led_ws2812)",
+      "unknown driver 'button_touch' (known: adc_oneshot, button_gpio, fixture_gpio, fixture_ws2812_rx, led_gpio, led_ws2812)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -433,12 +434,12 @@ describe('validation', () => {
   it('rejects reserved and malformed instance names, unknown capabilities and missing board entries', () => {
     const dir = fixture();
     edit(dir, PROFILE('c6-pad'), (y) => {
-      y.caps = { node: y.caps.boot, Status: y.caps.status, x: { cap: 'fr.analog_in', driver: 'led_gpio', bind: 'leds.nope' } };
+      y.caps = { node: y.caps.boot, Status: y.caps.status, x: { cap: 'fr.ota', driver: 'led_gpio', bind: 'leds.nope' } };
     });
     expect(messages(dir)).toEqual([
       "instance name 'node' is reserved (spec 03 §3.6)",
       "instance name 'Status' must be snake_case, at most 31 characters",
-      'fr.analog_in has no service in this framework yet (services: fr.button, fr.led, fr.fixture)',
+      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in)',
       'board esp32c6-supermini has no entry leds.nope',
     ]);
   });
@@ -548,8 +549,8 @@ describe('validation', () => {
 describe('driver manifests', () => {
   const drivers = listDrivers(ROOT);
 
-  it('lists the M1 drivers and the M2-C1 fixture drivers', () => {
-    expect(drivers).toEqual(['button_gpio', 'fixture_gpio', 'fixture_ws2812_rx', 'led_gpio', 'led_ws2812']);
+  it('lists the M1 drivers, the M2-C1 fixture drivers and M2-C3\'s adc_oneshot', () => {
+    expect(drivers).toEqual(['adc_oneshot', 'button_gpio', 'fixture_gpio', 'fixture_ws2812_rx', 'led_gpio', 'led_ws2812']);
   });
 
   it.each(drivers)('%s: driver.yaml matches its header and idf_component.yml', (id) => {
@@ -608,7 +609,7 @@ describe('the HIL fixture profile (design m2-c1-hil D5)', () => {
     const r = generateFirmware({ sourceDir: ROOT, profile: FIXTURE, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
     expect(r.slotsLockChanged).toBe(false);
     expect(r.slotsLock.content).toBe(readFileSync(join(ROOT, slotsLockFile(FIXTURE)), 'utf8'));
-    expect(r.manifest.caps.map((c) => [c.name, c.port])).toEqual([['status', 1], ...Array.from({ length: 12 }, (_, i) => [`ch${i}`, i + 2])]);
+    expect(r.manifest.caps.map((c) => [c.name, c.port])).toEqual([['status', 1], ...Array.from({ length: 14 }, (_, i) => [`ch${i}`, i + 2])]);
     expect(r.warnings).toEqual([]);
   });
 
@@ -644,7 +645,7 @@ describe('the HIL fixture profile (design m2-c1-hil D5)', () => {
       port: 2,
       cap: 'fr.fixture',
       cap_id: 6,
-      version: '0.1',
+      version: '0.2',
       driver: 'fixture_gpio',
       config: { drive: 'open_drain', decode: 'level', pull: 'none', cap_ms: 15000, flush_us: 2000 },
       traits: { drive: 'open_drain', decode: 'level' },
@@ -963,5 +964,261 @@ describe('board manifest facts (design m2-c1-hil D5)', () => {
       `${FIX_BOARD}: headers.J3.0: GPIO4 is already at J1-4`,
       `${FIX_BOARD}: en_access: J1-4 is not an EN position in headers`,
     ]);
+  });
+});
+
+// ---- M2-C3: fr.analog_in, array config, fixture pwm lines and the battery (design m2-c3-inputs) ----
+
+const ANALOG = 'c3o-analog';
+const C3_BOARD = 'hardware/boards/esp32c3-oled042.board.yaml';
+const S3L_BOARD = 'hardware/boards/waveshare-esp32s3-lcd19.board.yaml';
+
+describe('fr.analog_in and c3o-analog (design m2-c3-inputs D3, D4)', () => {
+  const paths = (dir: string, profile = ANALOG) => issuesOf(() => gen(dir, profile, false)).map((i) => `${i.path}: ${i.message}`);
+  const analog = (dir: string, fn: (a: Yaml) => void) => edit(dir, PROFILE(ANALOG), (y) => fn(y.caps.analog));
+
+  it('c3o-analog generates against the committed slots.lock: AnalogInService on adc_oneshot, its array config and traits', () => {
+    const r = generateFirmware({ sourceDir: ROOT, profile: ANALOG, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+    expect(r.slotsLockChanged).toBe(false);
+    expect(r.slotsLock.content).toBe(readFileSync(join(ROOT, slotsLockFile(ANALOG)), 'utf8'));
+    expect(r.manifest.caps.map((c) => [c.name, c.port])).toEqual([
+      ['boot', 1],
+      ['status', 2],
+      ['analog', 3],
+    ]);
+    expect(r.manifest.test_pin).toBe(10);
+    expect(r.manifest.caps[2]).toEqual({
+      name: 'analog',
+      port: 3,
+      cap: 'fr.analog_in',
+      cap_id: 5,
+      version: '1.0',
+      driver: 'adc_oneshot',
+      config: { sample_hz: 200, report_hz: 20, deadband: 512, filter: 'ema', min_mv: 0, max_mv: 2500, hysteresis: 1024, thresholds: [16384, 32768, 49152] },
+      traits: { resolution_bits: 12, full_scale_mv: 2500 },
+    });
+    expect(r.instances.analog).toEqual({ bind: 'gpio.3', pins: [3], driverConfig: { gpio: 3 } });
+    const cpp = file(r, 'fr_board/fr_board.cpp');
+    expect(cpp).toContain('// analog: fr.analog_in on port 3, driver adc_oneshot on gpio.3');
+    expect(cpp).toMatch(/AdcOneshot::Config c\{\};\n {4}c\.gpio = 3;\n {4}return c;/);
+    expect(cpp).toContain('    c.thresholds = fr::proto::Array<uint16_t, 4>{16384, 32768, 49152};');
+    expect(cpp).toContain('fr::drv::AdcOneshot driver{kDriverConfig};\nfr::AnalogInService service{driver, kConfig};');
+    expect(cpp).toContain('#include "fr/drv/adc_oneshot.hpp"');
+    expect(file(r, 'fr_board/include/fr/board.hpp')).toContain('#include "fr/services/analog_in_service.hpp"');
+    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES adc_oneshot button_gpio led_gpio)');
+  });
+
+  it('takes an array config from a profile: integers within the element type and max, or an empty list', () => {
+    const dir = fixture({ locks: true });
+    analog(dir, (a) => {
+      a.config = { thresholds: [] };
+    });
+    const r = gen(dir, ANALOG, false);
+    expect(r.manifest.caps[2].config.thresholds).toEqual([]);
+    expect(file(r, 'fr_board/fr_board.cpp')).toContain('    c.thresholds = fr::proto::Array<uint16_t, 4>{};');
+    analog(dir, (a) => {
+      a.config = { thresholds: [1, 2, 3, 4] };
+    });
+    expect(file(gen(dir, ANALOG, false), 'fr_board/fr_board.cpp')).toContain('fr::proto::Array<uint16_t, 4>{1, 2, 3, 4}');
+  });
+
+  it('refuses an array of the wrong shape, length or element, and a list for a scalar entry', () => {
+    const at = (key: string) => `caps.analog.config.${key}`;
+    for (const [value, message] of [
+      [[1, 2, 3, 4, 5], '5 elements, but array<u16> takes at most 4'],
+      [[1, 70000], 'element 1: expected an integer in 0..65535 (u16), got 70000'],
+      [[1.5], 'element 0: expected an integer in 0..65535 (u16), got 1.5'],
+      [16384, 'expected a list of u16 (at most 4), got 16384'],
+    ] as const) {
+      const dir = fixture({ locks: true });
+      analog(dir, (a) => {
+        a.config = { thresholds: value };
+      });
+      expect(paths(dir)).toEqual([`${at('thresholds')}: ${message}`]);
+    }
+    const dir = fixture({ locks: true });
+    analog(dir, (a) => {
+      a.config = { sample_hz: [100] };
+    });
+    expect(paths(dir)).toEqual([`${at('sample_hz')}: expected a number, got [100]`]);
+    // A profile list holds numbers only, and never reaches a driver field either.
+    analog(dir, (a) => {
+      a.config = { filter: ['ema'] };
+    });
+    expect(paths(dir)).toEqual([`${at('filter')}: Invalid input`]);
+    edit(dir, PROFILE(ANALOG), (y) => {
+      y.caps.analog.config = {};
+      y.caps.status.config = { gpio: [8] };
+    });
+    expect(paths(dir)).toEqual(['caps.status.config.gpio: expected an integer in 0..255 (gpio), got [8]']);
+  });
+
+  it('refuses an empty mV range and thresholds that are not strictly ascending (AnalogInService init would)', () => {
+    const dir = fixture({ locks: true });
+    analog(dir, (a) => {
+      a.config = { min_mv: 2000, max_mv: 2000, thresholds: [100, 300, 300] };
+    });
+    expect(paths(dir)).toEqual([
+      'caps.analog.config.max_mv: max_mv 2000 must exceed min_mv 2000',
+      'caps.analog.config.thresholds: thresholds must be strictly ascending: 300 follows 300',
+    ]);
+    // Against the default max_mv (2500), the path is the profile's min_mv.
+    analog(dir, (a) => {
+      a.config = { min_mv: 3000 };
+    });
+    expect(paths(dir)).toEqual(['caps.analog.config.min_mv: max_mv 2500 must exceed min_mv 3000']);
+  });
+
+  it('derives full_scale_mv from the target, unless the driver declares it', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, PROFILE('c6-pad'), (y) => {
+      y.caps.analog = { cap: 'fr.analog_in', driver: 'adc_oneshot', bind: 'gpio.3' };
+    });
+    expect(gen(dir, 'c6-pad', false).manifest.caps.find((c) => c.name === 'analog')?.traits).toEqual({ resolution_bits: 12, full_scale_mv: 3300 });
+    expect(gen(dir, ANALOG, false).manifest.caps[2].traits.full_scale_mv).toBe(2500);
+    edit(dir, 'hardware/drivers/adc_oneshot/driver.yaml', (y) => {
+      y.traits.full_scale_mv = 1100;
+    });
+    expect(gen(dir, ANALOG, false).manifest.caps[2].traits).toEqual({ resolution_bits: 12, full_scale_mv: 1100 });
+  });
+
+  it('binds an ADC1 pin only: one of pins.adc1, never an ADC2 pin, never the battery input', () => {
+    const dir = fixture({ locks: true });
+    analog(dir, (a) => {
+      a.bind = 'gpio.7'; // free on the C3, but not ADC1
+    });
+    expect(paths(dir)).toEqual(['caps.analog.bind: GPIO7 (gpio.7) is not in pins.adc1 of esp32c3-oled042, which driver adc_oneshot needs (ADC1 only)']);
+    // The C3's GPIO5 is ADC2_CH0, even on a board whose manifest lists it.
+    edit(dir, C3_BOARD, (y) => {
+      y.pins.reserved.display = [6];
+      y.pins.free.push(5);
+      y.pins.adc1.push(5);
+    });
+    analog(dir, (a) => {
+      a.bind = 'gpio.5';
+    });
+    expect(paths(dir)).toEqual(['caps.analog.bind: GPIO5 (gpio.5) is an ADC2 pin on esp32c3; driver adc_oneshot samples ADC1 only']);
+
+    const s3 = fixture({ locks: true });
+    edit(s3, PROFILE('s3l-pad'), (y) => {
+      y.caps.analog = { cap: 'fr.analog_in', driver: 'adc_oneshot', bind: 'gpio.4' };
+    });
+    expect(paths(s3, 's3l-pad')).toEqual([
+      'caps.analog.bind: GPIO4 (gpio.4) is reserved for battery on waveshare-esp32s3-lcd19',
+      'caps.analog.bind: GPIO4 (gpio.4) is the battery input of waveshare-esp32s3-lcd19 (battery.gpio); driver adc_oneshot may not sample it',
+    ]);
+    edit(s3, PROFILE('s3l-pad'), (y) => {
+      y.caps.analog.bind = 'gpio.5';
+    });
+    expect(gen(s3, 's3l-pad', false).manifest.caps.find((c) => c.name === 'analog')?.traits).toEqual({ resolution_bits: 12, full_scale_mv: 3300 });
+  });
+
+  it('budgets ADC1 channels against the board (resources.adc1_channel)', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, C3_BOARD, (y) => {
+      y.resources.adc1_channel = 1;
+    });
+    edit(dir, PROFILE(ANALOG), (y) => {
+      y.caps.analog2 = { cap: 'fr.analog_in', driver: 'adc_oneshot', bind: 'gpio.4' };
+    });
+    expect(paths(dir)).toEqual(['caps: adc1_channel budget exceeded: 2 needed (analog, analog2), board esp32c3-oled042 has 1']);
+    expect(Object.fromEntries(['esp32c3-oled042', 'esp32c6-supermini', 'esp32s3-devkitc1-n16r8', 'waveshare-esp32s3-lcd19'].map((b) => [b, loadBoardManifest(ROOT, b).resources?.adc1_channel]))).toEqual({
+      'esp32c3-oled042': 5,
+      'esp32c6-supermini': 7,
+      'esp32s3-devkitc1-n16r8': 10,
+      'waveshare-esp32s3-lcd19': 10,
+    });
+  });
+});
+
+describe('fixture pwm lines (design m2-c3-inputs §3)', () => {
+  const paths = (dir: string) => issuesOf(() => gen(dir, FIXTURE, false)).map((i) => `${i.path}: ${i.message}`);
+  const caps = (dir: string, fn: (c: Yaml) => void) => edit(dir, PROFILE(FIXTURE), (y) => fn(y.caps));
+
+  it('ch12 and ch13 are pwm lines on fixture_gpio, on glitch pins the rule exempts them from', () => {
+    expect(GLITCH_EXEMPT_DRIVES).toEqual(['pwm']);
+    const r = gen(fixture({ locks: true }), FIXTURE, false);
+    expect(r.manifest.caps).toHaveLength(15);
+    for (const [ch, pin, port] of [
+      ['ch12', 11, 14],
+      ['ch13', 12, 15],
+    ] as const) {
+      expect(r.manifest.caps.find((c) => c.name === ch)).toMatchObject({ port, driver: 'fixture_gpio', config: { drive: 'pwm', decode: 'level', pull: 'none' }, traits: { drive: 'pwm', decode: 'level' } });
+      expect(r.instances[ch].pins).toEqual([pin]);
+      expect(loadBoardManifest(ROOT, 'esp32s3-devkitc1-n16r8').pins.power_up_glitch).toContain(pin);
+    }
+    expect(file(r, 'fr_board/fr_board.cpp')).toContain('c.drive = fr::cap::FixtureDrive::pwm;');
+  });
+
+  it('another drive on the same glitch pins is still refused', () => {
+    const dir = fixture({ locks: true });
+    caps(dir, (c) => {
+      c.ch12.config = { drive: 'open_drain' };
+    });
+    expect(paths(dir)).toEqual(['caps.ch12.bind: GPIO11 (gpio.11) drives a level at power-up (pins.power_up_glitch), so no line with drive open_drain may use it']);
+  });
+
+  it('a pwm line takes no pull and decodes nothing, and only fixture_gpio drives one', () => {
+    const dir = fixture({ locks: true });
+    caps(dir, (c) => {
+      c.ch12.config = { drive: 'pwm', pull: 'up' };
+      c.ch13.config = { drive: 'pwm', decode: 'ws2812' };
+      c.ch6.config = { drive: 'pwm', decode: 'ws2812' };
+    });
+    expect(paths(dir)).toEqual([
+      'caps.ch6.config.drive: fixture_ws2812_rx is input only: it needs drive: none, not pwm',
+      'caps.ch12.config.pull: pull: up is only for an input line (drive: none); a line with drive pwm has no pulls',
+      'caps.ch13.config.decode: decode: ws2812 needs driver fixture_ws2812_rx (RMT RX); fixture_gpio refuses it at init',
+      'caps.ch13.config.decode: a drive: pwm line decodes nothing: it needs decode: level, not ws2812',
+    ]);
+  });
+
+  it('budgets an LEDC channel per pwm line and one shared LEDC timer against the board', () => {
+    const dir = fixture({ locks: true });
+    expect(() => gen(dir, FIXTURE, false)).not.toThrow(); // 2 of 8 channels, 1 of 4 timers
+    edit(dir, FIX_BOARD, (y) => {
+      y.resources.ledc_channels = 1;
+      y.resources.ledc_timers = 0;
+    });
+    expect(paths(dir)).toEqual([
+      'caps: ledc_channels budget exceeded: 2 needed (ch12, ch13), board esp32s3-devkitc1-n16r8 has 1',
+      'caps: ledc_timers budget exceeded: 1 needed (ch12, ch13), board esp32s3-devkitc1-n16r8 has 0',
+    ]);
+    // Lines of other drives draw no LEDC.
+    caps(dir, (c) => {
+      delete c.ch12;
+      delete c.ch13;
+    });
+    expect(() => gen(dir, FIXTURE, false)).not.toThrow();
+  });
+});
+
+describe('the board battery (design m2-c3-inputs D11)', () => {
+  it('renders kBattery into every profile: the S3 LCD board has one, the others kHasBattery false', () => {
+    const s3 = file(generateFirmware({ sourceDir: ROOT, profile: 's3l-pad', outDir: join(tmpdir(), 'unused'), write: false, model: MODEL }), 'fr_board/include/fr/board.hpp');
+    expect(s3).toContain('inline constexpr bool kHasBattery = true;\ninline constexpr Battery kBattery{4, 2617, 3400};');
+    expect(s3).toContain('struct Battery {\n    int8_t gpio;  // -1: the board has none\n    uint16_t divider_milli;\n    uint16_t low_mv;\n};');
+    for (const p of ['c3o-pad', 'c6-pad', 's3k-fixture']) {
+      const hpp = file(generateFirmware({ sourceDir: ROOT, profile: p, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL }), 'fr_board/include/fr/board.hpp');
+      expect(hpp).toContain('inline constexpr bool kHasBattery = false;\ninline constexpr Battery kBattery{-1, 0, 0};');
+    }
+    expect(loadBoardManifest(ROOT, 'waveshare-esp32s3-lcd19').battery).toEqual({ gpio: 4, divider: 2.617, low_mv: 3400 });
+  });
+
+  it('rounds the divider to thousandths, and keeps the battery pin reserved', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, S3L_BOARD, (y) => {
+      y.battery.divider = 2.0004;
+    });
+    expect(file(gen(dir, 's3l-pad', false), 'fr_board/include/fr/board.hpp')).toContain('kBattery{4, 2000, 3400}');
+    edit(dir, S3L_BOARD, (y) => {
+      delete y.pins.reserved.battery;
+    });
+    expect(issuesOf(() => gen(dir, 's3l-pad', false)).map(formatIssue)).toEqual([`${S3L_BOARD}: battery.gpio: battery GPIO4 must be in pins.reserved, so no instance claims it`]);
+    edit(dir, S3L_BOARD, (y) => {
+      y.pins.reserved.battery = [4];
+      y.battery = { gpio: 4, divider: 0.5, low_mv: 3400, extra: 1 };
+    });
+    expect(issuesOf(() => gen(dir, 's3l-pad', false)).map((i) => i.path).sort()).toEqual(['battery', 'battery.divider']);
   });
 });

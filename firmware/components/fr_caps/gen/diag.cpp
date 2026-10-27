@@ -163,7 +163,7 @@ void Diag::emit_mark(const DiagMark &e, TimeUs at)
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
     if (!w.overflow()) {
-        sink_->event(port_, kEventMark, Priority::normal, w.bytes(), at);
+        sink_->event(port_, kEventMark, Priority::normal, w.bytes(), at, kOrdered);
     }
 }
 

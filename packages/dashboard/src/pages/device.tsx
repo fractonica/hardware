@@ -1,6 +1,7 @@
 // A device (`#/device/<alias>`, spec 08 §8.9): what the registry and this hub run know of it, its
-// capabilities rendered from the catalog (command buttons, live properties from `part:'state'` events,
-// gestures through input_simulate on a debug build), its recent events, bindings, logs (xterm), the
+// capabilities rendered from the catalog (command buttons, live properties from `part:'state'` events with a
+// sparkline of numeric ones, gestures through input_simulate on a debug build for fr.button instances, and for
+// fr.analog_in a value form, design m2-c3-inputs D7), its recent events, bindings, logs (xterm), the
 // node's own diagnostics (diag_exec info and stats), OTA history, and crashes ("not built": crash_list is
 // open after C4, design c6 §1).
 
@@ -17,6 +18,7 @@ import { Badge, Button, Empty, ErrorBox, Input, Json, KV, Mono, Panel, presenceT
 import { useAct, useLive, useNow, useOp } from '../hooks.ts';
 import { agoIso, brief, short, span } from '../state/format.ts';
 import { defaultArgs, joinCatalog, parseArgs, visibleMembers, type InstanceView } from '../state/caps.ts';
+import type { PropPoint } from '../state/live.ts';
 import { EventRow } from './live.tsx';
 
 const GESTURES = ['press', 'release', 'click', 'double_click', 'long_press'] as const;
@@ -76,10 +78,61 @@ function Gestures({ deviceId, inst }: { deviceId: string; inst: string }) {
   );
 }
 
+/** fr.analog_in's value range (07 §7.3): 0..65535 over the instance's min_mv..max_mv. */
+const ANALOG_MAX = 65535;
+
+/** input_simulate {value} on an fr.analog_in instance (layer inject, debug builds): a slider and its number. */
+function AnalogForm({ deviceId, inst }: { deviceId: string; inst: string }) {
+  const [value, setValue] = useState(32768);
+  const act = useAct('input_simulate', { done: (r) => ({ tone: r.results[0]?.status === 'ok' ? 'ok' : 'warn', title: `${inst}: ${r.results[0]?.status ?? 'no answer'}` }) });
+  const set = (v: number) => setValue(Number.isFinite(v) ? Math.min(ANALOG_MAX, Math.max(0, Math.round(v))) : 0);
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2"
+      data-analog={inst}
+      onSubmit={(e) => {
+        e.preventDefault();
+        act.mutate({ selector: `id:${deviceId}`, instance: inst, value, layer: 'inject' });
+      }}
+    >
+      <span className="text-xs text-muted">simulate</span>
+      <input type="range" min={0} max={ANALOG_MAX} value={value} onChange={(e) => set(Number(e.target.value))} aria-label={`${inst} value`} className="min-w-32 flex-1 accent-accent" />
+      <Input type="number" min={0} max={ANALOG_MAX} value={value} onChange={(e) => set(Number(e.target.value))} aria-label={`${inst} value number`} className="w-24" />
+      <Button type="submit" tone="ghost" disabled={act.isPending} title="hold the value for 1 s (fr.analog_in inject)">
+        inject
+      </Button>
+    </form>
+  );
+}
+
+/** A property's recent numeric values (the live store's history) as a line; nothing with fewer than two. */
+function Sparkline({ points, max }: { points: readonly PropPoint[] | undefined; max?: number }) {
+  const nums = (points ?? []).map((p) => (typeof p.value === 'boolean' ? Number(p.value) : p.value)).filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  if (nums.length < 2) {
+    return null;
+  }
+  const lo = max !== undefined ? 0 : Math.min(...nums);
+  const hi = max !== undefined ? max : Math.max(...nums);
+  const range = hi - lo || 1;
+  const w = 120;
+  const h = 20;
+  const d = nums.map((v, i) => `${((i / (nums.length - 1)) * w).toFixed(1)},${(h - ((v - lo) / range) * h).toFixed(1)}`).join(' ');
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className="ml-2 inline-block align-middle text-accent" aria-hidden="true" data-sparkline>
+      <polyline points={d} fill="none" stroke="currentColor" strokeWidth="1.2" vectorEffect="non-scaling-stroke" />
+    </svg>
+  );
+}
+
 function InstanceCard({ deviceId, inst, cap, mirror, helloCaps }: { deviceId: string; inst: InstanceView; cap: CatalogCapability | undefined; mirror: Record<string, unknown>; helloCaps: number | null }) {
   const live = useLive((s) => s.properties[deviceId]);
+  const history = useLive((s) => s.history[deviceId]);
   const m = cap ? visibleMembers(cap, inst.traits, helloCaps) : null;
-  const injectable = m?.commands.some((c) => c.name === 'inject') ?? false;
+  // The gesture row is fr.button's, the value form fr.analog_in's (D7); any other inject is a plain command form.
+  const hasInject = m?.commands.some((c) => c.name === 'inject') ?? false;
+  const button = hasInject && inst.cap === 'fr.button';
+  const analog = hasInject && inst.cap === 'fr.analog_in';
+  const injectable = button || analog;
   return (
     <div className="rounded border border-line p-3" data-instance={inst.name}>
       <div className="mb-2 flex flex-wrap items-baseline gap-2">
@@ -100,7 +153,10 @@ function InstanceCard({ deviceId, inst, cap, mirror, helloCaps }: { deviceId: st
             return (
               <div key={p.name} className="contents" data-property={key}>
                 <dt className="text-muted">{p.name}</dt>
-                <dd className="font-mono">{v === undefined ? '–' : brief(v, 60)}</dd>
+                <dd className="font-mono">
+                  {v === undefined ? '–' : brief(v, 60)}
+                  <Sparkline points={history?.[key]} {...(analog && p.name === 'value' ? { max: ANALOG_MAX } : {})} />
+                </dd>
               </div>
             );
           })}
@@ -112,7 +168,8 @@ function InstanceCard({ deviceId, inst, cap, mirror, helloCaps }: { deviceId: st
           .map((c) => (
             <CommandForm key={c.name} deviceId={deviceId} inst={inst.name} cmd={c} />
           ))}
-        {injectable ? <Gestures deviceId={deviceId} inst={inst.name} /> : null}
+        {button ? <Gestures deviceId={deviceId} inst={inst.name} /> : null}
+        {analog ? <AnalogForm deviceId={deviceId} inst={inst.name} /> : null}
       </div>
       {m?.events.length ? <p className="mt-2 text-xs text-muted">events: {m.events.map((e) => e.name).join(', ')}</p> : null}
     </div>

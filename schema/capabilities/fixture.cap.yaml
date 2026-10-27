@@ -1,17 +1,17 @@
 capability: fr.fixture
 id: 0x0006
-version: "0.1"
+version: "0.2"
 test_only: true                    # left out of fr codegen client, the SDK, the app catalog and the dashboard's capability lists
 summary: One HIL fixture line wired to a device under test; presses BOOT, captures edges, decodes WS2812.
 types:
-  Drive:  { enum: { none: 0, open_drain: 1, nfet_gate: 2 } }   # M2-C3 adds pwm: 3 (LEDC)
+  Drive:  { enum: { none: 0, open_drain: 1, nfet_gate: 2, pwm: 3 } }   # pwm: LEDC, 20 kHz, 11-bit (M2-C3)
   Decode: { enum: { level: 0, ws2812: 1 } }
   Pull:   { enum: { none: 0, up: 1 } }
 traits:
   drive:  { id: 1, type: Drive,  default: none }
   decode: { id: 2, type: Decode, default: level }
 config:
-  drive:    { type: Drive,  default: none, doc: "nfet_gate: push-pull to a MOSFET gate only, high = press" }
+  drive:    { type: Drive,  default: none, doc: "nfet_gate: push-pull to a MOSFET gate only, high = press; pwm: an analog setpoint through an RC (set_duty)" }
   decode:   { type: Decode, default: level }
   pull:     { type: Pull,   default: none, doc: "up only on test_pin lines" }
   cap_ms:   { type: u16, default: 15000, range: [100, 30000], unit: ms, doc: "longest a press may hold the line" }
@@ -22,15 +22,24 @@ commands:
   press:
     id: 1
     delivery: reliable
-    doc: Drive the line by segments (press, release, press, ...); RESULT at the first press edge. BUSY while a press runs or when the line does not read released; UNSUPPORTED on drive none.
+    doc: Drive the line by segments (press, release, press, ...); RESULT at the first press edge. BUSY while a press runs or when the line does not read released; UNSUPPORTED on drive none or pwm.
     fields: { segments_us: { id: 1, type: "array<u32>", max: 16 } }
     result: { at_us: { id: 1, type: u32 }, total_us: { id: 2, type: u32 } }
     examples: [ { segments_us: [80000] } ]
-  release: { id: 2, delivery: reliable, idempotent: true }
+  release: { id: 2, delivery: reliable, idempotent: true, doc: "Lets the line go; on a pwm line the duty goes to 0." }
   read:
     id: 3
     delivery: reliable
+    doc: On a pwm line `level` is true while the duty is above 0.
     result: { level: { id: 1, type: bool }, edges: { id: 2, type: u32 }, dropped: { id: 3, type: u32 }, bad_frames: { id: 4, type: u32 } }
+  set_duty:
+    id: 4
+    delivery: reliable
+    idempotent: true
+    doc: Sets a pwm line's LEDC duty, in 1/10,000 of full scale; RESULT when it was applied. UNSUPPORTED on any drive but pwm.
+    fields: { duty: { id: 1, type: u16, range: [0, 10000] } }
+    result: { at_us: { id: 1, type: u32 } }
+    examples: [ { duty: 5000 }, { duty: 0 } ]
 events:
   edges:
     id: 1

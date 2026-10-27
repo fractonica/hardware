@@ -8,7 +8,7 @@
 //   when fr_fleet and its client (stream S2) are there.
 // Nothing here reaches the lab hub on 7420.
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -29,7 +29,7 @@ import { LOSS_HOOK_S, LOSS_REARM_MARGIN_S, lossRearmDue } from '../../../tests/e
 import { type FleetControl, fleetDiag, FleetState } from '../../../tests/sim/lib/fleet-diag.ts';
 import { addSample, emptyHist, type Hist } from '../../../tests/sim/lib/metrics.ts';
 import { PERSON_HANDLES, PersonBot, pleaseOf } from '../../../tests/sim/lib/person.ts';
-import { DEFAULT_DEPS, fleetBinOf, parseSimArgs, runScenario } from '../../../tests/sim/lib/runner.ts';
+import { DEFAULT_DEPS, fleetBinOf, fleetStaleness, parseSimArgs, runScenario } from '../../../tests/sim/lib/runner.ts';
 import { loadScenarioText } from '../../../tests/sim/lib/topology-check.ts';
 import { epochVerdict, lagVerdict, stormOutcome, stormVerdict } from '../../../tests/sim/lib/verdict.ts';
 import { checkSchedule, directoriesAgree, drawSchedule, inFlightProfile, MIN_COUNTS, parseArgs as parseChurn, WIFI_APPLY_DELAY_MS, wifiDownOfflineMaxMs } from '../../../tests/sim/t2-churn.ts';
@@ -486,5 +486,24 @@ describe.skipIf(!FLEET)('a dry run of T2-FLOOD-30 on fr_fleet against a private 
     expect(run.measured).toMatchObject({ cut: 'sim-07', sent: 50, nodes: 10, sanitized: false });
     expect(['pass', 'error']).toContain(run.status);
     expect(existsSync(join(String(run.measured.evidence), 'fleet-spec.json'))).toBe(true);
+  });
+});
+
+describe('fleetStaleness (M2-C3: a stale fr_fleet ran silent nodes)', () => {
+  it('names a kit source newer than the checkout binary, and leaves FR_FLEET_BIN or a missing binary alone', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fr-fleet-stale-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const bin = join(dir, 'build', 'host-fleet', 'fr_fleet');
+    const src = join(dir, 'firmware', 'test', 'host', 'sim', 'node.cpp');
+    mkdirSync(dirname(bin), { recursive: true });
+    mkdirSync(dirname(src), { recursive: true });
+    writeFileSync(src, '// kit');
+    writeFileSync(bin, 'bin');
+    utimesSync(src, new Date(1_000_000), new Date(1_000_000));
+    expect(fleetStaleness(dir, bin, {})).toBeNull();
+    utimesSync(src, new Date(), new Date(Date.now() + 60_000));
+    expect(fleetStaleness(dir, bin, {})).toBe('firmware/test/host/sim/node.cpp is newer than build/host-fleet/fr_fleet');
+    expect(fleetStaleness(dir, bin, { FR_FLEET_BIN: bin })).toBeNull();
+    expect(fleetStaleness(dir, join(dir, 'nope'), {})).toBeNull();
   });
 });

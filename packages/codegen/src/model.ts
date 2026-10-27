@@ -173,6 +173,12 @@ export interface Capability {
    * out: the catalog and catalog_hash (buildCatalog), the SDK facades and `fr codegen client`.
    */
   testOnly: boolean;
+  /**
+   * `ordered: true` (design m2-c3-inputs D8): the instance's events carry EXT port_seq (a per-port counter Net
+   * stamps), so the hub can hold one that overtook its predecessor and deliver them in order. The generated
+   * emit_* hand the Sink `ordered = true` (C++ kOrdered); CAPS (CapInfo.ordered) and the catalog carry the flag.
+   */
+  ordered: boolean;
   summary: string;
   doc?: string;
   mapsTo?: Record<string, string>;
@@ -484,6 +490,7 @@ const RawCapability = z.strictObject({
   id: int,
   version: z.string(),
   test_only: z.boolean().optional(),
+  ordered: z.boolean().optional(),
   summary: z.string(),
   doc: z.string().optional(),
   maps_to: z.record(z.string(), z.string()).optional(),
@@ -1171,6 +1178,12 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
     issues.add(file, ['test_only'], `${name} is a system capability (${hex(raw.id)}); only standard and project capabilities may be test_only`);
   }
 
+  const ordered = raw.ordered === true;
+  // port_seq numbers a port's EVENTs; a capability without events has nothing to order.
+  if (ordered && Object.keys(raw.events ?? {}).length === 0) {
+    issues.add(file, ['ordered'], `${name} has no events; ordered applies to a capability's events`);
+  }
+
   const enums = Object.entries(raw.types ?? {}).map(([n, t]) => buildEnum(n, t.enum, name, file, ['types', n, 'enum'], issues));
   const scope: Scope = { file, enums: new Map(enums.map((e) => [e.name, e])), structs: new Map(), issues };
 
@@ -1299,6 +1312,7 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
     section: reg?.section ?? 'project',
     version,
     testOnly,
+    ordered,
     summary: raw.summary,
     ...(raw.doc !== undefined ? { doc: raw.doc } : {}),
     ...(raw.maps_to ? { mapsTo: raw.maps_to } : {}),
@@ -1398,6 +1412,7 @@ export function buildCatalog(model: Model): Record<string, JsonValue> {
       name: c.name,
       version: `${c.version.major}.${c.version.minor}`,
       section: c.section,
+      ...(c.ordered ? { ordered: true } : {}),
       summary: c.summary,
       ...(c.doc !== undefined ? { doc: c.doc } : {}),
       ...(c.mapsTo ? { maps_to: c.mapsTo } : {}),

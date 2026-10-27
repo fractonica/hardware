@@ -22,8 +22,9 @@ import { fuzzCases, fuzzN, fuzzTimeout, hexOf, latin1, reportDigest } from './fu
 
 const N = fuzzN();
 const PINNED_N = 10_000;
-// wire.envelope's pin; it moved when EXT TLVs became supported (design c3 §2).
-const PINNED_ENVELOPE = 0x5956f8bf;
+// wire.envelope's pin; it moved when EXT TLVs became supported (design c3 §2), and when port_seq (0x05) became a
+// known u16 and the envelope vectors (its corpus) gained an EVENT carrying it (design m2-c3-inputs D8).
+const PINNED_ENVELOPE = 0x3afdb26f;
 
 class Digest {
   h = 0x811c9dc5;

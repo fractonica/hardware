@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:fractonica:schema:fr.fixture.release.args",
   "title": "fr.fixture.release arguments",
+  "description": "Lets the line go; on a pwm line the duty goes to 0.",
   "type": "object",
   "properties": {},
   "additionalProperties": false

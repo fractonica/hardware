@@ -152,13 +152,40 @@ describe('generated capability API (design c2 §4)', () => {
 
   it('hands the Sink when an event happened (design c2 §4, decision D)', () => {
     // emit_* and report_* forward `at`; kNowUs (the default) lets the Sink stamp the emission time.
-    expect(buttonCpp).toContain('void Button::emit_down(const ButtonDown &, TimeUs at)\n{\n    if (sink_ != nullptr) {\n        sink_->event(port_, kEventDown, Priority::realtime, {}, at);');
+    expect(buttonCpp).toContain('void Button::emit_down(const ButtonDown &, TimeUs at)\n{\n    if (sink_ != nullptr) {\n        sink_->event(port_, kEventDown, Priority::realtime, {}, at, kOrdered);');
     expect(buttonCpp).toContain('void Button::emit_up(const ButtonUp &e, TimeUs at)\n{');
-    expect(buttonCpp).toContain('    sink_->event(port_, kEventUp, Priority::realtime, w.bytes(), at);');
+    expect(buttonCpp).toContain('    sink_->event(port_, kEventUp, Priority::realtime, w.bytes(), at, kOrdered);');
     expect(buttonCpp).toContain('void Button::report_pressed(bool v, TimeUs at)\n{');
     expect(buttonCpp).toContain('    sink_->property(port_, kPropPressed, w.bytes(), at);');
     // report_all re-reports now.
     expect(buttonCpp).toContain('void Button::report_all()\n{\n    report_pressed(pressed());\n}');
+  });
+
+  it('hands the Sink the capability\'s ordered flag (design m2-c3-inputs D8)', () => {
+    // fr.button is ordered: true, fr.led is not; every emit_* passes kOrdered, so Net stamps port_seq.
+    expect(button).toContain('static constexpr bool kOrdered = true;  // true: its events carry EXT port_seq (YAML ordered)');
+    expect(led).toContain('static constexpr bool kOrdered = false;');
+    expect(ledCpp).toContain('sink_->event(port_, kEventEffectDone, Priority::normal, w.bytes(), at, kOrdered);');
+    for (const cap of loadModel(ROOT).capabilities.filter((c) => c.events.length > 0)) {
+      const cpp = file(out, `${CPP_CAPS_GEN_DIR}/${cap.shortName}.cpp`);
+      expect(cpp.match(/sink_->event\(/g)?.length).toBe(cpp.match(/sink_->event\([^;]*, at, kOrdered\);/g)?.length);
+      expect(file(out, `${CPP_CAPS_GEN_DIR}/${cap.shortName}.hpp`)).toContain(`static constexpr bool kOrdered = ${cap.ordered};`);
+    }
+  });
+
+  it('gives fr.analog_in 1.0 and the fixture\'s set_duty the interfaces their services implement (design m2-c3-inputs D1, §3)', () => {
+    const analog = file(out, `${CPP_CAPS_GEN_DIR}/analog_in.hpp`);
+    expect(analog).toContain('static constexpr Version kVersion{1, 0};');
+    expect(analog).toContain('virtual std::expected<AnalogInReadResult, Err> read() = 0;  // reliable');
+    expect(analog).toMatch(/#if FR_TEST_HOOKS\n(    \/\/.*\n)*    virtual Status inject\(const AnalogInInjectArgs &args\) = 0;  \/\/ reliable, visibility: test\n#endif/);
+    expect(analog).toContain('struct AnalogInTraits {\n    uint8_t resolution_bits = 0;\n    uint16_t full_scale_mv = 0;\n');
+    expect(analog).toContain('fr::proto::Array<uint16_t, 4> thresholds{};');
+    expect(analog).toContain('void emit_crossed(const AnalogInCrossed &e, TimeUs at = kNowUs);  // realtime');
+    expect(analog).toContain('void report_value(uint16_t v, TimeUs at = kNowUs);  // property id 1');
+    const fixture = file(out, `${CPP_CAPS_GEN_DIR}/fixture.hpp`);
+    expect(fixture).toContain('enum class FixtureDrive : uint8_t { none = 0, open_drain = 1, nfet_gate = 2, pwm = 3 };');
+    expect(fixture).toContain('virtual std::expected<FixtureSetDutyResult, Err> set_duty(const FixtureSetDutyArgs &args) = 0;  // reliable, idempotent');
+    expect(file(out, `${CPP_CAPS_GEN_DIR}/fixture.cpp`)).toContain('return v.duty <= 10000;');
   });
 
   it('reports only the properties whose trait is on', () => {

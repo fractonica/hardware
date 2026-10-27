@@ -3,13 +3,15 @@
 // input_simulate. Devices are picked by selector (registry, 09 §9.2); waits follow the cursor rules of
 // 09 §9.2 (since required, no stale or replayed matches, count and per_device). M2-C1 (design m2-c1-hil D8,
 // D9, D15; stream S4): input_simulate's layer (inject here, gpio through the fixture module), op.called on
-// command_send and input_simulate, and the fixture fence on both.
+// command_send and input_simulate, and the fixture fence on both. M2-C3 (design m2-c3-inputs D7): input_simulate
+// of an fr.analog_in value (or mV), and the value <-> mV mapping the fixture module shares.
 
 import { z } from 'zod';
 
 import { formatCursor, FrError, type JobOrigin, type LinksOpName, OP_CALLED_OPS, parseCursor } from '@fractonica/protocol';
-import { decodeMember, encodeMember, findCap, jsonSchema, statusName } from '@fractonica/protocol/gen';
+import { ANALOG_IN_CONFIG_DEFAULTS, decodeMember, encodeMember, findCap, jsonSchema, statusName } from '@fractonica/protocol/gen';
 
+import { manifestCapsByFwPrefix } from '../artifacts.ts';
 import type { Device, Handler, HubContext, HubEvent, OpInput, Presence } from '../context.ts';
 import type { Db } from '../db.ts';
 import { type EventQuery, EventStore, matchTypes, matchWhere, mintCursor, mintTimeUs, parseTypes, tailEvents } from '../events/index.ts';
@@ -98,6 +100,85 @@ function flushAll(hub: HubContext): void {
 }
 
 const directories = new WeakMap<Db, CapDirectory>();
+
+/** An fr.analog_in instance's input range in calibrated mV (design m2-c3-inputs D1): value 0 at min_mv, 65535 at max_mv. */
+export interface AnalogRange {
+  min_mv: number;
+  max_mv: number;
+}
+
+/**
+ * The range of a device's fr.analog_in instance (D7): its running firmware's manifest config, else the capability
+ * defaults (0..2,500 mV); a manifest whose max_mv does not exceed min_mv (codegen refuses one) gets the defaults.
+ */
+export function analogRange(hub: Pick<HubContext, 'db' | 'router'>, dev: Device, instance: string): AnalogRange {
+  const fw = routerInfo(hub.router, dev.device_id)?.fw_id_prefix ?? dev.fw_id;
+  let config: Record<string, unknown> = {};
+  try {
+    config = (fw && hub.db ? manifestCapsByFwPrefix(hub.db, fw)?.find((c) => c.name === instance)?.config : undefined) ?? {};
+  } catch {
+    // no manifest for that firmware: the defaults
+  }
+  const num = (k: 'min_mv' | 'max_mv') => (typeof config[k] === 'number' ? (config[k] as number) : ANALOG_IN_CONFIG_DEFAULTS[k]);
+  const r = { min_mv: num('min_mv'), max_mv: num('max_mv') };
+  return r.max_mv > r.min_mv ? r : { min_mv: ANALOG_IN_CONFIG_DEFAULTS.min_mv, max_mv: ANALOG_IN_CONFIG_DEFAULTS.max_mv };
+}
+
+/** mV -> fr.analog_in value over the range, rounded and clamped to 0..65535 (as the node maps a reading). */
+export function mvToValue(mv: number, r: AnalogRange): number {
+  return Math.min(65535, Math.max(0, Math.round(((mv - r.min_mv) * 65535) / (r.max_mv - r.min_mv))));
+}
+
+/** fr.analog_in value -> mV over the range, rounded. */
+export function valueToMv(value: number, r: AnalogRange): number {
+  return Math.round(r.min_mv + (value * (r.max_mv - r.min_mv)) / 65535);
+}
+
+/** What input_simulate asks of an instance (D7): a gesture of an fr.button, or a value of an fr.analog_in. */
+export type InputKind = 'gesture' | 'analog';
+/** The capability each kind of input needs. */
+const INPUT_CAP: Record<InputKind, string> = { gesture: 'fr.button', analog: 'fr.analog_in' };
+
+/**
+ * input_simulate's input checked (D7): exactly one of gesture, value, mv; hold_ms only with an analog value on
+ * layer inject; bounce only on gpio. Throws INVALID_ARGS.
+ */
+export function inputKind(input: OpInput<'input_simulate'>): InputKind {
+  const given = (['gesture', 'value', 'mv'] as const).filter((k) => input[k] !== undefined);
+  if (given.length !== 1) {
+    throw new FrError('INVALID_ARGS', `give exactly one of gesture, value or mv${given.length ? ` (got ${given.join(', ')})` : ''}`, {
+      remediation: [{ tool: 'input_simulate', args: { selector: input.selector, instance: input.instance, gesture: 'click' } }],
+    });
+  }
+  const kind: InputKind = input.gesture !== undefined ? 'gesture' : 'analog';
+  if (input.hold_ms !== undefined && (kind !== 'analog' || input.layer === 'gpio')) {
+    throw new FrError(
+      'INVALID_ARGS',
+      kind !== 'analog' ? 'hold_ms is for an analog value (value or mv), not a gesture' : 'hold_ms is for layer inject: a gpio setpoint holds until it is changed, released or set to 0',
+    );
+  }
+  if (input.layer !== 'gpio' && input.gesture === 'bounce') {
+    throw new FrError('INVALID_ARGS', 'gesture bounce is gpio-only (a click with contact bounce by the HIL fixture)', {
+      remediation: [{ tool: 'input_simulate', args: { selector: input.selector, instance: input.instance, gesture: 'bounce', layer: 'gpio' } }],
+    });
+  }
+  return kind;
+}
+
+/**
+ * The per-device outcome when the device's instance is of the other capability than the input needs (D7), else
+ * null: a gesture needs fr.button, a value or mv fr.analog_in. A device whose instances are unknown, or that has
+ * no such instance, passes here (the command path says not_found).
+ */
+export function inputMismatch(hub: Pick<HubContext, 'db' | 'router'>, dev: Device, instance: string, kind: InputKind): CommandOutcome | null {
+  const inst = instanceNamed(instancesOf(hub, dev), instance);
+  const want = INPUT_CAP[kind];
+  if (!inst || inst.cap === want) {
+    return null;
+  }
+  const what = kind === 'gesture' ? 'a gesture' : 'a value or mv';
+  return { device: dev.device_id, alias: dev.alias, status: 'invalid_input', error: `${dev.alias} ${instance} is ${inst.cap}: ${what} needs ${want}` };
+}
 
 /** The instances of a device: what the router knows (live HELLO firmware, descriptor), else its registry firmware's manifest. */
 export function instancesOf(hub: Pick<HubContext, 'db' | 'router'>, dev: Device): PortCap[] | null {
@@ -533,30 +614,56 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
   // Two layers (design m2-c1-hil D8): inject (the default) runs the instance's inject command, where press is
   // a raw hold; gpio has the HIL fixture press the bench-wired line, where press is a real hold and bounce
   // (gpio only) a click with contact bounce. The gpio result adds layer, fixture, channel and press, and the
-  // cursor before the presses.
+  // cursor before the presses. M2-C3 (design m2-c3-inputs D7): exactly one of gesture (fr.button), value or mv
+  // (fr.analog_in); an instance of the other capability is a per-device invalid_input (all of them: INVALID_ARGS).
+  // An analog inject sends inject {value, hold_ms} with mv converted over the instance's min_mv/max_mv, and its
+  // result adds the value per device; on gpio the fixture module sets the analog line's PWM setpoint (Driver.setMv).
   input_simulate: async (input: OpInput<'input_simulate'>, hub) => {
-    if (input.layer !== 'gpio' && input.gesture === 'bounce') {
-      throw new FrError('INVALID_ARGS', 'gesture bounce is gpio-only (a click with contact bounce by the HIL fixture)', {
-        remediation: [{ tool: 'input_simulate', args: { selector: input.selector, instance: input.instance, gesture: 'bounce', layer: 'gpio' } }],
-      });
-    }
+    const kind = inputKind(input);
     if (input.layer === 'gpio' && !hub.fixture) {
-      throw new FrError('NOT_FOUND', 'this hub runs no fixture module, so layer gpio has nothing to press with', {
-        remediation: [{ tool: 'bench_get' }, { tool: 'input_simulate', args: { ...input, layer: 'inject' } }],
+      throw new FrError('NOT_FOUND', `this hub runs no fixture module, so layer gpio has nothing to ${kind === 'gesture' ? 'press' : 'drive'} with`, {
+        remediation: [{ tool: 'bench_get' }, ...(kind === 'gesture' ? [{ tool: 'input_simulate', args: { ...input, layer: 'inject' } }] : [])],
       });
     }
-    const devices = selectDevices(hub, input.selector);
-    fenceCommand(hub, devices, 'input_simulate');
-    const called: OpCalled = { op: 'input_simulate', instance: input.instance, gesture: input.gesture, layer: input.layer };
-    if (input.layer === 'gpio') {
-      // op.called once the fixture module has gated every device, before it presses.
-      return hub.fixture!.simulate(devices, input, () => publishOpCalled(hub, devices, called));
+    const all = selectDevices(hub, input.selector);
+    fenceCommand(hub, all, 'input_simulate');
+    const mismatched = new Map<string, CommandOutcome>();
+    for (const d of all) {
+      const m = inputMismatch(hub, d, input.instance, kind);
+      if (m) {
+        mismatched.set(d.device_id, m);
+      }
     }
-    const results = await sendToAll(hub, devices, input.instance, 'inject', { gesture: input.gesture }, { ack: 'result', timeoutMs: input.timeout_s * 1000, duplicate: false }, called);
+    if (mismatched.size === all.length) {
+      const results = [...mismatched.values()];
+      throw new FrError('INVALID_ARGS', results.map((r) => r.error).join('; '), { details: { reason: 'invalid_input', results } });
+    }
+    const devices = all.filter((d) => !mismatched.has(d.device_id));
+    const ordered = (results: CommandOutcome[]) => all.map((d) => mismatched.get(d.device_id) ?? results.find((r) => r.device === d.device_id)!);
+    const what =
+      kind === 'gesture' ? { gesture: input.gesture } : { ...(input.value !== undefined ? { value: input.value } : { mv: input.mv }), ...(input.hold_ms !== undefined ? { hold_ms: input.hold_ms } : {}) };
+    const called: OpCalled = { op: 'input_simulate', instance: input.instance, ...what, layer: input.layer };
+    if (input.layer === 'gpio') {
+      // op.called once the fixture module has gated every device, before it presses (or drives).
+      const out = (await hub.fixture!.simulate(devices, input, () => publishOpCalled(hub, devices, called))) as { results: CommandOutcome[]; cursor: string };
+      return mismatched.size ? { ...out, results: ordered(out.results) } : out;
+    }
+    const opts = { ack: 'result' as const, timeoutMs: input.timeout_s * 1000, duplicate: false };
+    let results: CommandOutcome[];
+    if (kind === 'gesture') {
+      results = await sendToAll(hub, devices, input.instance, 'inject', { gesture: input.gesture }, opts, called);
+    } else {
+      // The value per device: an mv maps over each instance's own range.
+      const values = devices.map((d) => input.value ?? mvToValue(input.mv!, analogRange(hub, d, input.instance)));
+      const plans = devices.map((d, i) => planCommand(hub, d, input.instance, 'inject', { value: values[i], hold_ms: input.hold_ms ?? 0 }));
+      publishOpCalled(hub, devices, called);
+      const sent = await Promise.all(plans.map((p) => sendPlanned(hub, p, opts)));
+      results = sent.map((r, i) => ({ ...r, value: values[i] }));
+    }
     const refused = allRefused(results);
     if (refused) {
       throw refused;
     }
-    return { results };
+    return { results: ordered(results) };
   },
 };

@@ -218,12 +218,14 @@ describe('the lag rule, the storm and the preflight (verdict.ts)', () => {
     expect(scaleArgs('t-nn', ['--gap-ms', '1000'], 0.5)).toEqual(['--gap-ms', '2000']);
     expect(scaleArgs('t-input', ['--phase', 'loss'], 0.5)).toEqual(['--phase', 'loss', '--gap-ms', '800']);
     expect(scaleArgs('t-ota', ['--phase', 'wifi'], 0.5)).toEqual(['--phase', 'wifi']);
+    // T2-ANALOG-30: the nodes' report_hz is the load under test, so nothing is scaled.
+    expect(scaleArgs('t2-analog', ['--report-hz', '50'], 0.5)).toEqual(['--report-hz', '50']);
     expect(scaleArgs('t2-churn', ['--duration-s', '600'], 0.5)).toEqual(['--duration-s', '600', '--spacing-x', '2']);
     expect(scaleArgs('flood-b-epoch', [], 0.5)).toEqual(['--before-rate', '0.5', '--after-rate', '1']);
     expect(scaleArgs('t-flood', ['--interval-ms', '100'], 1)).toEqual(['--interval-ms', '100']);
     expect(() => scaleArgs('t-blink', [], 0.5)).toThrow('no time-scale rule for t-blink');
     expect(scaledPace(1, 0.5)).toBe(0.5);
-    expect(Object.keys(TIME_SCALE).sort()).toEqual(['flood-b-epoch', 'storm', 't-flood', 't-flood-b', 't-input', 't-nn', 't-ota', 't2-churn']);
+    expect(Object.keys(TIME_SCALE).sort()).toEqual(['flood-b-epoch', 'storm', 't-flood', 't-flood-b', 't-input', 't-nn', 't-ota', 't2-analog', 't2-churn']);
   });
 });
 

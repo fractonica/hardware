@@ -9,7 +9,9 @@
 // edge and 20 ms at most after the first, 32 at most) and `frame`s; the `level` property after a flush that
 // changed it. Edge stamps are the intended times (a hardware timer's), and the fixture reads back what it
 // drives. wire() connects a BOOT channel to a DUT FakeNode's button: the DUT stamps `down` at the press edge
-// on its own clock plus its ISR latency, debounced (a bounce gives one down), and `up` once released.
+// on its own clock plus its ISR latency, debounced (a bounce gives one down), and `up` once released. A pwm
+// channel (fr.fixture 0.2, design m2-c3-inputs D5) takes `set_duty {duty}` (RESULT {at_us}; UNSUPPORTED on any
+// other drive, and `press` on it is UNSUPPORTED); its `level` reads duty > 0, and `release` sets duty 0.
 //
 // Everything the fixture and a wired DUT do later (a gesture's next edges, an edges flush, the DUT's debounce)
 // is on one agenda in fixture time, run in that order once the fixture's clock reaches it, as hardware timers
@@ -26,6 +28,8 @@ import { fileURLToPath } from 'node:url';
 import { type ArtifactManifest, type Bench, BenchSchema, CLS, findOp, FLAG, type OpName } from '@fractonica/protocol';
 import {
   decodeFixturePressArgs,
+  decodeFixtureSetDutyArgs,
+  encodeFixtureSetDutyResult,
   encodeMember,
   encodeFixtureEdges,
   encodeFixtureFrame,
@@ -60,7 +64,7 @@ const FIX_LEVEL = 1;
 export interface ChannelSpec {
   name: string;
   port: number;
-  drive?: 'none' | 'open_drain' | 'nfet_gate';
+  drive?: 'none' | 'open_drain' | 'nfet_gate' | 'pwm';
   decode?: 'level' | 'ws2812';
 }
 
@@ -78,6 +82,8 @@ interface LineSim {
   firstAt: number;
   reported: boolean | null;
   edges: number;
+  /** A pwm channel's duty (1/10,000). */
+  duty: number;
   wire?: { dut: FakeNode; port: number; isrUs: number; delta: number; down: boolean; upTimer: Agendum | null };
 }
 
@@ -106,6 +112,8 @@ export class FixtureNode extends FakeNode {
   /** Presses taken (segments as sent, at_us), releases, read calls and BUSY answers. */
   presses: { channel: string; segments: number[]; at: number }[] = [];
   releases: string[] = [];
+  /** set_duty calls taken (and answered OK), in order. */
+  duties: { channel: string; duty: number; at: number }[] = [];
   reads = 0;
   busyAnswers = 0;
   /** status.blink calls (the identify blink at WELCOME). */
@@ -123,11 +131,12 @@ export class FixtureNode extends FakeNode {
     this.#flushUs = flushUs;
     this.describeAs([...channels.map((c) => ({ port: c.port, cap_id: 0x0006, name: c.name })), { port: statusPort, cap_id: 0x0002, name: 'status' }]);
     for (const spec of channels) {
-      const line: LineSim = { spec, level: true, pressing: false, held: false, timers: [], pending: [], flush: null, firstAt: 0, reported: null, edges: 0 };
+      const idle = spec.drive !== 'pwm'; // a pwm line reads duty > 0: low at duty 0
+      const line: LineSim = { spec, level: idle, pressing: false, held: false, timers: [], pending: [], flush: null, firstAt: 0, reported: null, edges: 0, duty: 0 };
       this.lines.set(spec.name, line);
       if (spec.decode !== 'ws2812') {
-        this.props.set(`${spec.port}/${FIX_LEVEL}`, encodeFixtureLevelState({ level: true }));
-        line.reported = true;
+        this.props.set(`${spec.port}/${FIX_LEVEL}`, encodeFixtureLevelState({ level: idle }));
+        line.reported = idle;
       }
       // Each command finds the line as the fixture's clock has it now, whatever ran late.
       this.handlers.set(`${spec.port}/1`, (args) => {
@@ -142,6 +151,10 @@ export class FixtureNode extends FakeNode {
         this.#catchUp();
         this.reads++;
         return { fields: encodeFixtureReadResult({ level: line.level, edges: line.edges, dropped: 0, bad_frames: 0 }) };
+      });
+      this.handlers.set(`${spec.port}/4`, (args) => {
+        this.#catchUp();
+        return this.#setDuty(line, args);
       });
     }
     this.handlers.set(`${statusPort}/${LED_BLINK}`, () => {
@@ -323,7 +336,7 @@ export class FixtureNode extends FakeNode {
     if (!d.ok || !d.value.segments_us.length) {
       return { status: STATUS.INVALID_ARGS };
     }
-    if (!line.spec.drive || line.spec.drive === 'none') {
+    if (!line.spec.drive || line.spec.drive === 'none' || line.spec.drive === 'pwm') {
       return { status: STATUS.UNSUPPORTED };
     }
     if (line.pressing || !this.#released(line)) {
@@ -349,12 +362,40 @@ export class FixtureNode extends FakeNode {
     return { status: STATUS.OK, fields: encodeFixturePressResult({ at_us: at >>> 0, total_us: total }) };
   }
 
+  /** set_duty on a pwm line: the duty now, its `level` STATE when duty > 0 changes. */
+  #setDuty(line: LineSim, args: Uint8Array): { status: number; fields?: Uint8Array } {
+    const d = decodeFixtureSetDutyArgs(args);
+    if (!d.ok || d.value.duty > 10_000) {
+      return { status: STATUS.INVALID_ARGS };
+    }
+    if (line.spec.drive !== 'pwm') {
+      return { status: STATUS.UNSUPPORTED };
+    }
+    const at = this.nodeNowUs();
+    this.duties.push({ channel: line.spec.name, duty: d.value.duty, at });
+    this.#duty(line, d.value.duty);
+    return { status: STATUS.OK, fields: encodeFixtureSetDutyResult({ at_us: at >>> 0 }) };
+  }
+
+  #duty(line: LineSim, duty: number): void {
+    line.duty = duty;
+    line.level = duty > 0;
+    if (line.reported !== line.level) {
+      line.reported = line.level;
+      this.state(line.spec.port, FIX_LEVEL, encodeFixtureLevelState({ level: line.level }));
+    }
+  }
+
   #released(line: LineSim): boolean {
     return line.spec.drive === 'nfet_gate' ? !line.pressing : !line.held;
   }
 
   #release(line: LineSim): void {
     this.releases.push(line.spec.name);
+    if (line.spec.drive === 'pwm') {
+      this.#duty(line, 0);
+      return;
+    }
     line.timers.forEach((a) => this.#cancel(a));
     line.timers = [];
     if (line.pressing) {
@@ -524,6 +565,7 @@ export const CHANNELS: ChannelSpec[] = [
   { name: 'ch6', port: 7, decode: 'ws2812' },
   { name: 'ch8', port: 9 },
   { name: 'ch10', port: 11 },
+  { name: 'ch12', port: 13, drive: 'pwm' },
 ];
 
 /** The fixture firmware FixtureNode reports (its HELLO fw_id prefix), which testBench pins. */
@@ -577,20 +619,24 @@ export interface BenchRig {
 }
 
 /**
- * The `release` the fixture module sends on every driven line of `bench` at each fixture WELCOME (D11): waits
- * until the fixture has them all, then forgets them (`releases`; its `frames` keep them), so a test sees only
- * its own.
+ * The `release` the fixture module sends on every driven line of `bench` at each fixture WELCOME (D11), and the
+ * `set_duty {duty: 0}` on every wired analog (pwm) line (m2-c3-inputs D5): waits until the fixture has them all,
+ * then forgets them (`releases`, `duties`; its `frames` keep them), so a test sees only its own.
  */
 export async function welcomeReleases(fixture: FixtureNode, bench: Bench): Promise<void> {
-  const driven = Object.values(bench.duts).flatMap((d) => Object.values(d.lines).filter((l) => l.wired && (l.role === 'button' || l.role === 'en')).map((l) => l.channel));
+  const lines = Object.values(bench.duts).flatMap((d) => Object.values(d.lines).filter((l) => l.wired));
+  const driven = lines.filter((l) => l.role === 'button' || l.role === 'en').map((l) => l.channel);
+  const pwm = lines.filter((l) => l.role === 'analog').map((l) => l.channel);
+  const done = () => driven.every((ch) => fixture.releases.includes(ch)) && pwm.every((ch) => fixture.duties.some((d) => d.channel === ch && d.duty === 0));
   const deadline = Date.now() + 3000;
-  while (!driven.every((ch) => fixture.releases.includes(ch))) {
+  while (!done()) {
     if (Date.now() > deadline) {
-      throw new Error(`no release at the fixture's WELCOME on ${driven.filter((ch) => !fixture.releases.includes(ch)).join(', ')}`);
+      throw new Error(`no release at the fixture's WELCOME on ${[...driven.filter((ch) => !fixture.releases.includes(ch)), ...pwm].join(', ')}`);
     }
     await new Promise((r) => setTimeout(r, 5));
   }
   fixture.releases = [];
+  fixture.duties = [];
 }
 
 /**
@@ -608,13 +654,15 @@ export async function benchRig(
     fixture?: Partial<FixtureNodeOptions>;
     c3?: Partial<Omit<FakeNodeOptions, 'caps' | 'hub' | 'addr' | 'alias'>>;
     c6?: Partial<Omit<FakeNodeOptions, 'caps' | 'hub' | 'addr' | 'alias'>>;
+    /** pad-c3's instances (default boot and status; c3o-analog adds analog on port 3). */
+    c3Caps?: { port: number; cap_id: number; name: string }[];
   } = {},
 ): Promise<BenchRig> {
   const r = await netRig();
   const bench = opts.bench ?? testBench();
   r.registry.add({ device_id: FIX.mac, addr: FIX.addr, alias: FIX.alias, role: 'fixture', profile: FIX.profile, board: 'esp32s3-devkitc1-n16r8', chip: 'esp32s3', provisioned: true, net: 0 });
   const fixture = new FixtureNode({ mac: FIX.mac, addr: FIX.addr, alias: FIX.alias, serial: r.serial, hbMs: opts.hbMs ?? 500, channels: CHANNELS, clockOffsetUs: 77_000_000, fwPrefix: FIX_FW, ...opts.fixture });
-  const c3 = r.pad({ mac: C3.mac, addr: C3.addr, alias: C3.alias, hbMs: opts.hbMs ?? 500, clockOffsetUs: 3_000_000, ...opts.c3 });
+  const c3 = r.pad({ mac: C3.mac, addr: C3.addr, alias: C3.alias, hbMs: opts.hbMs ?? 500, clockOffsetUs: 3_000_000, ...opts.c3, ...(opts.c3Caps ? { caps: opts.c3Caps } : {}) });
   const c6 = r.pad({ mac: C6.mac, addr: C6.addr, alias: C6.alias, hbMs: opts.hbMs ?? 500, clockOffsetUs: 9_500_000, ...opts.c6 });
   r.registry.get(C3.mac)!.profile = C3.profile;
   r.registry.get(C6.mac)!.profile = C6.profile;

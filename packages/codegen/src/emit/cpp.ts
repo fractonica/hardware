@@ -1334,6 +1334,8 @@ function capHeader(cap: Capability): string {
     c.dedent().line('public:').indent();
     c.line(`static constexpr uint16_t kId = ${hex(cap.id, 4)};`);
     c.line(`static constexpr Version kVersion{${cap.version.major}, ${cap.version.minor}};`);
+    // Design m2-c3-inputs D8: the emit_* hand it to the Sink, which stamps an ordered port's events with port_seq.
+    c.line(`static constexpr bool kOrdered = ${cap.ordered ? 'true' : 'false'};  // true: its events carry EXT port_seq (YAML ordered)`);
     if (cap.commands.length + cap.events.length + cap.properties.length > 0) {
       c.line();
       c.line('// Member ids (the envelope `kind`).');
@@ -1526,7 +1528,7 @@ function capSource(cap: Capability): string {
     const k = `kEvent${pascalCase(ev.name)}`;
     if (ev.fields.length === 0) {
       c.fn(`void ${P}::emit_${ev.name}(const ${name} &, TimeUs at)`, () => {
-        c.open('if (sink_ != nullptr)', () => c.line(`sink_->event(port_, ${k}, ${prio}, {}, at);`));
+        c.open('if (sink_ != nullptr)', () => c.line(`sink_->event(port_, ${k}, ${prio}, {}, at, kOrdered);`));
       });
     } else {
       c.fn(`void ${P}::emit_${ev.name}(const ${name} &e, TimeUs at)`, () => {
@@ -1536,9 +1538,9 @@ function capSource(cap: Capability): string {
         c.line('encode(e, w);');
         if (hasViews(ev.fields)) {
           // kMaxSize bounds every value the field types allow, except a view longer than its max.
-          c.open('if (!w.overflow())', () => c.line(`sink_->event(port_, ${k}, ${prio}, w.bytes(), at);`));
+          c.open('if (!w.overflow())', () => c.line(`sink_->event(port_, ${k}, ${prio}, w.bytes(), at, kOrdered);`));
         } else {
-          c.line(`sink_->event(port_, ${k}, ${prio}, w.bytes(), at);`);
+          c.line(`sink_->event(port_, ${k}, ${prio}, w.bytes(), at, kOrdered);`);
         }
       });
     }

@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { Prompt } from '@fractonica/protocol/browser';
 
 import type { Now } from '../src/state/clock.ts';
-import { createLiveStore, FLASH_MAX_AGE_MS, FLASH_MS, isFlashing, JOBS_MAX, pendingPrompts, PROMPT_GRACE_MS, RING_MAX } from '../src/state/live.ts';
+import { createLiveStore, FLASH_MAX_AGE_MS, FLASH_MS, HISTORY_MAX, isFlashing, JOBS_MAX, pendingPrompts, PROMPT_GRACE_MS, RING_MAX } from '../src/state/live.ts';
 import { ev } from './fakes.ts';
 
 const NOW = 1_700_000_000_000; // ms; ev() stamps t_hub_us at NOW plus seq µs
@@ -96,7 +96,39 @@ describe('dashboard live store', () => {
     expect(s.getState().properties[PAD]!['status.on']!.value).toBe(false);
     s.getState().ingest([ev(8, 'status.on', { part: 'state', member: 'on', fields: { on: true } }), ev(9, 'status.brightness', { part: 'state', member: 'brightness', fields: { brightness: 40 } })], {}, T(NOW));
     expect(s.getState().properties[PAD]).toMatchObject({ 'status.on': { value: true }, 'status.brightness': { value: 40 } });
-    expect(s.getState().events.map((e) => e.seq)).toEqual([8, 9]);
+    // STATE stays out of the ring (design m2-c3-inputs D6); it still moves maxSeq, so a re-read is no repeat.
+    expect(s.getState().events).toEqual([]);
+    expect(s.getState().maxSeq).toBe(9);
+    expect(s.getState().lastByDevice[PAD]!.seq).toBe(9);
+  });
+
+  it('keeps a streaming STATE out of the event ring, with the last HISTORY_MAX values of each property', () => {
+    const s = createLiveStore();
+    s.getState().ingest([ev(1, 'boot.down', { part: 'event', member: 'down' })], {}, T(NOW));
+    const value = (seq: number) => ev(seq, 'analog.value', { part: 'state', member: 'value', fields: { value: seq * 10 } });
+    // 20 Hz for a while, in batches as /ws delivers them, and one value twice (a re-read).
+    for (let b = 0; b < 30; b++) {
+      s.getState().ingest(Array.from({ length: 10 }, (_, i) => value(2 + b * 10 + i)), {}, T(NOW));
+    }
+    s.getState().ingest([value(301)], {}, T(NOW));
+    const st = s.getState();
+    expect(st.events.map((e) => e.type)).toEqual(['boot.down']);
+    expect(st.properties[PAD]!['analog.value']!.value).toBe(3010);
+    const h = st.history[PAD]!['analog.value']!;
+    expect(h).toHaveLength(HISTORY_MAX);
+    expect(h.at(-1)).toEqual({ t_hub_us: expect.any(Number), value: 3010 });
+    expect(h[0]!.value).toBe((301 - HISTORY_MAX + 1) * 10);
+    expect(new Set(h.map((p) => p.t_hub_us)).size).toBe(HISTORY_MAX);
+    // Earlier states' arrays are left as they were (the store's updates are pure).
+    const before = st.history[PAD]!['analog.value']!;
+    s.getState().ingest([value(302)], {}, T(NOW));
+    expect(before.at(-1)!.value).toBe(3010);
+    expect(s.getState().history[PAD]!['analog.value']!.at(-1)!.value).toBe(3020);
+    // A snapshot of the same value adds no point; another property has its own history.
+    s.getState().ingest([value(302)], { snapshot: true }, T(NOW));
+    s.getState().ingest([ev(303, 'status.on', { part: 'state', member: 'on', fields: { on: true } })], {}, T(NOW));
+    expect(s.getState().history[PAD]!['analog.value']).toHaveLength(HISTORY_MAX);
+    expect(s.getState().history[PAD]!['status.on']).toEqual([{ t_hub_us: expect.any(Number), value: true }]);
   });
 
   it('tracks prompt_human requests from hub.prompt / hub.prompt_done and hub_status', () => {

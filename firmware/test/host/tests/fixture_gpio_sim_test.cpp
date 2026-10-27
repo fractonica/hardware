@@ -2,7 +2,8 @@
 // the IDF shim: firmware/test/host/shim/esp_sim.hpp). Design m2-c1-hil D4, D8, D11; §4 S1's host tests: segments map to
 // line levels, the cap release fires whatever the segment alarm does, stale alarms do nothing, late boundaries
 // catch up, a timer that will not arm never holds a line, BUSY, readback, the edge ring, the D11 hub rule (also on a
-// real Net) and the releases on every reset path.
+// real Net) and the releases on every reset path. M2-C3 (design m2-c3-inputs §3): pwm lines on LEDC (one 20 kHz 11-bit
+// timer, a channel each, duty 0 at init, on release and on every reset path, no edge interrupt).
 #include <array>
 #include <initializer_list>
 #include <optional>
@@ -76,6 +77,7 @@ std::string show(const fr::cap::FixtureEdges &e)
 constexpr fr::hal::FixtureLineMode kOpenDrain{.drive = fr::hal::FixtureDrive::open_drain};
 constexpr fr::hal::FixtureLineMode kNfetGate{.drive = fr::hal::FixtureDrive::nfet_gate};
 constexpr fr::hal::FixtureLineMode kTestPinTap{.pull_up = true};
+constexpr fr::hal::FixtureLineMode kPwm{.drive = fr::hal::FixtureDrive::pwm};
 
 }  // namespace
 
@@ -901,4 +903,188 @@ TEST(fixture_gpio_boot_lets_go_of_what_a_cpu_reset_left_driven)
     CHECK(esp_sim::edge_irq(42));
     CHECK(od.press(std::array<uint32_t, 1>{80'000}, 15'000'000));
     CHECK(!esp_sim::level(42));
+}
+
+// ---- pwm lines (design m2-c3-inputs §3) ----
+
+static_assert(fr::drv::FixtureGpio::pwm_steps(0) == 0);
+static_assert(fr::drv::FixtureGpio::pwm_steps(10000) == 2048);  // 2^11: high all period, fully on
+static_assert(fr::drv::FixtureGpio::pwm_steps(5000) == 1024);
+static_assert(fr::drv::FixtureGpio::pwm_steps(2) == 0);  // 0.41 steps rounds down ...
+static_assert(fr::drv::FixtureGpio::pwm_steps(3) == 1);  // ... 0.61 up
+static_assert(fr::drv::FixtureGpio::pwm_steps(9997) == 2047);
+static_assert(fr::drv::FixtureGpio::pwm_steps(9998) == 2048);
+
+TEST(fixture_gpio_pwm_lines_share_one_ledc_timer)
+{
+    GpioRig r(fixture_config(FixtureDrive::pwm), 11);  // s3k-fixture ch12
+    REQUIRE(r.init());
+    CHECK_EQ(esp_sim::ledc_timer_configs(), 1);
+    CHECK_EQ(esp_sim::ledc_freq_hz(0), 20'000u);
+    CHECK_EQ(esp_sim::ledc_bits(0), 11);
+    CHECK_EQ(esp_sim::ledc_channel(11), 0);  // the pin outputs channel 0 through the matrix
+    CHECK_EQ(esp_sim::ledc_timer_of(0), 0);
+    CHECK_EQ(esp_sim::ledc_duty(0), 0);  // duty 0 at init
+    CHECK(esp_sim::output_enabled(11));
+    CHECK(!esp_sim::open_drain(11));
+    CHECK(!esp_sim::pull_up(11));
+    CHECK(!esp_sim::pull_down(11));
+    CHECK(!esp_sim::level(11));
+    CHECK(!esp_sim::edge_irq(11));     // no edge interrupt on a 20 kHz waveform
+    CHECK(r.segment() == nullptr);     // and no press timers
+    CHECK_EQ(esp_sim::shutdown_handlers(), 1u);  // esp_restart takes it to duty 0
+    CHECK(!r.svc.level());
+    // ch13: its own channel, the same timer.
+    frt::NullSink sink;
+    fr::drv::FixtureGpio ch13({.gpio = 12});
+    REQUIRE(ch13.init(r.core, kPwm, sink));
+    CHECK_EQ(esp_sim::ledc_timer_configs(), 1);
+    CHECK_EQ(esp_sim::ledc_channel(12), 1);
+    CHECK_EQ(esp_sim::ledc_timer_of(1), 0);
+    CHECK_EQ(esp_sim::ledc_duty(1), 0);
+    const fr::hal::Selftest st = ch13.selftest();
+    CHECK(st.ok);
+}
+
+TEST(fixture_gpio_pwm_runs_at_most_8_lines)
+{
+    frt::FakeCore core;
+    frt::SimScope sim(core);
+    frt::NullSink sink;
+    constexpr std::array<uint8_t, 9> kPins{1, 2, 4, 5, 6, 7, 8, 9, 10};
+    std::array<std::optional<fr::drv::FixtureGpio>, kPins.size()> lines;
+    for (size_t i = 0; i < kPins.size(); ++i) {
+        lines[i].emplace(fr::drv::FixtureGpio::Config{.gpio = kPins[i]});
+    }
+    for (size_t i = 0; i < 8; ++i) {
+        CHECK(lines[i]->init(core, kPwm, sink));
+    }
+    CHECK(lines[8]->init(core, kPwm, sink).error() == fr::Err::failed);  // the S3 has 8 low-speed channels
+    fr::drv::FixtureGpio pulled({.gpio = 11});
+    CHECK(pulled.init(core, {.drive = fr::hal::FixtureDrive::pwm, .pull_up = true}, sink).error() ==
+          fr::Err::invalid_args);
+}
+
+TEST(fixture_gpio_set_duty_maps_to_ledc_steps)
+{
+    GpioRig r(fixture_config(FixtureDrive::pwm), 11);
+    REQUIRE(r.init());
+    r.core.advance_ms(3);
+    auto res = r.svc.set_duty({.duty = 5000});
+    REQUIRE(res);
+    CHECK_EQ(res->at_us, low32(r.core.now()));  // esp_timer once ledc_update_duty returned
+    CHECK_EQ(esp_sim::ledc_duty(0), 1024);
+    CHECK(esp_sim::level(11));
+    CHECK(r.svc.level());
+    CHECK(r.svc.read()->level);
+    REQUIRE(r.svc.set_duty({.duty = 10000}));
+    CHECK_EQ(esp_sim::ledc_duty(0), 2048);
+    REQUIRE(r.svc.set_duty({.duty = 1234}));
+    CHECK_EQ(esp_sim::ledc_duty(0), 253);  // 252.7 rounded
+    res = r.svc.set_duty({.duty = 10001});
+    REQUIRE(!res);
+    CHECK(res.error() == fr::Err::invalid_args);
+    CHECK_EQ(esp_sim::ledc_duty(0), 253);
+    // The driver refuses on its own as well (a caller other than FixtureService).
+    CHECK(r.line.set_duty(10001).error() == fr::Err::invalid_args);
+    // press is UNSUPPORTED on a pwm line, at the service and at the driver.
+    CHECK(r.svc.press(segs({80'000})).error() == fr::Err::unsupported);
+    CHECK(r.line.press(std::array<uint32_t, 1>{80'000}, 15'000'000).error() == fr::Err::unsupported);
+    CHECK_EQ(esp_sim::ledc_duty(0), 253);
+    // release: duty 0, idempotent.
+    CHECK(r.svc.release());
+    CHECK_EQ(esp_sim::ledc_duty(0), 0);
+    CHECK(!esp_sim::level(11));
+    CHECK(!r.svc.level());
+    CHECK(r.svc.release());
+    CHECK_EQ(esp_sim::ledc_duty(0), 0);
+    // Through dispatch.
+    uint8_t buf[fr::cap::FixtureSetDutyArgs::kMaxSize];
+    fr::wire::Writer w(buf, sizeof(buf));
+    fr::cap::encode(fr::cap::FixtureSetDutyArgs{.duty = 2500}, w);
+    fr::cap::StaticReply<> reply;
+    REQUIRE(r.svc.dispatch(fr::cap::Fixture::kCmdSetDuty, w.bytes(), reply));
+    CHECK_EQ(esp_sim::ledc_duty(0), 512);
+}
+
+TEST(fixture_gpio_set_duty_unsupported_on_other_lines)
+{
+    GpioRig r(fixture_config(FixtureDrive::open_drain), 42);
+    REQUIRE(r.init());
+    CHECK(r.svc.set_duty({.duty = 5000}).error() == fr::Err::unsupported);
+    CHECK(r.line.set_duty(5000).error() == fr::Err::unsupported);
+    CHECK_EQ(esp_sim::ledc_timer_configs(), 0);  // no LEDC touched without a pwm line
+    CHECK_EQ(esp_sim::ledc_channel(42), -1);
+}
+
+namespace {
+
+/** A pwm line at duty 50 % on 11 beside a pressed open_drain line on 42. */
+struct PwmResetRig {
+    PwmResetRig()
+    {
+        frt::wire_net(42, FixtureDrive::open_drain);
+        ok = od.init(core, kOpenDrain, sink) && pwm.init(core, kPwm, sink) && pwm.set_duty(5000) &&
+             od.press(std::array<uint32_t, 1>{10'000'000}, 15'000'000);
+    }
+
+    frt::FakeCore core;
+    frt::SimScope sim{core};
+    frt::NullSink sink;
+    fr::drv::FixtureGpio od{{.gpio = 42}};
+    fr::drv::FixtureGpio pwm{{.gpio = 11}};
+    bool ok = false;
+};
+
+}  // namespace
+
+TEST(fixture_gpio_esp_restart_takes_pwm_lines_to_duty_0)
+{
+    PwmResetRig r;
+    REQUIRE(r.ok);
+    REQUIRE(esp_sim::level(11));
+    REQUIRE_EQ(esp_sim::shutdown_handlers(), 1u);
+    esp_sim::restart();
+    // Off LEDC (which a CPU reset keeps running at 50 %) onto the output register, driven low.
+    CHECK_EQ(esp_sim::ledc_channel(11), -1);
+    CHECK_EQ(esp_sim::ledc_duty(0), 1024);
+    CHECK(esp_sim::output_enabled(11));
+    CHECK(!esp_sim::out(11));
+    CHECK(!esp_sim::level(11));
+    CHECK(esp_sim::level(42));  // the open_drain line as before
+    CHECK(!r.pwm.level());
+}
+
+TEST(fixture_gpio_a_panic_takes_pwm_lines_to_duty_0_first)
+{
+    PwmResetRig r;
+    REQUIRE(r.ok);
+    bool pwm_low = false;
+    esp_sim::on_real_panic([&] { pwm_low = !esp_sim::level(11) && esp_sim::ledc_channel(11) == -1; });
+    esp_sim::panic();
+    CHECK(pwm_low);  // before the panic output and the dump
+    esp_sim::cpu_reset();
+    CHECK(!esp_sim::level(11));
+}
+
+TEST(fixture_gpio_boot_takes_a_pwm_line_off_ledc)
+{
+    PwmResetRig r;
+    REQUIRE(r.ok);
+    // A CPU reset neither hook saw: LEDC runs on and the matrix still routes it to the pin.
+    esp_sim::cpu_reset();
+    CHECK(esp_sim::level(11));
+    fr::drv::fixture_gpio_host_reset();
+    fr::drv::FixtureGpio pwm({.gpio = 11});
+    CHECK_EQ(esp_sim::boot(), 0);
+    CHECK(!esp_sim::output_enabled(11));  // the output is off before app_main
+    CHECK(!esp_sim::level(11));
+    // init() then takes it over at duty 0, and it takes a setpoint again.
+    frt::NullSink sink;
+    REQUIRE(pwm.init(r.core, kPwm, sink));
+    CHECK_EQ(esp_sim::ledc_channel(11), 0);
+    CHECK_EQ(esp_sim::ledc_duty(0), 0);
+    CHECK(!esp_sim::level(11));
+    REQUIRE(pwm.set_duty(10000));
+    CHECK(esp_sim::level(11));
 }

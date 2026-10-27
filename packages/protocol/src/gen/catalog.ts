@@ -68,6 +68,8 @@ export interface CatalogCapability {
   readonly name: string;
   readonly version: string;
   readonly section: 'standard' | 'system' | 'project';
+  /** Its events carry EXT port_seq; the hub delivers them in port_seq order (design m2-c3-inputs D8). */
+  readonly ordered?: true;
   readonly summary: string;
   readonly doc?: string;
   readonly maps_to?: Readonly<Record<string, string>>;
@@ -94,6 +96,7 @@ export const CATALOG: Catalog = {
       "name": "fr.button",
       "version": "1.0",
       "section": "standard",
+      "ordered": true,
       "summary": "Momentary push button with debounced edges and gesture recognition.",
       "doc": "`down` fires on the debounced leading edge and is the lowest-latency signal — bind game\ninput to it. `click` is semantic; with multi_press_max > 1 it waits multi_press_gap_ms\nto tell single from double clicks.\n",
       "maps_to": {
@@ -441,10 +444,10 @@ export const CATALOG: Catalog = {
     {
       "id": 5,
       "name": "fr.analog_in",
-      "version": "0.1",
+      "version": "1.0",
       "section": "standard",
       "summary": "An analog input sampled on the node and reported as a normalised, rate-limited value.",
-      "doc": "`value` is a LATEST property (latest wins, never retried), so a fast stream never queues\nbehind itself. Use `crossed` events for thresholds that must not be missed.\n",
+      "doc": "`value` is a LATEST property (latest wins, never retried), so a fast stream never queues behind itself.\nIt is the input's calibrated voltage mapped from [min_mv, max_mv] onto 0..65535 and clamped.\nUse `crossed` events for thresholds that must not be missed: they are reliable and carry hysteresis.\n",
       "types": {
         "Filter": {
           "none": 0,
@@ -461,6 +464,11 @@ export const CATALOG: Catalog = {
           "name": "resolution_bits",
           "id": 1,
           "type": "u8"
+        },
+        {
+          "name": "full_scale_mv",
+          "id": 2,
+          "type": "u16"
         }
       ],
       "config": [
@@ -477,44 +485,59 @@ export const CATALOG: Catalog = {
         {
           "name": "report_hz",
           "type": "u16",
-          "default": 50,
+          "default": 20,
           "range": [
             1,
             200
           ],
           "unit": "Hz",
-          "doc": "max STATE rate"
+          "doc": "max STATE rate. Provisional until S2 (C4)"
         },
         {
           "name": "deadband",
           "type": "u16",
-          "default": 64,
+          "default": 512,
           "range": [
             0,
-            4096
+            32768
           ],
-          "doc": "in normalised units/16; smaller changes are not reported"
+          "doc": "in value units; a change smaller than this since the last report is not reported. Provisional until S2"
         },
         {
           "name": "filter",
           "type": "Filter",
-          "default": "ema"
+          "default": "ema",
+          "doc": "ema: alpha 1/4"
         },
         {
-          "name": "raw_min",
+          "name": "min_mv",
           "type": "u16",
-          "default": 0
+          "default": 0,
+          "unit": "mV",
+          "doc": "maps to value 0"
         },
         {
-          "name": "raw_max",
+          "name": "max_mv",
           "type": "u16",
-          "default": 4095
+          "default": 2500,
+          "unit": "mV",
+          "doc": "maps to value 65535; must exceed min_mv"
+        },
+        {
+          "name": "hysteresis",
+          "type": "u16",
+          "default": 1024,
+          "range": [
+            0,
+            16384
+          ],
+          "doc": "in value units, for `crossed`"
         },
         {
           "name": "thresholds",
           "type": "array<u16>",
           "max": 4,
-          "doc": "normalised thresholds that emit `crossed`"
+          "doc": "value thresholds that emit `crossed`"
         }
       ],
       "properties": [
@@ -522,7 +545,7 @@ export const CATALOG: Catalog = {
           "name": "value",
           "id": 1,
           "type": "u16",
-          "doc": "0..65535, after calibration and filter"
+          "doc": "0..65535 over [min_mv, max_mv], after calibration and filter"
         }
       ],
       "commands": [
@@ -532,11 +555,57 @@ export const CATALOG: Catalog = {
           "delivery": "reliable",
           "idempotent": false,
           "visibility": "test",
+          "doc": "Holds `value` in place of the ADC for hold_ms (0 means 1,000 ms; at most 60,000). A newer inject replaces it.",
           "fields": [
             {
               "name": "value",
               "id": 1,
               "type": "u16"
+            },
+            {
+              "name": "hold_ms",
+              "id": 2,
+              "type": "u16"
+            }
+          ],
+          "examples": [
+            {
+              "value": 32768
+            },
+            {
+              "value": 0,
+              "hold_ms": 5000
+            }
+          ]
+        },
+        {
+          "name": "read",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The current reading, unfiltered and filtered. Answered from the last sample; never touches the ADC.",
+          "fields": [],
+          "result": [
+            {
+              "name": "mv",
+              "id": 1,
+              "type": "u16"
+            },
+            {
+              "name": "raw",
+              "id": 2,
+              "type": "u16"
+            },
+            {
+              "name": "value",
+              "id": 3,
+              "type": "u16"
+            },
+            {
+              "name": "injected",
+              "id": 4,
+              "type": "bool"
             }
           ]
         }
@@ -945,4 +1014,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0xdc34c43b;
+export const CATALOG_HASH = 0x41558ed8;

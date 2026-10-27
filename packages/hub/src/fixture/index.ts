@@ -2,7 +2,8 @@
 // (app node, profile s3k-fixture, one fr.fixture instance per wired line) that only this module commands.
 // It loads the bench file (hardware/bench/<name>.bench.yaml: `lab` unless the hub runs with --bench or
 // FR_BENCH), and puts together
-//   - driver.ts: gestures as segments, gating, the releases, the identify blink at each fixture WELCOME;
+//   - driver.ts: gestures as segments, gating, the releases, the identify blink at each fixture WELCOME, and the
+//     analog lines' PWM setpoints (M2-C3, design m2-c3-inputs D5, D7: setMv, duty 0 at every release);
 //   - timeline.ts: the fixture's edges (through each line's glitch filter) and frames as hil.edge and hil.frame on the DUTs;
 //   - sync.ts: the press-based fixture -> DUT clock fit and the pin_pulse samples;
 //   - ops.ts: bench_get;
@@ -326,6 +327,15 @@ export class FixtureModule implements Fixture {
       this.#inUse(this.#map);
     }
     return this.driver.simulate(devices, input, gated);
+  }
+
+  /** A DUT's analog line PWM setpoint (design m2-c3-inputs D5, D7): Driver.setMv after the bench is read fresh. */
+  setMv(dut: Device, instance: string, mv: number, opts: { timeoutMs?: number } = {}): Promise<unknown> {
+    this.#fresh();
+    if (this.#map) {
+      this.#inUse(this.#map);
+    }
+    return this.driver.setMv(dut, instance, mv, opts);
   }
 
   pinPulse(deviceId: string, atUs: number): void {

@@ -31,13 +31,15 @@ struct Sent {
     std::vector<uint8_t> bytes;
 };
 
-/** A node frame decoded for assertions (node frames carry no EXT). */
+/** A node frame decoded for assertions. The only EXT a node sends is an ordered port's port_seq (design m2-c3-inputs
+ * D8): `flags` has kFlagExt then. */
 struct Frame {
     fr::TimeUs at = 0;
     std::vector<uint8_t> bytes;
     uint8_t flags = 0, cls = 0, kind = 0, port = 0, ttl = 0;
     uint32_t seq = 0;
     uint16_t net = 0, src = 0, dst = 0, epoch = 0;
+    std::optional<uint32_t> port_seq;  // EXT 0x05
     uint32_t t_us = 0;
     fr::wire::ResultPrefix result;
     std::vector<uint8_t> body;
@@ -66,6 +68,7 @@ inline Frame decode_frame(const Sent &s)
     f.src = h.src;
     f.dst = h.dst;
     f.epoch = h.epoch;
+    f.port_seq = h.ext.value(fr::wire::kExtPortSeq);
     f.t_us = e->t_us;
     f.result = e->result;
     f.body.assign(e->body.begin(), e->body.end());

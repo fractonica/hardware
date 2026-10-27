@@ -82,6 +82,8 @@ hal::FixtureDrive drive_of(cap::FixtureDrive d)
         return hal::FixtureDrive::open_drain;
     case cap::FixtureDrive::nfet_gate:
         return hal::FixtureDrive::nfet_gate;
+    case cap::FixtureDrive::pwm:
+        return hal::FixtureDrive::pwm;  // design m2-c3-inputs §3: fixture_gpio's LEDC output
     case cap::FixtureDrive::none:
         break;
     }
@@ -134,7 +136,8 @@ Status FixtureService::init(Core &core)
     if (auto st = line_.init(core, mode, *this); !st) {
         return st;
     }
-    level_ = line_.level();
+    duty_ = 0;  // a pwm line starts at duty 0
+    level_ = cfg_.drive == cap::FixtureDrive::pwm ? false : line_.level();
     return {};
 }
 
@@ -145,7 +148,7 @@ hal::Selftest FixtureService::selftest()
 
 std::expected<cap::FixturePressResult, Err> FixtureService::press(const cap::FixturePressArgs &args)
 {
-    if (cfg_.drive == cap::FixtureDrive::none) {
+    if (cfg_.drive == cap::FixtureDrive::none || cfg_.drive == cap::FixtureDrive::pwm) {
         return std::unexpected(Err::unsupported);
     }
     if (flush_ == nullptr) {
@@ -173,14 +176,50 @@ std::expected<cap::FixturePressResult, Err> FixtureService::press(const cap::Fix
 
 Status FixtureService::release()
 {
-    return line_.release();
+    auto st = line_.release();
+    // A pwm line's release is duty 0 (design m2-c3-inputs §3), reported only once the line took it: a failed LEDC
+    // write leaves the duty, and the level reported, as they were.
+    if (st && cfg_.drive == cap::FixtureDrive::pwm && flush_ != nullptr) {
+        duty_changed(0, cap::kNowUs);
+    }
+    return st;
+}
+
+std::expected<cap::FixtureSetDutyResult, Err> FixtureService::set_duty(const cap::FixtureSetDutyArgs &args)
+{
+    // Design m2-c3-inputs §3: a pwm line's setpoint, idempotent; any other drive has none.
+    if (cfg_.drive != cap::FixtureDrive::pwm) {
+        return std::unexpected(Err::unsupported);
+    }
+    if (args.duty > hal::kFixtureDutyMax) {
+        return std::unexpected(Err::invalid_args);
+    }
+    if (flush_ == nullptr) {
+        return std::unexpected(Err::failed);  // init() did not run
+    }
+    const auto at = line_.set_duty(args.duty);
+    if (!at) {
+        return std::unexpected(at.error());
+    }
+    duty_changed(args.duty, unwrap(*at, core_->now()));
+    return cap::FixtureSetDutyResult{.at_us = *at};
 }
 
 std::expected<cap::FixtureReadResult, Err> FixtureService::read()
 {
     line_.drain();
-    return cap::FixtureReadResult{
-        .level = line_.level(), .edges = edges_, .dropped = dropped_, .bad_frames = bad_frames_};
+    // A pwm line reads duty > 0 (design m2-c3-inputs §3): its pin is a 20 kHz waveform, not a level.
+    const bool lv = cfg_.drive == cap::FixtureDrive::pwm ? duty_ > 0 : line_.level();
+    return cap::FixtureReadResult{.level = lv, .edges = edges_, .dropped = dropped_, .bad_frames = bad_frames_};
+}
+
+void FixtureService::duty_changed(uint16_t duty, TimeUs at)
+{
+    duty_ = duty;
+    if ((duty > 0) != level_) {
+        level_ = duty > 0;
+        report_level(level_, at);
+    }
 }
 
 void FixtureService::on_edges(std::span<const hal::FixtureEdge> edges, uint32_t dropped)
@@ -244,8 +283,9 @@ void FixtureService::flush()
         emit_edges(batch_, at);
         batch_ = {};
     }
-    // `level` is the pin as it reads now, stamped with the last edge when that edge says the same.
-    const bool lv = line_.level();
+    // `level` is the pin as it reads now, stamped with the last edge when that edge says the same (a pwm line's is its
+    // duty > 0, which duty_changed reports).
+    const bool lv = cfg_.drive == cap::FixtureDrive::pwm ? duty_ > 0 : line_.level();
     if (lv != level_) {
         level_ = lv;
         report_level(lv, lv == last_level ? last_at : cap::kNowUs);

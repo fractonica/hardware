@@ -571,6 +571,9 @@ const CMD_EXT: Header = hdr({
   ext: [extTlv(EXT.EXPIRE_AT_US, 0x01020304), extTlv(EXT.TRACE_ID, 0xdeadbeef)],
 });
 
+// button.down of an ordered capability (design m2-c3-inputs D8): Net stamps port_seq, the port's event counter.
+const BUTTON_DOWN_PORT_SEQ: Header = { ...BUTTON_DOWN, flags: FLAG.URGENT | FLAG.EXT, ext: [extTlv(EXT.PORT_SEQ, 1)] };
+
 function headerCases(b: Builder): void {
   const c = b.header;
   const add = (name: string, h: Header) => c.add({ name: `header.${name}`, kind: 'header', type: 'header', value: headerJson(h), hex: hexOf(packHeader(h)) });
@@ -604,6 +607,8 @@ function headerCases(b: Builder): void {
   add('ext_valid_ms_broadcast', hdr({ flags: FLAG.EXT, cls: CLS.MSG, kind: 0, seq: 77, src: 0x0000, dst: 0xffff, epoch: 9, ext: [extTlv(EXT.VALID_MS, 2000)] }));
   add('ext_exec_at', hdr({ flags: FLAG.ACK_REQ | FLAG.EXT, cls: CLS.CMD, kind: 1, seq: 6, src: 0x0000, dst: 0x0012, epoch: 9, port: 2, ext: [extTlv(EXT.EXEC_AT_US, 0xffffffff)] }));
   add('ext_empty', { ...BUTTON_DOWN, flags: FLAG.URGENT | FLAG.EXT, ext: [] });
+  add('ext_port_seq', BUTTON_DOWN_PORT_SEQ);
+  add('ext_port_seq_max_trace_id', { ...BUTTON_DOWN, seq: 13, flags: FLAG.URGENT | FLAG.EXT, ext: [extTlv(EXT.PORT_SEQ, 0xffff), extTlv(EXT.TRACE_ID, 7)] });
   add('ext_unknown_noncritical', {
     ...BUTTON_DOWN,
     flags: FLAG.URGENT | FLAG.EXT,
@@ -618,6 +623,7 @@ function headerCases(b: Builder): void {
   c.error('header.error_ext_unknown_critical_empty', 'header', 'header', ext('02 ff00'), 'unsupported_ext');
   c.error('header.error_ext_expire_at_short', 'header', 'header', ext('04 04020102'), 'bad_ext');
   c.error('header.error_ext_valid_ms_long', 'header', 'header', ext('06 030401020304'), 'bad_ext');
+  c.error('header.error_ext_port_seq_short', 'header', 'header', ext('03 050101'), 'bad_ext');
   // TLVs are checked in order: the first refusal wins.
   c.error('header.error_ext_first_refusal_wins', 'header', 'header', ext('06 9000 04020102'), 'unsupported_ext');
 }
@@ -921,6 +927,12 @@ function capEdgeCases(b: Builder, c: Cases): void {
     b.value(c, 'cap', T, 'full_batch', { n: 32, levels: 0x55555555, dt_us: Array.from({ length: 32 }, (_, i) => i * 625), dropped: 3 });
     c.error(`${T}.error_too_many_edges`, 'cap', T, `1a21${'01'.repeat(33)}`, 'too_long');
   }
+  if (hasMember(m, 'fr.fixture', 'commands', 'set_duty')) {
+    // Design m2-c3-inputs §3: duty in 1/10,000 of full scale; 10000 is the range's top.
+    b.value(c, 'cap', 'fr.fixture.set_duty.args', 'full_scale', { duty: 10000 });
+    // Above the range: it decodes, and valid() (C++) and the JSON accessors refuse it.
+    b.lenient(c, 'cap', 'fr.fixture.set_duty.args', 'duty_10001', { duty: 10001 });
+  }
   if (hasMember(m, 'fr.fixture', 'events', 'frame')) {
     b.value(c, 'cap', 'fr.fixture.frame.event', 'green_24_bits', { bits: 24, grb: 0x400000 });
   }
@@ -976,6 +988,13 @@ function envelopeSpecs(model: Model): EnvSpec[] {
     prefix: { type: 'result', req_epoch: 4, req_seq: 17, status: 0 },
   });
   out.push({ name: 'event.button_down', header: BUTTON_DOWN, prefix: { type: 'time', t_us: 1000 }, body: { type: 'fr.button.down.event', value: {} } });
+  // An ordered port's EVENT (design m2-c3-inputs D8): the time prefix follows the EXT block with port_seq.
+  out.push({
+    name: 'event.button_up_port_seq',
+    header: { ...BUTTON_DOWN_PORT_SEQ, kind: 2, seq: 13, ext: [extTlv(EXT.PORT_SEQ, 2)] },
+    prefix: { type: 'time', t_us: 81000 },
+    body: { type: 'fr.button.up.event', value: { held_ms: 80 } },
+  });
   out.push({
     name: 'event.button_up_t_max',
     header: { ...BUTTON_DOWN, kind: 2, seq: 13 },

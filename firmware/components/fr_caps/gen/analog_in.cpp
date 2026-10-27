@@ -65,6 +65,9 @@ size_t encode(const AnalogInTraits &v, fr::wire::Writer &w)
     if (v.resolution_bits != 0) {
         w.field_uint(1, v.resolution_bits);
     }
+    if (v.full_scale_mv != 0) {
+        w.field_uint(2, v.full_scale_mv);
+    }
     return w.size() - start;
 }
 
@@ -76,6 +79,9 @@ std::expected<AnalogInTraits, fr::wire::DecodeErr> decode_analog_in_traits(std::
         switch (r.field()) {
         case 1:
             v.resolution_bits = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.full_scale_mv = static_cast<uint16_t>(r.read_uint(0xFFFF));
             break;
         default:
             r.skip();
@@ -90,7 +96,7 @@ std::expected<AnalogInTraits, fr::wire::DecodeErr> decode_analog_in_traits(std::
 
 bool operator==(const AnalogInTraits &a, const AnalogInTraits &b)
 {
-    return a.resolution_bits == b.resolution_bits;
+    return a.resolution_bits == b.resolution_bits && a.full_scale_mv == b.full_scale_mv;
 }
 
 bool valid(const AnalogInTraits &)
@@ -104,6 +110,9 @@ size_t encode(const AnalogInInjectArgs &v, fr::wire::Writer &w)
     if (v.value != 0) {
         w.field_uint(1, v.value);
     }
+    if (v.hold_ms != 0) {
+        w.field_uint(2, v.hold_ms);
+    }
     return w.size() - start;
 }
 
@@ -115,6 +124,9 @@ std::expected<AnalogInInjectArgs, fr::wire::DecodeErr> decode_analog_in_inject_a
         switch (r.field()) {
         case 1:
             v.value = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 2:
+            v.hold_ms = static_cast<uint16_t>(r.read_uint(0xFFFF));
             break;
         default:
             r.skip();
@@ -129,10 +141,67 @@ std::expected<AnalogInInjectArgs, fr::wire::DecodeErr> decode_analog_in_inject_a
 
 bool operator==(const AnalogInInjectArgs &a, const AnalogInInjectArgs &b)
 {
-    return a.value == b.value;
+    return a.value == b.value && a.hold_ms == b.hold_ms;
 }
 
 bool valid(const AnalogInInjectArgs &)
+{
+    return true;
+}
+
+size_t encode(const AnalogInReadResult &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.mv != 0) {
+        w.field_uint(1, v.mv);
+    }
+    if (v.raw != 0) {
+        w.field_uint(2, v.raw);
+    }
+    if (v.value != 0) {
+        w.field_uint(3, v.value);
+    }
+    if (v.injected) {
+        w.field_bool(4, v.injected);
+    }
+    return w.size() - start;
+}
+
+std::expected<AnalogInReadResult, fr::wire::DecodeErr> decode_analog_in_read_result(std::span<const uint8_t> in)
+{
+    AnalogInReadResult v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.mv = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 2:
+            v.raw = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 3:
+            v.value = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 4:
+            v.injected = r.read_bool();
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const AnalogInReadResult &a, const AnalogInReadResult &b)
+{
+    return a.mv == b.mv && a.raw == b.raw && a.value == b.value && a.injected == b.injected;
+}
+
+bool valid(const AnalogInReadResult &)
 {
     return true;
 }
@@ -217,7 +286,7 @@ std::expected<uint16_t, fr::wire::DecodeErr> decode_analog_in_value_state(std::s
     return v;
 }
 
-Status AnalogIn::dispatch(uint8_t cmd_id, [[maybe_unused]] std::span<const uint8_t> args, Reply &)
+Status AnalogIn::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &reply)
 {
     switch (cmd_id) {
 #if FR_TEST_HOOKS
@@ -229,6 +298,22 @@ Status AnalogIn::dispatch(uint8_t cmd_id, [[maybe_unused]] std::span<const uint8
         return inject(*a);
     }
 #endif
+    case kCmdRead: {
+        if (!fr::proto::decode_empty(args)) {
+            return std::unexpected(Err::invalid_args);
+        }
+        const auto r = read();
+        if (!r) {
+            return std::unexpected(r.error());
+        }
+        encode(*r, reply.fields());
+        // Fields beyond the caller's buffer (realtime or bulk): FAILED with no fields, never truncated ones.
+        if (reply.fields().overflow()) {
+            reply.clear();
+            return std::unexpected(Err::failed);
+        }
+        return {};
+    }
     default:
         return std::unexpected(Err::unsupported);
     }
@@ -252,7 +337,7 @@ void AnalogIn::emit_crossed(const AnalogInCrossed &e, TimeUs at)
     uint8_t buf[AnalogInCrossed::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventCrossed, Priority::realtime, w.bytes(), at);
+    sink_->event(port_, kEventCrossed, Priority::realtime, w.bytes(), at, kOrdered);
 }
 
 void AnalogIn::report_value(uint16_t v, TimeUs at)

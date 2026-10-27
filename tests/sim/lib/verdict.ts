@@ -265,6 +265,9 @@ export const TIME_SCALE: Record<string, readonly { flag: string; default: number
   't-input': [{ flag: '--gap-ms', default: 400, op: 'mul' }],
   't-ota': [],
   't2-churn': [{ flag: '--spacing-x', default: 1, op: 'mul' }],
+  // The nodes' own report_hz is the load under test (design m2-c3-inputs §8): half the time scale would change what
+  // is measured, so nothing is scaled; its figures are published only.
+  't2-analog': [],
   'flood-b-epoch': [
     { flag: '--before-rate', default: 1, op: 'div' },
     { flag: '--after-rate', default: 2, op: 'div' },

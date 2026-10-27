@@ -5,6 +5,8 @@
 // systimer alarm, both while flash is busy, and the panic hook with the cache in any state, so their code (with
 // the inlined gpio_ll, ring and Plan code, and whatever -Og leaves out of line) sits in IRAM and every object they
 // touch in internal RAM. The host suite builds this file over firmware/test/host/shim (FR_HOST_SHIM).
+// M2-C3 (design m2-c3-inputs §3): pwm lines run on LEDC, set from the core task only; the reset paths take their pins
+// off LEDC with gpio_ll alone, which is inline and needs no lock.
 #include "fr/drv/fixture_gpio.hpp"
 
 #include <cinttypes>
@@ -12,6 +14,7 @@
 #include <iterator>
 
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "edge_ring.hpp"
 #include "esp_attr.h"
 #include "esp_bit_defs.h"
@@ -23,6 +26,7 @@
 #include "freertos/FreeRTOS.h"
 #include "hal/gpio_ll.h"
 #include "sdkconfig.h"
+#include "soc/gpio_sig_map.h"
 #include "soc/gpio_struct.h"
 
 #if !CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
@@ -53,6 +57,12 @@ bool s_shutdown_handler = false;  // release_for_restart() is registered with es
 // board's constructors (dynamic initialization) can note theirs before any init function reads it.
 uint64_t s_pins = 0;
 static_assert(GPIO_NUM_MAX <= 64, "s_pins holds one bit per GPIO");
+// pwm lines (design m2-c3-inputs §3): one low-speed LEDC timer for all of them, configured by the first, and the
+// channels handed out so far (a line's channel is its index among the pwm lines).
+constexpr ledc_mode_t kLedcMode = LEDC_LOW_SPEED_MODE;
+constexpr ledc_timer_t kLedcTimer = LEDC_TIMER_0;
+bool s_ledc_timer = false;
+uint8_t s_ledc_channels = 0;
 
 constexpr uint32_t low32(int64_t t)
 {
@@ -184,6 +194,17 @@ bool FixtureGpio::released_locked() const
     return (gpio_ll_get_level(&GPIO, cfg_.gpio) != 0) == pin_level(mode_.drive, false);
 }
 
+IRAM_ATTR void FixtureGpio::pwm_pin_low() const
+{
+    // Low on the output register first, the output on, then the pin off the LEDC signal onto that register, with its
+    // output enable from GPIO_ENABLE: no high on the way, and duty 0 whatever LEDC (which a CPU reset keeps running)
+    // does next.
+    gpio_ll_set_level(&GPIO, cfg_.gpio, 0);
+    gpio_ll_output_enable(&GPIO, cfg_.gpio);
+    gpio_ll_set_output_enable_ctrl(&GPIO, cfg_.gpio, false, false);
+    gpio_ll_set_output_signal_matrix_source(&GPIO, cfg_.gpio, SIG_GPIO_OUT_IDX, false);
+}
+
 // ---- the reset paths (design m2-c1-hil D11 item 1) ----
 // On the S3, esp_restart() and a panic's restart end in esp_restart_noos(), a CPU reset of both cores
 // (esp_system/port/soc/esp32s3/system_internal.c) that leaves the GPIO and IO_MUX registers as they were. A chip,
@@ -195,7 +216,9 @@ IRAM_ATTR void FixtureGpio::release_for_panic()
     // ISR comes back to press again before the reset.
     for (size_t i = 0; i < s_count; ++i) {
         const FixtureGpio &l = *s_lines[i];
-        if (l.mode_.drive != hal::FixtureDrive::none) {
+        if (l.mode_.drive == hal::FixtureDrive::pwm) {
+            l.pwm_pin_low();
+        } else if (l.mode_.drive != hal::FixtureDrive::none) {
             gpio_ll_set_level(&GPIO, l.cfg_.gpio, pin_level(l.mode_.drive, false) ? 1 : 0);
         }
     }
@@ -208,7 +231,10 @@ void FixtureGpio::release_for_restart()
     portENTER_CRITICAL(&s_mux);
     for (size_t i = 0; i < s_count; ++i) {
         FixtureGpio &l = *s_lines[i];
-        if (l.mode_.drive != hal::FixtureDrive::none) {
+        if (l.mode_.drive == hal::FixtureDrive::pwm) {
+            l.pwm_pin_low();  // duty 0 (design m2-c3-inputs §3); no LEDC driver call under the lock
+            l.duty_ = 0;
+        } else if (l.mode_.drive != hal::FixtureDrive::none) {
             l.running_ = false;
             esp_timer_stop(l.segment_);
             esp_timer_stop(l.guard_);
@@ -223,11 +249,20 @@ void FixtureGpio::release_at_boot()
 {
     // The drive is not known yet (FixtureService hands it over in init()), and needs not be: with its output off an
     // open_drain line reads high through the DUT's pull-up and an nfet_gate line's gate low through its pull-down
-    // (D12). Interrupts a CPU reset left enabled are masked until init() arms them again.
+    // (D12), and a pwm line's RC holds what the reset path left it (0 V) until init() drives duty 0. Interrupts a CPU
+    // reset left enabled are masked until init() arms them again.
+    // Clearing GPIO_ENABLE alone does not take a pwm line off LEDC: ledc_channel_config routed it through the GPIO
+    // matrix with OEN_SEL clear, so its output enable is LEDC's and GPIO_ENABLE is ignored. So, for every noted pin
+    // (harmless for the other drives, already on SIG_GPIO_OUT_IDX): GPIO_ENABLE off first, then the output enable
+    // from GPIO_ENABLE (the pin floats from here, LEDC still selected but not enabled), then the pin onto its output
+    // register. No high on the way.
     for (int n = 0; n < GPIO_NUM_MAX; ++n) {
         if ((s_pins & (uint64_t{1} << n)) != 0 && GPIO_IS_VALID_GPIO(n)) {
-            gpio_ll_intr_disable(&GPIO, static_cast<uint32_t>(n));
-            gpio_ll_output_disable(&GPIO, static_cast<uint32_t>(n));
+            const auto pin = static_cast<uint32_t>(n);
+            gpio_ll_intr_disable(&GPIO, pin);
+            gpio_ll_output_disable(&GPIO, pin);
+            gpio_ll_set_output_enable_ctrl(&GPIO, static_cast<uint8_t>(n), false, false);
+            gpio_ll_set_output_signal_matrix_source(&GPIO, pin, SIG_GPIO_OUT_IDX, false);
         }
     }
 }
@@ -293,6 +328,10 @@ Status FixtureGpio::init(Core &core, const hal::FixtureLineMode &mode, hal::Edge
         gpio_set_level(pin, 0);
         io.mode = GPIO_MODE_INPUT_OUTPUT;  // push-pull, idle low; the input reads the gate it drives
         break;
+    case hal::FixtureDrive::pwm:
+        gpio_set_level(pin, 0);
+        io.mode = GPIO_MODE_INPUT_OUTPUT;  // push-pull low (duty 0) until its LEDC channel takes the pin
+        break;
     case hal::FixtureDrive::none:
         io.mode = GPIO_MODE_INPUT;  // can never drive
         break;
@@ -300,8 +339,13 @@ Status FixtureGpio::init(Core &core, const hal::FixtureLineMode &mode, hal::Edge
     if (gpio_config(&io) != ESP_OK) {
         return std::unexpected(Err::failed);
     }
+    if (mode.drive == hal::FixtureDrive::pwm) {
+        if (auto st = init_pwm(); !st) {
+            return st;
+        }
+    }
 
-    if (drives) {
+    if (drives && mode.drive != hal::FixtureDrive::pwm) {  // a pwm line never presses: no press timers
         esp_timer_create_args_t args = {};
         args.arg = this;
         args.dispatch_method = ESP_TIMER_ISR;
@@ -357,7 +401,7 @@ std::expected<hal::FixturePress, Err> FixtureGpio::press(std::span<const uint32_
     if (sink_ == nullptr) {
         return std::unexpected(Err::failed);
     }
-    if (mode_.drive == hal::FixtureDrive::none) {
+    if (mode_.drive == hal::FixtureDrive::none || mode_.drive == hal::FixtureDrive::pwm) {
         return std::unexpected(Err::unsupported);
     }
     const auto plan = Plan::make(segments_us, cap_us);
@@ -414,6 +458,13 @@ Status FixtureGpio::release()
     if (sink_ == nullptr || mode_.drive == hal::FixtureDrive::none) {
         return {};
     }
+    if (mode_.drive == hal::FixtureDrive::pwm) {
+        if (!apply_steps(0)) {
+            return std::unexpected(Err::failed);
+        }
+        duty_ = 0;
+        return {};
+    }
     bool pushed = false;
     portENTER_CRITICAL(&s_mux);
     end_locked(pushed);
@@ -431,7 +482,68 @@ bool FixtureGpio::pressing() const
 
 bool FixtureGpio::level() const
 {
+    if (mode_.drive == hal::FixtureDrive::pwm) {
+        return duty_ > 0;  // its pin is a 20 kHz waveform, not a level
+    }
     return gpio_get_level(static_cast<gpio_num_t>(cfg_.gpio)) != 0;
+}
+
+Status FixtureGpio::init_pwm()
+{
+    if (!s_ledc_timer) {
+        ledc_timer_config_t t = {};
+        t.speed_mode = kLedcMode;
+        t.duty_resolution = static_cast<ledc_timer_bit_t>(kPwmBits);
+        t.timer_num = kLedcTimer;
+        t.freq_hz = kPwmHz;
+        t.clk_cfg = LEDC_AUTO_CLK;  // APB 80 MHz on the S3: a divider of 1.95 for 20 kHz x 2^11
+        if (ledc_timer_config(&t) != ESP_OK) {
+            ESP_LOGE(TAG, "LEDC timer: %" PRIu32 " Hz at %u bits refused", kPwmHz, unsigned{kPwmBits});
+            return std::unexpected(Err::failed);
+        }
+        s_ledc_timer = true;
+    }
+    if (s_ledc_channels == kMaxPwmLines) {
+        return std::unexpected(Err::failed);
+    }
+    ledc_channel_config_t c = {};
+    c.gpio_num = cfg_.gpio;
+    c.speed_mode = kLedcMode;
+    c.channel = static_cast<ledc_channel_t>(s_ledc_channels);
+    c.timer_sel = kLedcTimer;
+    c.duty = 0;  // design m2-c3-inputs §3: duty 0 at init
+    c.hpoint = 0;
+    if (ledc_channel_config(&c) != ESP_OK) {
+        return std::unexpected(Err::failed);
+    }
+    ledc_ch_ = static_cast<int8_t>(s_ledc_channels++);
+    duty_ = 0;
+    return {};
+}
+
+bool FixtureGpio::apply_steps(uint32_t steps)
+{
+    const auto ch = static_cast<ledc_channel_t>(ledc_ch_);
+    return ledc_set_duty(kLedcMode, ch, steps) == ESP_OK && ledc_update_duty(kLedcMode, ch) == ESP_OK;
+}
+
+std::expected<uint32_t, Err> FixtureGpio::set_duty(uint16_t duty)
+{
+    if (sink_ == nullptr) {
+        return std::unexpected(Err::failed);
+    }
+    if (mode_.drive != hal::FixtureDrive::pwm) {
+        return std::unexpected(Err::unsupported);
+    }
+    if (duty > hal::kFixtureDutyMax) {
+        return std::unexpected(Err::invalid_args);
+    }
+    if (!apply_steps(pwm_steps(duty))) {
+        return std::unexpected(Err::failed);
+    }
+    const int64_t at = esp_timer_get_time();
+    duty_ = duty;
+    return low32(at);
 }
 
 void FixtureGpio::drain()
@@ -504,6 +616,9 @@ hal::Selftest FixtureGpio::selftest()
         ok = running || released;
         state = running ? "pressing" : ok ? "released, gate low" : "gate reads high at idle (shorted to 3V3?)";
         break;
+    case hal::FixtureDrive::pwm:
+        snprintf(detail_, sizeof(detail_), "pwm on LEDC channel %d, duty %u/10000", int{ledc_ch_}, unsigned{duty_});
+        return {true, detail_};  // the pin is a waveform: nothing to read back
     case hal::FixtureDrive::none:
         state = high            ? "input, reads high"
                 : mode_.pull_up ? "input, reads low (the DUT is unpowered or stuck)"
@@ -532,6 +647,8 @@ void fixture_gpio_host_reset()
     s_draining = false;
     s_shutdown_handler = false;
     s_pins = 0;
+    s_ledc_timer = false;
+    s_ledc_channels = 0;
 }
 #endif
 

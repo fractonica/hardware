@@ -2,13 +2,28 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:fractonica:schema:fr.analog_in.inject.args",
   "title": "fr.analog_in.inject arguments",
+  "description": "Holds `value` in place of the ADC for hold_ms (0 means 1,000 ms; at most 60,000). A newer inject replaces it.",
   "type": "object",
   "properties": {
     "value": {
       "type": "integer",
       "minimum": 0,
       "maximum": 65535
+    },
+    "hold_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "examples": [
+    {
+      "value": 32768
+    },
+    {
+      "value": 0,
+      "hold_ms": 5000
+    }
+  ]
 }

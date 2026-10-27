@@ -7,7 +7,8 @@
 // offline, boot and USB detach, at a declared power cut, and on the module's stop; a gesture such a release
 // cuts short (status interrupted); a press or release whose RESULT is lost (let go, retried, the line pressing
 // until it reads released); and a fixture session that drops without a reboot (tracking kept, every driven line
-// released at its WELCOME, before the identify blink).
+// released at its WELCOME, before the identify blink). M2-C3 (design m2-c3-inputs D5, D7): an analog line's PWM
+// setpoint (duty, at_hub_us), its gates, duty 0 at the release paths, and input_simulate value/mv on both layers.
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,11 +17,13 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { CLS } from '@fractonica/protocol';
-import { PORT } from '@fractonica/protocol/gen';
+import { decodeAnalogInInjectArgs, findCap, PORT } from '@fractonica/protocol/gen';
 
-import { gestureSegments } from '../src/fixture/driver.ts';
-import { until } from './fake-node.ts';
-import { addManifest, benchRig, type BenchRig, C3, C6, FIX, FIX_FW, member } from './fixture-fake.ts';
+import { dutyFor, gestureSegments } from '../src/fixture/driver.ts';
+import { lineDrive } from '../src/fixture/timeline.ts';
+import { mvToValue, valueToMv } from '../src/router/ops.ts';
+import { PAD_CAPS, until } from './fake-node.ts';
+import { addManifest, benchRig, type BenchRig, C3, C6, FIX, FIX_FW, member, testBench } from './fixture-fake.ts';
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -176,7 +179,8 @@ describe('gating (D8, D11)', () => {
       message: expect.stringMatching(/pad-c3 analog is reserved \(wired: false\)/),
       details: { not_wired: true, channel: 'ch12', wired: false },
     });
-    await expect(b.call('input_simulate', gpio('pad-c3', 'click', 'status'))).rejects.toMatchObject({ code: 'NOT_FOUND', details: { not_wired: true } });
+    // An LED instance takes no gesture at all (m2-c3-inputs D7): invalid_input, before any bench line is looked at.
+    await expect(b.call('input_simulate', gpio('pad-c3', 'click', 'status'))).rejects.toMatchObject({ code: 'INVALID_ARGS', details: { reason: 'invalid_input' } });
     await expect(b.call('input_simulate', gpio('pad-c3', 'click', 'aux'))).rejects.toMatchObject({ code: 'NOT_FOUND', message: expect.stringMatching(/no aux line/) });
     const other = b.r.pad({ mac: 'a0b1c2d3e4f5', addr: 0x0090, alias: 'pad-x' });
     await other.connected(b.r.events);
@@ -430,5 +434,185 @@ describe('lost answers and dropped sessions (D11 item 2)', () => {
     expect(b.module.driver.running('ch0')).toBe(true);
     b.fixture.event(PORT.NODE, 1, member('fr.node', 'event', 'boot', { reset_reason: 1 }));
     await until(() => !b.module.driver.running('ch0'), 2000, 'tracking cleared at the fixture boot');
+  });
+});
+
+describe('analog lines and input_simulate value/mv (design m2-c3-inputs D5, D7)', () => {
+  const ANALOG_IN = findCap('fr.analog_in')!;
+  const INJECT = ANALOG_IN.commands.find((c) => c.name === 'inject')!.id;
+  const C3_ANALOG = [...PAD_CAPS, { port: 3, cap_id: ANALOG_IN.id, name: 'analog' }];
+  /** The bench with pad-c3's analog line wired (ch12, pwm), pad-c3 on c3o-analog with an analog instance on port 3. */
+  async function analogRig(patch: (b: Record<string, any>) => void = () => undefined): Promise<BenchRig> {
+    const b = await rig({
+      bench: testBench((x) => {
+        x.duts[C3.mac].lines.analog.wired = true;
+        patch(x);
+      }),
+      c3Caps: C3_ANALOG,
+    });
+    b.r.registry.get(C3.mac)!.profile = 'c3o-analog';
+    return b;
+  }
+  const set = (selector: string, v: { mv?: number; value?: number }, instance = 'analog') => ({ selector, instance, ...v, layer: 'gpio' });
+
+  it('maps a setpoint to a duty over vdd_mv (rounded, clamped), and lineDrive says pwm for an analog line', () => {
+    expect(dutyFor(1650, 3300)).toBe(5000);
+    expect(dutyFor(1, 3300)).toBe(3);
+    expect(dutyFor(4000, 3300)).toBe(10_000);
+    expect(dutyFor(-5, 3300)).toBe(0);
+    expect(lineDrive({ role: 'analog', channel: 'ch12', fixture_gpio: 11, dut_gpio: 3, wired: true } as never)).toBe('pwm');
+    expect(mvToValue(1250, { min_mv: 0, max_mv: 2500 })).toBe(32768);
+    expect(mvToValue(3000, { min_mv: 0, max_mv: 2500 })).toBe(65535);
+    expect(valueToMv(65535, { min_mv: 500, max_mv: 1500 })).toBe(1500);
+  });
+
+  it('sets the PWM setpoint of the bench line: the duty, and when it was applied in fixture and hub time', async () => {
+    const b = await analogRig((x) => {
+      x.fixture.vdd_mv = 3300;
+    });
+    const t0 = Date.now();
+    const res = await b.call('input_simulate', set('pad-c3', { mv: 1650 }));
+    expect(res.cursor).toMatch(/^c:\d+\.\d+$/);
+    expect(res.results).toEqual([
+      expect.objectContaining({
+        device: C3.mac,
+        alias: 'pad-c3',
+        status: 'ok',
+        layer: 'gpio',
+        fixture: 'fix-s3',
+        channel: 'ch12',
+        fields: { at_us: expect.any(Number) },
+        setpoint: { mv: 1650, duty: 5000, vdd_mv: 3300, applied_mv: 1650, at_fix_us: expect.any(Number), at_hub_us: expect.any(Number) },
+      }),
+    ]);
+    const sp = res.results[0].setpoint;
+    expect(sp.at_fix_us).toBeGreaterThan(77_000_000); // the full fixture time, unwrapped on its clock
+    expect(sp.at_hub_us / 1000).toBeGreaterThanOrEqual(t0 - 50);
+    expect(sp.at_hub_us / 1000).toBeLessThanOrEqual(Date.now() + 50);
+    expect(b.fixture.duties.map((d) => [d.channel, d.duty])).toEqual([['ch12', 5000]]);
+    // A value maps to mV over the instance's range (the capability's 0..2,500 mV without a manifest), then to a duty.
+    const full = await b.call('input_simulate', set('pad-c3', { value: 65535 }));
+    expect(full.results[0].setpoint).toMatchObject({ mv: 2500, duty: 7576 });
+    const top = await b.call('input_simulate', set('pad-c3', { mv: 5500 }));
+    expect(top.results[0].setpoint).toMatchObject({ duty: 10_000, applied_mv: 3300 });
+    // bench_get: the line drives pwm, its last duty, active while above 0.
+    await until(() => b.module.driver.lineLevel('ch12') === true, 1000, 'ch12 level');
+    let st = await b.call('bench_get', {});
+    expect(st.lines.find((l: any) => l.channel === 'ch12')).toMatchObject({ role: 'analog', drive: 'pwm', duty: 10_000, state: 'active', problem: null });
+    // The module's own entry (T-ANALOG's setpoints): mv 0 is duty 0.
+    const zero = (await b.module.setMv(b.r.registry.get(C3.mac)!, 'analog', 0)) as any;
+    expect(zero.setpoint).toMatchObject({ mv: 0, duty: 0 });
+    await until(() => b.module.driver.lineLevel('ch12') === false, 1000, 'ch12 level low');
+    st = await b.call('bench_get', {});
+    expect(st.lines.find((l: any) => l.channel === 'ch12')).toMatchObject({ duty: 0, state: 'idle' });
+    expect(b.fixture.presses).toHaveLength(0);
+  });
+
+  it('gates a setpoint: an analog line only, the DUT on its line profile; mv 0 always', async () => {
+    const b = await analogRig();
+    // A gesture on the analog line, a setpoint on the BOOT line: each is the other capability (invalid_input).
+    await expect(b.call('input_simulate', gpio('pad-c3', 'click', 'analog'))).rejects.toMatchObject({
+      code: 'INVALID_ARGS',
+      details: { reason: 'invalid_input', results: [{ alias: 'pad-c3', status: 'invalid_input' }] },
+    });
+    await expect(b.call('input_simulate', set('pad-c3', { mv: 100 }, 'boot'))).rejects.toMatchObject({ code: 'INVALID_ARGS', details: { reason: 'invalid_input' } });
+    // pad-c6 has no analog line on the bench.
+    await expect(b.call('input_simulate', set('pad-c6', { mv: 100 }))).rejects.toMatchObject({ code: 'NOT_FOUND', details: { not_wired: true } });
+    // On its bench profile (c3o-pad) the DUT's pin is no ADC input: refused, but letting go is not.
+    b.r.registry.get(C3.mac)!.profile = 'c3o-pad';
+    await expect(b.call('input_simulate', set('pad-c3', { mv: 100 }))).rejects.toMatchObject({
+      code: 'INCOMPATIBLE_PROFILE',
+      details: { problem: 'profile_mismatch', profile: 'c3o-pad', bench_profile: 'c3o-analog' },
+    });
+    expect((await b.call('input_simulate', set('pad-c3', { mv: 0 }))).results[0]).toMatchObject({ status: 'ok', setpoint: { duty: 0 } });
+    b.r.registry.get(C3.mac)!.profile = 'c3o-analog';
+    // No gesture reaches an analog line, and no setpoint a button line (even past the capability check).
+    expect(() => b.module.driver.gate(b.r.registry.get(C3.mac)!, 'analog', 'release')).toThrow(/analog line, not a button/);
+    expect(() => b.module.driver.gateAnalog(b.r.registry.get(C3.mac)!, 'boot', 100)).toThrow(/button line, not an analog one/);
+    expect(b.fixture.presses).toHaveLength(0);
+  });
+
+  it("refuses a fixture build that does not drive the line's channel pwm (its artifact manifest), and takes one that does", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fr-fix-art-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const ch = (name: string, port: number, config: Record<string, string>) => ({ name, port, cap: 'fr.fixture', cap_id: 6, version: '0.2', driver: 'fixture_gpio', config });
+    const caps = [ch('ch0', 1, { drive: 'open_drain' }), ch('ch2', 3, { drive: 'open_drain' })];
+    const none = await analogRig();
+    addManifest(none.r.db, dir, { profile: 's3k-fixture', fw: FIX_FW, caps: [...caps, ch('ch12', 13, { drive: 'none', decode: 'level' })] });
+    await expect(none.call('input_simulate', set('pad-c3', { mv: 100 }))).rejects.toMatchObject({
+      code: 'INCOMPATIBLE_PROFILE',
+      message: expect.stringMatching(/drives ch12 none, the bench line needs pwm/),
+      details: { problem: 'fixture_mismatch', channel: 'ch12' },
+    });
+    const st = await none.call('bench_get', {});
+    expect(st.lines.find((l: any) => l.channel === 'ch12')).toMatchObject({ problem: 'fixture_mismatch', drive: 'pwm' });
+    const dir2 = mkdtempSync(join(tmpdir(), 'fr-fix-art-'));
+    cleanups.push(() => rmSync(dir2, { recursive: true, force: true }));
+    const pwm = await analogRig();
+    addManifest(pwm.r.db, dir2, { profile: 's3k-fixture', fw: FIX_FW, caps: [...caps, ch('ch12', 13, { drive: 'pwm' })] });
+    expect((await pwm.call('input_simulate', set('pad-c3', { mv: 100 }))).results[0]).toMatchObject({ status: 'ok', setpoint: { duty: 303 } });
+  });
+
+  it('sets every pwm line to duty 0 at the release paths (DUT boot or offline, module stop), never with `release`', async () => {
+    const b = await analogRig();
+    await b.call('input_simulate', set('pad-c3', { mv: 1000 }));
+    b.c3.event(PORT.NODE, 1, member('fr.node', 'event', 'boot', { reset_reason: 1 }));
+    await until(() => b.fixture.duties.at(-1)?.duty === 0, 2000, 'duty 0 at node.boot');
+    expect(b.module.driver.duty('ch12')).toBe(0);
+    await b.call('input_simulate', set('pad-c3', { mv: 1000 }));
+    b.module.stop();
+    await until(() => b.fixture.duties.at(-1)?.duty === 0 && b.fixture.duties.length === 4, 2000, 'duty 0 at stop'); // 1000, 0, 1000, 0
+    expect(b.fixture.releases).not.toContain('ch12');
+    expect(b.fixture.lines.get('ch12')!.duty).toBe(0);
+  });
+
+  it('inject: value or mv over the manifest range, hold_ms passed on, per-device invalid_input, and the input rules', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fr-fix-art-'));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const fw = 'c3c3c3c3aabbccdd';
+    const b = await rig({ c3: { fwPrefix: fw }, c3Caps: C3_ANALOG });
+    const got: unknown[] = [];
+    b.c3.handlers.set(`3/${INJECT}`, (args) => {
+      const d = decodeAnalogInInjectArgs(args);
+      got.push(d.ok ? d.value : d.error);
+    });
+    const res = await b.call('input_simulate', { selector: 'pad-c3', instance: 'analog', mv: 1250, hold_ms: 5000 });
+    expect(res.results).toEqual([expect.objectContaining({ alias: 'pad-c3', status: 'ok', value: 32768 })]);
+    await b.call('input_simulate', { selector: 'pad-c3', instance: 'analog', value: 50_000 });
+    expect(got).toEqual([
+      { value: 32768, hold_ms: 5000 },
+      { value: 50_000, hold_ms: 0 },
+    ]);
+    // The running firmware's manifest range: 500..1,500 mV.
+    addManifest(b.r.db, dir, {
+      profile: 'c3o-analog',
+      fw,
+      target: 'esp32c3',
+      caps: [{ name: 'analog', port: 3, cap: 'fr.analog_in', cap_id: ANALOG_IN.id, version: '1.0', driver: 'adc_oneshot', config: { min_mv: 500, max_mv: 1500, thresholds: [16384] } }],
+    });
+    expect((await b.call('input_simulate', { selector: 'pad-c3', instance: 'analog', mv: 1000 })).results[0].value).toBe(32768);
+    expect((await b.call('input_simulate', { selector: 'pad-c3', instance: 'analog', mv: 100 })).results[0].value).toBe(0);
+    // A device whose `analog` is a button is invalid_input; the others still get theirs, in selection order.
+    const x = b.r.pad({ mac: 'a0b1c2d3e4f6', addr: 0x0091, alias: 'pad-x', caps: [{ port: 3, cap_id: findCap('fr.button')!.id, name: 'analog' }] });
+    await x.connected(b.r.events);
+    const mixed = await b.call('input_simulate', { selector: 'pad-c3,pad-x', instance: 'analog', value: 1 });
+    expect(mixed.results.map((r: any) => `${r.alias} ${r.status}`)).toEqual(['pad-c3 ok', 'pad-x invalid_input']);
+    expect(x.received(CLS.CMD).filter((f) => f.header.port === 3)).toEqual([]);
+    // Exactly one of gesture, value, mv; hold_ms only with a value on inject.
+    for (const bad of [
+      { instance: 'analog' },
+      { instance: 'analog', value: 1, mv: 1 },
+      { instance: 'boot', gesture: 'click', hold_ms: 100 },
+      { instance: 'analog', mv: 100, hold_ms: 100, layer: 'gpio' },
+    ]) {
+      await expect(b.call('input_simulate', { selector: 'pad-c3', ...bad })).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    }
+    await expect(b.call('input_simulate', { selector: 'pad-c3', instance: 'analog', value: 65536 })).rejects.toThrow();
+    // The fixture stays fenced: no client command_send reaches its pwm channel.
+    await expect(b.call('command_send', { selector: 'fix-s3', command: 'ch12.set_duty', args: { duty: 5000 } })).rejects.toMatchObject({
+      code: 'INVALID_ARGS',
+      details: { reason: 'fixture_internal' },
+    });
+    expect(b.fixture.duties).toEqual([]);
   });
 });

@@ -130,6 +130,7 @@ inline constexpr size_t kRealtimePayloadBudget = 200;
 static_assert(fr::wire::kExtTraceId == 0x02 && fr::wire::ext_value_size(fr::wire::kExtTraceId) == 4);
 static_assert(fr::wire::kExtValidMs == 0x03 && fr::wire::ext_value_size(fr::wire::kExtValidMs) == 2);
 static_assert(fr::wire::kExtExpireAtUs == 0x04 && fr::wire::ext_value_size(fr::wire::kExtExpireAtUs) == 4);
+static_assert(fr::wire::kExtPortSeq == 0x05 && fr::wire::ext_value_size(fr::wire::kExtPortSeq) == 2);
 static_assert(fr::wire::kExtExecAtUs == 0x81 && fr::wire::ext_value_size(fr::wire::kExtExecAtUs) == 4);
 
 // Serial line framing.

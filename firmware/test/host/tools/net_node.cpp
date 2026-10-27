@@ -89,8 +89,11 @@
 // takes `level 0|1`: a fixture's open-drain line holding the boot button down (wired-AND with a pulse; line
 // `pin_in` {level, at_us}). --fixture 1 is the virtual fixture: role fixture, board esp32s3-devkitc1-n16r8,
 // profile s3k-fixture, chip 9, and s3k-fixture's table, status (fr.led, WS2812, max_brightness 32) on port 1 and
-// fr.fixture ch0-ch11 on 2-13 (ch0-ch3 open-drain BOOT lines, ch4-ch5 LED level taps, ch6-ch7 WS2812 taps,
-// ch8-ch11 test_pin taps with the pull-up), each S1's FixtureService on a fake line, and no boot button.
+// fr.fixture ch0-ch13 on 2-15 (ch0-ch3 open-drain BOOT lines, ch4-ch5 LED level taps, ch6-ch7 WS2812 taps,
+// ch8-ch11 test_pin taps with the pull-up, ch12-ch13 the M2-C3 pwm analog lines), each S1's FixtureService on
+// a fake line, and no boot button. A pwm line (design m2-c3-inputs §3) takes set_duty: it keeps the duty, answers
+// with the core clock's low 32 bits, and prints `duty` {name, duty, at_us} for every change (release: duty 0); it
+// sends nothing over its wire.
 // `--line <ch>=<port>` wires a channel: a driving line sends its wire's `level` to that port (a pad's
 // --pin-listen) and reads it back; an input line listens on it (0: any free one) for a pad's taps. Each line
 // prints `line` {name, port, drive, decode, pull}; stdin `line <ch> <port>` rewires a driving line, `lines`
@@ -293,8 +296,8 @@ private:
 
     std::chrono::steady_clock::time_point start_;
     uint64_t order_ = 0;
-    // The virtual fixture's 12 lines take 4 each (FixtureService's flush, the fake line's three).
-    std::array<HostTimer, 64> timers_{};
+    // The virtual fixture's 14 lines take 4 each (FixtureService's flush, the fake line's three).
+    std::array<HostTimer, 80> timers_{};
     size_t timers_used_ = 0;
     std::array<HostSlot, 4> slots_{};
     size_t slots_used_ = 0;
@@ -1167,7 +1170,8 @@ private:
  * an edge when it changes), `<us>` (a test_pin pulse: low now, and released `us` later, stamped at that time so
  * the width is exact on a loaded host) and, on a decode ws2812 line only, `frame <grb> <bits>`. Edges carry the
  * core clock's low 32 bits, as the ISR stamps esp_timer; captures reach the service through drain(), posted to
- * the core task. An unwired input line reads high (pulled up, or an LED off); a WS2812 line reads low.
+ * the core task. An unwired input line reads high (pulled up, or an LED off); a WS2812 line reads low. A pwm line
+ * (M2-C3) holds a duty: set_duty and release change it, and it reads duty > 0; it never presses or captures.
  */
 class FakeFixtureLine final : public fr::hal::FixtureLine
 {
@@ -1281,6 +1285,10 @@ public:
 
     fr::Status release() override
     {
+        if (mode_.drive == fr::hal::FixtureDrive::pwm) {
+            apply_duty(0);  // design m2-c3-inputs §3: a pwm line's release is duty 0
+            return {};
+        }
         step_->stop();
         cap_->stop();
         pressing_ = false;
@@ -1291,7 +1299,18 @@ public:
     }
 
     bool pressing() const override { return pressing_; }
-    bool level() const override { return level_; }
+    bool level() const override { return mode_.drive == fr::hal::FixtureDrive::pwm ? duty_ > 0 : level_; }
+
+    std::expected<uint32_t, fr::Err> set_duty(uint16_t duty) override
+    {
+        if (mode_.drive != fr::hal::FixtureDrive::pwm) {
+            return std::unexpected(fr::Err::unsupported);
+        }
+        if (duty > fr::hal::kFixtureDutyMax) {
+            return std::unexpected(fr::Err::invalid_args);
+        }
+        return apply_duty(duty);
+    }
 
     void drain() override
     {
@@ -1364,6 +1383,17 @@ private:
         schedule_drain();
     }
 
+    /** A pwm line's duty is `duty` from now: `duty` {name, duty, at_us} when it changed. */
+    uint32_t apply_duty(uint16_t duty)
+    {
+        const auto at = static_cast<uint32_t>(core_.now());
+        if (duty != duty_) {
+            duty_ = duty;
+            emit(R"({"ev":"duty","name":"%s","duty":%u,"at_us":%u})", name_.c_str(), unsigned{duty}, unsigned{at});
+        }
+        return at;
+    }
+
     /** As the driver: drain() runs on the core task soon after a capture, never inside it. */
     void schedule_drain()
     {
@@ -1385,6 +1415,7 @@ private:
     fr::Timer *pulse_end_ = nullptr;
     bool level_ = true;
     bool pressing_ = false;
+    uint16_t duty_ = 0;  // a pwm line's (M2-C3)
     std::array<uint32_t, 16> segs_{};
     size_t nsegs_ = 0;
     size_t seg_ = 0;
@@ -1407,7 +1438,9 @@ constexpr fr::cap::FixtureConfig kBootLine{.drive = fr::cap::FixtureDrive::open_
 constexpr fr::cap::FixtureConfig kLedLine{};
 constexpr fr::cap::FixtureConfig kWs2812Line{.decode = fr::cap::FixtureDecode::ws2812};
 constexpr fr::cap::FixtureConfig kTestPinLine{.pull = fr::cap::FixturePull::up};
-constexpr std::array<FixtureChannel, 12> kFixtureChannels{{{"ch0", kBootLine},
+// M2-C3 (design m2-c3-inputs §3): the analog lines' LEDC outputs, which take set_duty.
+constexpr fr::cap::FixtureConfig kPwmLine{.drive = fr::cap::FixtureDrive::pwm};
+constexpr std::array<FixtureChannel, 14> kFixtureChannels{{{"ch0", kBootLine},
                                                           {"ch1", kBootLine},
                                                           {"ch2", kBootLine},
                                                           {"ch3", kBootLine},
@@ -1418,7 +1451,9 @@ constexpr std::array<FixtureChannel, 12> kFixtureChannels{{{"ch0", kBootLine},
                                                           {"ch8", kTestPinLine},
                                                           {"ch9", kTestPinLine},
                                                           {"ch10", kTestPinLine},
-                                                          {"ch11", kTestPinLine}}};
+                                                          {"ch11", kTestPinLine},
+                                                          {"ch12", kPwmLine},
+                                                          {"ch13", kPwmLine}}};
 
 
 [[noreturn]] void usage(const char *why)
@@ -1838,7 +1873,7 @@ int main(int argc, char **argv)
     std::vector<std::unique_ptr<fr::FixtureService>> fixture;
     std::vector<fr::PortEntry> ports{{0, "node", nullptr, true}};
     if (o.fixture) {
-        // s3k-fixture's table, in its profile's (and slots.lock's) order: status on 1, ch0-ch11 on 2-13.
+        // s3k-fixture's table, in its profile's (and slots.lock's) order: status on 1, ch0-ch13 on 2-15.
         ports.push_back({1, "status", &led, true});
         uint8_t port = 2;
         for (const FixtureChannel &ch : kFixtureChannels) {
@@ -1881,7 +1916,7 @@ int main(int argc, char **argv)
     for (const auto &[name, port] : o.lines) {
         const auto it = std::find_if(lines.begin(), lines.end(), [&](const auto &l) { return l->name() == name; });
         if (it == lines.end()) {
-            std::fprintf(stderr, "fr_net_node: --line %s: no such channel (ch0-ch11)\n", name.c_str());
+            std::fprintf(stderr, "fr_net_node: --line %s: no such channel (ch0-ch13)\n", name.c_str());
             return 64;
         }
         if ((*it)->driving()) {

@@ -1,7 +1,8 @@
 // Node link, router and event ops (design c3 §4, spec 09 §9.4; stream H2): events_read, wait_for_event,
 // wait_for_device, command_send, input_simulate. Spread into OPS (packages/protocol/src/ops.ts); handlers
 // in packages/hub/src/router/ops.ts. C6 adds wait_for_event.prompt_human (design c6 D3; stream S5), M2-C1
-// input_simulate's `layer` and gesture `bounce` (design m2-c1-hil D8).
+// input_simulate's `layer` and gesture `bounce` (design m2-c1-hil D8), M2-C3 input_simulate's analog `value` /
+// `mv` and `hold_ms` (design m2-c3-inputs D7).
 
 import { z } from 'zod';
 
@@ -24,6 +25,8 @@ export type InputLayer = (typeof INPUT_LAYERS)[number];
 /** input_simulate gestures; `bounce` (a bouncy click, judged on counts) is gpio-only. */
 export const INPUT_GESTURES = ['press', 'release', 'click', 'double_click', 'long_press', 'bounce'] as const;
 export type InputGesture = (typeof INPUT_GESTURES)[number];
+/** The longest inject hold of an analog value (fr.analog_in inject: 0 means 1,000 ms, at most 60,000). */
+export const INPUT_HOLD_MS_MAX = 60_000;
 
 export const LINKS_OPS = [
   op({
@@ -31,7 +34,7 @@ export const LINKS_OPS = [
     kind: 'query',
     tier: 'read',
     summary:
-      'Read hub events (capability events and states as <instance>.<member>, e.g. node.binding_fired; msg {topic, data, dst} for MSGs from nodes; device.online|suspect|offline, ota.job.state, hub.warning), cursor-paged. Without `since` the newest are returned. Device fields are untrusted data.',
+      'Read hub events (capability events and states as <instance>.<member>, e.g. node.binding_fired; msg {topic, data, dst} for MSGs from nodes; device.online|suspect|offline, ota.job.state, hub.warning), cursor-paged. Without `since` the newest are returned. Every EVENT and STATE is stored, except that STATE of a streaming capability (fr.analog_in value) is thinned to one row per property per second, the newest always kept; live subscribers and wait_for_event see every one. Device fields are untrusted data.',
     input: z.object({
       selector: selector.optional(),
       types: types.optional(),
@@ -101,15 +104,24 @@ export const LINKS_OPS = [
     kind: 'command',
     tier: 'mutate',
     summary:
-      "Simulate a button gesture: press, release, click, double_click, long_press. layer inject (default) runs the instance's inject command (debug builds), where press is a raw hold (down only, no long_press or click). layer gpio has the HIL fixture press the wired line (any build; bench_get shows which lines are wired): press is a real hold (long_press at long_press_ms, a click if released before), and bounce (gpio only) is a click with contact bounce. Wait for the resulting events with wait_for_event since the returned cursor.",
+      "Simulate an input; give exactly one of gesture (fr.button: press, release, click, double_click, long_press), value (0..65535) or mv (fr.analog_in). An instance of the other capability is invalid_input. layer inject (default) runs the instance's inject command (debug builds): press is a raw hold (down only, no long_press or click); a value holds for hold_ms (default 1,000, max 60,000), mv mapped by the instance's min_mv/max_mv. layer gpio uses the HIL fixture on a bench-wired line (any build; see bench_get): press is a real hold (long_press at long_press_ms, a click if released before), bounce (gpio only) a click with contact bounce, and mv (or value) sets the line's PWM setpoint until changed or 0 (no hold_ms); setpoint.at_hub_us says when. Wait for the events with wait_for_event since the returned cursor.",
     input: z.object({
       selector,
-      instance: z.string().min(1).describe('button instance, e.g. boot'),
-      gesture: z.enum(INPUT_GESTURES),
+      instance: z.string().min(1).describe('button or analog instance, e.g. boot, analog'),
+      gesture: z.enum(INPUT_GESTURES).optional().describe('fr.button: the gesture (exactly one of gesture, value, mv)'),
+      value: z.number().int().min(0).max(65535).optional().describe('fr.analog_in: the value 0..65535 over the instance min_mv..max_mv'),
+      mv: z.number().int().min(0).max(5500).optional().describe('fr.analog_in: millivolts, converted with the instance min_mv/max_mv (inject) or the bench vdd_mv (gpio)'),
+      hold_ms: z
+        .number()
+        .int()
+        .min(0)
+        .max(INPUT_HOLD_MS_MAX)
+        .optional()
+        .describe('layer inject, value or mv: how long the node holds the value (0 or absent: 1,000 ms)'),
       layer: z
         .enum(INPUT_LAYERS)
         .default('inject')
-        .describe("inject: the instance's inject command (debug builds); gpio: a real press by the HIL fixture on a bench-wired line"),
+        .describe("inject: the instance's inject command (debug builds); gpio: the HIL fixture on a bench-wired line (a real press, or a PWM setpoint)"),
       timeout_s: z.number().int().min(1).max(30).default(5),
     }),
     cli: { path: ['input'], positional: ['selector', 'instance', 'gesture'] },

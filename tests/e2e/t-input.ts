@@ -133,7 +133,7 @@ export function quantile(xs: number[], q: number): number {
 // ---- the SDK test client (@fractonica/sdk over /app, 07 §7.9) ----
 
 /** Connects with the app token client_generate hands out (never printed). No reconnect: a lost socket fails the run. */
-async function connectSdk(hub: Hub): Promise<SdkHub> {
+export async function connectSdk(hub: Hub): Promise<SdkHub> {
   const gen = await hub.ok<{ files: { path: string; content: string }[] }>('client_generate', { token: true });
   const token = /token\s*=\s*['"]([^'"]+)['"]/.exec(gen.files.find((f) => f.path === 'token.ts')?.content ?? '')?.[1];
   if (!token) {

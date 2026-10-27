@@ -820,7 +820,7 @@ function benchStatus(duts: FakeDut[], o: { fwOk?: boolean; fixturePresence?: str
     bench: {
       schema: 'fractonica/bench@1',
       id: 'lab',
-      fixture: { device: FIX, profile: 's3k-fixture', fw_id: o.pinned === undefined ? 'a1b2c3d4e5f60718' : o.pinned },
+      fixture: { device: FIX, profile: 's3k-fixture', fw_id: o.pinned === undefined ? 'a1b2c3d4e5f60718' : o.pinned, vdd_mv: 3300 },
       duts: Object.fromEntries(
         duts.map((d) => [
           d.device,
@@ -1784,7 +1784,7 @@ describe('tests/e2e/run.ts --tier hil', () => {
     expect(skipReason({ fixture: true }, false)).toBeNull();
     // A tier holds its own modules; naming one of another tier says which.
     expect(select(found, [], 'target').chosen.some((f) => f.file === 't-hil.ts')).toBe(false);
-    expect(select(found, [], 'hil').chosen.map((f) => f.file)).toEqual(['t-hil.ts']);
+    expect(select(found, [], 'hil').chosen.map((f) => f.file)).toEqual(['t-analog.ts', 't-hil.ts']);
     expect(select(found, ['t-hil'], 'target')).toMatchObject({ chosen: [], unknown: ['t-hil'], otherTier: [{ suite: 't-hil', tier: 'hil' }] });
   });
 
@@ -1833,7 +1833,7 @@ describe('tests/e2e/run.ts --tier hil', () => {
     expect(target.code).toBe(0);
     expect(target.out).not.toContain('t-hil.ts');
     expect(target.out).toContain('t-lat.ts\tT-LAT\t{"wiring":true,"usb":true}');
-    expect(hil).toMatchObject({ code: 0, out: 't-hil.ts\tT-HIL\t{"fixture":true}\n' });
+    expect(hil).toMatchObject({ code: 0, out: 't-analog.ts\tT-ANALOG\t{"fixture":true}\nt-hil.ts\tT-HIL\t{"fixture":true}\n' });
     expect(wrong.code).toBe(3);
     expect(wrong.err).toContain('t-hil is a hil gate: run it with --tier hil');
     // Tier sim runs the scenarios (design m2-c2 D14); an unknown one is refused before anything starts.
@@ -1902,7 +1902,7 @@ describe('T-LAT, T-INPUT, T-LED and T-AGENT with the HIL bench', () => {
     // The lenient reader takes the lab bench as the hub's loader does.
     const lines = benchFileLines(DESIGN_BENCH_YAML);
     expect(lines['58e6c5d55e64']).toMatchObject({ boot: { role: 'button', channel: 'ch2', dut_gpio: 9, wired: true }, test_pin: { channel: 'ch10', dut_gpio: 20, wired: true } });
-    expect(lines['1cdbd4175cc4'].analog).toMatchObject({ role: 'analog', wired: false });
+    expect(lines['1cdbd4175cc4'].analog).toMatchObject({ role: 'analog', wired: true });
     expect(lines['94a99015cecc'].en).toMatchObject({ role: 'en', wired: false });
   });
 

@@ -127,7 +127,7 @@ describe('the bench (D7, D9)', () => {
     expect(bench.duts['1cdbd4175cc4']).toMatchObject({ rf_weak: true, lines: { boot: { wired: true, via: 'direct' }, analog: { wired: false, rc: { r_ohm: 10000, c_nf: 1000 } } } });
     expect(bench.duts['58e6c5d55e64'].rf_weak).toBe(false);
     expect(bench.duts['94a99015cecc'].lines.en).toMatchObject({ role: 'en', dut_pin: 'EN', via: 'nfet', wired: false });
-    expect(bench.fixture).toEqual({ device: 'e8f60a81bc48', profile: 's3k-fixture', fw_id: null });
+    expect(bench.fixture).toEqual({ device: 'e8f60a81bc48', profile: 's3k-fixture', fw_id: null, vdd_mv: 3300 });
   });
 
   it('refuses a mistyped bench', () => {

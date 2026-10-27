@@ -372,13 +372,53 @@ Fail cmd_call(std::string_view args, Host &host, cJSON *res, size_t)
     return run_call(host, target.substr(0, dot), target.substr(dot + 1), json, res);
 }
 
+/** `<key>=<n>` with n decimal in 0..max; false for another key or a bad number. */
+bool parse_kv(std::string_view word, std::string_view key, uint32_t max, uint32_t &out)
+{
+    if (word.size() <= key.size() + 1 || !word.starts_with(key) || word[key.size()] != '=') {
+        return false;
+    }
+    std::string_view num = word.substr(key.size() + 1);
+    uint32_t v = 0;
+    auto [end, ec] = std::from_chars(num.data(), num.data() + num.size(), v);
+    if (ec != std::errc{} || end != num.data() + num.size() || v > max) {
+        return false;
+    }
+    out = v;
+    return true;
+}
+
+// The button form takes a gesture; the analog form (design m2-c3-inputs §5) a value and an optional hold.
+constexpr const char *kInjectUsage =
+    "usage: inject <inst> <gesture> | inject <inst> value=<0-65535> [hold_ms=<0-60000>]";
+
 Fail cmd_inject(std::string_view args, Host &host, cJSON *res, size_t)
 {
     std::string_view inst = next_word(args);
-    std::string_view gesture = next_word(args);
+    std::string_view first = next_word(args);
+    if (inst.empty() || first.empty()) {
+        return fail("invalid_args", kInjectUsage);
+    }
+    if (first.starts_with("value=")) {
+        // fr.analog_in inject {value, hold_ms}: hold_ms 0 (or absent) means 1,000 ms.
+        uint32_t value = 0;
+        uint32_t hold_ms = 0;
+        std::string_view second = next_word(args);
+        bool has_hold = !second.empty();
+        if (!parse_kv(first, "value", 65535, value) || (has_hold && !parse_kv(second, "hold_ms", 60000, hold_ms)) ||
+            !args.empty()) {
+            return fail("invalid_args", kInjectUsage);
+        }
+        cJSON *json = cJSON_CreateObject();
+        cJSON_AddNumberToObject(json, "value", value);
+        if (has_hold) {
+            cJSON_AddNumberToObject(json, "hold_ms", hold_ms);
+        }
+        return run_call(host, inst, "inject", json, res);
+    }
     char g[24];
-    if (inst.empty() || gesture.empty() || !args.empty() || !copy_cstr(gesture, g)) {
-        return fail("invalid_args", "usage: inject <inst> <gesture>");
+    if (!args.empty() || !copy_cstr(first, g)) {
+        return fail("invalid_args", kInjectUsage);
     }
     cJSON *json = cJSON_CreateObject();
     cJSON_AddStringToObject(json, "gesture", g);
@@ -656,6 +696,8 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t room)
     cJSON_AddNumberToObject(res, "exec_cancelled", n.exec_cancelled);
     cJSON_AddNumberToObject(res, "exec_late_us_max", n.exec_late_us_max);
     cJSON_AddNumberToObject(res, "rx_queue_us_max", n.rx_queue_us_max);
+    // design m2-c3-inputs D6: STATE second copies a newer STATE of the same property replaced.
+    cJSON_AddNumberToObject(res, "state_repeats_superseded", n.state_repeats_superseded);
     for (size_t i = 1; i < kStatSectionCount; ++i) {
         add_stat_section(res, i, n);
     }

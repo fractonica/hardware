@@ -57,7 +57,28 @@ export const HubStatusSchema = z.looseObject({
   advert: z.looseObject({ state: z.enum(ADVERT_STATES), name: z.string().optional(), error: z.string().optional() }).optional(),
   dashboard: z.looseObject({ url: z.string(), built: z.boolean(), stale: z.boolean() }).optional(),
   sleep_guard: z.looseObject({ active: z.boolean() }).optional(),
-  router: z.looseObject({ counters: z.record(z.string(), z.number()) }).optional(),
+  /**
+   * The router's counters; since M2-C3 `reorder` (design m2-c3-inputs D9): ordered-port events held, released in
+   * order, released without their predecessor (timeout, cap, reset), holds ended by the 8 cap, the longest hold in
+   * µs, and the events held now.
+   */
+  /** The event store (design m2-c3-inputs D6): streaming STATEs replaced before being written, since the hub started. */
+  events: z.looseObject({ state_thinned: z.number().int() }).optional(),
+  router: z
+    .looseObject({
+      counters: z.record(z.string(), z.number()),
+      reorder: z
+        .looseObject({
+          held: z.number().int(),
+          released_in_order: z.number().int(),
+          released_timeout: z.number().int(),
+          overflows: z.number().int(),
+          hold_us_max: z.number(),
+          holding: z.number().int(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 export type HubStatus = z.infer<typeof HubStatusSchema>;
 

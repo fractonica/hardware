@@ -393,7 +393,7 @@ void Led::emit_effect_done(const LedEffectDone &e, TimeUs at)
     uint8_t buf[LedEffectDone::kMaxSize];
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
-    sink_->event(port_, kEventEffectDone, Priority::normal, w.bytes(), at);
+    sink_->event(port_, kEventEffectDone, Priority::normal, w.bytes(), at, kOrdered);
 }
 
 void Led::report_on(bool v, TimeUs at)

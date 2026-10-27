@@ -3,7 +3,10 @@ id: lab
 fixture:
   device: e8f60a81bc48             # fix-s3: ESP32-S3-DevKitC-1-style, WROOM-1-N16R8, on the powered desk hub
   profile: s3k-fixture
-  fw_id: 262d9a55caf4c2f29fa004d3b322a6f38a34b785d3fb275d47721594b237b788   # s3k-fixture debug, provisioned 2026-10-24 (§5.3 step 2); RGB LED confirmed on GPIO48
+  # s3k-fixture debug with ch12/ch13 (pwm, M2-C3), flashed 2026-10-27; first provisioned 2026-10-24 (m2-c1 §5.3
+  # step 2), RGB LED confirmed on GPIO48.
+  fw_id: fad97d76d4563cdac9461c47201f2a9fd397b68284d5c407d406eedbb731c298
+  vdd_mv: 3300                     # the fixture's 3V3 rail: set_duty = round(mV / vdd_mv * 10000) (M2-C3)
 duts:
   1cdbd4175cc4:                    # pad-c3: C3 OLED board #2 (8.5 dBm cap; -80 dBm at M1 step 7)
     profile: c3o-pad
@@ -14,14 +17,14 @@ duts:
       boot:     { role: button,   dut_gpio: 9,  channel: ch1,  fixture_gpio: 41, via: direct, series_ohm: 1000 }
       status:   { role: led,      dut_gpio: 8,  channel: ch5,  fixture_gpio: 5,  active_level: low, series_ohm: 10000 }
       test_pin: { role: test_pin, dut_gpio: 10, channel: ch9,  fixture_gpio: 16, series_ohm: 1000 }
-      analog:   { role: analog,   dut_gpio: 3,  channel: ch12, fixture_gpio: 11, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 }, wired: false }   # M2-C3
+      analog:   { role: analog,   dut_gpio: 3,  channel: ch12, fixture_gpio: 11, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 } }   # M2-C3: a pwm channel through 10 kΩ / 1 µF
   1cdbd416ba34:                    # pad-c3b: C3 OLED board #1
     profile: c3o-pad
     lines:
       boot:     { role: button,   dut_gpio: 9,  channel: ch0,  fixture_gpio: 42, via: direct, series_ohm: 1000 }
       status:   { role: led,      dut_gpio: 8,  channel: ch4,  fixture_gpio: 4,  active_level: low, series_ohm: 10000 }
       test_pin: { role: test_pin, dut_gpio: 10, channel: ch8,  fixture_gpio: 15, series_ohm: 1000 }
-      analog:   { role: analog,   dut_gpio: 3,  channel: ch13, fixture_gpio: 12, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 }, wired: false }   # M2-C3
+      analog:   { role: analog,   dut_gpio: 3,  channel: ch13, fixture_gpio: 12, dut_profile: c3o-analog, rc: { r_ohm: 10000, c_nf: 1000 } }   # M2-C3: a pwm channel through 10 kΩ / 1 µF
   58e6c5d55e64:                    # pad-c6: C6 Super Mini
     profile: c6-pad
     lines:

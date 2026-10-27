@@ -143,7 +143,7 @@ describe('the lab bench as designed (§2.3)', () => {
   it('passes against the committed boards and profiles, with the three documented input taps on DUT straps as notes', () => {
     const dir = checkout();
     const { bench, notes } = checkBench(dir, 'lab', { model: MODEL });
-    expect(bench.fixture).toEqual({ device: FIX_S3, profile: 's3k-fixture', fw_id: null });
+    expect(bench.fixture).toEqual({ device: FIX_S3, profile: 's3k-fixture', fw_id: null, vdd_mv: 3300 });
     expect(notes).toEqual([
       `${BENCH}: ${at(PAD_C3, 'status')}: note: ch4 is an input tap on fixture GPIO4, which glitches at power-up, and reaches strapping pin GPIO8 of ${PAD_C3}: ${NOTE_TAIL}`,
       `${BENCH}: ${at(PAD_C3B, 'status')}: note: ch5 is an input tap on fixture GPIO5, which glitches at power-up, and reaches strapping pin GPIO8 of ${PAD_C3B}: ${NOTE_TAIL}`,
@@ -182,6 +182,8 @@ describe('fixture pins, channels and headers', () => {
       `${at(PAD_C3B, 'status', 'fixture_gpio')}: fixture GPIO4 is already wired to ${PAD_C3} status`,
       `${at(PAD_C3B, 'status', 'fixture_gpio')}: ch5 binds gpio.5 in s3k-fixture, not fixture GPIO4`,
       `${at(PAD_C3B, 'analog', 'channel')}: ch12 is already the channel of ${PAD_C3} analog`,
+      `${at(PAD_C3B, 'analog', 'fixture_gpio')}: ch12 binds gpio.11 in s3k-fixture, not fixture GPIO12`,
+      'fixture.profile: ch13 (fr.fixture) of s3k-fixture is on no wired bench line',
     ]);
   });
 
@@ -191,13 +193,15 @@ describe('fixture pins, channels and headers', () => {
       l.en.fixture_gpio = 38; // on J3, but rgb_alt
     });
     lines(dir, PAD_C3, (l) => {
-      l.analog.dut_gpio = 4; // fine: JP1-7
+      l.analog.dut_gpio = 4; // on a header (JP1-7): only the wired line's instance check objects
     });
     lines(dir, PAD_C3B, (l) => {
       l.analog.dut_gpio = 11; // a flash pin, on no header
     });
     expect(problems(dir)).toEqual([
+      `${at(PAD_C3, 'analog', 'dut_gpio')}: 'analog' binds gpio.3 (GPIO3) in c3o-analog, not GPIO4`,
       `${at(PAD_C3B, 'analog', 'dut_gpio')}: GPIO11 is on no header of esp32c3-oled042`,
+      `${at(PAD_C3B, 'analog', 'dut_gpio')}: 'analog' binds gpio.3 (GPIO3) in c3o-analog, not GPIO11`,
       `${at(PAD_S3, 'en', 'fixture_gpio')}: fixture GPIO38 is not in pins.free of esp32s3-devkitc1-n16r8`,
     ]);
   });
@@ -218,15 +222,21 @@ describe('fixture pins, channels and headers', () => {
   });
 
   it('refuses a wired: false line whose pin or channel the fixture profile binds', () => {
+    // One extra instance each: s3k-fixture has 15 of fr_core's 16 since M2-C3 (ch12, ch13).
     const dir = checkout();
     edit(dir, FIXTURE, (y) => {
-      y.caps.spare = { cap: 'fr.fixture', driver: 'fixture_gpio', bind: 'gpio.11' }; // ch12's reserved pin
-      y.caps.ch14 = { cap: 'fr.fixture', driver: 'fixture_gpio', bind: 'gpio.47', config: { drive: 'nfet_gate' } };
+      y.caps.spare = { cap: 'fr.fixture', driver: 'fixture_gpio', bind: 'gpio.21' }; // ch14's reserved pin
     });
     expect(problems(dir)).toEqual([
-      `${at(PAD_C3, 'analog', 'wired')}: fixture GPIO11 is wired: false, but spare of s3k-fixture binds it (gpio.11)`,
-      `${at(PAD_S3, 'en', 'wired')}: ch14 is wired: false, but s3k-fixture has an instance ch14`,
+      `${at(PAD_S3, 'en', 'wired')}: fixture GPIO21 is wired: false, but spare of s3k-fixture binds it (gpio.21)`,
       'fixture.profile: spare (fr.fixture) of s3k-fixture is on no wired bench line',
+    ]);
+    const ch14 = checkout();
+    edit(ch14, FIXTURE, (y) => {
+      y.caps.ch14 = { cap: 'fr.fixture', driver: 'fixture_gpio', bind: 'gpio.47', config: { drive: 'nfet_gate' } };
+    });
+    expect(problems(ch14)).toEqual([
+      `${at(PAD_S3, 'en', 'wired')}: ch14 is wired: false, but s3k-fixture has an instance ch14`,
       'fixture.profile: ch14 (fr.fixture) of s3k-fixture is on no wired bench line',
     ]);
   });
@@ -265,8 +275,11 @@ describe('the power-up glitch and strapping rules (D7, D11, D12)', () => {
       l.analog.dut_gpio = 2; // a C3 strap (JP2-6)
       delete l.analog.rc;
     });
+    // Without its rc the pwm line also loses the glitch-pin exemption (fixture GPIO11 glitches at power-up).
     expect(problems(dir)).toEqual([
+      `${at(PAD_C3, 'analog', 'fixture_gpio')}: fixture GPIO11 drives a level at power-up (pins.power_up_glitch), so no line with drive pwm may use it (a pwm line may, only as an analog line through an rc)`,
       `${at(PAD_C3, 'analog', 'rc')}: an analog line needs an rc (its filter)`,
+      `${at(PAD_C3, 'analog', 'dut_gpio')}: 'analog' binds gpio.3 (GPIO3) in c3o-analog, not GPIO2`,
       `${at(PAD_C3, 'analog')}: a pwm line drives push-pull: it may reach a DUT strapping pin only through a MOSFET (via: nfet)`,
     ]);
   });
@@ -282,6 +295,7 @@ describe('the power-up glitch and strapping rules (D7, D11, D12)', () => {
       l.test_pin.via = 'nfet';
     });
     expect(problems(dir)).toEqual([
+      `${at(PAD_C3, 'analog', 'dut_gpio')}: 'analog' binds gpio.3 (GPIO3) in c3o-analog, not GPIO2`,
       `${at(PAD_C3, 'analog', 'via')}: via applies only to button and en lines; this line's role is analog`,
       `${at(PAD_C3, 'analog')}: a pwm line drives push-pull: it may reach a DUT strapping pin only through a MOSFET (via: nfet)`,
       `${at(PAD_C3B, 'status', 'via')}: via applies only to button and en lines; this line's role is led`,
@@ -359,7 +373,10 @@ describe('the power-up glitch and strapping rules (D7, D11, D12)', () => {
     lines(dir, PAD_C3, (l) => {
       l.analog.dut_gpio = 21;
     });
-    expect(problems(dir)).toEqual([`${at(PAD_C3, 'analog', 'dut_gpio')}: GPIO21 is the ROM log's UART TX on esp32c3-oled042; no line may reach it`]);
+    expect(problems(dir)).toEqual([
+      `${at(PAD_C3, 'analog', 'dut_gpio')}: GPIO21 is the ROM log's UART TX on esp32c3-oled042; no line may reach it`,
+      `${at(PAD_C3, 'analog', 'dut_gpio')}: 'analog' binds gpio.3 (GPIO3) in c3o-analog, not GPIO21`,
+    ]);
   });
 });
 
@@ -464,6 +481,66 @@ describe('line roles against the DUT profiles (D7)', () => {
   });
 });
 
+describe('analog lines (design m2-c3-inputs §3)', () => {
+  it('are wired: a pwm fixture_gpio channel with an rc, to the analog instance of the line\'s dut_profile', () => {
+    const dir = checkout();
+    const { bench } = checkBench(dir, 'lab', { model: MODEL });
+    for (const [mac, ch, gpio] of [
+      [PAD_C3, 'ch12', 11],
+      [PAD_C3B, 'ch13', 12],
+    ] as const) {
+      expect(bench.duts[mac].lines.analog).toMatchObject({ role: 'analog', wired: true, channel: ch, fixture_gpio: gpio, dut_gpio: 3, dut_profile: 'c3o-analog' });
+    }
+  });
+
+  it('the glitch-pin rule exempts a pwm line only as an analog line through an rc', () => {
+    // ch12 and ch13 sit on fixture GPIO11/12, both on the S3's power-up glitch list: allowed as is (with the rc).
+    const dir = checkout();
+    expect(checkBench(dir, 'lab', { model: MODEL }).notes.some((n) => n.includes('.analog'))).toBe(false);
+    lines(dir, PAD_C3B, (l) => {
+      delete l.analog.rc;
+    });
+    expect(problems(dir)).toEqual([
+      `${at(PAD_C3B, 'analog', 'fixture_gpio')}: fixture GPIO12 drives a level at power-up (pins.power_up_glitch), so no line with drive pwm may use it (a pwm line may, only as an analog line through an rc)`,
+      `${at(PAD_C3B, 'analog', 'rc')}: an analog line needs an rc (its filter)`,
+    ]);
+  });
+
+  it('an analog line needs drive: pwm on its channel, and a pwm channel only an analog line', () => {
+    const dir = checkout();
+    edit(dir, FIXTURE, (y) => {
+      y.caps.ch12.config = { drive: 'none' };
+      y.caps.ch2.config = { drive: 'pwm' }; // pad-c6's BOOT line
+    });
+    const msgs = problems(dir);
+    expect(msgs).toContain(`${at(PAD_C3, 'analog', 'channel')}: an analog line needs drive: pwm on ch12, which has none`);
+    expect(msgs).toContain(`${at(PAD_C6, 'boot', 'channel')}: ch2 has drive: pwm, which only an analog line takes; this line's role is button`);
+    expect(msgs).toContain(`${at(PAD_C6, 'boot')}: a pwm line drives push-pull: it may reach a DUT button only through a MOSFET (via: nfet)`);
+  });
+
+  it('an analog line on a ws2812 channel is refused: pwm lines need fixture_gpio', () => {
+    const dir = checkout();
+    edit(dir, FIXTURE, (y) => {
+      y.caps.ch12 = { cap: 'fr.fixture', driver: 'fixture_ws2812_rx', bind: 'gpio.11', config: { decode: 'ws2812' } };
+    });
+    const msgs = problems(dir);
+    expect(msgs).toContain(`${at(PAD_C3, 'analog', 'channel')}: an analog line needs drive: pwm on ch12, which has none`);
+    expect(msgs).toContain(`${at(PAD_C3, 'analog', 'channel')}: an analog line needs a fixture_gpio channel; ch12 is fixture_ws2812_rx`);
+  });
+
+  it('fixture.vdd_mv defaults to 3300 and is read from the file', () => {
+    const dir = checkout();
+    edit(dir, BENCH, (y) => {
+      y.fixture.vdd_mv = 3280;
+    });
+    expect(checkBench(dir, 'lab', { model: MODEL }).bench.fixture.vdd_mv).toBe(3280);
+    edit(dir, BENCH, (y) => {
+      y.fixture.vdd_mv = 12000;
+    });
+    expect(problems(dir)).toEqual(['fixture.vdd_mv: Too big: expected number to be <=5500']);
+  });
+});
+
 describe('profiles (D7)', () => {
   it("the fixture's profile has role: fixture, the radio off and test_pin: none", () => {
     const dir = checkout();
@@ -499,25 +576,31 @@ describe('profiles (D7)', () => {
     });
     expect(problems(dir)).toEqual([
       `duts.${PAD_C6}.profile: profile c6-nope not found (firmware/profiles/c6-nope.profile.yaml)`,
-      "firmware/profiles/s3l-pad.profile.yaml: caps.boot.driver: unknown driver 'button_touch' (known: button_gpio, fixture_gpio, fixture_ws2812_rx, led_gpio, led_ws2812)",
+      "firmware/profiles/s3l-pad.profile.yaml: caps.boot.driver: unknown driver 'button_touch' (known: adc_oneshot, button_gpio, fixture_gpio, fixture_ws2812_rx, led_gpio, led_ws2812)",
     ]);
   });
 
   it('an unknown dut_profile is allowed only on a wired: false line', () => {
     const dir = checkout();
-    lines(dir, PAD_C3, (l) => {
-      l.analog.wired = true;
-    });
+    rmSync(join(dir, 'firmware/profiles/c3o-analog.profile.yaml'));
     expect(problems(dir)).toEqual([
-      `${at(PAD_C3, 'analog', 'channel')}: ch12 is not an fr.fixture instance of s3k-fixture`,
       `${at(PAD_C3, 'analog', 'dut_profile')}: profile c3o-analog not found; an unknown dut_profile is allowed only on a wired: false line`,
+      `${at(PAD_C3B, 'analog', 'dut_profile')}: profile c3o-analog not found; an unknown dut_profile is allowed only on a wired: false line`,
     ]);
+    // Reserved again (as before M2-C3: no fixture instance either), the missing profile is fine.
+    edit(dir, BENCH, (y) => {
+      y.duts[PAD_C3].lines.analog.wired = false;
+      y.duts[PAD_C3B].lines.analog.wired = false;
+    });
+    edit(dir, FIXTURE, (y) => {
+      delete y.caps.ch12;
+      delete y.caps.ch13;
+    });
+    expect(() => checkBench(dir, 'lab', { model: MODEL })).not.toThrow();
   });
 
   it("a dut_profile keeps the DUT's boot, status and test pin where its bench profile has them", () => {
     const dir = checkout();
-    const pad = parse(readFileSync(join(dir, 'firmware/profiles/c3o-pad.profile.yaml'), 'utf8')) as Yaml;
-    writeFileSync(join(dir, 'firmware/profiles/c3o-analog.profile.yaml'), stringify({ ...pad, profile: 'c3o-analog' }));
     expect(() => checkBench(dir, 'lab', { model: MODEL })).not.toThrow();
     edit(dir, 'firmware/profiles/c3o-analog.profile.yaml', (y) => {
       y.caps.boot.config = { gpio: 4 };

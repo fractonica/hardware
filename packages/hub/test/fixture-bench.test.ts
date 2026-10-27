@@ -83,20 +83,20 @@ describe('the bench file', () => {
     const r = loadBench(dir);
     expect(r.errors).toEqual([]);
     expect(r.file).toBe('hardware/bench/lab.bench.yaml');
-    expect(r.bench?.fixture).toEqual({ device: FIX.mac, profile: 's3k-fixture', fw_id: null });
+    expect(r.bench?.fixture).toEqual({ device: FIX.mac, profile: 's3k-fixture', fw_id: null, vdd_mv: 3300 });
     const lines = r.bench!.duts[C3.mac].lines;
     expect(lines.boot).toMatchObject({ role: 'button', channel: 'ch0', wired: true });
     expect(lines.analog).toMatchObject({ wired: false, dut_profile: 'c3o-analog' });
   });
 
-  it('loads the lab bench as designed: the fixture, four DUTs, 12 wired lines and 3 reserved (§2.3)', () => {
+  it('loads the lab bench as designed: the fixture, four DUTs, 14 wired lines and EN reserved (§2.3, M2-C3)', () => {
     const r = loadBench(checkout({ 'hardware/bench/lab.bench.yaml': DESIGN_YAML }));
     expect(r.errors).toEqual([]);
-    expect(r.bench?.fixture).toEqual({ device: FIX.mac, profile: 's3k-fixture', fw_id: null });
+    expect(r.bench?.fixture).toEqual({ device: FIX.mac, profile: 's3k-fixture', fw_id: null, vdd_mv: 3300 });
     const lines = Object.values(r.bench!.duts).flatMap((d) => Object.values(d.lines));
     expect(Object.keys(r.bench!.duts)).toEqual(KNOWN_DUTS);
-    expect(lines.filter((l) => l.wired)).toHaveLength(12);
-    expect(lines.filter((l) => !l.wired).map((l) => l.channel).sort()).toEqual(['ch12', 'ch13', 'ch14']);
+    expect(lines.filter((l) => l.wired)).toHaveLength(14);
+    expect(lines.filter((l) => !l.wired).map((l) => l.channel).sort()).toEqual(['ch14']);
   });
 
   it("loads this checkout's lab bench (the rig as wired): the fixture fix-s3, known DUTs, a pinned fw_id in hex", () => {

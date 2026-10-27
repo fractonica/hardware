@@ -55,6 +55,7 @@ class Diag : public Capability
 public:
     static constexpr uint16_t kId = 0x00F2;
     static constexpr Version kVersion{1, 0};
+    static constexpr bool kOrdered = false;  // true: its events carry EXT port_seq (YAML ordered)
 
     // Member ids (the envelope `kind`).
     static constexpr uint8_t kCmdExec = 1;

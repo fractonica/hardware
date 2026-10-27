@@ -29,7 +29,7 @@ boot_uart_tx: 16              # U0TXD: the ROM log prints on it at every boot
 en_access: null               # EN is on no header
 rf: { max_tx_power_qdbm: null, antenna: ceramic }
 test_pin: 20
-resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1 }
+resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1, adc1_channel: 7 }   # ADC1: GPIO0-6
 defaults:
   boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb }
