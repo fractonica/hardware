@@ -9,8 +9,9 @@
 //   node --conditions=@fractonica/source tests/e2e/t-ota.ts --phase cut --devices pad-c6 --say
 //
 // Phases:
-//   wifi:  `deploy {via: wifi, expect_log: "alive fw="}` (expect_event node.boot when a board is not on a USB
-//          port the hub holds open), as `fr deploy … --via wifi` at C4 (pad-c6 18.8 s, pad-c3 15.6 s at
+//   wifi:  `deploy {via: wifi, expect_log: "alive fw="}` (expect_event node.boot when a board's log lines do not
+//          reach the hub: neither on a USB port the hub holds open nor, since M2-C2 (design m2-c2 D21), online
+//          over TCP with a HELLO that says net_log), as `fr deploy … --via wifi` at C4 (pad-c6 18.8 s, pad-c3 15.6 s at
 //          -76 dBm; after the fix round three in parallel in 40.7-52.1 s, times including the reboot, the
 //          health gate and the expectation). A board deploy finds already_current (the checkout's build is
 //          what it runs) gets that image again with ota_deploy {force: true, via: wifi}, so every board does a
@@ -40,11 +41,18 @@
 // (the node is sent ABORT and keeps its image) and logs the `fr ota … --build …` that restores each board.
 // Run on its own (lib/runner.ts runStandalone: a person is at the bench, --allow-human implied; --hub URL,
 // --json); under tests/e2e/run.ts (test_run) FR_T_OTA_ARGS holds the flags.
+//
+// M2-C2 (design m2-c2 D11, D21): --max-parallel (1..16; without it ota_deploy's own default, 4) goes to every
+// ota_deploy of the run, the end-of-run restore included (T2-OTA-30 runs 30 nodes with --no-build --max-parallel 16, so every phase
+// and the restore are ota_deploy waves of 16); and the log mode takes a net_log board as a log source, as deploy's
+// expect_log does. On the fleet the sim runner injects `restoreVia: 'wifi'` (TOtaDeps): via auto would pick serial
+// for the nodes on the fleet's bridge, which carries their session but cannot be flashed (FLASH_FAILED).
 
 import { performance } from 'node:perf_hooks';
 
 import type { Result } from '@fractonica/protocol';
 
+import type { Hub } from './lib/hub.ts';
 import { runStandalone } from './lib/runner.ts';
 import {
   ask,
@@ -113,6 +121,8 @@ export interface TOtaOptions {
   restore: boolean;
   /** Speak each request with `sk say`. */
   say: boolean;
+  /** ota_deploy's max_parallel on every ota_deploy of the run, the restore's included (1..16); null: its default (4). */
+  maxParallel: number | null;
 }
 
 export const DEFAULTS: TOtaOptions = {
@@ -128,6 +138,7 @@ export const DEFAULTS: TOtaOptions = {
   ready: true,
   restore: true,
   say: false,
+  maxParallel: null,
 };
 
 /** The harness's own flags (the runner takes --allow-human, --hub and --json); anything else throws. */
@@ -191,9 +202,17 @@ export function parseArgs(argv: string[]): TOtaOptions {
       case '--say':
         o.say = true;
         break;
+      case '--max-parallel': {
+        const n = num(1);
+        if (!Number.isInteger(n) || n > 16) {
+          throw new Error('t-ota: --max-parallel takes 1..16');
+        }
+        o.maxParallel = n;
+        break;
+      }
       default:
         throw new Error(
-          `t-ota: unknown option ${a} (--phase, --devices, --no-build, --expect, --expect-timeout-s, --cut-build, --cut-at-kb, --cut-attempts, --off-s, --no-ready, --no-restore, --say)`,
+          `t-ota: unknown option ${a} (--phase, --devices, --no-build, --expect, --expect-timeout-s, --cut-build, --cut-at-kb, --cut-attempts, --off-s, --no-ready, --no-restore, --say, --max-parallel)`,
         );
     }
   }
@@ -208,6 +227,8 @@ interface Target {
   id: string;
   alias: string;
   snap: Snapshot;
+  /** Its HELLO says net_log (design m2-c2 D20): its log lines also come as LOG frames over TCP. */
+  netLog: boolean;
   /** What it must end on (a restore puts it back): the image it ran, or what the wifi phase installed. */
   normal: Normal;
 }
@@ -217,12 +238,44 @@ type Row = Record<string, unknown> & { pass: boolean };
 const ms = (t0: number) => Math.round(performance.now() - t0);
 const fw12 = (fw: string | null | undefined) => fw?.slice(0, 12) ?? null;
 
-/** log when the hub holds every board's USB port open (deploy's expect_log needs that), else event. */
-function expectMode(o: TOtaOptions, ts: Target[]): 'log' | 'event' | 'none' {
+/** HELLO caps b6 net_log (05 §5.7). */
+const CAP_NET_LOG = 1 << 6;
+
+/** Whether `id`'s last HELLO said net_log (device_get's router.hello_caps). */
+async function helloNetLog(ctx: ScenarioCtx, id: string): Promise<boolean> {
+  const d = await ctx.hub.ok<{ router?: { hello_caps?: number | null } | null }>('device_get', { device: `id:${id}` }, undefined, ctx.signal);
+  return ((d.router?.hello_caps ?? 0) & CAP_NET_LOG) !== 0;
+}
+
+/**
+ * Where a board's log lines reach the hub from (deploy's rule, design m2-c2 D21): a USB port it holds open, or a
+ * TCP session of a board whose HELLO says net_log; null for neither.
+ */
+export function logSource(t: { snap: Pick<Snapshot, 'port_state' | 'presence' | 'links'>; netLog: boolean }): 'usb' | 'tcp' | null {
+  if (t.snap.port_state === 'open') {
+    return 'usb';
+  }
+  const up = t.snap.presence === 'online' || t.snap.presence === 'suspect';
+  return up && t.netLog && t.snap.links.includes('tcp') ? 'tcp' : null;
+}
+
+/** log when every board's lines reach the hub (deploy's expect_log needs that), else event. */
+export function expectMode(o: Pick<TOtaOptions, 'expect'>, ts: Parameters<typeof logSource>[0][]): 'log' | 'event' | 'none' {
   if (o.expect !== 'auto') {
     return o.expect;
   }
-  return ts.every((t) => t.snap.port_state === 'open') ? 'log' : 'event';
+  return ts.every((t) => logSource(t) !== null) ? 'log' : 'event';
+}
+
+/**
+ * `ctx` whose hub gives every ota_deploy call `max_parallel` (D11): this module's own calls and the shared bench
+ * helpers' (the restore's), which take a ctx and call the hub through it.
+ */
+export function withMaxParallel<C extends { hub: Hub }>(ctx: C, maxParallel: number): C {
+  const hub = ctx.hub;
+  const wrapped = Object.create(hub) as Hub;
+  wrapped.call = (op, input = {}, timeoutMs, signal) => hub.call(op, op === 'ota_deploy' ? { max_parallel: maxParallel, ...input } : input, timeoutMs, signal);
+  return { ...ctx, hub: wrapped };
 }
 
 /** Each board's expectation after a reinstall, since its REBOOTING: its new image's alive line, or node.boot. */
@@ -681,7 +734,17 @@ async function cutPhase(ctx: ScenarioCtx, o: TOtaOptions, t: Target, images: Map
 
 // ---- the gate ----
 
-export async function runTOta(ctx: ScenarioCtx, o: TOtaOptions): Promise<Outcome> {
+/** What the sim runner injects (design m2-c2 D11): the bench gate runs unchanged on the fleet. */
+export interface TOtaDeps {
+  /**
+   * The end-of-run restore's transport (default auto: serial where the hub holds the board's USB port). The fleet's
+   * USB nodes are on a serial bridge that cannot be flashed, so on the fleet the restore goes over Wi-Fi.
+   */
+  restoreVia?: 'auto' | 'wifi';
+}
+
+export async function runTOta(runCtx: ScenarioCtx, o: TOtaOptions, deps: TOtaDeps = {}): Promise<Outcome> {
+  const ctx = o.maxParallel === null ? runCtx : withMaxParallel(runCtx, o.maxParallel);
   const listed = await ctx.hub.ok<{ devices: { device_id: string; alias: string }[] }>('device_list', { selector: o.devices.join(',') }, undefined, ctx.signal);
   const missing = o.devices.filter((a) => !listed.devices.some((d) => d.alias === a));
   if (missing.length) {
@@ -692,10 +755,12 @@ export async function runTOta(ctx: ScenarioCtx, o: TOtaOptions): Promise<Outcome
   for (const d of listed.devices) {
     const snap = await snapshot(ctx, `id:${d.device_id}`);
     noteRssi(ctx, snap, warnings);
-    targets.push({ id: d.device_id, alias: d.alias, snap, normal: await normalImage(ctx, snap) });
+    targets.push({ id: d.device_id, alias: d.alias, snap, netLog: await helloNetLog(ctx, d.device_id), normal: await normalImage(ctx, snap) });
   }
   const measured: Record<string, unknown> = {
     devices: targets.map((t) => t.alias),
+    ...(o.maxParallel !== null ? { max_parallel: o.maxParallel } : {}),
+    log_sources: Object.fromEntries(targets.map((t) => [t.alias, logSource(t)])),
     rssi: Object.fromEntries(targets.map((t) => [t.alias, t.snap.rssi])),
     start_fw: Object.fromEntries(targets.map((t) => [t.alias, { fw: fw12(t.snap.fw), normal: t.normal.build_id, ...(t.normal.note ? { note: t.normal.note } : {}) }])),
   };
@@ -751,7 +816,7 @@ export async function runTOta(ctx: ScenarioCtx, o: TOtaOptions): Promise<Outcome
         ctx.log(`not restored (cancelled): ${t.normal.build_id ? `fr ota ${t.alias} --build ${t.normal.build_id}` : `fr ota ${t.alias}`} puts ${t.alias} back on its normal firmware if it runs another`);
       }
     } else {
-      measured.restore = await restoreFirmware(ctx, targets);
+      measured.restore = await restoreFirmware(ctx, targets, deps.restoreVia ?? 'auto');
       ctx.measure('restore', measured.restore);
     }
   }
@@ -768,12 +833,13 @@ const scenario = defineScenario({
   usage: `--phase wifi|fault|cut|all   comma-separated (default all)
 --devices pad-c3,pad-c3b,pad-c6   aliases (default these)
 --no-build                   no deploy or build_start: the newest debug, fault and release artifacts
---expect auto|log|event|none --expect-timeout-s 30   the wifi phase's expectation (auto: log when every USB port is open)
+--expect auto|log|event|none --expect-timeout-s 30   the wifi phase's expectation (auto: log when every board's lines reach the hub: USB port open, or net_log over TCP)
 --cut-build node/<profile>/…  the image to cut over, per profile (default a release build of this checkout)
 --cut-at-kb 256 --cut-attempts 3 --off-s 3   the unplug: when (hub bytes), how many tries, how long it stays off
 --no-ready                   no BOOT press before each power cut
 --no-restore                 leave the boards on what they run at the end
 --say                        speak each request with sk say
+--max-parallel 16            ota_deploy's max_parallel (1..16; default its own, 4) on every ota_deploy, the restore's included
 under tests/e2e/run.ts (test_run), FR_T_OTA_ARGS holds these`,
   run: (ctx) => runTOta(ctx, parseArgs(ctx.args?.length ? ctx.args : (process.env.FR_T_OTA_ARGS ?? '').split(/\s+/).filter(Boolean))),
 });

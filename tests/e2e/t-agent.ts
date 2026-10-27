@@ -5,7 +5,8 @@
 // the hub alone (lib/agent-evidence.ts says what the hub keeps and what it cannot show):
 //
 //   node --conditions=@fractonica/source tests/e2e/t-agent.ts --prepare [--say]
-//     checks the bench (pads online and provisioned, USB ports open for expect_log, pad-c6 on c6-pad, the
+//     checks the bench (pads online and provisioned, a log source for expect_log: a USB port open, or since
+//     M2-C2 a HELLO that says net_log (design m2-c2 D21: lines over Wi-Fi), pad-c6 on c6-pad, the
 //     `fr` shim, RSSI), then prints the cursor, the launch command, the three prompts verbatim and the check
 //     command. Take it right before the session starts.
 //   node --conditions=@fractonica/source tests/e2e/t-agent.ts --since c:<run>.<seq> [--devices a,b,c] [--wait-min 60 --say]
@@ -432,6 +433,16 @@ interface Check {
   detail: string;
 }
 
+/** HELLO caps b6 net_log (05 §5.7). */
+const CAP_NET_LOG = 1 << 6;
+
+/** The device is online over TCP and its last HELLO said net_log: its log lines reach the hub over Wi-Fi. */
+async function netLogSource(ctx: ScenarioCtx, deviceId: string): Promise<boolean> {
+  const r = await ctx.hub.call<{ presence?: string; router?: { links?: string[]; hello_caps?: number | null } | null }>('device_get', { device: `id:${deviceId}` }, undefined, ctx.signal);
+  const d = r.data;
+  return Boolean(r.ok && d && (d.presence === 'online' || d.presence === 'suspect') && d.router?.links?.includes('tcp') && ((d.router.hello_caps ?? 0) & CAP_NET_LOG) !== 0);
+}
+
 export async function prepare(ctx: ScenarioCtx, o: TAgentOptions): Promise<Outcome> {
   const checks: Check[] = [];
   const add = (ok: boolean, level: Check['level'], detail: string) => checks.push({ ok, level, detail });
@@ -443,7 +454,14 @@ export async function prepare(ctx: ScenarioCtx, o: TAgentOptions): Promise<Outco
     const d = listed.find((x) => x.alias === alias);
     add(Boolean(d?.provisioned) && d?.presence === 'online', 'error', d ? `${alias}: ${d.provisioned ? 'provisioned' : 'not provisioned'}, ${d.presence}` : `${alias}: not registered`);
     const port = ports.find((p) => p.device_id && p.device_id === d?.device_id);
-    add(port?.state === 'open', 'warn', `${alias}: USB port ${port ? `${port.path} ${port.state}` : 'none'}${port?.state === 'open' ? '' : ' (expect_log needs it open: the agent must use expect_event node.boot)'}`);
+    // expect_log's sources (deploy's rule, design m2-c2 D21): the USB port, else a TCP session whose HELLO says net_log.
+    const net = port?.state !== 'open' && d ? await netLogSource(ctx, String(d.device_id)) : false;
+    const usb = `USB port ${port ? `${port.path} ${port.state}` : 'none'}`;
+    add(
+      port?.state === 'open' || net,
+      'warn',
+      `${alias}: ${usb}${port?.state === 'open' ? '' : net ? ' (its HELLO says net_log: expect_log reads its lines over Wi-Fi)' : ' (expect_log needs it open, or an image whose HELLO says net_log on Wi-Fi: the agent must use expect_event node.boot)'}`,
+    );
   }
   // Provisioned and online beyond the M1 pads (pad-s3): the agent's "all nodes" takes them too.
   const extra = listed.filter((d) => d.provisioned && d.presence === 'online' && !o.devices.includes(d.alias)).map((d) => String(d.alias));

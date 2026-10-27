@@ -2,11 +2,14 @@
 // hub link. Ingress: the log store's frame decoder is the one place every `@fr1:` line passes through
 // (SerialPortManager splits lines, LogStore renders frames), so a FrameDecoder subclass taps it there and
 // the log text stays exactly as before. Egress: one `@fr1:` line per envelope through the hub's own
-// handle (SerialPortManager.writeLine).
+// handle (SerialPortManager.writeLine). M2-C2 (design m2-c2 D16, D18): a line that goes to many ports is encoded
+// once (sendFramed), and an endpoint tells how full its queue is, so node-broadcast fan-out can leave room for
+// what else the line carries.
 
 import { decodeSerialLine, encodeSerialLine, SERIAL_TYPE } from '@fractonica/protocol';
 
 import { FrameDecoder, type FrameText } from '../frames.ts';
+import type { Framed } from './index.ts';
 import { type Endpoint, type LinkSink, newCounters } from './types.ts';
 
 /** What the serial link needs of SerialPortManager. */
@@ -43,7 +46,16 @@ export class SerialFrameTap extends FrameDecoder {
 }
 
 /** Envelopes queued for one port before more are dropped (writeLine refuses a stuck port anyway). */
-const MAX_QUEUED = 32;
+export const SERIAL_MAX_QUEUED = 32;
+
+/** One envelope as an `@fr1:` ENV line; null for one longer than a serial line can carry. */
+export function serialFrame(envelope: Uint8Array): string | null {
+  try {
+    return encodeSerialLine(SERIAL_TYPE.ENV, envelope);
+  } catch {
+    return null;
+  }
+}
 
 class SerialEndpoint implements Endpoint {
   readonly kind = 'serial' as const;
@@ -52,6 +64,7 @@ class SerialEndpoint implements Endpoint {
   closed = false;
   #link: SerialLink;
   #queued = 0;
+  #queuedBytes = 0;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(link: SerialLink, key: string, n: number) {
@@ -61,28 +74,44 @@ class SerialEndpoint implements Endpoint {
   }
 
   send(envelope: Uint8Array): boolean {
+    return this.#write(this.closed ? null : serialFrame(envelope));
+  }
+
+  /** The envelope's line, encoded once for every port it goes to. */
+  sendFramed(f: Framed): boolean {
+    return this.#write(this.closed ? null : f.serial);
+  }
+
+  /** Envelopes queued and not written yet (at most SERIAL_MAX_QUEUED). */
+  queued(): number {
+    return this.#queued;
+  }
+
+  #write(line: string | null): boolean {
     const writer = this.#link.writer;
-    if (this.closed || !writer || this.#queued >= MAX_QUEUED) {
-      this.#link.counters.tx_drop++;
-      return false;
-    }
-    let line: string;
-    try {
-      line = encodeSerialLine(SERIAL_TYPE.ENV, envelope);
-    } catch {
-      this.#link.counters.tx_drop++; // longer than a serial line can carry
+    if (this.closed || !writer || this.#queued >= SERIAL_MAX_QUEUED || line === null) {
+      this.#link.counters.tx_drop++; // closed, stuck, or longer than a serial line can carry
       return false;
     }
     // One write at a time per port, in order: the next line goes once the kernel has the previous one.
+    const bytes = line.length + 1;
     this.#queued++;
+    this.#queuedBytes += bytes;
+    if (this.#queuedBytes > this.#link.maxUnsent) {
+      this.#link.maxUnsent = this.#queuedBytes;
+    }
+    const done = () => {
+      this.#queued--;
+      this.#queuedBytes -= bytes;
+    };
     this.#tail = this.#tail.then(() =>
       writer.writeLine(this.remote, line).then(
         () => {
-          this.#queued--;
+          done();
           this.#link.counters.tx++;
         },
         () => {
-          this.#queued--;
+          done();
           this.#link.counters.tx_drop++;
         },
       ),
@@ -110,6 +139,8 @@ export class SerialLink {
   #n = 0;
   writer: SerialWriter | null;
   readonly counters = newCounters();
+  /** The most bytes of lines one port had queued, since the link was made (hub_status). */
+  maxUnsent = 0;
 
   constructor(sink: LinkSink, writer: SerialWriter | null) {
     this.#sink = sink;

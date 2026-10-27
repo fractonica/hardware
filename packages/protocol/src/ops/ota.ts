@@ -58,7 +58,7 @@ export const OTA_OPS = [
       build_type: z.enum(['debug', 'release']).default('debug'),
       via,
       fault: z.enum(['health']).optional().describe('debug only: deploy a fault build over Wi-Fi (health: rolls back)'),
-      expect_log: z.string().min(1).optional().describe('a log line containing this text, after the device came back (not with expect_event); the hub reads logs only from a USB port it holds open, so each device needs one (for a node on Wi-Fi alone use expect_event)'),
+      expect_log: z.string().min(1).optional().describe("a log line containing this text, after the device came back (not with expect_event); the hub reads logs from a USB port it holds open, and over Wi-Fi from a node whose last HELLO says net_log (router mode), so each device needs one or the other (else use expect_event); the running image decides, so a build without net_log deployed over Wi-Fi to a net_log node sends no LOG and times out"),
       expect_event: z.string().min(1).optional().describe('event type globs, e.g. node.boot, after the device came back (not with expect_log)'),
       expect_timeout_s: z.number().int().min(1).max(MAX_WAIT_S).default(30).describe('seconds each device has to show expect_log / expect_event'),
       dry_run: z.boolean().default(false),

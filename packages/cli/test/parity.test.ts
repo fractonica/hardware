@@ -205,6 +205,9 @@ describe('the plugin (09 §9.8)', () => {
       '`source_dir`',
       'pwd',
       '`expect_log`',
+      // Design m2-c2 D21: logs over USB, and over Wi-Fi from net_log nodes; a gateway-only node needs USB until C6.
+      'over USB, and over Wi-Fi from nodes whose HELLO says `net_log`',
+      'gateway-only node needs USB until C6',
       'expect_event: "node.boot"',
       '`build_start {source_dir, profile}`',
       'plan: "full"',
@@ -218,6 +221,11 @@ describe('the plugin (09 §9.8)', () => {
     for (const p of ['skills/build-deploy/SKILL.md', 'skills/fleet-ops/SKILL.md', 'AGENTS.md']) {
       expect(read(p), p).toContain('idf.py mcp-server');
     }
+    // The old "logs come only over USB" rule is gone everywhere (design m2-c2 D21), and AGENTS.md says the new one.
+    for (const p of [...skills.map((s) => `skills/${s}/SKILL.md`), 'AGENTS.md']) {
+      expect(read(p), p).not.toMatch(/Logs come only over USB|on a USB port the hub holds open[^.]*; for a board on Wi-Fi alone/);
+    }
+    expect(read('AGENTS.md')).toContain('over Wi-Fi from nodes whose HELLO says `net_log`');
   });
 
   it('teaches the HIL rig its rules (design m2-c1-hil §4 S6) and the fleet that `all` excludes the fixture (D6)', () => {

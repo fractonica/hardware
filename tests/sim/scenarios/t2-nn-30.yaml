@@ -1,0 +1,40 @@
+# T2-NN-30 (design m2-c2 §5.4): T-NN's own verdicts at 30 nodes. Running phase: 15 disjoint pairs at once (the
+# runner's --pairs 15: sim-01:sim-02 .. sim-29:sim-30, each its own runTNn, allOrAbort), 10 simulated presses 1 s
+# apart. The pairs are independent users: after one start line, each presses at its own offset inside the 1 s period,
+# drawn from the seed (never in lockstep). Stopped phase: one pair, the other 28 nodes up; the private hub is stopped
+# and started again (its restart()) and the person bot presses through `inject` on the PLEASE line. Published: the
+# running phase again under 10 Hz hub broadcasts (the runner's --bcast-hz), and in lockstep (--lockstep: all 15 pairs
+# pressing at the same instants, a stress figure, never gated).
+schema: fractonica/sim-scenario@1
+id: t2-nn-30
+gate: T2-NN-30
+summary: T-NN at 30 nodes, 15 pairs at once with the hub running, one pair with it stopped
+nodes:
+  count: 30
+  profile: c6-pad
+  hb_ms: 1000
+seed: 1
+medium:
+  topology: one_room
+  rssi_dbm: [-85, -45]
+  loss: [0.001, 0.015]
+  rate: { broadcast: 1M, unicast: 1M }
+  collisions: true
+  capture_db: 10
+ap: { channel: 6, uplink_ms: [0.5, 3], downlink_ms: [0.5, 3], udp_loss: 0 }
+runs:
+  - name: running
+    run: t-nn
+    args: [--pairs, '15', --phase, running, --sim, --presses, '10', --gap-ms, '1000']
+  - name: stopped
+    run: t-nn
+    args: [--pair, 'sim-29:sim-30', --phase, stopped, --allow-hub-stop, --stopped-presses, '5', --down-s, '60']
+  - name: running-under-broadcasts
+    run: t-nn
+    args: [--pairs, '15', --phase, running, --sim, --presses, '10', --gap-ms, '1000', --bcast-hz, '10']
+    published: true
+  - name: running-lockstep
+    run: t-nn
+    args: [--pairs, '15', --lockstep, --phase, running, --sim, --presses, '10', --gap-ms, '1000']
+    published: true
+published: false

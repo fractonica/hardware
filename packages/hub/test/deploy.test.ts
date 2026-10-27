@@ -4,7 +4,8 @@
 // expect_log / expect_event since the device last went down, fault deploys expecting ROLLED_BACK, the job's
 // error codes, dry runs, wait_s and cancel. The hub parts are real (job runner, event and log stores, the
 // wait ops through HANDLERS); the registry selects like the real one; the router answers presence only; the
-// port manager lists the USB ports a test opens, the hub's only source of log lines (expect_log).
+// port manager lists the USB ports a test opens, and (design m2-c2 D21) a stand-in for the router's device info
+// says which devices run an image whose HELLO says net_log: the two sources of log lines expect_log accepts.
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,7 +22,7 @@ import { createEvents } from '../src/events/index.ts';
 import { JobRunner } from '../src/jobs.ts';
 import { LogStore } from '../src/logstore.ts';
 import { HANDLERS } from '../src/ops.ts';
-import { createDeploy, type DeployBuild, type DeployDeps, type DeployDeviceResult, type DeployOptions, sameFw } from '../src/ota/deploy.ts';
+import { CAP_NET_LOG, createDeploy, type DeployBuild, type DeployDeps, type DeployDeviceResult, type DeployOptions, logSourceOf, sameFw } from '../src/ota/deploy.ts';
 import { OTA_JOB_STATE_EVENT, type OtaJobState } from '../src/ota/index.ts';
 import { selectDevices } from '../src/registry/selector.ts';
 import { nowUs } from '../src/ring.ts';
@@ -92,8 +93,9 @@ class FakeBuilder {
  * device going offline). rollback-silent: that reboot is noticed only late (as the router does:
  * device.offline `restarted` at the old image's HELLO, after its boot lines). serial: the serial transport
  * (flash, the flash job's reset boots the image, then REBOOTING and SUCCEEDED). lost: never back after the
- * reboot (TIMED_OUT not_back_online, needs_serial_recovery). A device logs only when the test holds its USB
- * port open (Env.ports): then each boot starts with the ROM banner. Over Wi-Fi alone the hub gets no lines.
+ * reboot (TIMED_OUT not_back_online, needs_serial_recovery). A device logs when the test holds its USB port open
+ * (Env.ports): then each boot starts with the ROM banner. Over Wi-Fi alone the hub gets its esp_log lines as LOG
+ * frames while the image it runs says net_log (Env.netLog; the ROM's lines never come that way).
  */
 type Script = 'success' | 'rollback' | 'rollback-silent' | 'serial' | 'fail' | 'lost' | 'silent' | 'hang';
 
@@ -112,6 +114,8 @@ class FakeOta {
   oldLine: string | null = null;
   /** Devices whose first attempt times out waiting for ACCEPT and is retried. */
   retry = new Set<string>();
+  /** Devices the deployed image makes lose net_log (a build from a source older than M2-C2). */
+  withoutNetLog = new Set<string>();
   parents: string[] = [];
   #env: Env;
 
@@ -155,16 +159,23 @@ class FakeOta {
     const state = (s: OtaJobState, extra: Record<string, unknown> = {}) =>
       env.publish(OTA_JOB_STATE_EVENT, id, { fields: { job, state: s, ...(this.via ? { via: this.via } : {}), ...extra } });
     const step = (ms = 5) => sleep(ms, undefined, { signal });
-    // The hub stores a device's lines only from a USB port it holds open (no LOG frames over Wi-Fi in M1).
+    // The hub stores a device's lines from a USB port it holds open, and from LOG frames while its image says
+    // net_log (only esp_log lines: the ROM and bootloader print before the hook is in).
     const log = (text: string) => {
       if (env.ports.get(id) === 'open') {
         env.logs.append(id, usbPath(id), text);
+      }
+      if (env.netLog.has(id) && /^[EWIDV] \(\d+\) /.test(text)) {
+        env.logs.append(id, 'tcp', text, { source: 'net', t_log_us: nowUs() });
       }
     };
     const boot = async (fw: string, line: string, opts: { restarted?: boolean } = {}) => {
       log('ESP-ROM:esp32c6-20220919');
       log('rst:0xc (SW_CPU),boot:0xc (SPI_FAST_FLASH_BOOT)');
       env.registry.get(id)!.fw_id = fw;
+      if (this.withoutNetLog.has(id)) {
+        env.netLog.delete(id); // the image it boots now was built from a source older than M2-C2
+      }
       log(`I (120) app: ${line}`);
       if (opts.restarted) {
         // Its HELLO in a new epoch ends the old session only now, after the boot lines.
@@ -256,6 +267,8 @@ interface Env {
   presence: Map<string, Presence>;
   /** The USB ports the port manager lists, by device; none by default (every device on Wi-Fi alone). */
   ports: Map<string, PortInfo['state']>;
+  /** Devices whose running image's HELLO says net_log (design m2-c2 D20): its lines also come over TCP. */
+  netLog: Set<string>;
   builder: FakeBuilder;
   ota: FakeOta;
   events: HubEvent[];
@@ -304,7 +317,14 @@ function setup(opts: DeployOptions = {}): Env {
   const env = {} as Env;
   const builder = new FakeBuilder();
   const ota = new FakeOta(env);
-  const handler = createDeploy({ build: builder.start, ota: ota.start }, opts);
+  const netLog = new Set<string>();
+  // The router's device info as the source rule reads it: online over TCP, with net_log while the image says it.
+  const linkInfo: DeployOptions['linkInfo'] = (_hub, id) => ({
+    presence: presence.get(id) ?? 'unknown',
+    links: ['tcp'],
+    hello_caps: netLog.has(id) ? CAP_NET_LOG | 0b10 : 0b10,
+  });
+  const handler = createDeploy({ build: builder.start, ota: ota.start }, { linkInfo, ...opts });
   Object.assign(env, {
     hub,
     jobs,
@@ -312,6 +332,7 @@ function setup(opts: DeployOptions = {}): Env {
     registry,
     presence,
     ports,
+    netLog,
     builder,
     ota,
     events: seen,
@@ -682,7 +703,7 @@ describe('deploy', () => {
       expect(err).toBeInstanceOf(FrError);
       expect(err).toMatchObject({
         code: 'INVALID_ARGS',
-        message: `expect_log needs each device on a USB port this hub holds open, the only source of its log lines: pad-c6b (USB port ${usbPath(C6B)} leased), pad-c3 (not on USB)`,
+        message: `expect_log needs each device on a USB port this hub holds open or online over Wi-Fi with net_log, the sources of its log lines: pad-c6b (USB port ${usbPath(C6B)} leased), pad-c3 (not on USB)`,
         hint: expect.stringContaining('--expect-event'),
         details: { no_log_source: [{ alias: 'pad-c6b', port: `${usbPath(C6B)} leased` }, { alias: 'pad-c3', port: null }] },
         remediation: [{ tool: 'deploy', args: { selector: 'pad-c6,pad-c6b,pad-c3,seen-only', expect_event: 'node.boot' } }],
@@ -705,6 +726,59 @@ describe('deploy', () => {
       ['pad-c3', 'updated', 'matched'],
       ['seen-only', 'failed', 'skipped'],
     ]);
+  });
+
+  it('accepts expect_log for a Wi-Fi-only device whose HELLO says net_log and matches it from its TCP lines', async () => {
+    // Design m2-c2 D21: pad-c3 is on Wi-Fi alone, and the image it runs sends LOG frames.
+    const env = setup();
+    env.netLog.add(C3);
+    expect(logSourceOf(env.hub, C3, (_h, id) => ({ presence: env.presence.get(id)!, links: ['tcp'], hello_caps: CAP_NET_LOG }))).toBe('tcp');
+    const plan = (await env.deploy({ selector: 'pad-c3', expect_log: 'v2 ready', dry_run: true })) as unknown as { expect: unknown };
+    expect(plan.expect).toEqual({ log: 'v2 ready', timeout_s: 30 });
+    const data = okData(await finished(env, { selector: 'pad-c3', expect_log: 'v2 ready', expect_timeout_s: 5 }));
+    expect(byAlias(data)['pad-c3']).toMatchObject({ outcome: 'updated', expect: 'matched' });
+    expect(env.logs.query({ devices: [C3], grep: 'v2 ready', limit: 5, direction: 'forward' }).map((l) => l.port)).toEqual(['tcp']);
+
+    // Without net_log (an older image) it keeps the refusal; with it but offline, or with no TCP session, too.
+    const env2 = setup();
+    await expect(env2.deploy({ selector: 'pad-c3', expect_log: 'v2 ready' })).rejects.toMatchObject({ code: 'INVALID_ARGS', details: { no_log_source: [{ alias: 'pad-c3', port: null }] } });
+    const off = (presence: 'offline' | 'online', links: ('tcp' | 'serial')[]) => logSourceOf(env.hub, C3, () => ({ presence, links, hello_caps: CAP_NET_LOG }));
+    expect(off('offline', ['tcp'])).toBeNull();
+    expect(off('online', ['serial'])).toBeNull();
+    // An open USB port is a source whatever the image says.
+    env2.ports.set(C3, 'open');
+    expect(logSourceOf(env2.hub, C3, () => null)).toBe('usb');
+  });
+
+  it("names the running-image limit when a net_log device's new image sends no LOG frames", async () => {
+    // Accepted on the image that runs (net_log), but the deployed one is built from an older source: no line comes.
+    const env = setup();
+    env.netLog.add(C3);
+    env.ota.withoutNetLog.add(C3);
+    const failed = failedData(await finished(env, { selector: 'pad-c3', expect_log: 'v2 ready', expect_timeout_s: 1 }), 'TIMEOUT');
+    expect(byAlias(failed)['pad-c3']).toMatchObject({
+      outcome: 'updated',
+      expect: 'timeout',
+      error: expect.stringMatching(/within 1s since .*: no log lines reach the hub from it now .*net_log.*older than M2-C2.*use expect_event$/),
+    });
+  });
+
+  it('names what never comes over TCP when an expect_log on a Wi-Fi-only net_log device times out', async () => {
+    // The ROM's banner is printed before the esp_log hook: it reaches the hub over USB only (design m2-c2 D21).
+    const env = setup();
+    env.netLog.add(C3);
+    const failed = failedData(await finished(env, { selector: 'pad-c3', expect_log: 'ESP-ROM:', expect_timeout_s: 1 }), 'TIMEOUT');
+    expect(byAlias(failed)['pad-c3']).toMatchObject({
+      outcome: 'updated',
+      expect: 'timeout',
+      error: expect.stringMatching(/within 1s since .*: the hub hears its log lines over Wi-Fi only, .*ROM and bootloader lines and D\/V lines come only over USB: .*use expect_event$/),
+    });
+    // The same line with the board on a USB port the hub holds open matches.
+    const env2 = setup();
+    env2.netLog.add(C3);
+    env2.ports.set(C3, 'open');
+    const data = okData(await finished(env2, { selector: 'pad-c3', expect_log: 'ESP-ROM:', expect_timeout_s: 5 }));
+    expect(byAlias(data)['pad-c3']).toMatchObject({ expect: 'matched' });
   });
 
   it('is the deploy handler of the hub and answers a dry run through it', async () => {

@@ -112,7 +112,7 @@ messages:
     descriptor_hash: { id: 5, type: u32 }
     board_hash: { id: 6, type: u32 }
     role: { id: 7, type: Role }
-    caps: { id: 8, type: u32, doc: "b0 espnow_v2, b1 wifi, b2 sleepy, b3 sec, b4 inject_enabled, b5 provisioned" }
+    caps: { id: 8, type: u32, doc: "b0 espnow_v2, b1 wifi, b2 sleepy, b3 sec, b4 inject_enabled, b5 provisioned, b6 net_log" }
     hb_interval_ms: { id: 9, type: u32 }
     reset_reason: { id: 10, type: u8 }
     ota_state: { id: 11, type: OtaState }
@@ -175,7 +175,9 @@ messages:
   TIME.SYNC_REQ: { t1: { id: 1, type: u64 } }
   TIME.SYNC_RES: { t1: { id: 1, type: u64 }, t2: { id: 2, type: u64 }, t3: { id: 3, type: u64 } }
   MSG.MSG: { topic: { id: 1, type: string, max: 32 }, data: { id: 2, type: bytes, max: 168 } }
-  LOG.LINE: { tag: { id: 1, type: string, max: 16 }, text: { id: 2, type: string, max: 200 } }
+  # node -> hub over TCP, from nodes whose HELLO says net_log: one whole esp_log line, as the serial copy prints it
+  # without ANSI and `\n` (design m2-c2 D20; 384 = fr_serial's line, so the ready banner fits).
+  LOG.LINE: { tag: { id: 1, type: string, max: 16 }, text: { id: 2, type: string, max: 384 } }
 
 # Protocol types: message-shaped structs used as array elements or encoded on their own. A type may hold
 # arrays of the types declared above it (no recursion).

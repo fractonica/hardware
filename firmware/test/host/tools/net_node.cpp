@@ -19,7 +19,7 @@
 //               [--air-rssi <dBm>] [--air-channel <n>] [--air-ack-ms <n>]] [--pin-target <udp port>]
 //               [--pin-listen <udp port>] [--role node|gateway|fixture] [--board <b>] [--profile <p>] [--chip <n>]
 //               [--led-kind mono|gpio_low|ws2812] [--led-tap <udp port>] [--test-pin-tap <udp port>]
-//               [--fixture 1 [--line <ch>=<udp port>]...]
+//               [--fixture 1 [--line <ch>=<udp port>]...] [--net-log 1]
 //   fr_net_node --make-image <path> [--version <label>] [--size <n>] [--board <b>] [--profile <p>]
 //               [--part <pp>] [--chip <n>] [--min-rev <n>] [--max-rev <n>] [--fault 0|1] [--seed <n>]
 //
@@ -61,8 +61,9 @@
 // C6 (design c6 §6 S6): fr.diag on port 241 answers fr.diag.exec lines over the hub link: `pin_pulse <us>`, `net
 // loss <pct> <s> [both|tx|rx]`, `net drop_hub_link|udp_block|ip_block|wifi_down <s>`, `stats [section]` and `info`.
 // `stats` answers as fr_diag does (design c5 §2, 09 §9.7): the C3/C6 counters (dup, cached_replies, delivery_failed,
-// ...) and the sections links, bcast, relay, espnow, bindings, nodes and msgs, or one of them alone with `stats
-// <section>`. `net wifi_down <s>` is the stdin command's, run after its RESULT went out.
+// ...) and the sections links, bcast, relay, espnow, bindings, nodes, msgs and (M2-C2) net_logs, or one of them alone
+// with `stats <section>`. `net wifi_down <s>` is the stdin command's, run 300 ms after its RESULT went out (fr_net's
+// WifiSta delay, M2-C2 review fleet-5).
 // A hub CMD with exec_at runs at its time through the real Net scheduler (D22). --pin-target is the T-LAT wire
 // out: `pin_pulse` sends one UDP datagram (the pulse length in µs, as text) to that loopback port and answers
 // {ok, pin 20, us, at_us} as the board's test pin would. --pin-listen is the wire in: a datagram on that port
@@ -94,6 +95,15 @@
 // --pin-listen) and reads it back; an input line listens on it (0: any free one) for a pad's taps. Each line
 // prints `line` {name, port, drive, decode, pull}; stdin `line <ch> <port>` rewires a driving line, `lines`
 // prints `lines` {items: [{name, level, pressing, port}]}. `state` adds health (fr_ota's bits) and hub_session.
+//
+// M2-C2 (design m2-c2 D2): the node classes live in the fleet kit (sim/, library fr_sim: Device, NodeCap, NodeDiag,
+// NodeOtaHost, the blobs, the state printers and this stdin table as frsim::Commands), shared with fr_fleet. This
+// file keeps main(), HostCore and its poll() loop, its blocking links, FakeAir, the wires and the virtual fixture,
+// so its I/O timing and its lines do not change. NodeDiag adds `inject <inst> <gesture>` and `neighbors [from]` in
+// fr_diag's shapes (D11). `--net-log 1` attaches the kit's log source (D20): HELLO caps net_log, fr_core's `ready
+// id=…` banner at boot and `alive fw=…` every 10 s, fr_ota's `slot … open` line, and stdin `log <E|W|I|D|V> <tag>
+// <text>`; Net drains them as LOG frames over TCP, and with --serial each also goes out on the USB line (stdout) as
+// fr_serial prints it. Without it a `log` line goes only to the USB line.
 // Test code: it may allocate.
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -124,40 +134,37 @@
 #include <utility>
 #include <vector>
 
-#include "catalog.hpp"
-#include "diag.hpp"  // generated fr::cap::Diag: fr.diag.exec on port 241
 #include "fr/core/core.hpp"
-#include "fr/core/descriptor.hpp"
 #include "fr/core/node_net.hpp"
 #include "fr/core/port.hpp"
-#include "fr/hash.hpp"
 #include "fr/net/net.hpp"
 #include "fr/serial_line.hpp"
 #include "fr/services/button_service.hpp"
 #include "fr/services/fixture_service.hpp"
 #include "fr/services/led_service.hpp"
-#include "messages.hpp"  // generated fr::proto::Descriptor
-#include "node.hpp"
+#include "sim/commands.hpp"
+#include "sim/node.hpp"
+#include "sim/out.hpp"
 #include "tools/ota_fake.hpp"
 // The ESP-NOW driver's IDF-free send discipline; not on the include path, as it is private to fr_net/src/esp.
 #include "../../../components/fr_net/src/esp/air_sched.hpp"
-
-void ota_fake::emit(const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    std::vprintf(fmt, ap);
-    va_end(ap);
-    std::fputc('\n', stdout);
-    std::fflush(stdout);
-}
 
 namespace {
 
 using fr::TimeUs;
 using fr::net::LinkKind;
-using ota_fake::emit;
+using frsim::parse_hex;
 
+/** The process's one output: stdout, untagged, as cpp-node.ts and every interop suite parse it. */
+frsim::StdOut g_out;
+
+__attribute__((format(printf, 1, 2))) void emit(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    g_out.vemit(fmt, ap);
+    va_end(ap);
+}
 constexpr TimeUs kNever = INT64_MAX;
 
 /** The core task on the host: a monotonic clock, timer and input-slot pools, a post queue (EspCore order). */
@@ -856,30 +863,11 @@ struct Options {
     uint16_t test_pin_tap = 0;  // pin_pulse also goes here (0: no tap)
     bool fixture = false;
     std::vector<std::pair<std::string, uint16_t>> lines;  // --line <ch>=<port>
+    bool net_log = false;  // M2-C2: LOG frames over TCP (design m2-c2 D20)
 
     /** TCP and UDP to the hub; without them the node is serial only (a radio-off build). */
     bool ip() const { return hub_tcp != 0; }
 };
-
-/** A JSON string body: quotes, backslashes and control characters escaped. */
-std::string json_text(std::string_view s)
-{
-    std::string out;
-    for (const char ch : s) {
-        const auto c = static_cast<unsigned char>(ch);
-        if (c == '"' || c == '\\') {
-            out += '\\';
-            out += ch;
-        } else if (c < 0x20) {
-            char esc[8];
-            std::snprintf(esc, sizeof(esc), "\\u%04x", c);
-            out += esc;
-        } else {
-            out += ch;
-        }
-    }
-    return out;
-}
 
 /**
  * The fake air medium (design c5 §5 interop): ESP-NOW as UDP datagrams on loopback. Each node binds a port
@@ -1170,324 +1158,6 @@ private:
     Counters n_;
 };
 
-/** nvs:fr_dir / nvs:fr_bind: a file in --ota-dir (written whole, like an NVS commit), else memory. */
-class FileBlob final : public fr::core::Blob
-{
-public:
-    explicit FileBlob(std::string path) : path_(std::move(path)) {}
-
-    size_t read(std::span<uint8_t> out) override
-    {
-        const std::optional<std::string> data = path_.empty() ? mem_ : ota_fake::read_file(path_);
-        if (!data || data->size() > out.size()) {
-            return 0;
-        }
-        std::memcpy(out.data(), data->data(), data->size());
-        return data->size();
-    }
-    bool write(std::span<const uint8_t> bytes) override
-    {
-        const std::string data(reinterpret_cast<const char *>(bytes.data()), bytes.size());
-        if (path_.empty()) {
-            mem_ = data;
-        } else {
-            ota_fake::write_file(path_, data);
-        }
-        return true;
-    }
-
-private:
-    std::string path_;
-    std::optional<std::string> mem_;
-};
-
-/** The board manifest's test_pin (spec 04 §4.3) of the boards a pad plays; -1 for none (the fixture board). */
-int board_test_pin(std::string_view board)
-{
-    if (board == "esp32c3-oled042") {
-        return 10;
-    }
-    if (board == "waveshare-esp32s3-lcd19") {
-        return 16;
-    }
-    if (board == "esp32s3-devkitc1-n16r8") {
-        return -1;
-    }
-    return 20;  // esp32c6-supermini, and any other board (as before M2-C1)
-}
-
-/**
- * fr.diag on port 241 (design c6 §6 S6): the fr.diag.exec lines T-INPUT and T-LAT send over the hub link, with
- * fr_diag's answers. `pin_pulse` is the board's test pin (GPIO20 on the c6 Super Mini this node plays by
- * default) as a datagram to --pin-target and to --test-pin-tap (M2-C1: the virtual fixture's test_pin line);
- * `net` drives Net's hooks, `loss` included.
- */
-class NodeDiag final : public fr::cap::Diag
-{
-public:
-    NodeDiag(HostCore &core, const Options &o)
-        : core_(core), o_(o), pin_target_(o.pin_target), test_pin_tap_(o.test_pin_tap), test_pin_(board_test_pin(o.board))
-    {
-    }
-    NodeDiag(const NodeDiag &) = delete;
-    NodeDiag &operator=(const NodeDiag &) = delete;
-
-    void bind(fr::net::Net &net) { net_ = &net; }
-    /** The fake air medium, for `stats espnow` (the driver's counters on target). */
-    void bind_air(const FakeAir *air) { air_ = air; }
-    /** What `net wifi_down <s>` does: the main loop's Wi-Fi switch (stdin's `wifi_down`). */
-    void on_wifi_down(std::function<void(uint32_t)> fn) { wifi_down_ = std::move(fn); }
-
-    std::expected<fr::cap::DiagExecResult, fr::Err> exec(const fr::cap::DiagExecArgs &args) override
-    {
-        std::string_view line = args.line;
-        const std::string_view cmd = word(line);
-        int n = 0;
-        if (cmd == "pin_pulse") {
-            n = pin_pulse(line);
-        } else if (cmd == "net") {
-            n = net_hook(line);
-        } else if (cmd == "stats") {
-            n = stats(line);
-        } else if (cmd == "info") {
-            n = std::snprintf(out_, sizeof(out_), R"({"ok":true,"id":"%s","inject_enabled":true,"test_pin":%d})",
-                              ota_fake::hex(o_.mac).c_str(), has_test_pin() ? test_pin_ : -1);
-        } else {
-            n = std::snprintf(out_, sizeof(out_), R"({"ok":false,"error":"unknown_command"})");
-        }
-        return fr::cap::DiagExecResult{.json = {out_, std::min(static_cast<size_t>(std::max(n, 0)), sizeof(out_) - 1)}};
-    }
-
-private:
-    /** A test pin is wired (to another pad's boot input, or to a fixture line), and the board has one. */
-    bool has_test_pin() const { return (pin_target_.on() || test_pin_tap_.on()) && test_pin_ >= 0; }
-
-    static std::string_view word(std::string_view &s)
-    {
-        while (!s.empty() && s.front() == ' ') {
-            s.remove_prefix(1);
-        }
-        const size_t sp = std::min(s.find(' '), s.size());
-        const std::string_view w = s.substr(0, sp);
-        s.remove_prefix(sp);
-        while (!s.empty() && s.front() == ' ') {
-            s.remove_prefix(1);
-        }
-        return w;
-    }
-
-    static bool number(std::string_view s, uint32_t lo, uint32_t hi, uint32_t &out)
-    {
-        if (s.empty() || s.size() > 9 || s.find_first_not_of("0123456789") != std::string_view::npos) {
-            return false;
-        }
-        out = static_cast<uint32_t>(std::strtoul(std::string(s).c_str(), nullptr, 10));
-        return out >= lo && out <= hi;
-    }
-
-    int fail(const char *error, const char *detail)
-    {
-        return std::snprintf(out_, sizeof(out_), R"({"ok":false,"error":"%s","detail":"%s"})", error, detail);
-    }
-
-    /** `pin_pulse <us>` as fr_diag answers it (design c6 D24). */
-    int pin_pulse(std::string_view args)
-    {
-        uint32_t us = 0;
-        if (!number(word(args), 10, 100000, us) || !args.empty()) {
-            return fail("invalid_args", "usage: pin_pulse <us> (10-100000)");
-        }
-        if (!has_test_pin()) {
-            return fail("unsupported", "no test_pin on this board");
-        }
-        const fr::TimeUs now = core_.now();
-        if (now < low_until_) {
-            return std::snprintf(out_, sizeof(out_), R"({"ok":false,"error":"busy"})");
-        }
-        // One wire, two ends: the pulse is `<us>` on each (low now, released `us` later).
-        const std::string text = std::to_string(us);
-        pin_target_.send(text);
-        test_pin_tap_.send(text);
-        low_until_ = now + us;
-        emit(R"({"ev":"pin_pulse","us":%u,"at_us":%lld})", us, static_cast<long long>(now));
-        return std::snprintf(out_, sizeof(out_), R"({"ok":true,"pin":%d,"us":%u,"at_us":%lld})", test_pin_, us,
-                             static_cast<long long>(now));
-    }
-
-    /** `net loss <pct> <s> [both|tx|rx]` and `net drop_hub_link|udp_block|ip_block <s>`, as fr_diag's `net`. */
-    int net_hook(std::string_view args)
-    {
-        const std::string_view name = word(args);
-        if (name == "loss") {
-            uint32_t pct = 0;
-            uint32_t secs = 0;
-            const bool ok_pct = number(word(args), 0, 100, pct);
-            const bool ok_s = number(word(args), 0, 86400, secs);
-            const std::string_view d = word(args);
-            fr::net::LossDir dir = fr::net::LossDir::both;
-            bool ok_dir = d.empty() || d == "both";
-            if (d == "tx" || d == "rx") {
-                dir = d == "tx" ? fr::net::LossDir::tx : fr::net::LossDir::rx;
-                ok_dir = true;
-            }
-            if (!ok_pct || !ok_s || !ok_dir || !args.empty()) {
-                return fail("invalid_args", "usage: net loss <pct 0-100> <seconds 0-86400> [both|tx|rx] (0 ends it)");
-            }
-            net_->loss(static_cast<uint8_t>(pct), secs, dir);  // after this RESULT: Net defers it
-            const char *dir_name = dir == fr::net::LossDir::tx ? "tx" : dir == fr::net::LossDir::rx ? "rx" : "both";
-            emit(R"({"ev":"loss","ok":true,"pct":%u,"s":%u,"dir":"%s"})", pct, secs, dir_name);  // as from stdin
-            return std::snprintf(out_, sizeof(out_), R"({"ok":true,"hook":"loss","pct":%u,"s":%u,"dir":"%s"})", pct,
-                                 secs, dir_name);
-        }
-        uint32_t secs = 0;
-        if (!number(word(args), 0, 86400, secs) || !args.empty()) {
-            return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds> | loss <pct> <seconds>");
-        }
-        if (name == "drop_hub_link") {
-            net_->drop_hub_link(secs);
-        } else if (name == "udp_block") {
-            net_->udp_block(secs);
-        } else if (name == "ip_block") {
-            net_->ip_block(secs);
-        } else if (name == "wifi_down") {
-            if (!wifi_down_) {
-                return fail("unsupported", "no Wi-Fi switch in this node");
-            }
-            // After this RESULT, which goes out over the link the CMD came on (fr_diag's hooks are deferred too).
-            if (!core_.post([this, secs] { wifi_down_(secs); })) {
-                return fail("busy", "the core's queue is full");
-            }
-        } else {
-            return fail("invalid_args", "usage: net drop_hub_link|udp_block|ip_block|wifi_down <seconds> | loss <pct> <seconds>");
-        }
-        return std::snprintf(out_, sizeof(out_), R"({"ok":true,"hook":"%.*s","s":%u})", static_cast<int>(name.size()),
-                             name.data(), secs);
-    }
-
-    /** fr_diag's `stats` sections, in its order (diag.cpp kStatSections): a full answer drops them from the end to fit. */
-    static constexpr std::string_view kSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs"};
-
-    __attribute__((format(printf, 1, 2))) static std::string format(const char *fmt, ...)
-    {
-        char b[512];
-        va_list ap;
-        va_start(ap, fmt);
-        const int n = std::vsnprintf(b, sizeof(b), fmt, ap);
-        va_end(ap);
-        return std::string(b, static_cast<size_t>(std::clamp(n, 0, static_cast<int>(sizeof(b) - 1))));
-    }
-
-    /** One section's object, as fr_diag's add_stat_section writes it, from Net's counters (espnow: the fake air's). */
-    std::string section(std::string_view name) const
-    {
-        const fr::net::State s = net_->state();
-        if (name == "links") {
-            constexpr std::pair<LinkKind, const char *> kLinks[] = {
-                {LinkKind::serial, "serial"}, {LinkKind::tcp, "tcp"}, {LinkKind::udp, "udp"}, {LinkKind::espnow, "espnow"}};
-            std::string out = "{";
-            for (const auto &[kind, link_name] : kLinks) {
-                const fr::net::LinkState &l = s.link(kind);
-                out += format(R"(%s"%s":{"tx":%u,"tx_fail":%u,"rx":%u,"rx_drop":%u,"retries":%u})", out.size() > 1 ? "," : "",
-                              link_name, l.tx, l.tx_fail, l.rx, l.rx_drop, l.retries);
-            }
-            return out + "}";
-        }
-        if (name == "bcast") {
-            return format(R"({"delivered":%u,"dup":%u,"old":%u,"watermark":%u})", s.bcast.delivered, s.bcast.dup, s.bcast.old,
-                          s.bcast.watermark);
-        }
-        if (name == "relay") {
-            return format(R"({"seeded":%u,"relayed":%u,"cancelled":%u,"dropped":%u})", s.relay.seeded, s.relay.relayed,
-                          s.relay.cancelled, s.relay.dropped);
-        }
-        if (name == "espnow") {
-            if (air_ == nullptr) {
-                return R"({"tx":0,"tx_fail":0,"retries":0,"refused":0,"rx":0,"rx_bad":0,"rx_lost":0,"peers":0})";
-            }
-            const FakeAir::Counters &c = air_->counters();
-            const fr::net::air::SchedStats &d = air_->scheduler().stats();
-            return format(R"({"tx":%u,"tx_fail":%u,"retries":%u,"refused":%u,"rx":%u,"rx_bad":%u,"rx_lost":%u,"peers":%zu})", d.sent,
-                          d.failed, d.retries, d.refused, c.rx, c.rx_bad, c.lost, air_->scheduler().peers());
-        }
-        if (name == "bindings") {
-            return format(R"({"fired":%u,"failed":%u,"rtt_p50_us":%u})", s.bindings.fired, s.bindings.failed, s.bindings.rtt_p50_us);
-        }
-        if (name == "nodes") {
-            return format(R"({"delivered":%u,"dup":%u,"old":%u,"sent":%u,"via_espnow":%u,"via_hub":%u,"via_flood":%u,"failed":%u,"resolves":%u})",
-                          s.nodes.delivered, s.nodes.dup, s.nodes.old, s.nodes.sent, s.nodes.via_espnow, s.nodes.via_hub,
-                          s.nodes.via_flood, s.nodes.failed, s.nodes.resolves);
-        }
-        std::string out = "{";  // msgs: per topic, then other
-        for (const fr::net::MsgStats::Topic &t : net_->msg_stats().topics) {
-            if (t.name[0] != '\0') {
-                out += "\"" + json_text(t.name) + "\":" + std::to_string(t.n) + ",";
-            }
-        }
-        return out + R"("other":)" + std::to_string(net_->msg_stats().other) + "}";
-    }
-
-    /**
-     * `stats [section]` as fr_diag's cmd_stats: one section alone, or the counters and every section, dropping
-     * sections from the end (named in `omitted`) until the answer fits fr.diag.exec. No `reset` here.
-     */
-    int stats(std::string_view args)
-    {
-        const std::string_view opt = word(args);
-        const auto *it = std::find(std::begin(kSections), std::end(kSections), opt);
-        if (!args.empty() || (!opt.empty() && it == std::end(kSections))) {
-            return fail("invalid_args", "usage: stats [links|bcast|relay|espnow|bindings|nodes|msgs]");
-        }
-        std::string out;
-        if (!opt.empty()) {
-            out = format(R"({"ok":true,"%.*s":)", static_cast<int>(opt.size()), opt.data()) + section(opt) + "}";
-        } else {
-            const fr::net::State s = net_->state();
-            out = format(R"({"ok":true,"cmds":%u,"cmds_refused":%u,"hook_dropped":%u,"loss_tx":%u,"loss_rx":%u,)"
-                         R"("cmds_scheduled":%u,"exec_late":%u,"exec_cancelled":%u,"exec_late_us_max":%u,"rx_queue_us_max":%u,)",
-                         s.cmds, s.cmds_refused, s.hook_drops, s.loss_tx, s.loss_rx, s.cmds_scheduled, s.exec_late,
-                         s.exec_cancelled, s.exec_late_us_max, s.rx_queue_us_max) +
-                  format(R"("dup":%u,"old":%u,"cached_replies":%u,"sessions_lost":%u,"events_dropped":%u,"delivery_failed":%u)",
-                         s.dup, s.old, s.cached_replies, s.sessions_lost, s.events_dropped, s.delivery_failed);
-            std::vector<std::string> parts;
-            for (const std::string_view name : kSections) {
-                parts.push_back(format(R"("%.*s":)", static_cast<int>(name.size()), name.data()) + section(name));
-            }
-            std::string omitted;
-            auto total = [&] {
-                size_t n = out.size() + 1 + (omitted.empty() ? 0 : omitted.size() + 14);
-                for (const std::string &p : parts) {
-                    n += p.size() + 1;
-                }
-                return n;
-            };
-            for (size_t i = parts.size(); i-- > 0 && total() >= sizeof(out_);) {
-                omitted = format(R"("%.*s")", static_cast<int>(kSections[i].size()), kSections[i].data()) +
-                          (omitted.empty() ? "" : "," + omitted);
-                parts.pop_back();
-            }
-            for (const std::string &p : parts) {
-                out += "," + p;
-            }
-            out += (omitted.empty() ? "" : R"(,"omitted":[)" + omitted + "]") + "}";
-        }
-        const size_t n = std::min(out.size(), sizeof(out_) - 1);
-        std::memcpy(out_, out.data(), n);
-        out_[n] = '\0';
-        return static_cast<int>(n);
-    }
-
-    HostCore &core_;
-    const Options &o_;
-    fr::net::Net *net_ = nullptr;
-    const FakeAir *air_ = nullptr;
-    std::function<void(uint32_t)> wifi_down_;
-    UdpOut pin_target_;
-    UdpOut test_pin_tap_;
-    int test_pin_;
-    fr::TimeUs low_until_ = 0;
-    char out_[fr::cap::DiagExecResult::kMaxSize];
-};
-
 /**
  * One fixture line on loopback (design m2-c1-hil D4, §4 S2), under FixtureService as fixture_gpio and
  * fixture_ws2812_rx are on target. A driving line (open_drain, nfet_gate) runs its segments from core timers and
@@ -1750,306 +1420,6 @@ constexpr std::array<FixtureChannel, 12> kFixtureChannels{{{"ch0", kBootLine},
                                                           {"ch10", kTestPinLine},
                                                           {"ch11", kTestPinLine}}};
 
-class Device;
-
-/** fr.node on port 0: what the hub's handshake and the registry use (describe, get_state, set_alias, reboot). */
-class NodeCap final : public fr::cap::Node
-{
-public:
-    explicit NodeCap(Device &d) : d_(d) {}
-
-    fr::Status identify(const fr::cap::NodeIdentifyArgs &) override { return {}; }
-    std::expected<fr::cap::NodeDescribeResult, fr::Err> describe() override;
-    fr::Status reboot(const fr::cap::NodeRebootArgs &args) override;
-    fr::Status set_alias(const fr::cap::NodeSetAliasArgs &args) override;
-    fr::Status set_groups(const fr::cap::NodeSetGroupsArgs &) override { return std::unexpected(fr::Err::unsupported); }
-    fr::Status net_set(const fr::cap::NodeNetSetArgs &) override { return std::unexpected(fr::Err::unsupported); }
-    fr::Status get_state() override;
-    // Bindings (07 §7.11), as fr_core's NodeService: Net's table, saved through the stores.
-    fr::Status bind_set(const fr::cap::NodeBindSetArgs &args) override;
-    fr::Status bind_clear(const fr::cap::NodeBindClearArgs &args) override;
-    std::expected<fr::cap::NodeBindListResult, fr::Err> bind_list() override;
-
-private:
-    Device &d_;
-};
-
-/** What Net asks of the node (fr_core's role on target): dispatch by port, identity and HELLO facts. */
-class Device final : public fr::net::Host
-{
-public:
-    Device(HostCore &core, const Options &o, std::span<fr::PortEntry> ports) : core_(core), o_(o), ports_(ports)
-    {
-        store_alias(o.alias, o.alias_rev);
-        const fr::core::DescriptorSource src{.fw_id_prefix = o.fw,
-                                             .catalog_hash = fr::cap::catalog_hash(),
-                                             .profile = o_.profile.c_str(),
-                                             .board = o_.board.c_str()};
-        desc_len_ = fr::core::build_descriptor(src, ports, desc_);
-    }
-
-    void set_net(fr::net::Net &net) { net_ = &net; }
-    fr::net::Net &net() { return *net_; }
-    std::span<uint8_t> bind_buf() { return bind_buf_; }
-    /** The fake air medium joined: HELLO caps espnow_v2. */
-    void set_air(bool on) { air_ = on; }
-    /** `wifi_down`: link_info() says Wi-Fi is away. */
-    void set_wifi(bool up) { wifi_up_ = up; }
-    void set_ota(fr::ota::Ota &ota, const ota_fake::MemFlash &flash)
-    {
-        ota_ = &ota;
-        flash_ = &flash;
-    }
-    bool rebooting() const { return reboot_at_ != kNever && core_.now() >= reboot_at_; }
-    TimeUs reboot_at() const { return reboot_at_; }
-    /** Why the restart: nullptr for fr.node.reboot (its event stays `{"ev":"reboot"}`). */
-    const char *reboot_reason() const { return reboot_reason_; }
-    NodeCap &node_cap() { return node_cap_; }
-
-    std::span<const uint8_t> descriptor() const { return {desc_, desc_len_}; }
-    void reboot(bool bootloader)
-    {
-        // As fr_core: BYE (after this RESULT, inside a request), then the restart a little later.
-        net_->bye(bootloader ? fr::net::kByeMaintenance : fr::net::kByeReboot);
-        reboot_at_ = core_.now() + 200'000;
-    }
-    /** fr_ota installed an image: BYE ota, then the restart (fr_core's OtaHost::restart). */
-    void reboot_into_ota()
-    {
-        net_->bye(fr::net::kByeOta);
-        reboot_at_ = core_.now() + 200'000;
-        reboot_reason_ = "ota";
-    }
-    void store_alias(std::string_view a, uint32_t rev)
-    {
-        alias_.assign(a.substr(0, fr::net::Identity::kAliasMax));
-        alias_rev_ = rev;
-    }
-    const std::string &alias() const { return alias_; }
-    uint32_t alias_rev() const { return alias_rev_; }
-    void report_board()
-    {
-        for (const fr::PortEntry &p : ports_) {
-            if (p.cap != nullptr && p.ok && p.port != 0) {
-                p.cap->report_all();
-            }
-        }
-    }
-
-    // fr::net::Host
-    fr::Status dispatch(uint8_t port, uint8_t cmd, std::span<const uint8_t> args, fr::cap::Reply &reply) override
-    {
-        emit(R"({"ev":"dispatch","port":%u,"cmd":%u,"capacity":%zu})", unsigned{port}, unsigned{cmd}, reply.capacity());
-        for (const fr::PortEntry &p : ports_) {
-            if (p.port == port && p.cap != nullptr) {
-                return p.ok ? p.cap->dispatch(cmd, args, reply) : std::unexpected(fr::Err::failed);
-            }
-        }
-        return std::unexpected(fr::Err::not_found);
-    }
-    void report_all() override { report_board(); }
-    fr::net::HelloInfo hello_info() override
-    {
-        fr::net::HelloInfo h;
-        h.mac = o_.mac;
-        h.chip = o_.chip;
-        h.chip_rev = 1;
-        h.fw_id_prefix = o_.fw;
-        h.descriptor_hash = fr::wire::descriptor_hash(descriptor());
-        h.board_hash = fr::wire::board_hash(o_.board);
-        h.role = o_.role;
-        // Serial only (a radio-off build, design m2-c1-hil D6): no `wifi`.
-        h.caps = (o_.ip() ? fr::net::kCapWifi : 0) | fr::net::kCapInjectEnabled |
-                 (o_.addr != fr::proto::kAddrUnassigned ? fr::net::kCapProvisioned : 0) | (air_ ? fr::net::kCapEspnowV2 : 0);
-        h.hb_interval_ms = o_.hb_ms;
-        h.reset_reason = 1;
-        // As fr_core: PENDING_VERIFY until the health gate marks the image valid.
-        h.ota_state = flash_ != nullptr && flash_->state().pending ? fr::proto::OtaState::pending_verify
-                                                                  : fr::proto::OtaState::valid;
-        return h;
-    }
-    fr::net::Identity identity() override
-    {
-        fr::net::Identity id;
-        id.addr = o_.addr;
-        id.net = o_.net;
-        std::memcpy(id.alias, alias_.data(), std::min(alias_.size(), fr::net::Identity::kAliasMax));
-        id.alias_rev = alias_rev_;
-        id.epoch = o_.epoch;
-        return id;
-    }
-    fr::net::LinkInfo link_info() override
-    {
-        fr::net::LinkInfo li;
-        if (wifi_up_ && o_.ip()) {
-            li = {.wifi_up = true, .channel = o_.air_channel, .bssid = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60}, .rssi = -48};
-        }
-        // The hub fields as fr_core fills them (design m2-c1-hil D11): FixtureService's release rule reads them.
-        return net_ != nullptr ? fr::core::hub_link_info(li, *net_) : li;
-    }
-    /** A hub session on serial or TCP now (fr::core::hub_session). */
-    bool hub_session() const { return net_ != nullptr && net_->hub_link(); }
-    fr::net::Vitals vitals() override
-    {
-        return {.free_heap_kb = 200, .vbat_mv = 0, .ota_busy = ota_ != nullptr && ota_->busy(), .low_batt = false};
-    }
-    void ota_frame(LinkKind from, const fr::wire::Header &h, std::span<const uint8_t> body, fr::net::OtaReply &reply) override
-    {
-        emit(R"({"ev":"ota_frame","link":"%s","kind":%u,"seq":%u,"ack_req":%s,"len":%zu})",
-             from == LinkKind::tcp ? "tcp" : from == LinkKind::serial ? "serial" : "udp", unsigned{h.kind},
-             static_cast<unsigned>(h.seq), (h.flags & fr::wire::kFlagAckReq) != 0 ? "true" : "false", body.size());
-        if (ota_ != nullptr) {
-            ota_->on_frame(h.kind, body, reply);  // as fr_core's NetHost
-        }
-    }
-    void msg(uint16_t src, std::string_view topic, std::span<const uint8_t> data) override
-    {
-        const std::string_view text(reinterpret_cast<const char *>(data.data()), data.size());
-        if (fr::wire::utf8_valid(data)) {
-            emit(R"({"ev":"msg","src":%u,"topic":"%s","data":"%s","len":%zu})", unsigned{src}, json_text(topic).c_str(),
-                 json_text(text).c_str(), data.size());
-        } else {
-            emit(R"({"ev":"msg","src":%u,"topic":"%s","data_hex":"%s","len":%zu})", unsigned{src},
-                 json_text(topic).c_str(), ota_fake::hex(data).c_str(), data.size());
-        }
-    }
-
-private:
-    HostCore &core_;
-    Options o_;
-    std::span<fr::PortEntry> ports_;
-    NodeCap node_cap_{*this};
-    fr::net::Net *net_ = nullptr;
-    fr::ota::Ota *ota_ = nullptr;
-    const ota_fake::MemFlash *flash_ = nullptr;
-    std::string alias_;
-    uint32_t alias_rev_ = 0;
-    uint8_t desc_[fr::proto::Descriptor::kMaxSize];
-    size_t desc_len_ = 0;
-    TimeUs reboot_at_ = kNever;
-    const char *reboot_reason_ = nullptr;
-    uint8_t bind_buf_[fr::core::kBindListMax];
-    bool air_ = false;
-    bool wifi_up_ = true;
-};
-
-/** fr_core's OtaHost on this node: Net::send_ota (each frame reported), the hub's HTTP port, BYE ota. */
-class NodeOtaHost final : public fr::ota::Host
-{
-public:
-    NodeOtaHost(fr::net::Net &net, Device &dev, const Options &o) : net_(net), dev_(dev), o_(o) {}
-
-    fr::Status send(uint8_t kind, std::span<const uint8_t> body, bool ack_req) override
-    {
-        const fr::Status st = net_.send_ota(kind, body, ack_req);
-        const char *sent = st ? "true" : "false";
-        const char *ack = ack_req ? "true" : "false";
-        if (kind == fr::proto::kKindOtaAccept || kind == fr::proto::kKindOtaReject) {
-            auto a = kind == fr::proto::kKindOtaAccept ? fr::proto::decode_ota_accept(body)
-                                                       : fr::proto::decode_ota_reject(body).transform([](const auto &r) {
-                                                             return fr::proto::OtaAccept{.job_id = r.job_id, .code = r.code};
-                                                         });
-            if (a) {
-                emit(R"({"ev":"ota_tx","kind":"%s","job":"%.*s","code":%u,"ack_req":%s,"sent":%s})",
-                     kind == fr::proto::kKindOtaAccept ? "accept" : "reject", static_cast<int>(a->job_id.size()),
-                     a->job_id.data(), unsigned{a->code}, ack, sent);
-            }
-        } else if (kind == fr::proto::kKindOtaStatus) {
-            if (auto m = fr::proto::decode_ota_status(body)) {
-                emit(R"({"ev":"ota_tx","kind":"status","job":"%.*s","state":%u,"bytes":%u,"ack_req":%s,"sent":%s})",
-                     static_cast<int>(m->job_id.size()), m->job_id.data(), unsigned{m->state},
-                     static_cast<unsigned>(m->bytes), ack, sent);
-            }
-        } else if (kind == fr::proto::kKindOtaResult) {
-            if (auto m = fr::proto::decode_ota_result(body)) {
-                emit(R"({"ev":"ota_tx","kind":"result","job":"%.*s","outcome":%u,"reason":%u,"ack_req":%s,"sent":%s})",
-                     static_cast<int>(m->job_id.size()), m->job_id.data(), unsigned{m->outcome}, unsigned{m->reason},
-                     ack, sent);
-            }
-        }
-        return st;
-    }
-    bool endpoint(fr::ota::Endpoint &out) override
-    {
-        // design c4 §3: the address of the TCP session, the hub's node HTTP port.
-        if (!net_.state().link(LinkKind::tcp).session) {
-            return false;
-        }
-        std::snprintf(out.host, sizeof(out.host), "%s", o_.host.c_str());
-        out.port = o_.hub_http;
-        return true;
-    }
-    void restart() override { dev_.reboot_into_ota(); }
-
-private:
-    fr::net::Net &net_;
-    Device &dev_;
-    const Options &o_;
-};
-
-std::expected<fr::cap::NodeDescribeResult, fr::Err> NodeCap::describe()
-{
-    if (d_.descriptor().empty()) {
-        return std::unexpected(fr::Err::failed);
-    }
-    return fr::cap::NodeDescribeResult{.descriptor = d_.descriptor()};
-}
-
-fr::Status NodeCap::reboot(const fr::cap::NodeRebootArgs &args)
-{
-    d_.reboot(args.bootloader);
-    return {};
-}
-
-fr::Status NodeCap::set_alias(const fr::cap::NodeSetAliasArgs &args)
-{
-    d_.store_alias(args.alias, args.rev);
-    emit(R"({"ev":"set_alias","alias":"%s","rev":%u})", d_.alias().c_str(), d_.alias_rev());
-    return {};
-}
-
-fr::Status NodeCap::get_state()
-{
-    d_.report_board();
-    return {};
-}
-
-fr::Status NodeCap::bind_set(const fr::cap::NodeBindSetArgs &args)
-{
-    const fr::Status st = fr::core::bind_set(d_.net(), args);
-    emit(R"({"ev":"bind_set","slot":%u,"on_port":%u,"on_cls":%u,"to_addr":%u,"to_port":%u,"to_cls":%u,"ok":%s})",
-         unsigned{args.slot}, unsigned{args.on_port}, unsigned{args.on_cls}, unsigned{args.to_addr},
-         unsigned{args.to_port}, unsigned{args.to_cls}, st ? "true" : "false");
-    return st;
-}
-
-fr::Status NodeCap::bind_clear(const fr::cap::NodeBindClearArgs &args)
-{
-    const fr::Status st = fr::core::bind_clear(d_.net(), args);
-    emit(R"({"ev":"bind_clear","slot":%u,"ok":%s})", unsigned{args.slot}, st ? "true" : "false");
-    return st;
-}
-
-std::expected<fr::cap::NodeBindListResult, fr::Err> NodeCap::bind_list()
-{
-    return fr::core::bind_list(d_.net(), d_.bind_buf());
-}
-
-bool parse_hex(std::string_view s, std::span<uint8_t> out)
-{
-    if (s.size() != out.size() * 2) {
-        return false;
-    }
-    for (size_t i = 0; i < out.size(); ++i) {
-        char byte[3] = {s[2 * i], s[2 * i + 1], 0};
-        char *end = nullptr;
-        out[i] = static_cast<uint8_t>(std::strtoul(byte, &end, 16));
-        if (end != byte + 2) {
-            return false;
-        }
-    }
-    return true;
-}
 
 [[noreturn]] void usage(const char *why)
 {
@@ -2059,7 +1429,7 @@ bool parse_hex(std::string_view s, std::span<uint8_t> out)
                          "[--fault health] [--air-dir D [--air-loss PCT] [--air-seed N] [--air-rssi DBM] [--air-channel N] "
                          "[--air-ack-ms N]] [--pin-target UDPPORT] [--pin-listen UDPPORT] [--role node|gateway|fixture] "
                          "[--board B] [--profile P] [--chip N] [--led-kind mono|gpio_low|ws2812] [--led-tap UDPPORT] "
-                         "[--test-pin-tap UDPPORT] [--fixture 1 [--line CH=UDPPORT]...]\n"
+                         "[--test-pin-tap UDPPORT] [--fixture 1 [--line CH=UDPPORT]...] [--net-log 1]\n"
                          "       fr_net_node --make-image PATH [--version V] [--size N] [--board B] [--profile P] "
                          "[--part X] [--chip N] [--min-rev N] [--max-rev N] [--fault 0|1] [--seed N]\n", why);
     std::exit(64);
@@ -2174,6 +1544,8 @@ Options parse(int argc, char **argv)
             o.test_pin_tap = static_cast<uint16_t>(n);
         } else if (k == "--fixture") {
             o.fixture = n != 0;
+        } else if (k == "--net-log") {
+            o.net_log = n != 0;
         } else if (k == "--line") {
             const std::string_view spec = v;
             const size_t eq = spec.find('=');
@@ -2211,79 +1583,6 @@ Options parse(int argc, char **argv)
     return o;
 }
 
-/** The C5 part of `state`: Net's ESP-NOW link and counters, the medium's, the tables. */
-std::string c5_state(const fr::net::Net &net, const FakeAir *air)
-{
-    const fr::net::State s = net.state();
-    const fr::net::LinkState &l = s.link(LinkKind::espnow);
-    size_t bindings = 0;
-    for (const fr::net::BindingSlot &b : net.bindings()) {
-        bindings += b.used ? 1 : 0;
-    }
-    char head[1024];
-    std::snprintf(head, sizeof(head),
-                  R"("air_up":%s,"air_tx":%u,"air_tx_fail":%u,"air_rx":%u,"air_rx_drop":%u,"air_retries":%u,)"
-                  R"("relay_seeded":%u,"relay_relayed":%u,"relay_cancelled":%u,"relay_dropped":%u,)"
-                  R"("bcast_delivered":%u,"bcast_dup":%u,"bcast_old":%u,"bcast_watermark":%u,)"
-                  R"("bind_fired":%u,"bind_failed":%u,"bind_rtt_p50_us":%u,"bindings":%zu,"directory":%zu,"neighbors":%zu,)"
-                  R"("nodes":{"delivered":%u,"dup":%u,"old":%u,"sent":%u,"via_espnow":%u,"via_hub":%u,"via_flood":%u,"failed":%u,"resolves":%u})",
-                  l.up ? "true" : "false", l.tx, l.tx_fail, l.rx, l.rx_drop, l.retries, s.relay.seeded, s.relay.relayed,
-                  s.relay.cancelled, s.relay.dropped, s.bcast.delivered, s.bcast.dup, s.bcast.old, s.bcast.watermark,
-                  s.bindings.fired, s.bindings.failed, s.bindings.rtt_p50_us, bindings, net.directory().count,
-                  net.neighbors().count, s.nodes.delivered, s.nodes.dup, s.nodes.old, s.nodes.sent, s.nodes.via_espnow,
-                  s.nodes.via_hub, s.nodes.via_flood, s.nodes.failed, s.nodes.resolves);
-    std::string out = head;
-    if (air != nullptr) {
-        const FakeAir::Counters &c = air->counters();
-        const fr::net::air::SchedStats &d = air->scheduler().stats();
-        char medium[512];
-        std::snprintf(medium, sizeof(medium),
-                      R"(,"medium":{"tx":%u,"rx":%u,"rx_bad":%u,"lost":%u,"acks":%u,"sent":%u,"failed":%u,"link_retries":%u,"refused":%u,"peers":%zu})",
-                      c.tx, c.rx, c.rx_bad, c.lost, c.acks, d.sent, d.failed, d.retries, d.refused,
-                      air->scheduler().peers());
-        out += medium;
-    }
-    out += R"(,"msgs":{)";
-    for (const fr::net::MsgStats::Topic &t : net.msg_stats().topics) {
-        if (t.name[0] != '\0') {
-            out += "\"" + json_text(t.name) + "\":" + std::to_string(t.n) + ",";
-        }
-    }
-    out += R"("other":)" + std::to_string(net.msg_stats().other) + "}";
-    return out;
-}
-
-/** The C6 part of `state` (design c6 D21-D23): `net loss` and its counts, exec_at's table, the receive queue. */
-std::string c6_state(const fr::net::State &s)
-{
-    const char *dir = s.loss_dir == fr::net::LossDir::tx ? "tx" : s.loss_dir == fr::net::LossDir::rx ? "rx" : "both";
-    char out[512];
-    std::snprintf(out, sizeof(out),
-                  R"("loss_pct":%u,"loss_dir":"%s","loss_tx":%u,"loss_rx":%u,"cmds_refused":%u,"cmds_scheduled":%u,)"
-                  R"("exec_late":%u,"exec_cancelled":%u,"exec_late_us_max":%u,"rx_queue_us_max":%u)",
-                  unsigned{s.loss_pct}, dir, s.loss_tx, s.loss_rx, s.cmds_refused, s.cmds_scheduled, s.exec_late,
-                  s.exec_cancelled, s.exec_late_us_max, s.rx_queue_us_max);
-    return out;
-}
-
-/** `state`: Net's view, the C5 and C6 parts, and (M2-C1) fr_ota's health bits and the hub session. */
-void print_state(const fr::net::Net &net, const FakeAir *air, uint32_t health)
-{
-    const fr::net::State s = net.state();
-    const auto &tcp = s.link(LinkKind::tcp);
-    const auto &udp = s.link(LinkKind::udp);
-    const auto &ser = s.link(LinkKind::serial);
-    emit(R"({"ev":"state","serial_session":%s,"serial_tx":%u,"serial_rx":%u,"session":%s,"udp_ok":%s,"time_synced":%s,"hub_epoch":%u,"tcp_tx":%u,"tcp_rx":%u,"udp_tx":%u,)"
-         R"("udp_retries":%u,"rx_drop":%u,"cmds":%u,"dup":%u,"old":%u,"cached_replies":%u,"sessions_lost":%u,)"
-         R"("events_dropped":%u,"delivery_failed":%u,"udp_blocked":%s,"ip_blocked":%s,"hook_drops":%u,%s,%s,)"
-         R"("health":%u,"hub_session":%s})",
-         ser.session ? "true" : "false", ser.tx, ser.rx, tcp.session ? "true" : "false", udp.udp_ok ? "true" : "false", s.time_synced() ? "true" : "false", unsigned{s.hub_epoch},
-         tcp.tx, tcp.rx, udp.tx, udp.retries, tcp.rx_drop + udp.rx_drop, s.cmds, s.dup, s.old, s.cached_replies,
-         s.sessions_lost, s.events_dropped, s.delivery_failed, s.udp_blocked ? "true" : "false",
-         s.ip_blocked ? "true" : "false", s.hook_drops, c5_state(net, air).c_str(), c6_state(s).c_str(), health,
-         s.hub_link() ? "true" : "false");
-}
-
 /** `lines`: the virtual fixture's lines as they read now. */
 void print_lines(const std::vector<std::unique_ptr<FakeFixtureLine>> &lines)
 {
@@ -2297,83 +1596,147 @@ void print_lines(const std::vector<std::unique_ptr<FakeFixtureLine>> &lines)
     emit(R"({"ev":"lines","items":[%s]})", items.c_str());
 }
 
+
 /**
- * The id of a serial command-channel line, `#<1-8 digits> <line>` (fr_diag split_id), or nullopt: any other stdin
- * line is this tool's own command.
+ * NodeLinks over this process's own links (design m2-c2 D2): its blocking TcpLink and UdpLink, the stdin/stdout
+ * SerialLink, FakeAir and the test pin's wires. Its `wifi_down` closes the TCP socket (the hub sees a FIN), as
+ * fr_net_node always did; the fleet's never does (D7).
  */
-std::optional<std::string_view> serial_diag_id(std::string_view cmd)
+class NetNodeLinks final : public frsim::NodeLinks
 {
-    if (cmd.size() < 3 || cmd.front() != '#') {
-        return std::nullopt;
+public:
+    NetNodeLinks(HostCore &core, const Options &o, fr::net::Net &net, std::optional<TcpLink> &tcp,
+                 std::optional<UdpLink> &udp, SerialLink &serial, std::optional<FakeAir> &air)
+        : core_(core), o_(o), net_(net), tcp_(tcp), udp_(udp), serial_(serial), air_(air), pin_target_(o.pin_target),
+          test_pin_tap_(o.test_pin_tap)
+    {
     }
-    size_t n = 1;
-    while (n < cmd.size() && cmd[n] >= '0' && cmd[n] <= '9') {
-        ++n;
-    }
-    if (n == 1 || n > 9 || n >= cmd.size() || cmd[n] != ' ') {
-        return std::nullopt;
-    }
-    return cmd.substr(1, n - 1);
-}
 
-/** `msg <dst|broadcast> <topic> [data…]`: fr::msg::send from stdin. */
-void stdin_msg(fr::net::Net &net, std::string_view args, bool reliable)
-{
-    auto word = [&args]() {
-        while (!args.empty() && args.front() == ' ') {
-            args.remove_prefix(1);
+    // As `net wifi_down` on target: TCP and UDP go, ESP-NOW and serial stay; 0 ends it (stdin and fr.diag.exec).
+    void wifi_down(uint32_t secs) override
+    {
+        if (secs == 0) {
+            if (wifi_back_at_ != kNever) {
+                wifi_back_at_ = kNever;
+                set_wifi(true);
+            }
+            return;
         }
-        const size_t sp = std::min(args.find(' '), args.size());
-        const std::string_view w = args.substr(0, sp);
-        args.remove_prefix(sp);
-        return w;
-    };
-    const std::string_view dst_text = word();
-    const std::string_view topic = word();
-    if (!args.empty() && args.front() == ' ') {
-        args.remove_prefix(1);
+        if (wifi_back_at_ == kNever) {
+            set_wifi(false);
+        }
+        wifi_back_at_ = core_.now() + static_cast<TimeUs>(secs) * 1'000'000;
     }
-    const uint16_t dst = dst_text == "broadcast"
-                             ? fr::msg::kBroadcast
-                             : static_cast<uint16_t>(std::strtoul(std::string(dst_text).c_str(), nullptr, 0));
-    const fr::Status st = fr::core::msg_send(
-        net, dst, topic, std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(args.data()), args.size()), reliable);
-    emit(R"({"ev":"msg_sent","dst":%u,"topic":"%s","ok":%s,"error":"%s"})", unsigned{dst}, json_text(topic).c_str(),
-         st ? "true" : "false", st ? "" : fr::err_name(st.error()));
-}
+    void tcp_enable(bool on) override
+    {
+        if (tcp_) {
+            tcp_->enable(on);
+        }
+    }
+    void air_loss(uint32_t pct) override
+    {
+        if (air_) {
+            air_->set_loss(pct);
+        }
+    }
+    bool air_counters(frsim::AirCounters &out) const override
+    {
+        if (!air_) {
+            return false;
+        }
+        const FakeAir::Counters &c = air_->counters();
+        const fr::net::air::SchedStats &d = air_->scheduler().stats();
+        out = {.tx = d.sent,
+               .tx_fail = d.failed,
+               .retries = d.retries,
+               .refused = d.refused,
+               .rx = c.rx,
+               .rx_bad = c.rx_bad,
+               .rx_lost = c.lost,
+               .peers = static_cast<uint32_t>(air_->scheduler().peers()),
+               .datagrams = c.tx,
+               .acks = c.acks};
+        return true;
+    }
+    fr::net::LinkInfo wifi() const override
+    {
+        if (wifi_up_ && o_.ip()) {
+            return {.wifi_up = true, .channel = o_.air_channel, .bssid = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60}, .rssi = -48};
+        }
+        return {};
+    }
+    void serial_host(bool present) override { serial_.set_host(present); }
+    void hub_mute(bool on) override { serial_.set_mute(on); }
+    bool test_pin_wired() const override { return pin_target_.on() || test_pin_tap_.on(); }
+    void test_pin_pulse(uint32_t us) override
+    {
+        // One wire, two ends: the pulse is `<us>` on each (low now, released `us` later).
+        const std::string text = std::to_string(us);
+        pin_target_.send(text);
+        test_pin_tap_.send(text);
+    }
 
-/** `neighbors`: the neighbour table. */
-void print_neighbors(const fr::net::Net &net, TimeUs now)
-{
-    const fr::net::Neighbors nb = net.neighbors();
-    std::string items;
-    for (size_t i = 0; i < nb.count && i < nb.items.size(); ++i) {
-        const fr::net::Neighbor &e = nb.items[i];
-        char one[192];
-        std::snprintf(one, sizeof(one), R"(%s{"mac":"%s","addr":%u,"rssi":%d,"age_ms":%lld,"ack_ok":%u,"ack_fail":%u})",
-                      i == 0 ? "" : ",", ota_fake::hex(e.mac).c_str(), unsigned{e.addr}, int{e.rssi},
-                      static_cast<long long>((now - e.last_heard) / 1000), e.ack_ok, e.ack_fail);
-        items += one;
+    /** When `wifi_down` ends (kNever: not down). */
+    TimeUs wifi_back_at() const { return wifi_back_at_; }
+    /** The main loop, each round: Wi-Fi back once `wifi_down` ran out. */
+    void poll(TimeUs now)
+    {
+        if (wifi_back_at_ != kNever && now >= wifi_back_at_) {
+            wifi_back_at_ = kNever;
+            set_wifi(true);
+        }
     }
-    emit(R"({"ev":"neighbors","items":[%s]})", items.c_str());
-}
 
-/** `directory`: the directory as NET/DIRECTORY (or a RESOLVE answer) left it, by addr. */
-void print_directory(const fr::net::Net &net)
-{
-    const fr::net::Directory &d = net.directory();
-    const auto end = d.entries.begin() + static_cast<std::ptrdiff_t>(std::min(d.count, d.entries.size()));
-    std::vector<fr::net::DirEntry> sorted(d.entries.begin(), end);
-    std::sort(sorted.begin(), sorted.end(),
-              [](const fr::net::DirEntry &a, const fr::net::DirEntry &b) { return a.addr < b.addr; });
-    std::string items;
-    for (const fr::net::DirEntry &e : sorted) {
-        char one[64];
-        std::snprintf(one, sizeof(one), R"(%s{"addr":%u,"mac":"%s"})", items.empty() ? "" : ",", unsigned{e.addr},
-                      ota_fake::hex(e.mac).c_str());
-        items += one;
+private:
+    void set_wifi(bool up)
+    {
+        tcp_->enable(up);
+        udp_->enable(up);
+        wifi_up_ = up;
+        fr::net::Net *net = &net_;
+        core_.post([net] { net->link_changed(LinkKind::udp); });
+        emit(R"({"ev":"wifi","up":%s})", up ? "true" : "false");
     }
-    emit(R"({"ev":"directory","items":[%s]})", items.c_str());
+
+    HostCore &core_;
+    const Options &o_;
+    fr::net::Net &net_;
+    std::optional<TcpLink> &tcp_;
+    std::optional<UdpLink> &udp_;
+    SerialLink &serial_;
+    std::optional<FakeAir> &air_;
+    UdpOut pin_target_;
+    UdpOut test_pin_tap_;
+    bool wifi_up_ = true;
+    TimeUs wifi_back_at_ = kNever;  // `wifi_down` ends then
+};
+
+/** The kit's NodeSpec from the options (design m2-c2 D2): what Device, NodeDiag and NodeOtaHost read. */
+frsim::NodeSpec spec_of(const Options &o)
+{
+    frsim::NodeSpec s;
+    s.alias = o.alias;
+    s.mac = o.mac;
+    s.addr = o.addr;
+    s.net = o.net;
+    s.epoch = o.epoch;
+    s.alias_rev = o.alias_rev;
+    s.hb_ms = o.hb_ms;
+    s.health_ms = o.health_ms;
+    s.usb = o.serial;
+    s.profile = o.profile;
+    s.board = o.board;
+    s.chip = o.chip;
+    s.role = o.role;
+    s.fw = o.fw;
+    s.version = o.version;
+    s.radio.channel = o.air_channel;
+    s.ip = o.ip();
+    s.host = o.host;
+    s.hub_http = o.hub_http;
+    s.fault_health = o.fault_health;
+    s.net_log = o.net_log;
+    return s;
 }
 
 /** `--make-image PATH ...`: an image this node's CHECK accepts, for the hub's interop tests. */
@@ -2417,7 +1780,7 @@ int make_image_main(int argc, char **argv)
 }
 
 /** The process's node, for fr::core::link_info(). */
-Device *g_node = nullptr;
+frsim::Device *g_node = nullptr;
 
 }  // namespace
 
@@ -2454,10 +1817,11 @@ int main(int argc, char **argv)
     } else {
         std::copy(o.fw.begin(), o.fw.end(), running.begin());
     }
-    ota_fake::MemFlash flash(o.ota_dir, running, o.version);
+    ota_fake::MemFlash flash(o.ota_dir, running, o.version, g_out);
     std::copy_n(flash.state().running.begin(), o.fw.size(), o.fw.begin());
+    const frsim::NodeSpec spec = spec_of(o);
     ota_fake::MemStore store(o.ota_dir);
-    ota_fake::HttpFetch fetch;
+    ota_fake::HttpFetch fetch(g_out);
     ota_fake::HostWorker worker;
     WiredButton button_src(core);
     // The status LED as the profile has it: s3k-fixture's is a WS2812 capped at 32, a WS2812 pad's (c6-pad,
@@ -2467,7 +1831,7 @@ int main(int argc, char **argv)
     PadLight light(core, led_kind, o.led_tap);
     fr::ButtonService button(button_src, fr::cap::ButtonConfig{});
     fr::LedService led(light, fr::cap::LedConfig{.max_brightness = max_brightness});
-    NodeDiag diag(core, o);
+    frsim::NodeDiag diag(core, spec, g_out);
     // The virtual fixture (design m2-c1-hil §4 S2): S1's FixtureService on a fake line per channel, as the
     // generated glue builds them on target.
     std::vector<std::unique_ptr<FakeFixtureLine>> lines;
@@ -2489,7 +1853,7 @@ int main(int argc, char **argv)
     }
     // fr.diag on 241 is a system port, outside the descriptor, as on target.
     ports.push_back({241, "diag", &diag, true});
-    Device node(core, o, ports);
+    frsim::Device node(core, spec, ports, g_out);
     ports[0].cap = &node.node_cap();
     g_node = &node;
 
@@ -2497,10 +1861,9 @@ int main(int argc, char **argv)
     cfg.heartbeat_ms = o.hb_ms;
     fr::net::Net net(core, node, cfg);
     node.set_net(net);
-    diag.bind(net);
     // nvs:fr_dir and nvs:fr_bind (design c5 §3): in --ota-dir across boots, written through the worker fake.
-    FileBlob dir_blob(o.ota_dir.empty() ? std::string() : o.ota_dir + "/fr_dir.bin");
-    FileBlob bind_blob(o.ota_dir.empty() ? std::string() : o.ota_dir + "/fr_bind.bin");
+    frsim::FileBlob dir_blob(o.ota_dir.empty() ? std::string() : o.ota_dir + "/fr_dir.bin");
+    frsim::FileBlob bind_blob(o.ota_dir.empty() ? std::string() : o.ota_dir + "/fr_bind.bin");
     fr::core::NetStores stores(core, worker, dir_blob, bind_blob);
     net.attach_stores(stores.directory(), stores.bindings());
     for (fr::PortEntry &p : ports) {
@@ -2558,13 +1921,23 @@ int main(int argc, char **argv)
         air->bind(net);
         net.attach_air(*air);
         node.set_air(true);
-        diag.bind_air(&*air);
         core.post([&net] { net.link_changed(LinkKind::espnow); });  // as the driver posts it once up
     }
+    NetNodeLinks links(core, o, net, tcp, udp, serial, air);
+    node.set_links(links);
+    diag.bind(net, links, ports);
+    // The node's ESP_LOG lines (design m2-c2 D20): on the USB line with --serial; with --net-log also LOG over TCP.
+    frsim::KitLogs logs(core, o.serial ? frsim::KitLogs::SerialOut([](std::string_view l) { g_out.line(l); })
+                                       : frsim::KitLogs::SerialOut());
+    if (o.net_log) {
+        logs.attach(net);
+        flash.set_log([&logs](char level, std::string_view tag, std::string_view text) { logs.log(level, tag, text); });
+    }
 
-    // fr_core's OTA wiring (design c4 §3) on the fake sink.
+    // fr_core's OTA wiring (design c4 §3) on the fake sink; its OTA decision lines through the node's log source.
     fr::ota::Ota ota;
-    NodeOtaHost ota_host(net, node, o);
+    frsim::NodeOtaHost ota_host(net, node, spec, g_out);
+    ota_host.set_logs(&logs);
     fr::ota::Deps deps;
     deps.core = &core;
     deps.worker = &worker;
@@ -2602,6 +1975,12 @@ int main(int argc, char **argv)
     ota.health_set(fr::ota::kHealthCore | fr::ota::kHealthCaps);
     emit(R"({"ev":"started","descriptor_hash":%u,"fw":"%s","version":"%s","pending":%s})", node.hello_info().descriptor_hash,
          ota_fake::hex(flash.state().running).c_str(), flash.state().version.c_str(), ota.pending_verify() ? "true" : "false");
+    if (o.net_log &&
+        !logs.start(spec, flash.state().running, node.hello_info().caps | fr::net::kCapNetLog, o.ip(),
+                    flash.state().slot == 0 ? "ota_0" : "ota_1", flash.running().crashed ? "PANIC" : "POWERON")) {
+        std::fprintf(stderr, "fr_net_node: no timer for the log source\n");
+        return 1;
+    }
     // The T-LAT wire in (design c6 §6 S6): a datagram is another node's test pin pulsing this node's boot input;
     // M2-C1: or a fixture's open-drain line holding it down (`level 0|1`).
     int pin_fd = -1;
@@ -2614,36 +1993,22 @@ int main(int argc, char **argv)
         }
         emit(R"({"ev":"pin_listen","port":%u})", unsigned{port});
     }
+    // The stdin table (sim/commands.cpp), on this node.
+    frsim::NodeCtx ctx{.spec = spec,
+                       .core = core,
+                       .net = net,
+                       .links = links,
+                       .out = g_out,
+                       .device = node,
+                       .diag = diag,
+                       .ota = &ota,
+                       .button = o.fixture ? nullptr : &button,
+                       .logs = &logs};
 
     std::string line;
     bool quit = false;
     bool udp_ok = false;
     bool net_up = false;
-    TimeUs wifi_back_at = kNever;  // `wifi_down` ends then
-    auto set_wifi = [&](bool up) {
-        tcp->enable(up);
-        udp->enable(up);
-        node.set_wifi(up);
-        core.post([&net] { net.link_changed(LinkKind::udp); });
-        emit(R"({"ev":"wifi","up":%s})", up ? "true" : "false");
-    };
-    // As `net wifi_down` on target: TCP and UDP go, ESP-NOW and serial stay; 0 ends it (stdin and fr.diag.exec).
-    auto wifi_down = [&](uint32_t secs) {
-        if (secs == 0) {
-            if (wifi_back_at != kNever) {
-                wifi_back_at = kNever;
-                set_wifi(true);
-            }
-            return;
-        }
-        if (wifi_back_at == kNever) {
-            set_wifi(false);
-        }
-        wifi_back_at = core.now() + static_cast<TimeUs>(secs) * 1'000'000;
-    };
-    if (o.ip()) {
-        diag.on_wifi_down(wifi_down);  // serial only, `net wifi_down` answers unsupported, as with the radio off
-    }
     std::vector<pollfd> fds;
     while (!quit) {
         if (tcp) {
@@ -2657,10 +2022,7 @@ int main(int argc, char **argv)
         stores.retry();
         light.tap(core.now());
         light.log_sent();
-        if (wifi_back_at != kNever && core.now() >= wifi_back_at) {
-            wifi_back_at = kNever;
-            set_wifi(true);
-        }
+        links.poll(core.now());
         if (!net_up && tcp && tcp->fd() >= 0) {
             net_up = true;
             ota.health_set(fr::ota::kHealthNet);  // NET: the network is there (Wi-Fi up on target)
@@ -2688,7 +2050,7 @@ int main(int argc, char **argv)
         }
         const TimeUs now = core.now();
         const TimeUs next = worker.idle() ? std::min({core.next_deadline(), tcp ? tcp->retry_at() : kNever, node.reboot_at(),
-                                                      now + 100'000, air ? air->next_deadline() : kNever, wifi_back_at})
+                                                      now + 100'000, air ? air->next_deadline() : kNever, links.wifi_back_at()})
                                           : now;
         // The driver's timers run in microseconds (link retries 2 and 4 ms): poll() rounds up to the ms.
         const int timeout_ms = static_cast<int>(std::max<TimeUs>(0, (next - now + 999) / 1000));
@@ -2740,85 +2102,12 @@ int main(int argc, char **argv)
             while ((nl = line.find('\n')) != std::string::npos) {
                 const std::string cmd = line.substr(0, nl);
                 line.erase(0, nl + 1);
-                const uint32_t arg = static_cast<uint32_t>(std::strtoul(cmd.c_str() + std::min(cmd.find(' '), cmd.size()), nullptr, 10));
                 if (cmd.starts_with(fr::wire::kLinePrefix)) {
                     serial.on_line(cmd);
-                } else if (const std::optional<std::string_view> id = serial_diag_id(cmd)) {
+                } else if (const std::optional<std::string_view> id = frsim::serial_diag_id(cmd)) {
                     // fr_diag's serial command channel (`#<id> <line>` in, `#<id> <json>` out on the USB line, as
                     // the hub's diag_exec writes it to a port it holds open): the same answers as fr.diag.exec.
-                    const std::string_view rest = std::string_view(cmd).substr(id->size() + 2);
-                    const auto r = diag.exec({.line = rest});
-                    const std::string_view json = r ? r->json : std::string_view(R"({"ok":false,"error":"failed"})");
-                    std::printf("#%.*s %.*s\n", static_cast<int>(id->size()), id->data(), static_cast<int>(json.size()), json.data());
-                    std::fflush(stdout);
-                } else if (cmd == "state") {
-                    print_state(net, air ? &*air : nullptr, ota.health());
-                } else if (cmd.starts_with("udp_block")) {
-                    net.udp_block(arg);
-                } else if (cmd.starts_with("drop_hub_link")) {
-                    net.drop_hub_link(arg);
-                } else if (cmd.starts_with("ip_block")) {
-                    net.ip_block(arg);
-                } else if (cmd.starts_with("tcp ")) {
-                    if (tcp) {
-                        tcp->enable(arg != 0);
-                    }
-                } else if (cmd.starts_with("usb ")) {
-                    serial.set_host(arg != 0);
-                } else if (cmd.starts_with("hub_mute ")) {
-                    serial.set_mute(arg != 0);
-                } else if (cmd.starts_with("wifi_down")) {
-                    if (o.ip()) {
-                        wifi_down(arg);
-                    }
-                } else if (cmd.starts_with("loss ")) {
-                    // `loss <pct> <s> [both|tx|rx]` (design c6 D21): from here at once, as from the serial channel.
-                    std::string_view rest = std::string_view(cmd).substr(5);
-                    unsigned pct = 0;
-                    unsigned secs = 0;
-                    char dir[8] = "both";
-                    const int got = std::sscanf(std::string(rest).c_str(), "%u %u %7s", &pct, &secs, dir);
-                    const std::string_view d = dir;
-                    const bool ok = got >= 2 && pct <= 100 && (d == "both" || d == "tx" || d == "rx");
-                    if (ok) {
-                        using fr::net::LossDir;
-                        const LossDir way = d == "tx" ? LossDir::tx : d == "rx" ? LossDir::rx : LossDir::both;
-                        net.loss(static_cast<uint8_t>(pct), secs, way);
-                    }
-                    emit(R"({"ev":"loss","ok":%s,"pct":%u,"s":%u,"dir":"%s"})", ok ? "true" : "false", pct, secs, dir);
-                } else if (cmd.starts_with("air_loss")) {
-                    if (air) {
-                        air->set_loss(arg);
-                    }
-                } else if (cmd.starts_with("msg_reliable ")) {
-                    stdin_msg(net, std::string_view(cmd).substr(13), true);
-                } else if (cmd.starts_with("msg ")) {
-                    stdin_msg(net, std::string_view(cmd).substr(4), false);
-                } else if (cmd.starts_with("bind ")) {
-                    std::string_view h = std::string_view(cmd).substr(5);
-                    std::vector<uint8_t> bytes(h.size() / 2);
-                    const bool hex_ok = h.size() % 2 == 0 && ota_fake::unhex(h, bytes);
-                    const fr::Status st = hex_ok ? net.set_binding(bytes) : fr::Status{std::unexpected(fr::Err::invalid_args)};
-                    emit(R"({"ev":"bind","ok":%s})", st ? "true" : "false");
-                } else if (cmd.starts_with("unbind ")) {
-                    const bool all = cmd.ends_with(" all");
-                    const fr::Status st = net.clear_binding(all ? fr::net::kBindSlotAll : static_cast<uint8_t>(arg));
-                    emit(R"({"ev":"unbind","ok":%s})", st ? "true" : "false");
-                } else if (cmd == "bindings") {
-                    const auto list = net.encode_bindings(node.bind_buf());
-                    emit(R"({"ev":"bindings","ok":%s,"hex":"%s"})", list ? "true" : "false",
-                         list ? ota_fake::hex(*list).c_str() : "");
-                } else if (cmd == "neighbors") {
-                    print_neighbors(net, core.now());
-                } else if (cmd == "directory") {
-                    print_directory(net);
-                } else if (cmd.starts_with("inject ")) {
-                    // A gesture on the boot button, as the hub's input_simulate: its events, and the bindings
-                    // they fire, go through Net like a real press (T-NN without a hub). The fixture has none.
-                    fr::cap::ButtonGesture g{};
-                    const bool known = !o.fixture && fr::cap::from_name(std::string_view(cmd).substr(7), g);
-                    const fr::Status st = known ? button.inject({.gesture = g}) : fr::Status{std::unexpected(fr::Err::invalid_args)};
-                    emit(R"({"ev":"inject","ok":%s})", st ? "true" : "false");
+                    g_out.line(frsim::serial_diag_answer(diag, *id, cmd));
                 } else if (cmd.starts_with("line ")) {
                     // `line <ch> <port>`: a driving fixture line's wire to a pad started after the fixture.
                     char name[16] = "";
@@ -2832,8 +2121,6 @@ int main(int argc, char **argv)
                     emit(R"({"ev":"line","name":"%s","port":%u,"ok":%s})", name, port, ok ? "true" : "false");
                 } else if (cmd == "lines") {
                     print_lines(lines);
-                } else if (cmd == "bye") {
-                    net.bye(fr::net::kByeShutdown);
                 } else if (cmd == "crash") {
                     // A panic: no BYE, nothing flushed but what is already written; the next start's
                     // reset reason says so (a rollback's `crash`).
@@ -2842,11 +2129,14 @@ int main(int argc, char **argv)
                     std::_Exit(3);
                 } else if (cmd == "quit") {
                     quit = true;
+                } else {
+                    frsim::Commands::run(ctx, cmd);  // the shared table; any other line is ignored
                 }
             }
         }
     }
-    print_state(net, air ? &*air : nullptr, ota.health());
+    frsim::AirCounters c;
+    frsim::print_state(g_out, net, links.air_counters(c) ? &c : nullptr, ota.health());
     if (pin_fd >= 0) {
         ::close(pin_fd);
     }

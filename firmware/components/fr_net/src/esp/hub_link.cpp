@@ -209,6 +209,8 @@ public:
     bool udp_up() const { return udp_up_.load(std::memory_order_acquire); }
     fr::Status tcp_send(std::span<const uint8_t> env);
     fr::Status udp_send(std::span<const uint8_t> env);
+    /** The TX FIFO's fill: bytes not yet handed to lwIP (Link::queued; design m2-c2 D20, LOG waits for 0). */
+    size_t tcp_queued() const { return tx_.fill(); }
     void request_drop(DropReason why)
     {
         drop_why_.store(static_cast<uint8_t>(why), std::memory_order_relaxed);
@@ -730,6 +732,7 @@ public:
     fr::Status send(std::span<const uint8_t> envelope) override { return s_hub.tcp_send(envelope); }
     void drop(DropReason why) override { s_hub.request_drop(why); }
     void hold(bool on) override { s_hub.request_hold(on); }
+    size_t queued() const override { return s_hub.tcp_queued(); }
 };
 
 class UdpLink final : public Link

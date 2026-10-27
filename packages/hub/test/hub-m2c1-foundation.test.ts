@@ -40,10 +40,11 @@ describe('M2-C1 ops on a hub without a fixture module', () => {
     });
   });
 
-  it('keeps test_run tier sim reserved (NOT_FOUND until M2-C2); hil and args reach the runner', async () => {
-    expect(await refusal('test_run', { source_dir: '/x', tier: 'sim' })).toMatchObject({ code: 'NOT_FOUND', details: { not_implemented: 'test_run tier sim' } });
+  it('lets test_run tiers sim and hil, and args, reach the runner', async () => {
     // Past the tier gate: the refusal is the runner's own (a source_dir that is no checkout), not a placeholder's.
+    // Tier sim is no longer reserved (design m2-c2 D14).
     for (const input of [
+      { source_dir: '/x', tier: 'sim' },
       { source_dir: '/x', tier: 'hil' },
       { source_dir: '/x', tier: 'target', suite: 't-lat', args: ['--rounds', '3'] },
     ]) {

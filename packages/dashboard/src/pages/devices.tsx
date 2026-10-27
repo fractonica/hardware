@@ -1,6 +1,8 @@
 // Devices (`#/`, spec 08 §8.9): the online/offline grid by alias, with board, firmware, RSSI, uptime and
 // the last event of each, and identify / rename. A tile flashes on input (11.5 step 3). device_list is
-// refetched on device.*, registry.* and port.* events, and every 10 s.
+// refetched on device.*, registry.* and port.* events, and every 10 s; it is the grid's only query (design m2-c2
+// D16): each row carries what its tile shows of the link (`live`), so a device.* event at 30 nodes costs one
+// device_list, not 30 device_gets.
 
 import { Link } from '@tanstack/react-router';
 

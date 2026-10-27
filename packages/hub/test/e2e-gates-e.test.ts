@@ -1826,7 +1826,7 @@ describe('tests/e2e/run.ts --tier hil', () => {
       node([join('tests', 'e2e', 'run.ts'), '--list'], env),
       node([join('tests', 'e2e', 'run.ts'), '--tier', 'hil', '--list'], env),
       node([join('tests', 'e2e', 'run.ts'), 't-hil', '--json'], env),
-      node([join('tests', 'e2e', 'run.ts'), '--tier', 'sim', '--json'], env),
+      node([join('tests', 'e2e', 'run.ts'), '--tier', 'sim', 't2-nope', '--json'], env),
       node([join('tests', 'e2e', 't-hil.ts'), '--list'], env),
       node([join('tests', 'e2e', 't-hil.ts'), '--help'], env),
     ]);
@@ -1836,8 +1836,9 @@ describe('tests/e2e/run.ts --tier hil', () => {
     expect(hil).toMatchObject({ code: 0, out: 't-hil.ts\tT-HIL\t{"fixture":true}\n' });
     expect(wrong.code).toBe(3);
     expect(wrong.err).toContain('t-hil is a hil gate: run it with --tier hil');
+    // Tier sim runs the scenarios (design m2-c2 D14); an unknown one is refused before anything starts.
     expect(sim.code).toBe(3);
-    expect(sim.err).toContain('the sim tier comes with M2-C2');
+    expect(sim.err).toContain('no sim scenario t2-nope');
     expect(list).toMatchObject({ code: 0, out: 't-hil.ts\tT-HIL\t{"fixture":true}\n' });
     expect(help.code).toBe(0);
     for (const flag of ['--devices', '--phase wiring|fit|buttons|leds|test_pin|all', '--rounds 10', '--any-fixture-fw', 'FR_T_HIL_ARGS', 'a hil gate: bench_get is checked first']) {

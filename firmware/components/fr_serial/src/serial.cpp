@@ -7,6 +7,7 @@
 
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "fr/serial_line.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -29,6 +30,18 @@ constexpr size_t kLogRingBytes = 4096;
 constexpr size_t kMaxRecord = wire::kMaxLine + 1;
 /** Longest log line kept whole; the ready banner with long alias/board/version strings is ~330. */
 constexpr size_t kLogLine = 384;
+static_assert(kLogLine == kLogLineMax + 1);
+// The net log ring (design m2-c2 D20): 4 KB on a radio image, a token one on the radio-off fixture, which never
+// enables it. A record is `level u8 | pushed_ms u32 LE | tag_len u8 | tag | text`.
+#if defined(CONFIG_FR_NET_RADIO) && CONFIG_FR_NET_RADIO
+constexpr size_t kNetRingBytes = 4096;
+constexpr size_t kNetJoinSlots = 3;  // tasks with a line half printed at once (the Wi-Fi blob's, a few others)
+#else
+constexpr size_t kNetRingBytes = 64;
+constexpr size_t kNetJoinSlots = 1;
+#endif
+constexpr size_t kNetTagMax = 16;  // LOG.LINE.tag
+constexpr size_t kNetHead = 6;
 /** Largest ENV body write_frame encodes: a bulk envelope (spec 05 §5.6 MTU), whose line still fits kMaxLine. */
 constexpr size_t kMaxFrameBody = 1470;
 static_assert(wire::kLinePrefix.size() + wire::base64url_len(kMaxFrameBody + 3) <= wire::kMaxLine);
@@ -49,15 +62,27 @@ class LineRing
 public:
     bool push(std::string_view line, bool newline)
     {
-        size_t n = line.size() + (newline ? 1 : 0);
+        const std::string_view parts[] = {line, newline ? std::string_view("\n") : std::string_view()};
+        return push(parts);
+    }
+
+    /** One record of `parts` back to back; `was_empty` says whether the ring held nothing before it. */
+    bool push(std::span<const std::string_view> parts, bool *was_empty = nullptr)
+    {
+        size_t n = 0;
+        for (std::string_view p : parts) {
+            n += p.size();
+        }
         bool ok = false;
         portENTER_CRITICAL_SAFE(&mux_);
+        if (was_empty != nullptr) {
+            *was_empty = used_ == 0;
+        }
         if (n <= kMaxRecord && used_ + 2 + n <= kRingBytes) {
             put_byte(static_cast<char>(n & 0xFF));
             put_byte(static_cast<char>(n >> 8));
-            put(line.data(), line.size());
-            if (newline) {
-                put_byte('\n');
+            for (std::string_view p : parts) {
+                put(p.data(), p.size());
             }
             ok = true;
         } else {
@@ -68,7 +93,10 @@ public:
     }
 
     /** Moves the oldest record into `out` (kMaxRecord bytes); returns its length, 0 when empty. */
-    size_t pop(char *out)
+    size_t pop(char *out) { return pop(out, kMaxRecord); }
+
+    /** The same into `cap` bytes: a longer record's rest is dropped (it leaves the ring whole). */
+    size_t pop(char *out, size_t cap)
     {
         size_t n = 0;
         portENTER_CRITICAL_SAFE(&mux_);
@@ -77,14 +105,16 @@ public:
             n |= static_cast<size_t>(static_cast<uint8_t>(take_byte())) << 8;
             for (size_t i = 0; i < n;) {
                 size_t chunk = std::min(n - i, kRingBytes - tail_);
-                std::memcpy(out + i, buf_ + tail_, chunk);
+                if (i < cap) {
+                    std::memcpy(out + i, buf_ + tail_, std::min(chunk, cap - i));
+                }
                 tail_ = (tail_ + chunk) % kRingBytes;
                 used_ -= chunk;
                 i += chunk;
             }
         }
         portEXIT_CRITICAL_SAFE(&mux_);
-        return n;
+        return std::min(n, cap);
     }
 
     /** Counts a line that never reached push() (it could not be encoded). */
@@ -130,6 +160,13 @@ private:
 
 LineRing<kFrameRingBytes> s_frames;
 LineRing<kLogRingBytes> s_logs;
+// The net log ring (design m2-c2 D20): off until enable_net_logs().
+LineRing<kNetRingBytes> s_net_logs;
+LineJoiner<kNetJoinSlots, kLogLineMax> s_net_join;
+std::atomic<bool> s_net_on{false};
+uint8_t s_net_max_level = 3;
+void (*s_net_wake)() = nullptr;
+std::atomic<uint32_t> s_net_cut{0};
 Handlers s_handlers{};
 TaskHandle_t s_writer = nullptr;
 
@@ -156,7 +193,54 @@ void wake_writer()
     }
 }
 
-/** esp_log_set_vprintf hook: every ESP_LOG line becomes one log-ring record. */
+/**
+ * One whole line for the net log ring (design m2-c2 D20), its '\n' already gone: ANSI and a trailing '\r' off (as
+ * the hub's serial path takes them off), the level and tag parsed out and floored by FR_NET_LOG_LEVEL, then pushed
+ * with its stamp (fr::Core's clock, ms). The ring's first line after empty wakes the core task. Runs on the logging
+ * task; logs nothing.
+ */
+void net_line(char *line, size_t len, bool cut)
+{
+    len = strip_ansi(line, len);
+    if (len > 0 && line[len - 1] == '\r') {
+        --len;
+    }
+    const std::string_view text(line, len);
+    if (text.find_first_not_of(" \t") == std::string_view::npos) {
+        return;  // blank: the hub stores none either
+    }
+    const LogHead head = parse_log_head(text);
+    const uint8_t level = head.level != 0 ? head.level : 3;  // a line of another shape counts as I
+    if (level > s_net_max_level) {
+        return;
+    }
+    const std::string_view tag = head.tag.substr(0, kNetTagMax);
+    // fr::Core's clock (EspCore::now() is esp_timer_get_time()) in ms, which Net's 30 s age limit reads it against.
+    // Not esp_log_timestamp(), the `(<ms>)` in the text: esp_log's clock (LOG v1, RTOS source) is the cycle count
+    // at its first call after the scheduler started plus 10 ms ticks, so it runs ahead of esp_timer by the boot's
+    // start-up (+0.15..+0.57 s measured on the lab pads), and a stamp ahead of the drain's clock read as 49 days
+    // old. esp_timer_get_time() takes no lock and is safe here (any task, the vprintf hook).
+    const auto ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    const char hdr[kNetHead] = {static_cast<char>(level),
+                                static_cast<char>(ms & 0xFF),
+                                static_cast<char>((ms >> 8) & 0xFF),
+                                static_cast<char>((ms >> 16) & 0xFF),
+                                static_cast<char>(ms >> 24),
+                                static_cast<char>(tag.size())};
+    const std::string_view parts[] = {{hdr, sizeof(hdr)}, tag, text};
+    bool was_empty = false;
+    if (!s_net_logs.push(parts, &was_empty)) {
+        return;  // counted by the ring (ring_drop)
+    }
+    if (cut) {
+        s_net_cut.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (was_empty && s_net_wake != nullptr) {
+        s_net_wake();
+    }
+}
+
+/** esp_log_set_vprintf hook: every ESP_LOG line becomes one log-ring record (and, enabled, net log ring lines). */
 int log_vprintf(const char *fmt, va_list ap)
 {
     char buf[kLogLine];
@@ -165,11 +249,21 @@ int log_vprintf(const char *fmt, va_list ap)
         return n;
     }
     size_t len = std::min(static_cast<size_t>(n), sizeof(buf) - 1);
-    if (static_cast<size_t>(n) >= sizeof(buf)) {
+    const bool truncated = static_cast<size_t>(n) >= sizeof(buf);
+    if (truncated) {
         buf[len - 1] = '\n';  // truncated: still exactly one line
     }
     s_logs.push({buf, len}, false);
     wake_writer();
+    if (s_net_on.load(std::memory_order_acquire)) {
+        // The same bytes the serial line got, so the hub's dedup finds the pair (design m2-c2 D21); the serial
+        // ring has its copy, so the joiner may edit buf in place. The truncated line is the one ending at the '\n'
+        // put in above.
+        const char *forced = truncated ? buf + len - 1 : nullptr;
+        s_net_join.feed(xTaskGetCurrentTaskHandle(), buf, len, [forced](char *line, size_t line_len, bool cut) {
+            net_line(line, line_len, cut || line + line_len == forced);
+        });
+    }
     return n;
 }
 
@@ -308,6 +402,37 @@ bool write_frame(uint8_t type, std::span<const uint8_t> body)
 bool connected()
 {
     return usb_serial_jtag_is_connected();
+}
+
+void enable_net_logs(uint8_t max_level, void (*wake)())
+{
+    s_net_max_level = max_level;
+    s_net_wake = wake;
+    s_net_on.store(true, std::memory_order_release);
+}
+
+bool pop_net_log(NetLogLine &line, std::span<char> scratch)
+{
+    // Popped in place: the views below point into the caller's scratch.
+    if (scratch.size() < kNetHead) {
+        return false;
+    }
+    const size_t n = s_net_logs.pop(scratch.data(), scratch.size());
+    if (n < kNetHead) {
+        return false;
+    }
+    const auto byte = [&](size_t i) { return static_cast<uint8_t>(scratch[i]); };
+    const size_t tag_len = std::min<size_t>(byte(5), n - kNetHead);
+    line.level = byte(0);
+    line.pushed_ms = byte(1) | uint32_t{byte(2)} << 8 | uint32_t{byte(3)} << 16 | uint32_t{byte(4)} << 24;
+    line.tag = {scratch.data() + kNetHead, tag_len};
+    line.text = {scratch.data() + kNetHead + tag_len, n - kNetHead - tag_len};
+    return true;
+}
+
+NetLogStats net_log_stats()
+{
+    return {.ring_drop = s_net_logs.dropped(), .cut = s_net_cut.load(std::memory_order_relaxed)};
 }
 
 Stats stats()

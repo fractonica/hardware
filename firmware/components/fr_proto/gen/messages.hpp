@@ -139,7 +139,7 @@ struct PresenceHello {
     uint32_t descriptor_hash = 0;
     uint32_t board_hash = 0;
     Role role = Role::node;
-    uint32_t caps = 0;  // b0 espnow_v2, b1 wifi, b2 sleepy, b3 sec, b4 inject_enabled, b5 provisioned
+    uint32_t caps = 0;  // b0 espnow_v2, b1 wifi, b2 sleepy, b3 sec, b4 inject_enabled, b5 provisioned, b6 net_log
     uint32_t hb_interval_ms = 0;
     uint8_t reset_reason = 0;
     OtaState ota_state = OtaState::new_;
@@ -233,7 +233,7 @@ struct LogLine {
     std::string_view text{};
 
     static constexpr uint8_t kCls = fr::wire::kClsLog;
-    static constexpr size_t kMaxSize = 221;
+    static constexpr size_t kMaxSize = 405;
 };
 size_t encode(const LogLine &v, fr::wire::Writer &w);
 std::expected<LogLine, fr::wire::DecodeErr> decode_log_line(std::span<const uint8_t> in);

@@ -9,17 +9,29 @@
 // (the update slot, appended as written, truncated on a resume) and `rec.txt` (nvs:fr_ota). Each start
 // first does what the bootloader would: an image set as the boot partition starts PENDING_VERIFY, and a
 // PENDING_VERIFY image that ended without being marked valid is marked aborted and the previous one runs.
-// Without --ota-dir everything lives in memory for one process. Test code: it may allocate.
+// Without --ota-dir everything lives in memory for one process. M2-C2 (design m2-c2 D2, D8): the fakes print through
+// the node's Out (sim/out.hpp), so a fleet node's lines carry its alias, and MemFlash logs fr_ota's `slot … open`
+// line through a hook (the kit's KitLogs). HttpFetch can be made cancellable for the fleet's power cut: abort(), from
+// any thread, shuts its socket down so a GET blocked in a read returns at once. Test code: it may allocate.
 #pragma once
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -30,10 +42,9 @@
 #include "fr/ota/check.hpp"
 #include "fr/ota/http_get.hpp"
 #include "fr/ota/ota.hpp"
+#include "sim/out.hpp"
 
 namespace ota_fake {
-
-void emit(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 using Digest = std::array<uint8_t, 32>;
 
@@ -315,8 +326,12 @@ struct BootState {
 class MemFlash final : public fr::ota::Flash
 {
 public:
+    /** fr_ota's ESP_LOG lines (level, tag, text), as esp_flash.cpp logs them; the kit's KitLogs takes them. */
+    using LogFn = std::function<void(char level, std::string_view tag, std::string_view text)>;
+
     /** Loads the state (or starts from `running`/`version`) and does what the bootloader does at a reset. */
-    MemFlash(std::string dir, const Digest &running, const std::string &version) : dir_(std::move(dir))
+    MemFlash(std::string dir, const Digest &running, const std::string &version, frsim::Out &out)
+        : dir_(std::move(dir)), out_(out)
     {
         s_.running = running;
         s_.version = version;
@@ -342,20 +357,27 @@ public:
             s_.pending = true;
             s_.slot ^= 1;
             slot_.clear();  // the update slot is now the old image's
-            emit(R"({"ev":"ota_boot","fw":"%s","pending":true})", hex(s_.running).c_str());
+            out_.emit(R"({"ev":"ota_boot","fw":"%s","pending":true})", hex(s_.running).c_str());
         } else if (s_.pending && s_.prev) {
             // A PENDING_VERIFY image reset before it was marked valid: ABORTED, the previous one boots.
             rollback_state();
-            emit(R"({"ev":"ota_boot","fw":"%s","rolled_back":true,"crashed":%s})", hex(s_.running).c_str(),
-                 crashed_ ? "true" : "false");
+            out_.emit(R"({"ev":"ota_boot","fw":"%s","rolled_back":true,"crashed":%s})", hex(s_.running).c_str(),
+                      crashed_ ? "true" : "false");
         }
         save();
     }
 
-    fr::Status begin(uint32_t, uint32_t resume_off) override
+    /** Where fr_ota's log lines go (none by default). */
+    void set_log(LogFn log) { log_ = std::move(log); }
+
+    fr::Status begin(uint32_t size, uint32_t resume_off) override
     {
         if (resume_off > slot_.size()) {
             return std::unexpected(fr::Err::failed);
+        }
+        if (log_) {
+            // esp_flash.cpp's line once the update slot is open (the hub's expect_log may key on it).
+            log_('I', "fr_ota", frsim::sformat("slot %s open for %u B at %u", s_.slot == 0 ? "ota_1" : "ota_0", size, resume_off));
         }
         slot_.resize(resume_off);
         // esp_ota_begin invalidates the inactive slot's otadata entry; a resume keeps it as it was.
@@ -424,19 +446,19 @@ public:
     {
         s_.pending = false;
         save();
-        emit(R"({"ev":"ota_valid","fw":"%s"})", hex(s_.running).c_str());
+        out_.emit(R"({"ev":"ota_valid","fw":"%s"})", hex(s_.running).c_str());
         return {};
     }
     void rollback() override
     {
         if (!s_.prev) {
-            emit(R"({"ev":"ota_rollback_impossible"})");
+            out_.emit(R"({"ev":"ota_rollback_impossible"})");
             return;  // as esp_ota_mark_app_invalid_rollback_and_reboot without another app
         }
         const Digest invalid = s_.running;
         rollback_state();
         save();
-        emit(R"({"ev":"ota_rollback","invalid":"%s"})", hex(invalid).c_str());
+        out_.emit(R"({"ev":"ota_rollback","invalid":"%s"})", hex(invalid).c_str());
         reboot_requested = true;
     }
     fr::ota::RunningInfo running() const override
@@ -526,6 +548,8 @@ private:
     }
 
     std::string dir_;
+    frsim::Out &out_;
+    LogFn log_;
     BootState s_;
     bool crashed_ = false;
     std::vector<uint8_t> slot_;
@@ -618,26 +642,173 @@ private:
 
 // ---- the image download: the board's own GET (fr_ota/src/http) on POSIX sockets, a 5 s timeout ----
 
-/** fr::ota::HttpGet with one `ota_get` line per GET (its Range start and the status, 0 when none came). The
- * timeout is shorter than the board's 10 s: this node's worker runs on its one loop. */
+/** The TCP sockets this process holds connected to `port`, as (fd, local port): each live connection once. */
+inline std::vector<std::pair<int, uint16_t>> sockets_to(uint16_t port)
+{
+    std::vector<std::pair<int, uint16_t>> out;
+    const long open_max = ::sysconf(_SC_OPEN_MAX);
+    const int max = static_cast<int>(std::clamp<long>(open_max, 256, 4096));
+    for (int fd = 0; fd < max; ++fd) {
+        sockaddr_in peer{};
+        socklen_t len = sizeof(peer);
+        if (::getpeername(fd, reinterpret_cast<sockaddr *>(&peer), &len) != 0 || peer.sin_family != AF_INET ||
+            ntohs(peer.sin_port) != port) {
+            continue;
+        }
+        sockaddr_in self{};
+        len = sizeof(self);
+        if (::getsockname(fd, reinterpret_cast<sockaddr *>(&self), &len) == 0) {
+            out.emplace_back(fd, ntohs(self.sin_port));
+        }
+    }
+    return out;
+}
+
+/**
+ * fr::ota::HttpGet with one `ota_get` line per GET (its Range start and the status, 0 when none came). The
+ * timeout is shorter than the board's 10 s: this node's worker runs on its one loop.
+ *
+ * Cancellable (the fleet, design m2-c2 D8): HttpGet keeps its socket to itself, so after each start() this fake
+ * finds it (the one new connection to the hub's HTTP port; every cancellable start() in the process runs under one
+ * lock, so no other appears meanwhile) and keeps a dup of it. abort(), from any thread, shuts that socket down: a
+ * read blocked on it returns at once and fails, and HttpGet's own close of its fd can never make the dup name
+ * another socket.
+ */
 class HttpFetch final : public fr::ota::Fetch
 {
 public:
+    /**
+     * `bytes_per_s` paces the download (the fleet's `ap.http_kbps`, wall time only; 0: as fast as loopback gives
+     * it), so a cut at "256 KB served" can land mid-image as on a board: on loopback 600 KB arrives in tens of ms.
+     */
+    explicit HttpFetch(frsim::Out &out, bool cancellable = false, double bytes_per_s = 0)
+        : out_(out), cancellable_(cancellable), pace_(bytes_per_s)
+    {
+    }
+    ~HttpFetch() { forget(); }
+    HttpFetch(const HttpFetch &) = delete;
+    HttpFetch &operator=(const HttpFetch &) = delete;
+
     fr::Status start(const char *url, uint32_t from_byte) override
     {
-        const fr::Status st = http_.start(url, from_byte);
-        if (st) {
-            emit(R"({"ev":"ota_get","from":%u,"status":%d})", from_byte, http_.status());
+        if (aborted()) {
+            return std::unexpected(fr::Err::failed);
+        }
+        fr::Status st;
+        if (!cancellable_) {
+            st = http_.start(url, from_byte);
         } else {
-            emit(R"({"ev":"ota_get","from":%u,"status":%d,"error":"%s"})", from_byte, http_.status(), http_.error());
+            forget();
+            const std::lock_guard serial(start_lock());
+            const uint16_t port = url_port(url);
+            const auto before = sockets_to(port);
+            st = http_.start(url, from_byte);
+            if (st) {
+                for (const auto &s : sockets_to(port)) {
+                    if (std::find(before.begin(), before.end(), s) == before.end()) {
+                        const std::lock_guard lock(mu_);
+                        dup_fd_ = ::dup(s.first);
+                        break;
+                    }
+                }
+            }
+            if (aborted()) {
+                http_.close();
+                forget();
+                st = std::unexpected(fr::Err::failed);
+            }
+        }
+        started_ = std::chrono::steady_clock::now();
+        got_ = 0;
+        if (st) {
+            out_.emit(R"({"ev":"ota_get","from":%u,"status":%d})", from_byte, http_.status());
+        } else {
+            out_.emit(R"({"ev":"ota_get","from":%u,"status":%d,"error":"%s"})", from_byte, http_.status(), http_.error());
         }
         return st;
     }
-    std::expected<size_t, fr::Err> read(std::span<uint8_t> out) override { return http_.read(out); }
-    void close() override { http_.close(); }
+    std::expected<size_t, fr::Err> read(std::span<uint8_t> out) override
+    {
+        if (aborted()) {
+            return std::unexpected(fr::Err::failed);
+        }
+        if (pace_ > 0) {
+            // This read is due once the bytes so far took their time at the pace; a power cut ends the wait. Reads
+            // of at most 50 ms' worth keep it smooth.
+            const auto due = started_ + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                            std::chrono::duration<double>(static_cast<double>(got_) / pace_));
+            std::unique_lock lock(mu_);
+            cv_.wait_until(lock, due, [this] { return aborted_; });
+            if (aborted_) {
+                return std::unexpected(fr::Err::failed);
+            }
+            out = out.first(std::min(out.size(), std::max<size_t>(1024, static_cast<size_t>(pace_ / 20))));
+        }
+        const auto n = http_.read(out);
+        if (n) {
+            got_ += *n;
+        }
+        return n;
+    }
+    void close() override
+    {
+        http_.close();
+        forget();
+    }
+
+    /** Any thread: the GET in flight fails at once, and every later start() or read() too (a power cut). */
+    void abort()
+    {
+        const std::lock_guard lock(mu_);
+        aborted_ = true;
+        if (dup_fd_ >= 0) {
+            ::shutdown(dup_fd_, SHUT_RDWR);
+        }
+        cv_.notify_all();
+    }
 
 private:
+    static std::mutex &start_lock()
+    {
+        static std::mutex m;
+        return m;
+    }
+    /** The port of `http://host:port/...` (80 without one). */
+    static uint16_t url_port(const char *url)
+    {
+        const std::string_view u = url != nullptr ? url : "";
+        const size_t host = u.find("://");
+        const size_t colon = u.find(':', host == std::string_view::npos ? 0 : host + 3);
+        const size_t slash = u.find('/', host == std::string_view::npos ? 0 : host + 3);
+        if (colon == std::string_view::npos || (slash != std::string_view::npos && colon > slash)) {
+            return 80;
+        }
+        return static_cast<uint16_t>(std::strtoul(std::string(u.substr(colon + 1)).c_str(), nullptr, 10));
+    }
+    bool aborted()
+    {
+        const std::lock_guard lock(mu_);
+        return aborted_;
+    }
+    void forget()
+    {
+        const std::lock_guard lock(mu_);
+        if (dup_fd_ >= 0) {
+            ::close(dup_fd_);
+            dup_fd_ = -1;
+        }
+    }
+
+    frsim::Out &out_;
+    bool cancellable_;
+    double pace_;  // bytes/s; 0: unpaced
+    std::chrono::steady_clock::time_point started_{};
+    uint64_t got_ = 0;  // bytes read since start()
     fr::ota::HttpGet http_{5000};
+    std::mutex mu_;
+    std::condition_variable cv_;  // abort() wakes a paced read
+    int dup_fd_ = -1;
+    bool aborted_ = false;
 };
 
 }  // namespace ota_fake

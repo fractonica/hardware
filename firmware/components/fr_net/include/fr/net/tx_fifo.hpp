@@ -94,6 +94,9 @@ public:
 
     bool empty() const { return head_.load(std::memory_order_acquire) == tail_.load(std::memory_order_relaxed); }
 
+    /** Producer: bytes queued, record headers included (Link::queued, design m2-c2 D20). */
+    size_t fill() const { return fill(head_.load(std::memory_order_relaxed), tail_.load(std::memory_order_acquire)); }
+
 private:
     static size_t fill(Index head, Index tail) { return static_cast<size_t>(static_cast<Index>(head - tail)); }
     static size_t offset(Index pos) { return static_cast<size_t>(pos % N); }

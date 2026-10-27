@@ -922,7 +922,7 @@ std::expected<LogLine, fr::wire::DecodeErr> decode_log_line(std::span<const uint
             v.tag = r.read_string(16);
             break;
         case 2:
-            v.text = r.read_string(200);
+            v.text = r.read_string(384);
             break;
         default:
             r.skip();

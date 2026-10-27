@@ -20,6 +20,7 @@
 // - `jobs: true` gets a `job` frame per status, stage and progress change (progress at most 4 per second
 //   per job; the active jobs first); `ports: true` the port.* events.
 // web/feeds.ts publishes the port.*, job.state and loop-delay events; this part starts and stops it.
+// - Counted for hub_status `ws` (design m2-c2 D16): frames and bytes sent, gaps, overflows and selector resolves.
 
 import type { WebSocket } from '@fastify/websocket';
 import type { FastifyInstance } from 'fastify';
@@ -45,6 +46,7 @@ import { type StoredLine, toLogLine } from '../logstore.ts';
 import { logDevices } from '../ops.ts';
 import { nowUs } from '../ring.ts';
 import { routerInfo } from '../router/index.ts';
+import type { WsStatsView } from '../router/scale.ts';
 import { createFeeds, type FeedOptions, PORT_EVENT_TYPES } from './feeds.ts';
 
 /** What the server needs of a client socket: ws's WebSocket, or a test's fake. */
@@ -152,6 +154,7 @@ export class WsHub {
   #lineText = new WeakMap<StoredLine, string>();
   #jobThrottle = new Map<string, { at: number; timer: NodeJS.Timeout | null; frame: string | null }>();
   #tick: NodeJS.Timeout | null = null;
+  #stats = { frames: 0, bytes: 0, gaps: 0, overflows: 0, resolves: 0 };
 
   constructor(hub: () => HubContext, opts: WsOptions = {}) {
     this.#hub = hub;
@@ -163,13 +166,31 @@ export class WsHub {
     return this.#clients.size;
   }
 
+  /** hub_status `ws` (design m2-c2 D16): since this server was made. */
+  stats(): WsStatsView {
+    return { clients: this.#clients.size, ...this.#stats };
+  }
+
+  /** Every frame to a socket goes through here, so it is counted. */
+  #out(sock: WsSocket, text: string): void {
+    this.#stats.frames++;
+    this.#stats.bytes += Buffer.byteLength(text);
+    sock.send(text);
+  }
+
+  /** A `gap` frame (counted as such too). */
+  #gap(c: Client, seq: number): void {
+    this.#stats.gaps++;
+    this.#out(c.sock, JSON.stringify({ t: 'gap', after: formatCursor({ run: this.#hub().logs.run, seq }) }));
+  }
+
   /** A new socket: hello now. Returns the handlers its messages (text or binary) and close go to. */
   open(sock: WsSocket): { message(text: string): void; binary(): void; close(): void } {
     const hub = this.#hub();
     const head = hub.logs.headSeq();
     const c = new Client(sock, head);
     this.#clients.add(c);
-    sock.send(JSON.stringify({ t: 'hello', v: 1, run: hub.logs.run, head: mintCursor(hub), version: HUB_VERSION, registry_hash: REGISTRY_HASH, t_hub_us: nowUs() }));
+    this.#out(sock, JSON.stringify({ t: 'hello', v: 1, run: hub.logs.run, head: mintCursor(hub), version: HUB_VERSION, registry_hash: REGISTRY_HASH, t_hub_us: nowUs() }));
     this.#tick ??= setInterval(() => this.#onTick(), this.#limits.logBatchMs);
     this.#tick.unref();
     return {
@@ -244,7 +265,7 @@ export class WsHub {
    */
   #reply(c: Client, text: string): void {
     if (c.sock.bufferedAmount <= this.#limits.eventBufferedBytes) {
-      c.sock.send(text);
+      this.#out(c.sock, text);
     }
   }
 
@@ -267,6 +288,7 @@ export class WsHub {
       return null;
     }
     const hub = this.#hub();
+    this.#stats.resolves++;
     // Unlike events_read, a selector that matches no device now is accepted: `online`, a tag, may later.
     return new Set(hub.registry.resolve(selector, (id) => hub.router.presence(id)).map((d) => d.device_id));
   }
@@ -391,7 +413,7 @@ export class WsHub {
       return;
     }
     c.lastSeq = seq;
-    c.sock.send(text);
+    this.#out(c.sock, text);
   }
 
   /**
@@ -399,6 +421,9 @@ export class WsHub {
    * socket drains it gets one `gap` naming the last event it was sent, to re-read from with events_read.
    */
   #overflow(c: Client): void {
+    if (c.gapAfter === null) {
+      this.#stats.overflows++;
+    }
     c.gapAfter ??= c.lastSeq >= 0 ? c.lastSeq : c.helloSeq;
     c.held = [];
     c.catching = null;
@@ -412,7 +437,6 @@ export class WsHub {
    */
   #catchUp(c: Client, sub: Sub): void {
     const since = sub.events!.since!;
-    const run = this.#hub().logs.run;
     if (c.gapAfter !== null) {
       c.gapAfter = Math.min(c.gapAfter, since); // the coming gap covers it
       return;
@@ -420,7 +444,7 @@ export class WsHub {
     const cur = c.catching;
     if (cur) {
       if (since < c.lastSeq) {
-        c.sock.send(JSON.stringify({ t: 'gap', after: formatCursor({ run, seq: since }) }));
+        this.#gap(c, since);
       }
       cur.subs.push(sub);
       // Back to where its range starts (rows looked at and passed over may be its), and on to the head:
@@ -436,7 +460,7 @@ export class WsHub {
       this.#send(c, h.seq, h.text);
     }
     if (from < c.lastSeq) {
-      c.sock.send(JSON.stringify({ t: 'gap', after: formatCursor({ run, seq: from }) }));
+      this.#gap(c, from);
       from = c.lastSeq;
     }
     c.lastSeq = from;
@@ -520,7 +544,7 @@ export class WsHub {
           part: 'state',
           member,
         };
-        c.sock.send(JSON.stringify({ t: 'ev', e, snapshot: true }));
+        this.#out(c.sock, JSON.stringify({ t: 'ev', e, snapshot: true }));
       }
     }
   }
@@ -556,7 +580,7 @@ export class WsHub {
   #onTick(): void {
     for (const c of this.#clients) {
       if (c.gapAfter !== null && c.sock.bufferedAmount < this.#limits.logDropBufferedBytes) {
-        c.sock.send(JSON.stringify({ t: 'gap', after: formatCursor({ run: this.#hub().logs.run, seq: c.gapAfter }) }));
+        this.#gap(c, c.gapAfter);
         c.gapAfter = null;
       }
       if (!c.logBatch.length || c.holding || c.gapAfter !== null) {
@@ -568,7 +592,7 @@ export class WsHub {
         if (c.sock.bufferedAmount > this.#limits.logDropBufferedBytes) {
           break; // the stream class gives way (D6)
         }
-        c.sock.send(`{"t":"log","l":[${batch.slice(i, i + LOG_FRAME_LINES).map((l) => this.#lineJson(l)).join(',')}]}`);
+        this.#out(c.sock, `{"t":"log","l":[${batch.slice(i, i + LOG_FRAME_LINES).map((l) => this.#lineJson(l)).join(',')}]}`);
       }
     }
   }
@@ -614,7 +638,7 @@ export class WsHub {
   #jobFrame(frame: string): void {
     for (const c of this.#clients) {
       if (c.gapAfter === null && [...c.subs.values()].some((s) => s.jobs)) {
-        c.sock.send(frame);
+        this.#out(c.sock, frame);
       }
     }
   }
@@ -626,7 +650,7 @@ export class WsHub {
       return;
     }
     for (const j of jobs.list(100).filter((j) => !TERMINAL.has(j.status))) {
-      c.sock.send(JSON.stringify({ t: 'job', job_id: j.job_id, kind: j.kind, status: j.status, ...(j.stage ? { stage: j.stage } : {}), ...(j.progress ? { progress: j.progress } : {}) }));
+      this.#out(c.sock, JSON.stringify({ t: 'job', job_id: j.job_id, kind: j.kind, status: j.status, ...(j.stage ? { stage: j.stage } : {}), ...(j.progress ? { progress: j.progress } : {}) }));
     }
   }
 }

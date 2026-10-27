@@ -83,6 +83,7 @@ struct RelayCounters {
     uint32_t relayed = 0;
     uint32_t cancelled = 0;  // after K copies heard
     uint32_t dropped = 0;    // due but not sent: relay off, ota_busy, queue full, flood rate (a spent TTL is not)
+    uint32_t refused = 0;    // of those, refused by the driver (design m2-c2 D17)
 };
 
 /** Node <-> node frames (05 §5.10), whichever link brought or took them. */
@@ -104,6 +105,16 @@ struct BcastCounters {
     uint32_t dup = 0;
     uint32_t old = 0;
     uint32_t watermark = 0;  // as HEARTBEAT reports it (not a counter)
+    uint32_t adopted = 0;    // newer hub runs taken from the air with no session up (design m2-c2 D19)
+};
+
+/** LOG frames over TCP (design m2-c2 D20): `stats` net_logs. */
+struct LogCounters {
+    uint32_t sent = 0;
+    uint32_t ring_drop = 0;  // no room in the log ring
+    uint32_t age_drop = 0;   // older than 30 s at their turn
+    uint32_t rate_drop = 0;  // over 20 lines/s
+    uint32_t cut = 0;        // cut to LOG.LINE's 384 B
 };
 
 /** Bindings (07 §7.11): node.binding_fired as reported. */
@@ -196,6 +207,8 @@ struct NetStatus {
     BindingCounters bindings;
     MsgTopicCount msgs[kMsgTopics];
     uint32_t msgs_other = 0;
+    // M2-C2 (design m2-c2 D20).
+    LogCounters net_logs;
 };
 
 /** Debug hooks of `net` (spec 09 §9.7, design c3 §3), FR_TEST_HOOKS builds only. */

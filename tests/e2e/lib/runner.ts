@@ -2,7 +2,9 @@
 // tests/e2e/run.ts (every gate module of a tier, or the chosen suites) and of runStandalone (one module run
 // as a script). Progress goes to stderr; stdout carries the report only. A hil run (--tier hil, design
 // m2-c1-hil D13) starts with the bench_get preflight (lib/hil.ts hilPreflight): a fatal problem fails every
-// gate before anything is pressed.
+// gate before anything is pressed. A sim run (--tier sim, design m2-c2 D14) hands over to tests/sim/lib/runner.ts,
+// which loads the T2 scenarios (tests/sim/scenarios/*.yaml), not these modules, and runs each on fr_fleet against a
+// private hub of its own; its report keeps this contract (lib/report.ts).
 
 import { readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -192,7 +194,7 @@ export interface Args {
   suiteArgs: string[];
 }
 
-/** run.ts's tiers: the scenario tiers, and sim (reserved for M2-C2: no modules yet). */
+/** run.ts's tiers: the scenario tiers, and sim (the T2 scenarios, tests/sim/lib/runner.ts). */
 const RUN_TIERS = [...SCENARIO_TIERS, 'sim'] as const;
 
 export function parseArgs(argv: string[], defaults: { allowHuman: boolean } = { allowHuman: false }): Args {
@@ -223,10 +225,12 @@ export function parseArgs(argv: string[], defaults: { allowHuman: boolean } = { 
   return a;
 }
 
-const USAGE = `usage: node --conditions=@fractonica/source tests/e2e/run.ts [suite…] [--suite a,b] [--tier target|hil] [--allow-human] [--hub URL] [--json] [--list] [-- args…]
+const USAGE = `usage: node --conditions=@fractonica/source tests/e2e/run.ts [suite…] [--suite a,b] [--tier target|hil|sim] [--allow-human] [--hub URL] [--json] [--list] [-- args…]
   suite: a gate module's stem or gate id (t-lat, T-LAT); default every tests/e2e/t-*.ts of the tier
   --tier target  the gates on the hub's boards (default); hil: the HIL fixture gates (T-HIL), after a bench_get
-                 preflight that fails fast with the faulty line; sim: reserved (M2-C2)
+                 preflight that fails fast with the faulty line; sim: the T2 scenarios (tests/sim/scenarios, by id:
+                 t2-flood-30), each on fr_fleet against a private hub, never FR_HUB; default the gated ones; their
+                 args after -- are the sim runner's (--seed n, --nodes n, --time-scale 0.5, --keep, --no-preflight)
   --allow-human  also run the scenarios that need a person at the bench or wiring (hil gates never do)
   --hub URL      the hub (default FR_HUB or http://127.0.0.1:7420)
   --json         print the report as one JSON line (what test_run reads)
@@ -271,8 +275,18 @@ export async function main(argv: string[], dir: string): Promise<number> {
     err(`e2e: --tier takes ${RUN_TIERS.join(', ')}, not ${args.tier}\n${USAGE}`);
     return EXIT.usage;
   }
+  if (args.tier === 'sim') {
+    // The T2 scenarios are not gate modules: the sim runner loads and runs them (design m2-c2 D14).
+    const { runSim } = await import('../../sim/lib/runner.ts');
+    const ac = cancelOnSignals();
+    const out = await runSim({ suites: [...args.suites, ...args.rest], args: args.suiteArgs, sourceDir: resolve(dir, '..', '..'), signal: ac.signal, list: args.list, err });
+    if (typeof out === 'number') {
+      return out;
+    }
+    print(out, args.json);
+    return ac.signal.aborted ? 130 : exitCodeFor(out);
+  }
   const found = await discover(dir);
-  // sim is a run tier with no modules yet: it selects none.
   const tier = args.tier as ScenarioTier;
   // --list shows the tier's modules (target by default, so a target listing reads as before M2-C1).
   const { chosen: inTier } = select(found, [], tier);
@@ -289,7 +303,7 @@ export async function main(argv: string[], dir: string): Promise<number> {
     err(
       unknown.length
         ? `e2e: no gate scenario ${unknown.join(', ')} in ${dir} (tier ${tier}; have: ${have})${moved ? `; ${moved}` : ''}`
-        : `e2e: no gate scenarios (tests/e2e/t-*.ts) of tier ${tier} in ${dir}${args.tier === 'sim' ? ' (the sim tier comes with M2-C2)' : ''}`,
+        : `e2e: no gate scenarios (tests/e2e/t-*.ts) of tier ${tier} in ${dir}`,
     );
     return EXIT.notFound;
   }

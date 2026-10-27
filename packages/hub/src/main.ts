@@ -24,6 +24,7 @@ import { createLatencyProbe } from './latency/probe.ts';
 import { NODE_LINK_PORT, SerialFrameTap, SleepGuard } from './links/index.ts';
 import { bridgeBinding, serialBridgeArg } from './links/serial-bridge.ts';
 import { holdPort, runningHubPid, writePidfile } from './lock.ts';
+import { createLogIngest } from './logs/ingest.ts';
 import { LogStore } from './logstore.ts';
 import { createOta, NODE_HTTP_PORT } from './ota/index.ts';
 import { createPortHolders } from './ports/holders.ts';
@@ -32,6 +33,7 @@ import { createPrompts } from './prompts.ts';
 import { createRegistry, sweepIdentAtStart } from './registry/index.ts';
 import { RingRetention } from './ring.ts';
 import { createRouter } from './router/index.ts';
+import { createScaleCounters } from './router/scale.ts';
 import { CursorSeq } from './seq.ts';
 import { SerialPortManager } from './serial.ts';
 import { listenLoopbackV6 } from './web/guard.ts';
@@ -111,6 +113,8 @@ async function main(): Promise<void> {
   let nodeSessions = 0;
   let otaActive = false;
   const holdAwake = () => sleepGuard.update(nodeSessions + (otaActive ? 1 : 0));
+  // This process's scale counters (design m2-c2 D16): the router and the LOG ingest (D21) count into one set.
+  const scale = createScaleCounters();
   const router = createRouter({
     db,
     logs,
@@ -124,6 +128,8 @@ async function main(): Promise<void> {
       nodeSessions = n;
       holdAwake();
     },
+    logIngest: createLogIngest(logs, scale),
+    scale,
   });
   frames.attach((device, line) => router.serialLine(device, line));
   // Node <-> node (design c5 §4): the router carries hub broadcasts; bindings resolve, push and re-push.

@@ -1,10 +1,14 @@
 // TCP :7421 (spec 05 §5.12.1, 08 §8.4): nodes connect to the hub; framing is `len u16 LE | envelope`,
 // TCP_NODELAY and SO_KEEPALIVE (idle 5 s, interval 1 s, count 3) on every connection. Each connection is
-// an Endpoint; which device it belongs to is the router's business (it learns that from HELLO).
+// an Endpoint; which device it belongs to is the router's business (it learns that from HELLO). M2-C2 (design
+// m2-c2 D16): an envelope that goes to many connections (a hub broadcast, a node broadcast's fan-out) is framed
+// once and the same Buffer written to each (sendFramed), and the most bytes one socket held unsent is kept for
+// hub_status.
 
 import { createServer, type Server, type Socket } from 'node:net';
 
-import { type Endpoint, type LinkCounters, type LinkSink, newCounters } from './types.ts';
+import type { Framed } from './index.ts';
+import { type Endpoint, type LinkSink, newCounters } from './types.ts';
 
 /** A frame longer than this is a framing error (bulk MTU 1470, plus slack for a node that pads). */
 export const TCP_MAX_ENVELOPE = 2048;
@@ -14,31 +18,53 @@ export const TCP_MAX_ENVELOPE = 2048;
  */
 const MAX_UNSENT = 256 * 1024;
 
+/** One envelope as it goes on the wire (`len u16 LE | envelope`); null for one longer than the length field. */
+export function tcpFrame(envelope: Uint8Array): Buffer | null {
+  if (envelope.length > 0xffff) {
+    return null;
+  }
+  const frame = Buffer.allocUnsafe(envelope.length + 2);
+  frame.writeUInt16LE(envelope.length, 0);
+  frame.set(envelope, 2);
+  return frame;
+}
+
 class TcpEndpoint implements Endpoint {
   readonly kind = 'tcp' as const;
   readonly id: string;
   readonly remote: string;
   closed = false;
   #socket: Socket;
-  #counters: LinkCounters;
+  #link: TcpLink;
 
-  constructor(socket: Socket, n: number, counters: LinkCounters) {
+  constructor(socket: Socket, n: number, link: TcpLink) {
     this.#socket = socket;
-    this.#counters = counters;
+    this.#link = link;
     this.remote = (socket.remoteAddress ?? '?').replace(/^::ffff:/, '');
     this.id = `tcp:${this.remote}:${socket.remotePort ?? 0}#${n}`;
   }
 
   send(envelope: Uint8Array): boolean {
-    if (this.closed || envelope.length > 0xffff || this.#socket.writableLength > MAX_UNSENT) {
-      this.#counters.tx_drop++;
+    return this.#write(this.closed ? null : tcpFrame(envelope));
+  }
+
+  /** The envelope framed once for every endpoint it goes to: the same Buffer, never copied per socket. */
+  sendFramed(f: Framed): boolean {
+    return this.#write(this.closed ? null : f.tcp);
+  }
+
+  #write(frame: Buffer | null): boolean {
+    const counters = this.#link.counters;
+    if (this.closed || !frame || this.#socket.writableLength > MAX_UNSENT) {
+      counters.tx_drop++;
       return false;
     }
-    const frame = Buffer.allocUnsafe(envelope.length + 2);
-    frame.writeUInt16LE(envelope.length, 0);
-    frame.set(envelope, 2);
     this.#socket.write(frame);
-    this.#counters.tx++;
+    counters.tx++;
+    const unsent = this.#socket.writableLength;
+    if (unsent > this.#link.maxUnsent) {
+      this.#link.maxUnsent = unsent;
+    }
     return true;
   }
 
@@ -54,6 +80,8 @@ export class TcpLink {
   #sockets = new Set<Socket>();
   #n = 0;
   readonly counters = newCounters();
+  /** The most bytes one socket held unsent right after a write, since the link was made (hub_status). */
+  maxUnsent = 0;
 
   constructor(sink: LinkSink) {
     this.#sink = sink;
@@ -93,7 +121,7 @@ export class TcpLink {
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 5000, 1000, 3);
     this.#sockets.add(socket);
-    const ep = new TcpEndpoint(socket, ++this.#n, this.counters);
+    const ep = new TcpEndpoint(socket, ++this.#n, this);
     let buf: Buffer = Buffer.alloc(0);
     socket.on('data', (chunk: Buffer) => {
       buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;

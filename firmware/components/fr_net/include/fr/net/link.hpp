@@ -52,6 +52,12 @@ public:
      * still open stays open. The others ignore it.
      */
     virtual void hold(bool) {}
+    /**
+     * Bytes queued ahead of the transport, not yet handed to it (TCP: the TX FIFO's fill, TxFifo::fill). LOG
+     * frames go out only while it is 0 (design m2-c2 D20), so they never wait in front of later frames there.
+     * Links without such a queue say 0.
+     */
+    virtual size_t queued() const { return 0; }
 
 protected:
     ~Link() = default;

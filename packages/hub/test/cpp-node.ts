@@ -20,6 +20,9 @@ export const BIN = process.env.FR_NET_NODE_BIN ? resolve(process.env.FR_NET_NODE
 
 export type Line = { ev: string; [k: string]: unknown };
 
+/** An ESP_LOG line on the USB line (KitLogs with --serial; logstore.ts ESP_LOG_RE's head). */
+const ESP_LOG_LINE = /^[EWIDV] \(\d+\) /;
+
 /**
  * One fr_net_node process: its JSON lines, and stdin commands (state, udp_block <s>, drop_hub_link <s>, ip_block <s>,
  * tcp 0|1, usb 0|1, bye, crash, quit). With --air-dir <dir> (design c5 §5) it joins a fake ESP-NOW medium shared by
@@ -50,6 +53,13 @@ export type Line = { ev: string; [k: string]: unknown };
  *   to an in-process router with serialToRouter(), or to a real hub process through virtual-usb.ts (I1). `state`
  *   adds `health` (fr_ota's bits) and `hub_session`. Stdin `#<id> <line>` is fr_diag's serial command channel
  *   (the hub's diag_exec on a port it holds open): the answer `#<id> {json}` goes out on the USB line (onSerial).
+ *
+ * M2-C2 (design m2-c2 D2, D20): the node classes live in the fleet kit (firmware/test/host/sim). `--net-log 1`
+ * attaches the kit's log source: HELLO caps net_log, fr_core's `ready id=…` banner at boot and `alive fw=…` every
+ * 10 s, fr_ota's `slot … open` line, and stdin `log <E|W|I|D|V> <tag> <text>` (one line; `log_rate <lines/s>` a
+ * generator), drained as LOG frames over TCP. With --serial each such line also goes out on the USB line as
+ * fr_serial prints it (`I (1234) tag: text`, to onSerial); without --net-log a `log` line goes to the USB line only.
+ * diag `info` answers in fr_diag's shape (uptime_ms, epoch, links, hub, wifi).
  * - `--role node|gateway|fixture` (or 0-2), `--board <b>`, `--profile <p>`, `--chip <n>`: what HELLO, the descriptor and the
  *   OTA CHECK say (default esp32c6-supermini, c6-pad, 13). The board picks the test pin pin_pulse and `info` report
  *   (esp32c3-oled042 10, esp32c6-supermini 20, waveshare-esp32s3-lcd19 16, esp32s3-devkitc1-n16r8 none: -1).
@@ -77,7 +87,7 @@ export class CppNode {
   readonly lines: Line[] = [];
   readonly proc: ChildProcessWithoutNullStreams;
   exited: number | null = null;
-  /** With --serial: the node's `@fr1:` lines (and serial command-channel answers), as its USB port would print them. */
+  /** With --serial: the node's `@fr1:` lines, serial command-channel answers and ESP_LOG lines, as its USB port would print them. */
   onSerial: (line: string) => void = () => undefined;
   #buf = '';
   #onExit: Array<(code: number) => void> = [];
@@ -91,8 +101,9 @@ export class CppNode {
       while ((nl = this.#buf.indexOf('\n')) >= 0) {
         const text = this.#buf.slice(0, nl);
         this.#buf = this.#buf.slice(nl + 1);
-        // The USB line's own output: `@fr1:` envelopes, and the serial command channel's `#<id> {json}` answers.
-        if (text.startsWith('@fr1:') || /^#\d{1,8} [{]/.test(text)) {
+        // The USB line's own output: `@fr1:` envelopes, the serial command channel's `#<id> {json}` answers, and
+        // (M2-C2) the node's ESP_LOG lines, `<L> (<ms>) <tag>: <text>`, as fr_serial prints them.
+        if (text.startsWith('@fr1:') || /^#\d{1,8} [{]/.test(text) || ESP_LOG_LINE.test(text)) {
           this.onSerial(text);
           continue;
         }

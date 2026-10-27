@@ -77,6 +77,7 @@ fractonica/                       # this folder; unrelated experiments move to e
 │  ├─ profiles/*.profile.yaml      # board + capability→driver bindings (+ .slots.lock)
 │  ├─ partitions/fr-{4,8,16}mb-v1.csv
 │  ├─ test/host/                   # host C++ suite: codecs, vectors, fuzz, services (`pnpm test:host`, 10 §10.4)
+│  │                               #   sim/: the T2 kit (`fr_sim`: medium, SimAir, SimCore, executor) and tools/fleet.cpp (`fr_fleet`), M2-C2
 │  └─ config/                      # sdkconfig.framework[.<target>], sdkconfig.build.{debug,release}, sdkconfig.local (git-ignored)
 ├─ packages/                       # TypeScript (pnpm workspace: packages/*, web/*)
 │  ├─ protocol/                    # Zod control-plane schemas, `fr-ws/1` frames, generated device codecs
@@ -92,8 +93,9 @@ fractonica/                       # this folder; unrelated experiments move to e
 ├─ plugin/                         # Claude Code plugin: .claude-plugin/plugin.json (MCP server `fractonica` = `fr mcp`), skills
 │                                  #   fleet-ops, build-deploy, e2e-verify, hil-rig (M2-C1), SessionStart hook, AGENTS.md (09 §9.8)
 ├─ .claude-plugin/marketplace.json # lists plugin/ (`/plugin marketplace add <checkout>`)
-└─ tests/e2e/                      # gate harnesses t-*.ts, run.ts (`test_run` tiers target and hil), lib/, fixtures/ (10 §10.5)
-                                   #   t-hil.ts (tier hil) since M2-C1; the virtual fleet comes in M2
+├─ tests/e2e/                      # gate harnesses t-*.ts, run.ts (`test_run` tiers target, hil and sim), lib/, fixtures/ (10 §10.5)
+│                                  #   t-hil.ts (tier hil) since M2-C1
+└─ tests/sim/                      # tier sim since M2-C2: scenarios/*.yaml, the sim runner, private hub, person bot, t2-churn.ts (10 §10.5)
 ```
 
 ## 2.5 Naming

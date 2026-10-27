@@ -1,7 +1,9 @@
 // Hub broadcasts and node <-> node traffic through the hub (design c5 §4, spec 05 §5.8-5.10; stream H1):
 // BCAST fan-out with valid_ms (to every session of a node on TCP and USB), the flood rate, watermark repair,
 // node broadcasts fanned out with ttl_remaining 1, node -> node forwarding, DIRECTORY on every registry
-// change, and message_send (one send, unicast MSGs with their ACKs, and the repeat job).
+// change, and message_send (one send, unicast MSGs with their ACKs, and the repeat job). M2-C2 (design m2-c2
+// D18): node-broadcast fan-out on every session of a node, as hub broadcasts go, counted once per node; a USB
+// line that is not the node's best link takes a copy only while its queue has room; never the fixture.
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -213,6 +215,84 @@ describe('node broadcasts', () => {
     a.raw(sent.bytes, 'tcp');
     await new Promise((res) => setTimeout(res, 100));
     expect(b.nodeFrames).toHaveLength(1);
+    expect(r.router.status().counters.fanned_out).toBe(2);
+  });
+});
+
+describe('node broadcasts on every session (design m2-c2 D18)', () => {
+  /** A source pad, and one pad on both links (its USB session alongside TCP), as two FakeNodes with one MAC. */
+  async function dual(r: NetRig): Promise<{ src: FakeNode; usb: FakeNode; wifi: FakeNode; mac: string }> {
+    const src = r.pad({ mac: '112233445566', addr: 0x0034, alias: 'pad-c3' });
+    await src.connected(r.events);
+    const mac = 'a0b1c2d3e4f5';
+    r.registry.add({ device_id: mac, addr: 0x0012, alias: 'pad-c6', provisioned: true });
+    const usb = r.node({ mac, addr: 0x0012, alias: 'pad-c6', autoHeartbeat: false, serial: r.serial });
+    await usb.connected(r.events);
+    const wifi = r.node({ mac, addr: 0x0012, alias: 'pad-c6', autoHeartbeat: false, seqStart: 100 });
+    const tcpUp = waitForEvent(r.events, (e) => e.type === 'device.link' && e.fields?.link === 'tcp');
+    await wifi.connect();
+    await tcpUp;
+    return { src, usb, wifi, mac };
+  }
+
+  it('reach both sessions of a TCP + USB pad, counted once, and the USB one after Wi-Fi died without a FIN', async () => {
+    const r = await setup();
+    const { src, usb, wifi, mac } = await dual(r);
+    const first = src.msg('pong', '{"n":1}', { dst: ADDR.BROADCAST });
+    await until(() => usb.nodeFrames.length === 1 && wifi.nodeFrames.length === 1, 3000, 'the fan-out on both links');
+    expect([usb.nodeFrames[0].via, wifi.nodeFrames[0].via]).toEqual(['serial', 'tcp']);
+    for (const n of [usb, wifi]) {
+      expect(n.nodeFrames[0].header).toMatchObject({ src: 0x0034, dst: ADDR.BROADCAST, seq: first.seq, ttl: 0x21 });
+    }
+    expect(r.router.status().counters.fanned_out).toBe(1);
+    expect(r.router.status().scale.fanout_bytes).toBe(2 * first.bytes.length);
+
+    // Wi-Fi dies without a FIN: TCP is still the best link for 2 intervals, and the copy on USB gets there.
+    wifi.unplug();
+    expect(r.router.info(mac)!.links[0]).toBe('tcp');
+    src.msg('pong', '{"n":2}', { dst: ADDR.BROADCAST });
+    await until(() => usb.nodeFrames.length === 2, 3000, 'the second copy over USB');
+    expect(usb.nodeFrames[1].header).toMatchObject({ src: 0x0034, ttl: 0x21 });
+    expect(r.router.status().counters.fanned_out).toBe(2);
+    expect(r.router.status().scale.fanout_skipped_full).toBe(0);
+  });
+
+  it('skip a USB line that is not the best link while its queue is half full, counted', async () => {
+    const r = await setup({ config: { floodPerS: 0 } });
+    const { src, usb, wifi } = await dual(r);
+    // The USB port stops taking lines (a node that does not read): its queue fills with hub broadcasts.
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const write = r.serial.writeLine.bind(r.serial);
+    r.serial.writeLine = async (selector, line) => {
+      await gate;
+      return write(selector, line);
+    };
+    for (let i = 0; i < 16; i++) {
+      r.router.broadcast({ cls: CLS.MSG, kind: KIND.MSG.MSG, port: PORT.NODE, body: new Uint8Array(0) });
+    }
+    src.msg('pong', '{"n":1}', { dst: ADDR.BROADCAST });
+    await until(() => wifi.nodeFrames.length === 1, 3000, 'the copy over TCP');
+    expect(r.router.status().scale.fanout_skipped_full).toBe(1);
+    expect(r.router.status().counters.fanned_out).toBe(1); // the node got it, over TCP
+    release();
+    await until(() => usb.broadcasts.length === 16, 3000, 'the queued broadcasts over USB');
+    expect(usb.nodeFrames).toHaveLength(0);
+    // With room again, the next one goes both ways.
+    src.msg('pong', '{"n":2}', { dst: ADDR.BROADCAST });
+    await until(() => usb.nodeFrames.length === 1 && wifi.nodeFrames.length === 2, 3000, 'the next copies');
+    expect(r.router.status().scale.fanout_skipped_full).toBe(1);
+  });
+
+  it('never go to the fixture', async () => {
+    const r = await setup();
+    const [a, b] = await three(r);
+    const fixture = r.node({ mac: '0a0b0c0d0e0f', addr: 0x0040, alias: 'fixture', role: 'fixture' });
+    await fixture.connected(r.events);
+    a.msg('pong', '{}', { dst: ADDR.BROADCAST });
+    await until(() => b.nodeFrames.length === 1, 3000, 'the fan-out');
+    await new Promise((res) => setTimeout(res, 100));
+    expect(fixture.nodeFrames).toHaveLength(0);
     expect(r.router.status().counters.fanned_out).toBe(2);
   });
 });

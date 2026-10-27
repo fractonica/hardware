@@ -5,6 +5,7 @@ export * from './names.ts';
 export * from './ops.ts';
 export * from './registry-hash.ts';
 export * from './result.ts';
+export * from './sim.ts';
 export * from './types.ts';
 export * from './wire/index.ts';
 export * from './ws.ts';

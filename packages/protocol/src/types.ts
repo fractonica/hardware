@@ -128,13 +128,21 @@ export type LogKind = (typeof LOG_KINDS)[number];
 
 export const LogLineSchema = z.object({
   cursor: z.string(),
+  /** When the line reached the hub. */
   ts: z.string(),
   device: z.string(),
+  /** A USB port's path, or `tcp` for a LOG frame from a net_log node (design m2-c2 D21). */
   port: z.string(),
   level: z.string().optional(),
   tag: z.string().optional(),
   kind: z.enum(LOG_KINDS),
   text: z.string(),
+  /**
+   * A `tcp` line's own time, µs since the Unix epoch on the hub clock (the clock of events' `t_hub_us`), from its
+   * esp_log ms through the node's TIME sync: such a line can reach the hub up to 30 s after it was logged, so this,
+   * not `ts`, places it among events. Absent on serial lines and while the node's clock is unsynced.
+   */
+  t_log_us: z.number().optional(),
 });
 export type LogLine = z.infer<typeof LogLineSchema>;
 

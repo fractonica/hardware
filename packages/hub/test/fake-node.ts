@@ -20,10 +20,13 @@
 // outside 0..2 s, INVALID_ARGS on BULK, 8 slots, the RESULT at execution, a DUP of a scheduled one dropped,
 // a new hub epoch cancelling them), and testPin() wires its diag pin_pulse to another FakeNode's button,
 // which then sends `down` stamped at the pulse and `up` once it ends.
+// LOG over TCP (design m2-c2 D20, D21; stream S5): a FakeNode with `netLog` says net_log in HELLO and sends its
+// log lines as LOG frames over TCP (log()), as fr_net drains fr_serial's ring; rig() routes them into a real log
+// ingest (logs/ingest.ts) counting into the rig's scale counters.
 
 import { createHash, randomBytes } from 'node:crypto';
 import { createSocket, type Socket as UdpSocket } from 'node:dgram';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { type ClientRequest, get as httpGet } from 'node:http';
 import { createConnection, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -64,6 +67,7 @@ import {
   encodeDescriptor,
   encodeDiagExecResult,
   encodeEnvelope,
+  encodeLogLine,
   encodeMsgMsg,
   encodeNodeBindListResult,
   encodeNodeDescribeResult,
@@ -85,16 +89,18 @@ import {
   STATUS,
 } from '@fractonica/protocol/gen';
 
-import { parseAppImage, storeBlob } from '../src/artifacts.ts';
+import { parseAppImage, registerImage } from '../src/artifacts.ts';
 import { type BindingService, createBindings } from '../src/bindings/index.ts';
 import type { Device, HelloSeen, HubContext, Presence, Registry, Router } from '../src/context.ts';
 import { type Db, openDb } from '../src/db.ts';
 import { EventStore } from '../src/events/index.ts';
 import { JobRunner } from '../src/jobs.ts';
+import { createLogIngest } from '../src/logs/ingest.ts';
 import { LogStore } from '../src/logstore.ts';
 import { createOta, type OtaConfig, type OtaDeps, type OtaOrchestrator } from '../src/ota/index.ts';
 import { selectDevices } from '../src/registry/selector.ts';
 import { createRouter, type HubRouter, type RouterClock, type RouterConfig } from '../src/router/index.ts';
+import { createScaleCounters, type ScaleCounters } from '../src/router/scale.ts';
 import { CursorSeq } from '../src/seq.ts';
 
 export { CLS } from '@fractonica/protocol';
@@ -146,8 +152,10 @@ export interface FakeNodeOptions {
   hub?: { host?: string; tcp: number; udp: number };
   /** Instead of TCP/UDP: this node is USB-attached through `serial`. */
   serial?: FakeSerial;
-  /** HELLO `caps` (default: wifi + inject_enabled; + provisioned when addr is set). */
+  /** HELLO `caps` (default: wifi + inject_enabled; + provisioned when addr is set; + net_log with `netLog`). */
   caps?: number;
+  /** LOG frames over TCP (design m2-c2 D20): HELLO says net_log (caps b6) unless `caps` is given. */
+  netLog?: boolean;
   /** HELLO `role` (default node; `fixture`: the HIL fixture, design m2-c1-hil D6). */
   role?: 'node' | 'gateway' | 'fixture';
   /** The last seq of the ordinary space already used (a reconnect within one boot continues it). */
@@ -362,7 +370,8 @@ export class FakeNode {
       hbMs: 1000,
       autoHeartbeat: true,
       clockOffsetUs: 5_000_000,
-      caps: (1 << 1) | (1 << 4) | (addr !== ADDR.UNASSIGNED ? 1 << 5 : 0),
+      caps: (1 << 1) | (1 << 4) | (addr !== ADDR.UNASSIGNED ? 1 << 5 : 0) | (opts.netLog ? 1 << 6 : 0),
+      netLog: false,
       role: 'node',
       seqStart: 0,
       ...opts,
@@ -498,6 +507,27 @@ export class FakeNode {
 
   bye(reason = 1): void {
     this.#emit(CLS.PRESENCE, KIND.PRESENCE.BYE, PORT.NODE, encodePresenceBye({ reason }), {}, 'session');
+  }
+
+  /**
+   * One log line as a LOG frame over TCP (design m2-c2 D20): `line` is the whole esp_log line (`I (1234) tag: msg`),
+   * its level (the frame's kind) and tag parsed from it unless given. Q0 to the hub, BULK past the realtime MTU,
+   * never over serial or UDP. Returns its seq.
+   */
+  log(line: string, opts: { level?: number; tag?: string } = {}): number {
+    const m = /^([EWIDV]) \((\d+)\) ([^:]+):/.exec(line);
+    const level = opts.level ?? (m ? 'EWIDV'.indexOf(m[1]) + 1 : KIND.LOG.I);
+    const body = encodeLogLine({ tag: opts.tag ?? (m ? m[3].slice(0, 16) : ''), text: line });
+    const seq = ++this.#seq;
+    const bulk = body.length + 18 > 250 ? FLAG.BULK : 0;
+    this.#write('tcp', this.#encode(seq, CLS.LOG, level, PORT.NODE, body, bulk));
+    return seq;
+  }
+
+  /** `I (<ms>) <tag>: <msg>`, as esp_log formats a line now (or at `ms`) on this node's clock. */
+  logLine(msg: string, opts: { level?: 'E' | 'W' | 'I' | 'D' | 'V'; tag?: string; ms?: number } = {}): string {
+    const ms = opts.ms ?? Math.floor(this.nodeNowUs() / 1000);
+    return `${opts.level ?? 'I'} (${ms}) ${opts.tag ?? 'app'}: ${msg}`;
   }
 
   /** Sends raw bytes (tests of malformed or replayed frames). */
@@ -1510,6 +1540,8 @@ export interface Rig {
   dir: string;
   db: Db;
   logs: LogStore;
+  /** This router's scale counters, which the log ingest counts into too (design m2-c2 D16, D21). */
+  scale: ScaleCounters;
   events: EventStore;
   registry: FakeRegistry;
   serial: FakeSerial;
@@ -1521,14 +1553,26 @@ export interface Rig {
   close(): Promise<void>;
 }
 
-/** A router on ephemeral loopback ports with a fresh db, a fake registry and a fake serial link. */
+/**
+ * A router on ephemeral loopback ports with a fresh db, a fake registry and a fake serial link, and (design m2-c2
+ * D21) the log ingest main.ts gives it: LOG frames land in `logs`. `logNow` times the store's dedup window.
+ */
 export async function rig(
-  opts: { config?: Partial<RouterConfig>; clock?: RouterClock; hubEpoch?: number; serialOnly?: boolean; registry?: FakeRegistry } = {},
+  opts: {
+    config?: Partial<RouterConfig>;
+    clock?: RouterClock;
+    hubEpoch?: number;
+    serialOnly?: boolean;
+    registry?: FakeRegistry;
+    scale?: ScaleCounters;
+    logNow?: () => number;
+  } = {},
 ): Promise<Rig> {
   const dir = mkdtempSync(join(tmpdir(), 'fr-router-'));
   const db = openDb(join(dir, 'hub.db'));
   const seq = new CursorSeq(db);
-  const logs = new LogStore(db, 1, { retention: false, seq });
+  const logs = new LogStore(db, 1, { retention: false, seq, ...(opts.logNow ? { now: opts.logNow } : {}) });
+  const scale = opts.scale ?? createScaleCounters();
   const events = new EventStore(db, seq, 1);
   const registry = opts.registry ?? new FakeRegistry();
   const serial = new FakeSerial();
@@ -1545,6 +1589,8 @@ export async function rig(
     config: { timeSampleTimeoutMs: 200, ...opts.config },
     ...(opts.clock ? { clock: opts.clock } : {}),
     onSessions: (n) => sessions.push(n),
+    logIngest: createLogIngest(logs, scale),
+    scale,
   });
   serial.deliver = (device, line) => router.serialLine(device, line);
   await router.start();
@@ -1555,6 +1601,7 @@ export async function rig(
     dir,
     db,
     logs,
+    scale,
     events,
     registry,
     serial,
@@ -1603,7 +1650,7 @@ export interface TestArtifact {
  * Registers an artifact with a random app image of `size` bytes; fw_id is its sha256 (what FakeNode checks).
  * With `image` (an ESP app image, e.g. `fr_net_node --make-image`), the ingest parser reads fw_id (the
  * appended digest), chip id, version and fr_app_desc from it instead. FR_HOME must point at a temp dir: the
- * blob goes into its artifact store.
+ * blob goes into its artifact store (registerImage, design m2-c2 D9), the manifest into `dir`.
  */
 export function addArtifact(
   db: Db,
@@ -1620,51 +1667,34 @@ export function addArtifact(
     buildType?: 'debug' | 'release';
   } = {},
 ): TestArtifact {
-  const profile = opts.profile ?? 'c6-pad';
-  const buildType = opts.buildType ?? 'debug';
   const image = opts.image ?? randomBytes(opts.size ?? 96 * 1024);
   const parsed = opts.image ? parseAppImage(opts.image) : null;
   const fw = parsed?.fw_id ?? createHash('sha256').update(image).digest('hex');
-  const file = join(dir, `${fw}.bin`);
-  writeFileSync(file, image);
-  const blob = storeBlob(file);
+  const profile = opts.profile ?? 'c6-pad';
+  const buildType = opts.buildType ?? 'debug';
   const buildId = `node/${profile}/${opts.fault ? `${buildType}-fault` : buildType}/${fw.slice(0, 12)}`;
-  const manifest: ArtifactManifest = {
-    schema: 'fractonica.artifact/1',
-    build_id: buildId,
-    app: 'node',
-    profile,
-    build_type: buildType,
-    board: 'esp32c6-supermini',
-    target: opts.target ?? 'esp32c6',
-    chip_id: opts.chipId ?? parsed?.chip_id ?? 13,
-    part_profile: 'fr-4mb-v1',
-    version: opts.version ?? parsed?.version ?? `1a2b3c4-dirty.${fw.slice(0, 8)}`,
-    source_dir: '/src',
-    git: { sha: 'abc', dirty: true },
-    idf: { version: 'v6.1', commit: 'def' },
-    fw_id: fw,
-    elf_sha256: '00',
-    size: image.length,
-    built_at: opts.builtAt ?? new Date().toISOString(),
-    flash: { mode: 'dio', freq: '80m', size: '4MB', files: [{ offset: '0x10000', role: 'app', blob: blob.ref, size: image.length }] },
-    partitions: [],
-    ...(opts.fault ? { fault: opts.fault } : {}),
-    ...(parsed?.app_desc ? { app_desc: parsed.app_desc } : {}),
-  };
-  const manifestPath = join(dir, `${buildId.replaceAll('/', '_')}.json`);
-  writeFileSync(manifestPath, JSON.stringify(manifest));
-  db.prepare('INSERT INTO artifacts (build_id, source_dir, profile, build_type, fw_id, built_at, manifest_path, fault) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
-    buildId,
-    '/src',
+  // The fields and the manifest's place this helper always had, so its artifacts read as before.
+  const r = registerImage(db, {
+    image,
+    raw: !opts.image,
     profile,
     buildType,
-    fw,
-    manifest.built_at,
-    manifestPath,
-    opts.fault ?? null,
-  );
-  return { buildId, fw_id: fw, image, manifest };
+    ...(opts.fault ? { fault: opts.fault } : {}),
+    manifestPath: join(dir, `${buildId.replaceAll('/', '_')}.json`),
+    manifest: {
+      board: 'esp32c6-supermini',
+      target: opts.target ?? 'esp32c6',
+      chip_id: opts.chipId ?? parsed?.chip_id ?? 13,
+      part_profile: 'fr-4mb-v1',
+      version: opts.version ?? parsed?.version ?? `1a2b3c4-dirty.${fw.slice(0, 8)}`,
+      source_dir: '/src',
+      git: { sha: 'abc', dirty: true },
+      idf: { version: 'v6.1', commit: 'def' },
+      elf_sha256: '00',
+      ...(opts.builtAt ? { built_at: opts.builtAt } : {}),
+    },
+  });
+  return { buildId: r.buildId, fw_id: r.fw_id, image, manifest: r.manifest };
 }
 
 export interface OtaRig extends Rig {

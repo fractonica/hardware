@@ -96,6 +96,7 @@ public:
         }
     }
     void hold(bool on) override { holds.push_back(on); }
+    size_t queued() const override { return queued_bytes; }
 
     /** Every frame sent, or those of one class/kind. */
     std::vector<Frame> frames() const
@@ -133,6 +134,7 @@ public:
     bool is_up = false;
     bool refuse = false;          // send() fails (queue full)
     bool drop_goes_down = false;  // drop() closes the link (TCP), the owner then calls link_changed
+    size_t queued_bytes = 0;      // what queued() says: the TX FIFO's fill (design m2-c2 D20, LOG waits for 0)
     int drops = 0;
     std::vector<fr::net::DropReason> drop_reasons;
     std::vector<bool> holds;  // every hold() call, in order

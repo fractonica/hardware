@@ -24,7 +24,9 @@
 //          client already had for its instance must be late, and no other: zero missed and zero false late.
 //          A transient diag failure (a retryable hub error, a line that missed the USB port) is retried
 //          once and counted (`diag_retries`). One board that fails, or a cancel, stops every board, and
-//          each ends with `net loss 0 0` before the run goes on (lib/tasks.ts allOrAbort).
+//          each ends with `net loss 0 0` before the run goes on (lib/tasks.ts allOrAbort). The hook is armed
+//          again before it can run out (LOSS_HOOK_S less LOSS_REARM_MARGIN_S after it was last armed): at a longer
+//          --gap-ms (half the time scale on the T2 fleet, design m2-c2 D11, D15) the phase outlasts one hook.
 //
 // Run on its own (lib/runner.ts runStandalone: a person is at the bench, so --allow-human is implied; --hub
 // URL, --json) it prints `[measured]` lines and the gate report. test_run loads the default export
@@ -409,6 +411,15 @@ export function transientDiag(e: unknown): boolean {
 /** The loss phase's diag retry: once, after this long. */
 const DIAG_RETRY_MS = 500;
 
+/** `net loss <pct> <s>`'s length in the loss phase, and how long before it would run out it is armed again. */
+export const LOSS_HOOK_S = 900;
+export const LOSS_REARM_MARGIN_S = 60;
+
+/** Whether a hook armed at `armedAt` (ms) must be armed again at `now` (D11: before it runs out). */
+export function lossRearmDue(armedAt: number, now: number, hookS = LOSS_HOOK_S, marginS = LOSS_REARM_MARGIN_S): boolean {
+  return now - armedAt >= (hookS - marginS) * 1000;
+}
+
 /**
  * Ends `net loss` on the board however the line gets there (over the link ends the hook too), retried
  * once; a board left armed drops 5 % of its hub-link envelopes for up to 900 s under the next gate, so a
@@ -447,24 +458,40 @@ async function lossPhase(ctx: ScenarioCtx, t: Target, o: TInputOptions, signal: 
         ctx.log(`${t.alias}: ${line}: ${(e as Error).message}; once more`);
       },
     });
+  /** When `net loss <pct> 900` was last armed (local ms): armed again before it runs out (lossRearmDue). */
+  let armedAt = 0;
+  let rearms = 0;
+  const arm = async () => {
+    const on = await step(`net loss ${o.lossPct} ${LOSS_HOOK_S}`);
+    armedAt = Date.now();
+    return on;
+  };
+  const keepArmed = async () => {
+    if (lossRearmDue(armedAt, Date.now())) {
+      rearms++;
+      await arm();
+    }
+  };
   // Armed inside the try: a line that failed after the board took it still ends in the finally's disarm.
   try {
-    const on = await step(`net loss ${o.lossPct} 900`);
+    const on = await arm();
     if (on.ok !== true) {
       throw new Error(`${t.alias}: net loss refused: ${JSON.stringify(on)} (needs the C6 debug firmware)`);
     }
     for (let i = 0; i < o.clicks; i++) {
+      await keepArmed();
       await step('inject boot click');
       await sleep(o.gapMs, signal);
     }
     // Checkpoints: a click, then 2.5 s quiet; the mirror must end false. Convergence: from the click to
     // the mirror's last change to false. The clicks above took about 430 s of the hook's 900 and these take
     // about 510 more, so the hook is armed again for them.
-    await step(`net loss ${o.lossPct} 900`);
+    await arm();
     const conv: number[] = [];
     let stuck = 0;
     for (let i = 0; i < o.checkpoints; i++) {
       signal.throwIfAborted();
+      await keepArmed();
       await step('inject boot click');
       const t0 = Date.now();
       let lastFalse = pressed(t.dev) === false ? t0 : -1;
@@ -499,7 +526,7 @@ async function lossPhase(ctx: ScenarioCtx, t: Target, o: TInputOptions, signal: 
       } else {
         forcedStuck++;
       }
-      await step(`net loss ${o.lossPct} 900`);
+      await arm();
       await sleep(o.gapMs, signal);
     }
     const stats = await diag(ctx, t, 'stats').catch(() => ({}) as Record<string, unknown>);
@@ -530,6 +557,7 @@ async function lossPhase(ctx: ScenarioCtx, t: Target, o: TInputOptions, signal: 
       convergence_ms: { p50: quantile(conv, 0.5), p95, max },
       forced: { n: o.forced, not_converged: forcedStuck, after_hook_ms: { p50: quantile(forced, 0.5), max: forcedMax } },
       diag_retries: retries,
+      loss_rearms: rearms,
       node: { loss_tx: stats.loss_tx, loss_rx: stats.loss_rx },
     };
   } finally {

@@ -7,6 +7,10 @@
 // meanwhile cancel them (a hub link's copy never counts). Also here: the per-source flood rate, the
 // router-mode ESP-NOW heartbeat, the directory (NET/DIRECTORY pages, RESOLVE, DirectoryStore) and the
 // completion of air sends. Everything runs on the core task; no heap.
+//
+// M2-C2 (design m2-c2 D17, D19): a flood the driver refuses gives its flood-rate token back (here for relays and
+// seeds, in peer.cpp for the node's own floods), and while no session is up a newer hub run heard over the air is
+// adopted (adopt_hub_run) instead of waiting for the next WELCOME.
 #include <algorithm>
 #include <cstring>
 
@@ -210,13 +214,20 @@ void Net::on_hub_air(const EnvelopeView &e, std::span<const uint8_t> envelope, c
         ++s.rx_drop;
         return;
     }
-    // The hub BCAST window of the hub run that WELCOMEd this node, so the hub link's copy and the air
-    // copies of one broadcast dedup together, also once the session has ended (T-FLOOD-B: Wi-Fi down).
-    // Without a WELCOME this boot (hub_epoch 0, which no hub run has) old cannot be told from new: none.
-    if (state_.hub_epoch == 0 || h.epoch != state_.hub_epoch) {
-        ++state_.bcast.old;
-        ++s.rx_drop;
-        return;
+    // The hub BCAST window of the hub run this node follows, so the hub link's copy and the air copies of one
+    // broadcast dedup together, also once the session has ended (T-FLOOD-B: Wi-Fi down). Epoch 0 is no hub run.
+    if (h.epoch == 0 || h.epoch != state_.hub_epoch) {
+        // Design m2-c2 D19: with no session up, a newer run heard over the air is the hub restarted during a
+        // router outage (its USB nodes seed it), so it is adopted instead of waiting for the next WELCOME. A
+        // node with no run yet (none this boot) takes the first it hears: a stale one is overtaken by the next
+        // newer frame. With a session up, the session's run is authoritative.
+        const bool newer = state_.hub_epoch == 0 || epoch_after(h.epoch, state_.hub_epoch);
+        if (h.epoch == 0 || state_.hub_link() || !newer) {
+            ++state_.bcast.old;
+            ++s.rx_drop;
+            return;
+        }
+        adopt_hub_run(h.epoch, h.seq);
     }
     switch (bcast_.check_and_set(h.seq)) {
     case Verdict::old:
@@ -618,7 +629,11 @@ void Net::service_relays(TimeUs now)
         if (air_send(kBroadcastMac, {r.bytes, r.len}, prio, next_token())) {
             ++(r.seed ? state_.relay.seeded : state_.relay.relayed);
         } else {
+            // Design m2-c2 D17: the driver refused it (its queue full, say): the origin's token goes back, since
+            // nothing went on the air. Dropped, not re-queued, which would hold a relay slot.
+            flood_rate_refund(r.src);
             ++state_.relay.dropped;
+            ++state_.relay.refused;
         }
     }
 }
@@ -656,6 +671,32 @@ bool Net::flood_rate_take(uint16_t src, TimeUs now)
     }
     b->milli -= 1000;
     return true;
+}
+
+void Net::flood_rate_refund(uint16_t src)
+{
+    // Design m2-c2 D17: called right after a flood_rate_take(src) in the same core-task call, so the bucket is
+    // still there (no take evicted it) and unrefilled since: one flood back is exactly what was taken.
+    constexpr uint32_t kFull = kFloodRatePerS * 1000;
+    for (FloodRate &f : rates_) {
+        if (f.used && f.src == src) {
+            f.milli = std::min<uint32_t>(kFull, f.milli + 1000);
+            return;
+        }
+    }
+}
+
+void Net::adopt_hub_run(uint16_t epoch, uint32_t seq)
+{
+    // Design m2-c2 D19: none of this run's broadcasts reached the node yet, so the window starts empty just
+    // below `seq` (as a newer boot of a node source does, 05 §5.8): an earlier seq overtaken by this frame
+    // still delivers. A later WELCOME of this run only raises the floor (on_welcome's same run), so nothing
+    // taken from the air is delivered twice; one of another run resets it. The old run's scheduled CMDs go,
+    // as at a WELCOME of another run: their hub is gone, and its clock offset with it.
+    state_.hub_epoch = epoch;
+    bcast_.restart(seq - 1);
+    drop_other_run_cmds(epoch);
+    ++state_.bcast.adopted;
 }
 
 void Net::send_air_heartbeat()

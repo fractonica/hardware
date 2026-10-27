@@ -4,7 +4,8 @@
 // fr_serial and the diag channel, the port table with the system capabilities, HELLO's facts, the C1 banner
 // and the liveness log. M2-C1 (design m2-c1-hil D6, D11): the HELLO role from the profile, the radio-off build
 // (serial only, NET health from the serial session) and the hub link (session, last frame, run) in link_info() for
-// services.
+// services. M2-C2 (design m2-c2 D20): with the radio on, fr_serial's net log ring as Net's LogSource (LOG frames
+// over TCP, HELLO net_log).
 #include "fr/core.hpp"
 
 #include <array>
@@ -323,6 +324,58 @@ private:
 };
 
 SerialLink s_serial;
+
+/**
+ * The node's log lines for LOG frames over TCP (design m2-c2 D20): fr_serial's net log ring, which the ESP_LOG hook
+ * fills with whole lines of every task. Attached to Net only when the radio is on, so HELLO says net_log then and
+ * the radio-off fixture keeps its logs on USB. pop() runs on the core task (Net's drain); it hands Net what the
+ * ring counted since (its drops and cuts), and logs nothing: the LOG path never logs itself. The ring stamps each
+ * line on this core's clock (esp_timer ms), which Net's age limit compares with now(); the text's `(<ms>)` is
+ * esp_log's clock, which runs ahead of esp_timer by the boot's start-up, and text_ms() gives Net that clock for its
+ * own `W (<ms>) fr_net: <n> log lines dropped` line.
+ */
+class SerialLogs final : public net::LogSource
+{
+public:
+    uint32_t text_ms(uint32_t) const override { return esp_log_timestamp(); }
+
+    bool pop(net::LogLine &line, std::span<char> scratch) override
+    {
+        const serial::NetLogStats st = serial::net_log_stats();
+        if (st.ring_drop != told_.ring_drop || st.cut != told_.cut) {
+            s_net->logs_dropped(st.ring_drop - told_.ring_drop, st.cut - told_.cut);
+            told_ = st;
+        }
+        serial::NetLogLine l;
+        if (!serial::pop_net_log(l, scratch)) {
+            return false;
+        }
+        line = {.level = l.level, .pushed_ms = l.pushed_ms, .tag = l.tag, .text = l.text};
+        return true;
+    }
+
+private:
+    serial::NetLogStats told_{};
+};
+
+SerialLogs s_serial_logs;
+// One wake in flight at a time: the hook asks on every empty -> non-empty turn of the ring, from any task.
+std::atomic<bool> s_logs_wake{false};
+
+/** fr_serial's wake for the net log ring: one coalesced post that has Net drain it (logs_ready). Any task. */
+void wake_net_logs()
+{
+    if (s_logs_wake.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    // A full post queue loses this wake only: Net's next tick drains the ring anyway (within an interval).
+    if (!s_core.post([] {
+            s_logs_wake.store(false, std::memory_order_release);
+            s_net->logs_ready();
+        })) {
+        s_logs_wake.store(false, std::memory_order_release);
+    }
+}
 
 /** Received envelopes: lent to the core task with each post, never more in flight than the pool. */
 struct RxBuf {
@@ -977,7 +1030,8 @@ public:
         n.relay = {.seeded = st.relay.seeded,
                    .relayed = st.relay.relayed,
                    .cancelled = st.relay.cancelled,
-                   .dropped = st.relay.dropped};
+                   .dropped = st.relay.dropped,
+                   .refused = st.relay.refused};
         n.nodes = {.delivered = st.nodes.delivered,
                    .dup = st.nodes.dup,
                    .old = st.nodes.old,
@@ -987,7 +1041,11 @@ public:
                    .via_flood = st.nodes.via_flood,
                    .failed = st.nodes.failed,
                    .resolves = st.nodes.resolves};
-        n.bcast = {.delivered = st.bcast.delivered, .dup = st.bcast.dup, .old = st.bcast.old, .watermark = st.bcast.watermark};
+        n.bcast = {.delivered = st.bcast.delivered,
+                   .dup = st.bcast.dup,
+                   .old = st.bcast.old,
+                   .watermark = st.bcast.watermark,
+                   .adopted = st.bcast.adopted};
         n.bindings = {.fired = st.bindings.fired, .failed = st.bindings.failed, .rtt_p50_us = st.bindings.rtt_p50_us};
         const net::MsgStats &ms = s_net->msg_stats();
         static_assert(diag::kMsgTopics == net::MsgStats::kTopics);
@@ -997,6 +1055,11 @@ public:
             n.msgs[i].n = ms.topics[i].n;
         }
         n.msgs_other = ms.other;
+        n.net_logs = {.sent = st.logs.sent,
+                      .ring_drop = st.logs.ring_drop,
+                      .age_drop = st.logs.age_drop,
+                      .rate_drop = st.logs.rate_drop,
+                      .cut = st.logs.cut};
         return n;
     }
 
@@ -1300,6 +1363,9 @@ Core &start()
         s_net->attach(net::esp::tcp_link());
         s_net->attach(net::esp::udp_link());
         s_net->attach_air(net::esp::air_link());
+        // Design m2-c2 D20: LOG frames over TCP from fr_serial's net log ring (enabled before its hook goes in).
+        serial::enable_net_logs(CONFIG_FR_NET_LOG_LEVEL, wake_net_logs);
+        s_net->attach_logs(&s_serial_logs);
     }
     s_stores.emplace(s_core, worker::get(), s_dir_blob, s_bind_blob);
     s_net->attach_stores(s_stores->directory(), s_stores->bindings());

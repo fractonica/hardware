@@ -13,6 +13,10 @@
 // C6 (design c6 D21-D23): hub CMDs with exec_at wait in fixed slots for the timer (on_timer, never inside
 // another dispatch), the `net loss` hook drops hub-link envelopes at random both ways, and receive() takes
 // the link task's receive time.
+//
+// M2-C2 (design m2-c2 D20): the same timer drains the LogSource (log.cpp), and HELLO says net_log while one is
+// attached. The TCP session's WELCOME, TIME answers, get_state RESULT, hub frames and end are what the drain's
+// settle and 1 KB window rules follow.
 #include "fr/net/net.hpp"
 
 #include <algorithm>
@@ -144,9 +148,13 @@ void Net::receive(LinkKind from, std::span<const uint8_t> envelope, TimeUs at)
     const TimeUs now = core_.now();
     rx_at_ = std::min(at, now);
     state_.rx_queue_us_max = std::max(state_.rx_queue_us_max, us_u32(now - rx_at_));
+    const TimeUs tcp_heard = sess(LinkKind::tcp).last_rx;
     in_receive_ = true;
     handle(from, envelope);
     in_receive_ = false;
+    if (from == LinkKind::tcp && sess(LinkKind::tcp).last_rx != tcp_heard) {
+        log_heard(rx_at_);  // design m2-c2 D20: a hub frame over TCP clears the LOG sent one RTT before it
+    }
     run_deferred();
     flush_fired();
     arm();
@@ -213,6 +221,7 @@ void Net::reset_stats()
     state_.bcast = {};  // state() reads the watermark from the window
     state_.bindings = {};
     state_.nodes = {};
+    state_.logs = {};
     msgs_ = {};
     rtt_n_ = rtt_next_ = 0;
 }
@@ -532,12 +541,7 @@ void Net::on_welcome(LinkKind from, std::span<const uint8_t> body)
     }
     // Design c6 D22: CMDs an earlier hub run scheduled are dropped unrun; their hub is gone, and its clock
     // offset with it. A WELCOME of the same run (the other link, a reconnect) keeps them.
-    for (Scheduled &x : exec_) {
-        if (x.used && x.cmd.epoch != w->hub_epoch) {
-            x.used = false;
-            ++state_.exec_cancelled;
-        }
-    }
+    drop_other_run_cmds(w->hub_epoch);
     // 05 §5.8: the node resets its hub entries on every WELCOME, with the floors the hub gives. A WELCOME of
     // the hub run the BCAST window already follows only raises its floor (design c5 §8): a broadcast
     // above bcast_base can arrive over the air or the other session ahead of this WELCOME, and moving the
@@ -554,6 +558,9 @@ void Net::on_welcome(LinkKind from, std::span<const uint8_t> body)
     LinkState &s = ls(from);
     s.session = true;
     s.time_synced = false;  // the handshake's TIME burst follows
+    if (from == LinkKind::tcp) {
+        log_welcome(rx_at_);  // design m2-c2 D20: LOG waits for this handshake to settle
+    }
     sess(from).last_rx = rx_at_;
     hub_heard_at_ = rx_at_;
     sess(from).hello_due = kNever;
@@ -567,6 +574,16 @@ void Net::on_welcome(LinkKind from, std::span<const uint8_t> body)
         Writer bw(buf, sizeof(buf));
         encode(cap::NodeBoot{.reset_reason = host_.hello_info().reset_reason}, bw);
         send_event(fr::proto::kPortNode, cap::Node::kEventBoot, cap::Priority::normal, bw.bytes(), rx_at_, true);
+    }
+}
+
+void Net::drop_other_run_cmds(uint16_t epoch)
+{
+    for (Scheduled &x : exec_) {
+        if (x.used && x.cmd.epoch != epoch) {
+            x.used = false;
+            ++state_.exec_cancelled;
+        }
     }
 }
 
@@ -700,6 +717,11 @@ void Net::run_cmd(const CmdRef &c, std::span<const uint8_t> args)
     const Status st = host_.dispatch(c.port, c.kind, args, reply);
     // Only a successful dispatch owns what it wrote into the reply.
     answer_cmd(c, st, st ? reply.bytes() : std::span<const uint8_t>{});
+    if (c.from == LinkKind::tcp && c.port == fr::proto::kPortNode && c.kind == cap::Node::kCmdGetState) {
+        // Design m2-c2 D20: the hub's handshake ends with get_state (after its TIME burst), so the TCP session's
+        // LOG backlog never competes with the handshake's own frames.
+        log_state_answered_ = true;
+    }
 }
 
 void Net::answer_cmd(const CmdRef &c, const Status &st, std::span<const uint8_t> fields)
@@ -857,6 +879,9 @@ void Net::on_sync_req(LinkKind from, std::span<const uint8_t> body)
     transmit_on(from, build(0, kClsTime, fr::proto::kKindTimeSyncRes, ++seq_, fr::proto::kAddrHub,
                             fr::proto::kPortNode, {}, w.bytes()));
     ls(from).time_synced = true;
+    if (from == LinkKind::tcp) {
+        log_synced(rx_at_, static_cast<TimeUs>(res.t3));  // the TCP session's RTT, for the LOG window (D20)
+    }
 }
 
 bool Net::resend_cached(uint16_t src, uint16_t epoch, uint32_t req_seq, LinkKind from)
@@ -935,7 +960,7 @@ void Net::send_hello(LinkKind k)
         .descriptor_hash = hi.descriptor_hash,
         .board_hash = hi.board_hash,
         .role = hi.role,
-        .caps = hi.caps,
+        .caps = logs_ != nullptr ? hi.caps | kCapNetLog : hi.caps,  // design m2-c2 D20
         .hb_interval_ms = cfg_.heartbeat_ms,  // the cadence Net keeps, whatever HelloInfo says
         .reset_reason = hi.reset_reason,
         .ota_state = hi.ota_state,
@@ -1035,6 +1060,7 @@ void Net::end_session(LinkKind k, bool lost)
     // 05 §5.8: a Q1 frame written to a connection that is gone has failed; UDP rides the TCP session
     // (its ACKs come back over TCP).
     if (k == LinkKind::tcp) {
+        log_session_end();  // design m2-c2 D20: the next session settles again, its socket starts empty
         clear_udp_ok();
         fail_pending(kViaTcp | kViaUdp);
         // A standby serial session becomes the path: its keepalive clock starts now.
@@ -1281,6 +1307,7 @@ void Net::tick()
             service_pending(p, now);
         }
     }
+    service_logs(now);  // LOG frames over TCP (design m2-c2 D20)
     // ESP-NOW (design c5 §3): relays whose delay ran out, node -> node retries and give-ups, the heartbeat.
     service_relays(now);
     for (NodeOut &o : node_out_) {
@@ -1345,6 +1372,7 @@ void Net::arm()
             next = std::min({next, p.retry_at, p.deadline});
         }
     }
+    next = std::min(next, next_log_due());
     for (const Relay &r : relays_) {
         if (r.used) {
             next = std::min(next, r.due);

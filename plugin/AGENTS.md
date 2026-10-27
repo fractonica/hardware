@@ -37,7 +37,7 @@ Errors carry `remediation[]` (a `tool` with `args`, a `cli` command or a `human`
 ## Build and deploy
 
 - Happy path: `fr deploy <sel> --via wifi --expect-event node.boot --json` (op `deploy`): build per profile, OTA, wait for the new fw_id, check the expectation; one result per device (`updated | already_current | rolled_back | failed`).
-- `--expect-log <text>` needs every selected device on a USB port the hub holds open (`fr ports ls`: `open`); for a board on Wi-Fi alone use `--expect-event node.boot`.
+- `--expect-log <text>` needs every selected device to have a log source: logs reach the hub over USB (a port the hub holds open, `fr ports ls`: `open`), and over Wi-Fi from nodes whose HELLO says `net_log` (router mode, images from M2-C2 on; `fr devices get <dev> --json`: `router.hello_caps` bit 6); a gateway-only node needs USB until C6. The image a device runs decides, so a build from an older source deployed to a Wi-Fi-only node times out its expectation. Otherwise use `--expect-event node.boot`. Over Wi-Fi only E, W and I `ESP_LOG` lines logged after start-up arrive, at most 20 lines/s and none older than 30 s (losses show as a `fr_net: <n> log lines dropped` line); D and V lines, bootloader and early-boot output, and panic or abort text come only over USB.
 - `all` includes seen-only and offline rows; prefer `online` or a tag unless every row is provisioned and online.
 - Build alone: `fr build --profile <p>` (op `build_start`); a failure is `BUILD_FAILED` with `details.diagnostics[]`, more in `fr jobs logs <job> --errors-only`.
 - Switch a profile: `fr build --profile <p>`, then `fr flash <dev> --profile <p> --plan full` over USB (op `flash_start`), then `fr wait device <dev> --since C`.
@@ -55,5 +55,7 @@ fr latency pad-c6,pad-c3 --window 300 --json                     # latency_stats
 fr assert logs pad-c3 --since "$C" --expect 'fr: ready' --forbid 'Guru Meditation' --json   # logs_assert
 fr wait event boot.down --selector pad-c6 --since "$C" --prompt-human 'Press BOOT on pad-c6' --timeout 110 --json
 ```
+
+The `--forbid 'Guru Meditation'` crash check needs USB: panic and abort text, ROM and bootloader output reach the hub only over USB. For a device whose only log source is Wi-Fi (`net_log`), forbid the reset reason the ready banner of the next boot names: `fr assert logs pad-c6 --since "$C" --expect 'fr: ready' --forbid 'reset=PANIC' --forbid 'reset=TASK_WDT' --forbid 'reset=INT_WDT' --forbid 'reset=WDT' --forbid 'reset=BROWNOUT' --json`.
 
 `fr send <sel> status.blink '{"count":3}'` (op `command_send`) runs a capability command; `fr diag <dev> selftest` (op `diag_exec`) checks LED and button pins without hands.

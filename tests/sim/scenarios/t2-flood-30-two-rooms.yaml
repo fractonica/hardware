@@ -1,0 +1,26 @@
+# Published (design m2-c2 D10): two rooms of 15, full reach inside each and partial reach across (hidden terminals),
+# collisions on. Router-mode gates are judged on one room; this layout is reported only. Each cut node keeps at least
+# two seeders in its own room (the validator's rule).
+schema: fractonica/sim-scenario@1
+id: t2-flood-30-two-rooms
+summary: T-FLOOD at 30 nodes in two rooms of 15 with partial reach across, collisions on
+nodes:
+  count: 30
+  profile: c6-pad
+  hb_ms: 1000
+  usb: [sim-07, sim-22]
+seed: 1
+medium:
+  topology: two_rooms
+  cross_reach: 0.3
+  rssi_dbm: [-88, -45]
+  loss: [0.001, 0.015]
+  rate: { broadcast: 1M, unicast: 1M }
+  collisions: true
+  capture_db: 10
+ap: { channel: 6, uplink_ms: [0.5, 3], downlink_ms: [0.5, 3], udp_loss: 0 }
+runs:
+  - name: cut-2
+    run: t-flood
+    args: [--devices, 'sim-01..sim-30', --cut, 'sim-07,sim-22', --count, '1000', --interval-ms, '100', --max-seeds, '1000', --min-delivery, '99.9']
+published: true

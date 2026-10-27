@@ -2,7 +2,8 @@
 // on a MAC ACK -> via the hub -> flooded unicast; TTL 1 when the driver's peer table is busy), Q1 over
 // ESP-NOW (ACK_REQ, end-to-end retries with jitter and give-up, the RESULT/ACK that ends them), the target's
 // side (dispatch once, RESULT or ACK to the source MAC, the cached RESULT for a DUP), answers that fall back,
-// node frames the hub forwarded, MSG delivery and its per-topic counts, and send_msg.
+// node frames the hub forwarded, MSG delivery and its per-topic counts, and send_msg. M2-C2 (design m2-c2 D17):
+// flooded unicasts the driver refuses give their flood token back, retries included.
 #include <algorithm>
 
 #include "tests/net_air_fakes.hpp"
@@ -163,6 +164,36 @@ TEST(net_air_send_fast_with_no_path_is_busy)
     r.core.run_ready();
     CHECK_EQ(r.net.state().bindings.fired, 1u);
     CHECK_EQ(r.net.state().bindings.failed, 1u);
+}
+
+TEST(net_air_send_refused_floods_keep_the_nodes_tokens)
+{
+    AirRig r;
+    // No hub session and no MAC for 0x0077: every attempt of a reliable frame is a flooded unicast (TTL_DEFAULT),
+    // and the driver's queue is full for all four. Design m2-c2 D17: each attempt's flood token goes back when
+    // the driver refuses it, where each used to keep one.
+    r.air.refuse = fr::Err::busy;
+    REQUIRE(r.net.send_to_node(0x0077, wire::kClsMsg, 0, 0, frt::msg_body("r"), Delivery::reliable));
+    for (int ms = 0; ms < 600 && r.net.state().link(LinkKind::espnow).retries < 3; ++ms) {
+        r.core.advance_ms(1);
+    }
+    REQUIRE_EQ(r.net.state().link(LinkKind::espnow).retries, 3u);  // the fourth and last attempt, just refused
+    CHECK(r.air.sent.empty());
+    CHECK_EQ(r.net.state().relay.seeded, 0u);
+    // The queue drains: the node's own broadcasts still have their whole burst, 10 at once, and the 11th is
+    // over the rate (no hub to take it: busy).
+    r.air.refuse.reset();
+    const auto body = frt::msg_body("b");
+    for (int i = 0; i < 10; ++i) {
+        REQUIRE(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body));
+    }
+    CHECK(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body).error() == fr::Err::busy);
+    CHECK_EQ(r.air.of(wire::kClsMsg).size(), 10u);
+    CHECK_EQ(r.net.state().relay.seeded, 10u);
+    // The reliable frame gives up as before (05 §5.8).
+    r.core.advance_ms(400);
+    CHECK_EQ(r.net.state().nodes.failed, 1u);
+    CHECK_EQ(r.net.state().delivery_failed, 1u);
 }
 
 TEST(net_air_send_refusals)

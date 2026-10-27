@@ -507,7 +507,7 @@ export interface PresenceHello {
   descriptor_hash: number;
   board_hash: number;
   role: Role | number;
-  /** b0 espnow_v2, b1 wifi, b2 sleepy, b3 sec, b4 inject_enabled, b5 provisioned */
+  /** b0 espnow_v2, b1 wifi, b2 sleepy, b3 sec, b4 inject_enabled, b5 provisioned, b6 net_log */
   caps: number;
   hb_interval_ms: number;
   reset_reason: number;
@@ -827,7 +827,7 @@ export function decodeMsgMsg(bytes: Uint8Array): Decoded<MsgMsg> {
 export interface LogLineMsg {
   /** (<= 16 UTF-8 bytes) */
   tag: string;
-  /** (<= 200 UTF-8 bytes) */
+  /** (<= 384 UTF-8 bytes) */
   text: string;
 }
 
@@ -836,7 +836,7 @@ export function encodeLogLine(v: Partial<LogLineMsg> = {}): Uint8Array {
   const w = new Writer();
   const f1 = $.str(v.tag ?? '', 16, 'tag');
   if (f1.length > 0) w.fieldBytes(1, f1);
-  const f2 = $.str(v.text ?? '', 200, 'text');
+  const f2 = $.str(v.text ?? '', 384, 'text');
   if (f2.length > 0) w.fieldBytes(2, f2);
   return w.finish();
 }
@@ -850,7 +850,7 @@ export function decodeLogLine(bytes: Uint8Array): Decoded<LogLineMsg> {
         v.tag = r.readString(16);
         break;
       case 2:
-        v.text = r.readString(200);
+        v.text = r.readString(384);
         break;
       default:
         r.skip();
@@ -1223,7 +1223,7 @@ export const MESSAGES: readonly $.MessageInfo[] = [
   { key: 'PRESENCE.PING', cls: 1, kind: 4, codec: { fields: [{ name: 't0' }], maxSize: 6, encode: encodePresencePing, decode: decodePresencePing } },
   { key: 'PRESENCE.PONG', cls: 1, kind: 5, codec: { fields: [{ name: 't0' }, { name: 't1' }], maxSize: 12, encode: encodePresencePong, decode: decodePresencePong } },
   { key: 'MSG.MSG', cls: 7, kind: 0, codec: { fields: [{ name: 'topic' }, { name: 'data', json: 'bytes' }], maxSize: 205, encode: encodeMsgMsg, decode: decodeMsgMsg } },
-  { key: 'LOG.LINE', cls: 8, kind: null, codec: { fields: [{ name: 'tag' }, { name: 'text' }], maxSize: 221, encode: encodeLogLine, decode: decodeLogLine } },
+  { key: 'LOG.LINE', cls: 8, kind: null, codec: { fields: [{ name: 'tag' }, { name: 'text' }], maxSize: 405, encode: encodeLogLine, decode: decodeLogLine } },
   { key: 'OTA.OFFER', cls: 9, kind: 1, codec: { fields: [{ name: 'job_id' }, { name: 'fw_id', json: 'bytes' }, { name: 'size' }, { name: 'version' }, { name: 'flags' }], maxSize: 104, encode: encodeOtaOffer, decode: decodeOtaOffer } },
   { key: 'OTA.ACCEPT', cls: 9, kind: 2, codec: { fields: [{ name: 'job_id' }, { name: 'code' }], maxSize: 28, encode: encodeOtaAccept, decode: decodeOtaAccept } },
   { key: 'OTA.REJECT', cls: 9, kind: 3, codec: { fields: [{ name: 'job_id' }, { name: 'code' }], maxSize: 28, encode: encodeOtaReject, decode: decodeOtaReject } },

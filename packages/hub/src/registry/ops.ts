@@ -1,11 +1,13 @@
 // Op handlers of the registry and provisioning (packages/protocol/src/ops/registry.ts; stream H1),
 // spread into HANDLERS (packages/hub/src/ops.ts). flash_start's handler is flashing.ts (startFlash).
+// M2-C2 (design m2-c2 D16): device_list rows carry `live`, what a dashboard tile shows of the device's link, so
+// 30 tiles render from one device_list instead of a device_get each (each O(N) to resolve).
 
-import { FrError, type RegistryOpName } from '@fractonica/protocol';
+import { FrError, type PortInfo, type RegistryOpName } from '@fractonica/protocol';
 
 import type { Device, Handler, HubContext } from '../context.ts';
 import { nowUs } from '../ring.ts';
-import { routerInfo } from '../router/index.ts';
+import { routerInfo, routerSummary } from '../router/index.ts';
 import { presenceOf, registryOf, resolveOne } from './hub.ts';
 import { editTags } from './names.ts';
 import { startProvision } from './provision.ts';
@@ -14,17 +16,20 @@ import { provisionOf } from './store.ts';
 /** List budget (spec 09 §9.2): 100 rows. */
 const LIST_MAX = 100;
 
-/** A registry row as ops return it: plus presence and, when attached, the USB port. */
-function view(hub: HubContext, d: Device) {
-  const port = hub.serial.list().find((p) => p.device_id === d.device_id);
+/** A registry row as ops return it: plus presence and, when attached, the USB port (`ports`: one port listing for many rows). */
+function view(hub: HubContext, d: Device, ports: PortInfo[] = hub.serial.list()) {
+  const port = ports.find((p) => p.device_id === d.device_id);
   return { ...d, presence: presenceOf(hub)(d.device_id), ...(port ? { port: port.path, port_state: port.state } : {}) };
 }
 
 export const REGISTRY_HANDLERS: Record<RegistryOpName, Handler> = {
   device_list: (input: { selector?: string }, hub: HubContext) => {
     const found = registryOf(hub).resolve(input.selector ?? 'all', presenceOf(hub));
+    const ports = hub.serial.list();
     return {
-      devices: found.slice(0, LIST_MAX).map((d) => view(hub, d)),
+      // `live`: links (best first), udp_blocked, the last heartbeat's RSSI and uptime, the firmware prefix; null
+      // before the device's first HELLO in this hub run.
+      devices: found.slice(0, LIST_MAX).map((d) => ({ ...view(hub, d, ports), live: routerSummary(hub.router, d.device_id) })),
       count: found.length,
       truncated: found.length > LIST_MAX,
     };

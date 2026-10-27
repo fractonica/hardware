@@ -4,6 +4,8 @@
 // unicast's target delivering without relaying, relay_enabled, ota_busy, gateways, the per-source flood rate,
 // seeding from the hub (TCP and serial) and the repair copy that is not seeded again, the node broadcast's dual
 // path, the hub's fan-out of it, hub broadcasts over the air (known hub runs only), groups and the watermark.
+// M2-C2 (design m2-c2 D17, D19): the token a flood the driver refused gives back (own broadcasts, relays), and
+// the adoption of a newer hub run heard over the air while no session is up (from no run at all too).
 #include <algorithm>
 
 #include "tests/net_air_fakes.hpp"
@@ -320,6 +322,7 @@ TEST(net_flood_rate_per_source)
     CHECK_EQ(msg_floods(r).size(), 11u);
     CHECK_EQ(r.net.state().relay.relayed, 11u);
     CHECK_EQ(r.net.state().relay.dropped, 2u);
+    CHECK_EQ(r.net.state().relay.refused, 0u);  // over the rate, never offered to the driver
     // It refills at 10 per second.
     r.core.advance_ms(1000);
     for (int i = 0; i < 5; ++i) {
@@ -327,6 +330,83 @@ TEST(net_flood_rate_per_source)
         r.core.advance_ms(30);
     }
     CHECK_EQ(msg_floods(r).size(), 16u);
+}
+
+TEST(net_flood_a_refused_broadcast_gives_its_token_back)
+{
+    AirRig r;
+    r.session(LinkKind::tcp);
+    r.clear_sent();
+    const auto body = frt::msg_body("own");
+    // Design m2-c2 D17: the driver refuses 10 of the node's own broadcasts (its queue full, or any refusal):
+    // each still reaches the hub, and each gives back the flood token it took, since nothing went on the air.
+    const fr::Err refusals[] = {fr::Err::busy,         fr::Err::busy,         fr::Err::busy,  fr::Err::busy,
+                                fr::Err::invalid_args, fr::Err::invalid_args, fr::Err::failed, fr::Err::failed,
+                                fr::Err::failed,       fr::Err::invalid_args};
+    for (const fr::Err e : refusals) {
+        r.air.refuse = e;
+        REQUIRE(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body));
+    }
+    r.air.refuse.reset();
+    CHECK(msg_floods(r).empty());
+    CHECK_EQ(r.tcp.frames_of(wire::kClsMsg).size(), 10u);
+    CHECK_EQ(r.net.state().relay.seeded, 0u);
+    // The queue drains: 10 more within 100 ms all go on the air. Had the refused ones kept their tokens, the
+    // bucket would hold under one flood now.
+    for (int i = 0; i < 10; ++i) {
+        REQUIRE(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body));
+        r.core.advance_ms(9);
+    }
+    CHECK_EQ(msg_floods(r).size(), 10u);
+    CHECK_EQ(r.net.state().relay.seeded, 10u);
+    // Accepted floods are still capped at 10 a second: the 11th goes to the hub only.
+    REQUIRE(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body));
+    CHECK_EQ(msg_floods(r).size(), 10u);
+    // A refused TTL-1 broadcast took no token (it is no flood), so it gives none back: the bucket stays spent.
+    r.air.refuse = fr::Err::busy;
+    for (int i = 0; i < 5; ++i) {
+        CHECK(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body, 1).error() == fr::Err::busy);
+    }
+    r.air.refuse.reset();
+    // A failed take never reaches the driver and gives nothing back either: two more floods at once, both
+    // hub-only. An accepted TTL-1 broadcast still goes out, the rate notwithstanding.
+    REQUIRE(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body));
+    REQUIRE(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body));
+    CHECK_EQ(msg_floods(r).size(), 10u);
+    CHECK_EQ(r.tcp.frames_of(wire::kClsMsg).size(), 23u);
+    REQUIRE(r.net.broadcast(wire::kClsMsg, proto::kKindMsgMsg, 0, body, 1));
+    CHECK_EQ(msg_floods(r).size(), 11u);
+    CHECK_EQ(msg_floods(r).back().frame().ttl, 0x11);
+}
+
+TEST(net_flood_a_refused_relay_gives_the_origin_its_token_back)
+{
+    AirRig r;
+    Peer origin;
+    // Design m2-c2 D17: 10 relays of one origin, all refused by the driver. Each is dropped (not re-queued,
+    // which would hold a relay slot) and counted refused, and gives the origin's token back.
+    r.air.refuse = fr::Err::busy;
+    for (int batch = 0; batch < 2; ++batch) {
+        for (int i = 0; i < 5; ++i) {
+            r.rx(origin.msg(kBcast, "r"), origin.meta());
+        }
+        r.core.advance_ms(30);
+    }
+    CHECK(msg_floods(r).empty());
+    CHECK_EQ(r.net.state().relay.relayed, 0u);
+    CHECK_EQ(r.net.state().relay.dropped, 10u);
+    CHECK_EQ(r.net.state().relay.refused, 10u);
+    // So 5 more right after (all 15 within 100 ms) are all relayed, where kept tokens would have left about one.
+    r.air.refuse.reset();
+    for (int i = 0; i < 5; ++i) {
+        r.rx(origin.msg(kBcast, "r"), origin.meta());
+    }
+    r.core.advance_ms(30);
+    CHECK_EQ(msg_floods(r).size(), 5u);
+    CHECK_EQ(r.net.state().relay.relayed, 5u);
+    CHECK_EQ(r.net.state().relay.dropped, 10u);
+    CHECK_EQ(r.net.state().relay.refused, 10u);
+    CHECK_EQ(r.host.msgs.size(), 15u);  // delivered all the same
 }
 
 TEST(net_flood_relay_queue_bound)
@@ -413,34 +493,143 @@ TEST(net_flood_node_broadcast_dual_path)
     CHECK(u.net.broadcast(wire::kClsMsg, 0, 0, body).error() == fr::Err::not_provisioned);
 }
 
-TEST(net_flood_hub_broadcasts_over_air_need_a_known_hub_run)
+TEST(net_flood_hub_broadcasts_over_air_follow_one_hub_run)
 {
     AirRig r;
     Peer seeder;
-    // No WELCOME yet: old cannot be told from new, nothing is taken.
+    // No WELCOME yet this boot (design m2-c2 D19, which supersedes c5 rule 7): the first hub run heard is the
+    // only evidence there is, so it is adopted and the broadcast delivered.
     const auto b1 = frt::hub_broadcast(r.hub, "b");
     r.rx(as_relayed(b1), seeder.meta());
-    CHECK(r.host.msgs.empty());
-    CHECK_EQ(r.net.state().bcast.old, 1u);
-    // After a WELCOME: delivered from the air, deduplicated with the hub link's copy.
+    CHECK_EQ(r.host.msgs.size(), 1u);
+    CHECK_EQ(r.net.hub_epoch(), 41);
+    CHECK_EQ(r.net.state().bcast.adopted, 1u);
+    CHECK_EQ(r.net.state().bcast.old, 0u);
+    // After its WELCOME: delivered from the air, deduplicated with the hub link's copy.
     r.session(LinkKind::tcp);
     const auto b2 = frt::hub_broadcast(r.hub, "b");
     r.rx(as_relayed(b2), seeder.meta());
     r.deliver(LinkKind::tcp, b2);
-    CHECK_EQ(r.host.msgs.size(), 1u);
-    // Another hub run's broadcast: dropped.
+    CHECK_EQ(r.host.msgs.size(), 2u);
+    // Another hub run's broadcast while a session is up: the session's run is authoritative, dropped.
     r.hub.epoch = 42;
     r.rx(as_relayed(frt::hub_broadcast(r.hub, "b")), seeder.meta());
     r.hub.epoch = 41;
-    CHECK_EQ(r.host.msgs.size(), 1u);
+    CHECK_EQ(r.host.msgs.size(), 2u);
+    CHECK_EQ(r.net.state().bcast.old, 1u);
     // The session ends (Wi-Fi down, T-FLOOD-B): the floods of that hub run still arrive.
     r.down(LinkKind::tcp);
     CHECK(!r.net.state().hub_link());
     r.rx(as_relayed(frt::hub_broadcast(r.hub, "b")), seeder.meta());
-    CHECK_EQ(r.host.msgs.size(), 2u);
+    CHECK_EQ(r.host.msgs.size(), 3u);
     // Only floods: a hub frame to this node's MAC, an ACK_REQ or a LATEST one is not what the air carries.
     r.rx(as_relayed(frt::hub_broadcast(r.hub, "b")), seeder.meta(false));
+    CHECK_EQ(r.host.msgs.size(), 3u);
+    CHECK_EQ(r.net.state().bcast.adopted, 1u);
+    CHECK_EQ(r.net.hub_epoch(), 41);
+}
+
+TEST(net_flood_a_newer_hub_run_heard_with_no_session_is_adopted)
+{
+    AirRig r;
+    Peer seeder;
+    r.session(LinkKind::tcp);
+    r.deliver(LinkKind::tcp, r.hub.sync_req(1));  // synced, so run 41 can schedule CMDs
+    REQUIRE(r.net.state().time_synced());
+    r.deliver(LinkKind::tcp, frt::hub_broadcast(r.hub, "old-run"));
+    // Two CMDs run 41 scheduled 1.5 s ahead (design c6 D22).
+    for (uint8_t kind = 1; kind <= 2; ++kind) {
+        wire::ExtBuilder ext;
+        ext.add_value(wire::kExtExecAtUs, static_cast<uint32_t>(r.core.now() + 1'500'000));
+        r.deliver(LinkKind::tcp, r.hub.cmd(2, kind, {}, wire::kFlagAckReq, ext.view()));
+    }
+    REQUIRE_EQ(r.net.state().cmds_scheduled, 2u);
+    // Design m2-c2 D19: a router outage ends the session, and the hub restarts meanwhile (run 42, its seqs from
+    // the start). Its USB nodes, WELCOMEd over serial, seed the new run, which this node hears over the air.
+    r.down(LinkKind::tcp);
+    r.hub.epoch = 42;
+    r.hub.bcast = 0;
+    const auto n1 = frt::hub_broadcast(r.hub, "new-run");
+    const auto n2 = frt::hub_broadcast(r.hub, "new-run");
+    const auto n3 = frt::hub_broadcast(r.hub, "new-run");
+    r.rx(as_relayed(n2), seeder.meta());
+    CHECK_EQ(r.net.hub_epoch(), 42);
+    CHECK_EQ(r.net.state().bcast.adopted, 1u);
     CHECK_EQ(r.host.msgs.size(), 2u);
+    // Run 41's scheduled CMDs go unrun, as at a WELCOME of another run.
+    CHECK_EQ(r.net.state().exec_cancelled, 2u);
+    // The window started empty just below the adopted seq: an earlier one overtaken by it still delivers, and
+    // a second copy of either is a DUP.
+    r.rx(as_relayed(n1), seeder.meta());
+    r.rx(as_relayed(n3), seeder.meta());
+    r.rx(as_relayed(n3), Peer{.addr = 0x0013, .mac = {2, 0, 0, 0, 0, 0x13}}.meta());
+    CHECK_EQ(r.host.msgs.size(), 4u);
+    CHECK_EQ(r.net.state().bcast.dup, 1u);
+    // A late copy of run 41 is OLD now; adoption only ever moves to a newer run.
+    r.hub.epoch = 41;
+    r.rx(as_relayed(frt::hub_broadcast(r.hub, "old-run", {}, 0x22, 2)), seeder.meta());
+    r.hub.epoch = 42;
+    CHECK_EQ(r.host.msgs.size(), 4u);
+    CHECK_EQ(r.net.state().bcast.old, 1u);
+    CHECK_EQ(r.net.hub_epoch(), 42);
+    r.core.advance_ms(2000);
+    CHECK(r.host.calls.empty());
+    // Wi-Fi back: the WELCOME of run 42 is the same run, so it keeps what came over the air. Broadcast 4 reaches
+    // the node over the air between the WELCOME being sent and arriving; the hub's own copy of it is a DUP.
+    r.up(LinkKind::tcp);
+    const auto welcome = r.hub.welcome(0, 0);  // bcast_base 3
+    const auto n4 = frt::hub_broadcast(r.hub, "new-run");
+    r.rx(as_relayed(n4), seeder.meta());
+    r.deliver(LinkKind::tcp, welcome);
+    REQUIRE(r.net.state().hub_link());
+    r.deliver(LinkKind::tcp, n4);
+    CHECK_EQ(r.host.msgs.size(), 5u);
+    CHECK_EQ(r.net.state().bcast.dup, 2u);
+    r.deliver(LinkKind::tcp, frt::hub_broadcast(r.hub, "new-run"));
+    CHECK_EQ(r.host.msgs.size(), 6u);
+    // With the session up, a newer run heard over the air is not adopted: the session's run holds until it
+    // times out or a WELCOME of another run arrives.
+    r.hub.epoch = 43;
+    r.rx(as_relayed(frt::hub_broadcast(r.hub, "next-run")), seeder.meta());
+    CHECK_EQ(r.host.msgs.size(), 6u);
+    CHECK_EQ(r.net.state().bcast.old, 2u);
+    CHECK_EQ(r.net.hub_epoch(), 42);
+    CHECK_EQ(r.net.state().bcast.adopted, 1u);
+}
+
+TEST(net_flood_adoption_without_a_run_follows_the_newest_heard)
+{
+    AirRig r;
+    Peer seeder;
+    // A node rebooted during the outage has no run (design m2-c2 D19): it takes the first it hears, even a
+    // stale copy of an older run still on the air, and the next newer frame overtakes it.
+    r.hub.epoch = 40;
+    r.rx(as_relayed(frt::hub_broadcast(r.hub, "stale", {}, 0x22, 900)), seeder.meta());
+    CHECK_EQ(r.net.hub_epoch(), 40);
+    r.hub.epoch = 41;
+    r.rx(as_relayed(frt::hub_broadcast(r.hub, "live", {}, 0x22, 7)), seeder.meta());
+    CHECK_EQ(r.net.hub_epoch(), 41);
+    r.hub.epoch = 40;
+    r.rx(as_relayed(frt::hub_broadcast(r.hub, "stale", {}, 0x22, 901)), seeder.meta());
+    CHECK_EQ(r.net.hub_epoch(), 41);
+    CHECK_EQ(r.host.msgs.size(), 2u);
+    CHECK_EQ(r.net.state().bcast.adopted, 2u);
+    CHECK_EQ(r.net.state().bcast.old, 1u);
+    // Epoch 0 is no hub run: never adopted, never delivered.
+    r.hub.epoch = 0;
+    r.rx(as_relayed(frt::hub_broadcast(r.hub, "zero", {}, 0x22, 8)), seeder.meta());
+    CHECK_EQ(r.net.hub_epoch(), 41);
+    CHECK_EQ(r.net.state().bcast.old, 2u);
+    // Epochs compare in serial arithmetic (05 §5.5): after 0xFFFF comes 1.
+    AirRig w;
+    w.hub.epoch = 0xFFFF;
+    w.session(LinkKind::tcp);
+    w.down(LinkKind::tcp);
+    w.hub.epoch = 1;
+    w.rx(as_relayed(frt::hub_broadcast(w.hub, "wrapped")), seeder.meta());
+    CHECK_EQ(w.net.hub_epoch(), 1);
+    CHECK_EQ(w.host.msgs.size(), 1u);
+    CHECK_EQ(w.net.state().bcast.adopted, 1u);
 }
 
 TEST(net_flood_watermark_counts_both_paths)

@@ -1,6 +1,8 @@
 # Host C++ suite (design c2 §8, c3 §5, c4 §5): fr_proto, fr_caps, the fr_core services, the fr_net and fr_ota cores
 # built without ESP-IDF, under ASan + UBSan. `pnpm test:host` configures, builds and runs it through
 # tools/host-test.mjs. Sources are globbed, so later work only drops files into the listed directories.
+# M2-C2 (design m2-c2 D1, D14) adds the T2 fleet kit (sim/, library fr_sim) and fr_fleet, which
+# `host-test.mjs --fleet` builds alone into build/host-fleet without sanitizers (FR_HOST_SANITIZE=OFF).
 cmake_minimum_required(VERSION 3.24)
 
 # Homebrew clang 22: one C++23 toolchain on every Mac (Apple clang lags on the library side).
@@ -28,8 +30,13 @@ set(FR_FIXTURE_INCLUDES
     ${REPO_DIR}/hardware/drivers/fixture_gpio/src
     ${REPO_DIR}/hardware/drivers/fixture_ws2812_rx/include)
 
-# -fno-sanitize-recover: a UBSan finding fails the run instead of scrolling past.
-set(FR_SANITIZE -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+# -fno-sanitize-recover: a UBSan finding fails the run instead of scrolling past. OFF only for the fleet build: the
+# T2 gates time a 30-node fr_fleet, and ASan costs it about 2-3x CPU (design m2-c2 D14).
+option(FR_HOST_SANITIZE "Build under ASan + UBSan" ON)
+set(FR_SANITIZE "")
+if(FR_HOST_SANITIZE)
+    set(FR_SANITIZE -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+endif()
 add_compile_options(-g ${FR_SANITIZE})
 add_link_options(${FR_SANITIZE})
 
@@ -104,8 +111,19 @@ target_compile_definitions(fr_fixture_sim PRIVATE FR_HOST_SHIM=1)
 target_link_libraries(fr_fixture_sim PUBLIC fr_host_lib)
 target_compile_options(fr_fixture_sim PRIVATE ${FR_CXX_WARNINGS})
 
+# The T2 fleet kit (design m2-c2 §3 item 5, D1-D8; namespace frsim): the N-node medium, each node's radio over the
+# real air::Scheduler, a core per node and the executor, and the node classes fr_net_node and fr_fleet share. The
+# driver's air_sched.hpp is private to fr_net/src/esp, so only this library gets that directory. Threads: the wall
+# mode's worker strands for blocking OTA downloads (D1).
+find_package(Threads REQUIRED)
+file(GLOB FR_SIM_SRCS CONFIGURE_DEPENDS ${HOST_DIR}/sim/*.cpp)
+add_library(fr_sim STATIC ${FR_SIM_SRCS})
+target_include_directories(fr_sim PUBLIC ${HOST_DIR} PRIVATE ${COMPONENTS_DIR}/fr_net/src/esp)
+target_link_libraries(fr_sim PUBLIC fr_host_lib Threads::Threads)
+target_compile_options(fr_sim PRIVATE ${FR_CXX_WARNINGS})
+
 add_executable(fr_host_tests ${FR_TEST_SRCS} ${FR_FUZZ_TARGET_SRCS})
-target_link_libraries(fr_host_tests PRIVATE fr_fixture_sim fr_host_lib)
+target_link_libraries(fr_host_tests PRIVATE fr_sim fr_fixture_sim fr_host_lib)
 target_include_directories(fr_host_tests PRIVATE ${FR_FIXTURE_INCLUDES})
 target_compile_options(fr_host_tests PRIVATE ${FR_CXX_WARNINGS})
 
@@ -118,6 +136,12 @@ target_compile_options(fr_host_fuzz PRIVATE ${FR_CXX_WARNINGS})
 # fr_ota core (interop-ota.test.ts, design c4 §5) and, with --air-dir, a fake ESP-NOW medium between
 # several such processes under the real driver's send discipline (interop-air.test.ts, design c5 §5).
 add_executable(fr_net_node ${HOST_DIR}/tools/net_node.cpp)
-target_link_libraries(fr_net_node PRIVATE fr_host_lib)
+target_link_libraries(fr_net_node PRIVATE fr_sim fr_host_lib)
 target_include_directories(fr_net_node PRIVATE ${FR_FIXTURE_INCLUDES})  # --fixture's fake lines (design m2-c1-hil §4 S2)
 target_compile_options(fr_net_node PRIVATE ${FR_CXX_WARNINGS})
+
+# fr_fleet (design m2-c2 D1, D8): N nodes, the medium, an AP model and the executor in one process against a
+# private hub, for the T2-*-30 gates. Its contract (spec file, ready line, control lines) is in tools/fleet.cpp.
+add_executable(fr_fleet ${HOST_DIR}/tools/fleet.cpp)
+target_link_libraries(fr_fleet PRIVATE fr_sim fr_host_lib)
+target_compile_options(fr_fleet PRIVATE ${FR_CXX_WARNINGS})

@@ -337,11 +337,13 @@ export interface RestoreTarget {
 
 /**
  * Leaves every device on its normal image: a device that runs anything else gets it back by ota_deploy
- * (via auto: serial when the hub holds its USB port, else Wi-Fi; allow_downgrade, since the other image
- * may carry a newer label). Never throws: a device it could not restore is reported and logged with the
+ * (via auto by default: serial when the hub holds its USB port, else Wi-Fi; allow_downgrade, since the other image
+ * may carry a newer label). `via` names the transport where auto would pick one the devices cannot take: the sim
+ * fleet's USB nodes sit on a serial bridge that carries their session but cannot be flashed (design m2-c2 D7), so
+ * the sim runner restores over Wi-Fi. Never throws: a device it could not restore is reported and logged with the
  * command that restores it by hand.
  */
-export async function restoreFirmware(ctx: Pick<ScenarioCtx, 'hub' | 'signal' | 'log'>, targets: RestoreTarget[]): Promise<Record<string, unknown>> {
+export async function restoreFirmware(ctx: Pick<ScenarioCtx, 'hub' | 'signal' | 'log'>, targets: RestoreTarget[], via: 'auto' | 'wifi' | 'serial' = 'auto'): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = {};
   const todo: RestoreTarget[] = [];
   for (const t of targets) {
@@ -363,11 +365,12 @@ export async function restoreFirmware(ctx: Pick<ScenarioCtx, 'hub' | 'signal' | 
     groups.set(k, [...(groups.get(k) ?? []), t]);
   }
   for (const [build, ts] of groups) {
-    const hand = ts.map((t) => (build ? `fr ota ${t.alias} --build ${build}` : `fr ota ${t.alias}`)).join('; ');
+    const viaFlag = via === 'auto' ? '' : ` --via ${via}`;
+    const hand = ts.map((t) => (build ? `fr ota ${t.alias} --build ${build}${viaFlag}` : `fr ota ${t.alias}${viaFlag}`)).join('; ');
     const t0 = Date.now();
     try {
       ctx.log(`restoring ${ts.map((t) => t.alias).join(', ')} to ${build || 'the newest debug build'}`);
-      const { job } = await startJob(ctx, 'ota_deploy', { selector: ts.map((t) => `id:${t.id}`).join(','), ...(build ? { build } : {}), via: 'auto', allow_downgrade: true });
+      const { job } = await startJob(ctx, 'ota_deploy', { selector: ts.map((t) => `id:${t.id}`).join(','), ...(build ? { build } : {}), via, allow_downgrade: true });
       const done = await followJob(ctx, job, { cancelOnAbort: false, timeoutMs: 10 * 60_000 });
       const rows = jobBody<{ devices: OtaRow[] }>(done)?.devices ?? [];
       for (const t of ts) {

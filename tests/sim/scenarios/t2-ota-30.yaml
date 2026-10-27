@@ -1,0 +1,39 @@
+# T2-OTA-30 (design m2-c2 §5.4): T-OTA's own verdict on 30 nodes. The images come from `fr_fleet --make-image`
+# (debug, release, and a release with the health fault; over 512 KB, so the download outlasts the cut) and are
+# registered before the hub starts (D9). health_ms 10 s instead of the 60 s deadline. Every ota_deploy runs 16 at a
+# time (--max-parallel 16: two waves of 16 in each phase and in the restore), expectations in log mode over TCP
+# (D21); then the cut on the three nodes on the bridge, the person bot powering each off after the ">= 256 KB"
+# PLEASE line and on at the replug line; the restore goes over Wi-Fi (D11). On loopback the hub's count runs ahead of
+# the node by nearly the whole image (not the ~100 KB of a board), so the bot pulls the plug after its reaction delay
+# and once the node has stored a 64 KB stride (lib/person.ts), and the node resumes past it.
+schema: fractonica/sim-scenario@1
+id: t2-ota-30
+gate: T2-OTA-30
+summary: T-OTA's Wi-Fi, fault and cut phases on 30 nodes, 16 at a time
+nodes:
+  count: 30
+  profile: c6-pad
+  hb_ms: 1000
+  health_ms: 10000
+  usb: [sim-28, sim-29, sim-30]
+seed: 1
+medium:
+  topology: one_room
+  rssi_dbm: [-85, -45]
+  loss: [0.001, 0.015]
+  rate: { broadcast: 1M, unicast: 1M }
+  collisions: true
+  capture_db: 10
+# http_kbps paces each node's image download (about a board's OTA rate: 6 s for the image), so the cut lands mid-image.
+ap: { channel: 6, uplink_ms: [0.5, 3], downlink_ms: [0.5, 3], udp_loss: 0, http_kbps: 100 }
+runs:
+  - name: wifi
+    run: t-ota
+    args: [--no-build, --max-parallel, '16', --phase, wifi, --expect, log, --devices, 'sim-01..sim-30']
+  - name: fault
+    run: t-ota
+    args: [--no-build, --max-parallel, '16', --phase, fault, --devices, 'sim-01..sim-30']
+  - name: cut
+    run: t-ota
+    args: [--no-build, --max-parallel, '16', --phase, cut, --devices, 'sim-28,sim-29,sim-30']
+published: false

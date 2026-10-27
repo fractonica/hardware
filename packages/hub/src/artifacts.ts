@@ -1,4 +1,6 @@
-// Content-addressed artifact store and build manifests (spec 06 §6.8).
+// Content-addressed artifact store and build manifests (spec 06 §6.8). Builds come in through ingestBuild (an IDF
+// build directory); from M2-C2 (design m2-c2 D9) an app image made elsewhere (fr_fleet --make-image for the T2 runs,
+// a host test's) through registerImage.
 
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -17,6 +19,7 @@ import {
 import { z } from 'zod';
 
 import { type Db, kvGet, kvSet } from './db.ts';
+import { chipName } from './registry/store.ts';
 
 const IMAGE_MAGIC = 0xe9;
 const APP_DESC_OFFSET = 32;          // esp_app_desc_t follows the 24 B image header and 8 B segment header
@@ -206,7 +209,11 @@ export function blobPath(ref: string): string {
 }
 
 export function storeBlob(file: string): { ref: string; size: number; sha: string } {
-  const buf = readFileSync(file);
+  return storeBytes(readFileSync(file));
+}
+
+/** storeBlob for bytes in memory. */
+export function storeBytes(buf: Buffer): { ref: string; size: number; sha: string } {
   const sha = sha256(buf);
   const dest = blobPath(sha);
   // Only presence is checked on later ingests, so a blob is written under a temp name and renamed:
@@ -368,6 +375,81 @@ export function ingestBuild(db: Db, inp: IngestInput): { manifest: ArtifactManif
   ).run(build_id, inp.sourceDir, inp.profile, inp.buildType, image.fw_id, manifest.built_at, manifestPath, inp.fault ?? null);
   kvSet(db, lastFwKey(inp.sourceDir, inp.profile, variant), image.fw_id);
   return { manifest, manifestPath };
+}
+
+/** registerImage's input (design m2-c2 D9). */
+export interface RegisterImageInput {
+  /** An ESP app image: fw_id, chip id, version and fr_app_desc are read from it (parseAppImage). */
+  image: Buffer;
+  /** Not an ESP image (a host test's random bytes): its fw_id is its sha256, and nothing is parsed. */
+  raw?: boolean;
+  profile: string;
+  buildType: 'debug' | 'release';
+  fault?: FaultKind;
+  /**
+   * Manifest fields the image does not decide. Defaults: app `node`; board and part_profile from its fr_app_desc
+   * (else fr_net_node's esp32c6-supermini, fr-4mb-v1); target from its chip id; version from its esp_app_desc_t;
+   * built_at now; no source dir, git or IDF.
+   */
+  manifest?: Partial<Pick<ArtifactManifest, 'app' | 'board' | 'target' | 'chip_id' | 'part_profile' | 'version' | 'source_dir' | 'git' | 'idf' | 'elf_sha256' | 'built_at'>>;
+  /** Where the manifest goes; default builds/<build_id>/manifest.json in the store, as ingestBuild writes it. */
+  manifestPath?: string;
+}
+
+/**
+ * Puts an app image that no IDF build made (ingestBuild needs a build directory) into the artifact store, as the
+ * private hub of a T2 run needs before it starts (design m2-c2 D9): the image as one blob (`app` at 0x10000), its
+ * manifest under builds/<build_id>/, and the artifacts row with its build type and fault, so ota_deploy and
+ * deploy's --no-build path can name it. FR_HOME decides which store: a private hub's temp home for the sim runner.
+ */
+export function registerImage(db: Db, inp: RegisterImageInput): { buildId: string; fw_id: string; manifest: ArtifactManifest; manifestPath: string } {
+  const parsed = inp.raw ? null : parseAppImage(inp.image);
+  const blob = storeBytes(inp.image);
+  const fw_id = parsed?.fw_id ?? blob.sha;
+  const o = inp.manifest ?? {};
+  const app = o.app ?? 'node';
+  const buildId = `${app}/${inp.profile}/${buildVariant(inp.buildType, inp.fault)}/${fw_id.slice(0, 12)}`;
+  const chipId = o.chip_id ?? parsed?.chip_id ?? 13;
+  const manifest: ArtifactManifest = ArtifactManifestSchema.parse({
+    schema: 'fractonica.artifact/1',
+    build_id: buildId,
+    app,
+    profile: inp.profile,
+    build_type: inp.buildType,
+    board: o.board ?? parsed?.app_desc?.board ?? 'esp32c6-supermini',
+    target: o.target ?? chipName(chipId) ?? 'esp32c6',
+    chip_id: chipId,
+    part_profile: o.part_profile ?? parsed?.app_desc?.part_profile ?? 'fr-4mb-v1',
+    version: o.version ?? parsed?.version ?? fw_id.slice(0, 12),
+    source_dir: o.source_dir ?? '',
+    git: o.git ?? { sha: '', dirty: false },
+    idf: o.idf ?? { version: parsed?.idf_ver ?? '', commit: '' },
+    fw_id,
+    elf_sha256: o.elf_sha256 ?? parsed?.elf_sha256 ?? '',
+    size: inp.image.length,
+    built_at: o.built_at ?? new Date().toISOString(),
+    flash: { mode: 'dio', freq: '80m', size: '4MB', files: [{ offset: '0x10000', role: 'app', blob: blob.ref, size: blob.size }] },
+    partitions: [],
+    ...(inp.fault ? { fault: inp.fault } : {}),
+    ...(parsed?.app_desc ? { app_desc: parsed.app_desc } : {}),
+  });
+  const manifestPath = inp.manifestPath ?? join(paths.artifacts(), 'builds', buildId, 'manifest.json');
+  mkdirSync(dirname(manifestPath), { recursive: true });
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+  // As ingestBuild: registering the same image again (a re-run into the same FR_HOME) replaces its row.
+  db.prepare(
+    'INSERT INTO artifacts (build_id, source_dir, profile, build_type, fw_id, built_at, manifest_path, fault) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(build_id) DO UPDATE SET source_dir = excluded.source_dir, built_at = excluded.built_at, manifest_path = excluded.manifest_path, fault = excluded.fault',
+  ).run(
+    buildId,
+    manifest.source_dir,
+    inp.profile,
+    inp.buildType,
+    fw_id,
+    manifest.built_at,
+    manifestPath,
+    inp.fault ?? null,
+  );
+  return { buildId, fw_id, manifest, manifestPath };
 }
 
 /**

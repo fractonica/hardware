@@ -7,7 +7,14 @@
 //           one gate (t-lat or T-LAT). Its last stdout line is the report (tests/e2e/lib/report.ts).
 //   hil:    the same runner with `--tier hil`: only the gates that need the HIL fixture, after its bench_get
 //           preflight (M2-C1). They share the boards with the target gates, so the two never overlap.
-//   sim:    reserved for the simulator tier (M2-C2); NOT_FOUND until then.
+//   sim:    the same runner with `--tier sim` (design m2-c2 D14): the T2 scenarios (tests/sim/scenarios/*.yaml),
+//           each on fr_fleet against a private hub the runner starts, never this hub (FR_HUB is not passed). Suite
+//           names one scenario by id (t2-flood-30); a tier-wide run takes the gated ones. It takes the test:target
+//           lock, as a 30-node wall-clock run and a bench run would skew each other's timing figures. Its args are
+//           the runner's own (--seed, --time-scale, --keep); allow_human is ignored (the person bot is the person),
+//           and a published scenario's result never fails the job. No fr_fleet: ENV_MISSING, with the build. A run
+//           that failed nothing but left a gated entry not judged (the preflight's host_load: the Mac too loaded)
+//           has no verdict: TIMEOUT (retryable), its report in the details, never a completed pass (§5.6).
 // `args` go to the one suite the run names: after `--` to the gate runner (ctx.args), or to vitest or the
 // host suite. The flags that let a gate erase a board, stop the hub or switch the router off are refused
 // until M2-C7's confirmations exist.
@@ -160,16 +167,22 @@ interface GateLine {
 const E2E_EXIT_NOT_FOUND = 3;
 const E2E_EXIT_USAGE = 64;
 
-/** The gate runner's command line: the run's tier (hil only: target is the runner's default), its suite, then `--` and the suite's args. */
-export function gateArgs(src: string, tier: 'target' | 'hil', input: Pick<OpInput<'test_run'>, 'suite' | 'allow_human' | 'args'>): string[] {
+/** The tiers the gate runner (tests/e2e/run.ts) runs. */
+export type GateTier = 'target' | 'hil' | 'sim';
+
+/**
+ * The gate runner's command line: the run's tier (hil and sim: target is the runner's default), its suite, then `--`
+ * and the suite's args. allow_human means nothing to the sim tier (its person bot is the person, D14).
+ */
+export function gateArgs(src: string, tier: GateTier, input: Pick<OpInput<'test_run'>, 'suite' | 'allow_human' | 'args'>): string[] {
   const args = ['--conditions=@fractonica/source', join(src, 'tests', 'e2e', 'run.ts'), '--json'];
-  if (tier === 'hil') {
-    args.push('--tier', 'hil');
+  if (tier !== 'target') {
+    args.push('--tier', tier);
   }
   if (input.suite) {
     args.push('--suite', input.suite);
   }
-  if (input.allow_human) {
+  if (input.allow_human && tier !== 'sim') {
     args.push('--allow-human');
   }
   if (input.args?.length) {
@@ -178,11 +191,23 @@ export function gateArgs(src: string, tier: 'target' | 'hil', input: Pick<OpInpu
   return args;
 }
 
-/** target and hil: tests/e2e/run.ts; its report carries the run's tier whatever the runner wrote (D13). */
+/** A gate report entry, as tests/e2e/lib/report.ts writes it. */
+interface GateEntry {
+  gate: string;
+  status: string;
+  code?: string;
+  reason?: string;
+  published?: boolean;
+}
+
+/**
+ * target, hil and sim: tests/e2e/run.ts; its report carries the run's tier whatever the runner wrote (D13). A sim
+ * run gets no FR_HUB (its scenarios start their own hub, D14), even when this hub's environment has one.
+ */
 async function runGates(
   ctx: JobCtx,
   src: string,
-  tier: 'target' | 'hil',
+  tier: GateTier,
   input: OpInput<'test_run'>,
   origin: JobOrigin | undefined,
   hubUrl: string,
@@ -190,7 +215,10 @@ async function runGates(
 ): Promise<unknown> {
   let last = '';
   const errTail: string[] = [];
-  const env = childEnv({ FR_HUB: hubUrl, ...(origin ? { FR_CLIENT: origin } : {}) });
+  const env = childEnv({ ...(tier === 'sim' ? {} : { FR_HUB: hubUrl }), ...(origin ? { FR_CLIENT: origin } : {}) });
+  if (tier === 'sim') {
+    delete env.FR_HUB;
+  }
   const code = await spawnLogged(
     deps.node,
     gateArgs(src, tier, input),
@@ -220,7 +248,10 @@ async function runGates(
   );
   ctx.signal.throwIfAborted();
   if (code === E2E_EXIT_NOT_FOUND) {
-    throw new FrError('NOT_FOUND', errTail.at(-1) ?? `no ${tier} gate scenarios to run`, { details: { tail: errTail } });
+    throw new FrError('NOT_FOUND', errTail.at(-1) ?? `no ${tier} gate scenarios to run`, {
+      details: { tail: errTail },
+      ...(tier === 'sim' ? { hint: 'a sim suite is a scenario id from tests/sim/scenarios, e.g. t2-flood-30' } : {}),
+    });
   }
   if (code === E2E_EXIT_USAGE) {
     throw new FrError('INVALID_ARGS', `tests/e2e/run.ts refused its arguments: ${errTail.find((l) => l.trim()) ?? `exit ${code}`}`, {
@@ -241,9 +272,30 @@ async function runGates(
     });
   }
   const tiered = { ...report, tier } as Record<string, unknown> & { pass: boolean };
+  if (tier === 'sim' && tiered.pass && tiered.conclusive === false) {
+    // Nothing failed, but a gated entry judged nothing (skipped for host_load): no verdict, so never a completed pass.
+    const notJudged = Array.isArray(tiered.not_judged) ? (tiered.not_judged as string[]) : [];
+    throw new FrError('TIMEOUT', `sim tier: not judged: ${notJudged.join(', ') || 'a gated scenario'}; the Mac stayed too loaded for the preflight's 10 min`, {
+      hint: 'a T2 gate counts only when its own entry passed: stop the simulators, builds and other agent sessions, then run it again',
+      details: tiered,
+      remediation: [{ tool: 'test_run', args: { tier: 'sim', ...(input.suite ? { suite: input.suite } : {}) } }],
+    });
+  }
   if (!tiered.pass || code !== 0) {
-    const gates = (tiered as { gates?: { gate: string; status: string }[] }).gates ?? [];
-    const bad = gates.filter((g) => g.status === 'fail' || g.status === 'error').map((g) => `${g.gate} ${g.status}`);
+    // A published sim scenario's result never fails the job (D14): only the gated entries count.
+    const gates = ((tiered as { gates?: GateEntry[] }).gates ?? []).filter((g) => !g.published);
+    const badGates = gates.filter((g) => g.status === 'fail' || g.status === 'error');
+    const bad = badGates.map((g) => `${g.gate} ${g.status}`);
+    // A sim scenario that could not start for want of fr_fleet is the environment's problem, with its build.
+    if (tier === 'sim' && badGates.length && badGates.every((g) => g.code === 'ENV_MISSING')) {
+      throw new FrError('ENV_MISSING', `sim tier: ${badGates[0].reason ?? 'fr_fleet is missing'}`, {
+        details: tiered,
+        remediation: [{ tool: 'test_run', args: { tier: 'host', suite: 'cpp', args: ['--fleet'] }, cli: 'node tools/host-test.mjs --fleet' }],
+      });
+    }
+    if (tier === 'sim' && !badGates.length && tiered.pass) {
+      return tiered;
+    }
     throw new FrError('ASSERTION_FAILED', `${tier} tier: ${bad.join(', ') || `run.ts exited ${code}`}`, {
       details: tiered,
       remediation: [{ tool: 'job_logs', args: { job_id: ctx.jobId } }],
@@ -274,13 +326,6 @@ function checkArgs(input: OpInput<'test_run'>): void {
 /** test_run: validates, starts the job (kind test) and waits up to wait_s for it (09 §9.2). */
 export async function startTestRun(hub: HubContext, input: OpInput<'test_run'>, deps: TestRunDeps = DEFAULT_DEPS): Promise<Job> {
   const tier = input.tier;
-  if (tier === 'sim') {
-    // Reserved now so that M2-C2 needs no second REGISTRY_HASH bump (D13).
-    throw new FrError('NOT_FOUND', 'test tier sim is reserved: the simulator tier comes with M2-C2', {
-      details: { not_implemented: 'test_run tier sim' },
-      remediation: [{ tool: 'test_run', args: { tier: 'host' } }],
-    });
-  }
   checkArgs(input);
   const src = checkSourceDir(input.source_dir);
   const origin = requestClient.getStore();
@@ -304,7 +349,11 @@ export async function startTestRun(hub: HubContext, input: OpInput<'test_run'>, 
     if (!existsSync(join(src, 'tests', 'e2e', 'run.ts'))) {
       throw new FrError('NOT_FOUND', `${src} has no tests/e2e/run.ts`, { hint: 'source_dir must be a Fractonica checkout from C6 on' });
     }
-    // The target and hil gates share the boards (hil also the fixture): one such run at a time on this hub.
+    if (tier === 'sim' && !existsSync(join(src, 'tests', 'sim', 'scenarios'))) {
+      throw new FrError('NOT_FOUND', `${src} has no tests/sim/scenarios`, { hint: 'the sim tier needs a Fractonica checkout from M2-C2 on' });
+    }
+    // The target and hil gates share the boards (hil also the fixture): one such run at a time on this hub. A sim
+    // run takes the same lock: a 30-node wall-clock run and a bench run would skew each other's timing (D14).
     locks = ['test:target'];
     const hubUrl = deps.hubUrl(hub);
     run = (ctx) => runGates(ctx, src, tier, input, origin, hubUrl, deps);
@@ -329,7 +378,8 @@ function tierOf(job: Job): { tier: TestTier; suite?: string } {
 /**
  * test_report (09 §9.4, D13): a finished test job's report. A passing run's is its result; a failing one's
  * is the ASSERTION_FAILED details; a run that ended without a verdict (cancelled, no such suite, the hub
- * restarted) has none, `pass` null, and its error.
+ * restarted) has none, `pass` null, and its error. A sim run that judged nothing wrong but left a gated entry not
+ * judged (TIMEOUT, host_load) keeps its report, with `pass` null: it is no verdict (design m2-c2 §5.6).
  */
 export function testReport(hub: Pick<HubContext, 'jobs'>, jobId: string): Record<string, unknown> {
   const job = hub.jobs.get(jobId);
@@ -346,14 +396,15 @@ export function testReport(hub: Pick<HubContext, 'jobs'>, jobId: string): Record
   const error = job.error as { code?: string; details?: unknown } | undefined;
   const isReport = (v: unknown): v is Record<string, unknown> & { pass: boolean } =>
     typeof v === 'object' && v !== null && !Array.isArray(v) && typeof (v as { pass?: unknown }).pass === 'boolean';
-  const report = job.status === 'completed' ? job.result : error?.code === 'ASSERTION_FAILED' ? error.details : undefined;
+  const notJudged = tier === 'sim' && error?.code === 'TIMEOUT' && isReport(error.details) && error.details.conclusive === false;
+  const report = job.status === 'completed' ? job.result : error?.code === 'ASSERTION_FAILED' || notJudged ? error?.details : undefined;
   const verdict = isReport(report) ? report : null;
   return {
     job_id: job.job_id,
     tier,
     ...(suite ? { suite } : {}),
     status: job.status,
-    pass: verdict ? verdict.pass : null,
+    pass: verdict && verdict.conclusive !== false ? verdict.pass : null,
     report: verdict,
     ...(job.error ? { error: job.error } : {}),
     ...(job.started_at ? { started_at: job.started_at } : {}),

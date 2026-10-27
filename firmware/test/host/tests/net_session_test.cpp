@@ -1,7 +1,7 @@
 // fr_net sessions and presence (design c3 §3, spec 05 §5.10-5.12): HELLO until WELCOME per link, the
 // boot event, heartbeat cadence and fields, session loss after 3.5 intervals (and the serial standby rule),
 // heartbeats and PONGs on every session, serial as the path while TCP is silent, BYE in both directions,
-// TIME answers, and the jitter RNG's determinism.
+// TIME answers, the jitter RNG's determinism, and (design m2-c2 D20) HELLO's net_log bit.
 #include <algorithm>
 
 #include "tests/net_fakes.hpp"
@@ -133,6 +133,32 @@ TEST(net_hello_unprovisioned_and_unassociated)
     auto results = r.serial.frames(wire::kClsResult, 7);
     REQUIRE_EQ(results.size(), 1u);
     CHECK_EQ(results[0].src, 0xFFFE);
+}
+
+TEST(net_hello_says_net_log_while_a_log_source_is_attached)
+{
+    // Design m2-c2 D20: HELLO caps b6 net_log tells the hub this node sends LOG frames over TCP.
+    struct NoLines final : fr::net::LogSource {
+        bool pop(fr::net::LogLine &, std::span<char>) override { return false; }
+    } logs;
+    NetRig r;
+    r.net.attach_logs(&logs);
+    r.up(LinkKind::tcp);
+    auto hellos = r.tcp.frames(kPres, kHello);
+    REQUIRE_EQ(hellos.size(), 1u);
+    auto m = proto::decode_presence_hello(hellos[0].body);
+    REQUIRE(m.has_value());
+    CHECK_EQ(m->caps, fr::net::kCapWifi | fr::net::kCapProvisioned | fr::net::kCapNetLog);
+    // Detached, the next HELLO no longer says it.
+    r.net.attach_logs(nullptr);
+    r.core.advance_ms(1000);
+    hellos = r.tcp.frames(kPres, kHello);
+    REQUIRE_EQ(hellos.size(), 2u);
+    m = proto::decode_presence_hello(hellos[1].body);
+    REQUIRE(m.has_value());
+    CHECK_EQ(m->caps, fr::net::kCapWifi | fr::net::kCapProvisioned);
+    // No LOG frame without a session.
+    CHECK(r.tcp.frames_of(wire::kClsLog).empty());
 }
 
 TEST(net_welcome_starts_heartbeats_and_sends_boot_once)

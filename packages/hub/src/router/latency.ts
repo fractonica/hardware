@@ -6,6 +6,8 @@
 
 import { performance } from 'node:perf_hooks';
 
+import { Histogram, type HistogramView } from './scale.ts';
+
 /** What a device's samples are of. */
 export type LatencyMetric = 'ping' | 'input' | 'binding';
 
@@ -148,6 +150,11 @@ const PROBE_MS = 20;
  * this is the wait a frame can see before it is handled): how late a PROBE_MS timer fires, summarised once
  * a second. Started and stopped with the router. (perf_hooks' monitorEventLoopDelay counts its own
  * resolution in every sample, so an idle loop would read as ~10 ms.)
+ *
+ * Also every probe's lateness in one cumulative histogram (design m2-c2 D15, hub_status router.scale.loop): the
+ * per-second p99 of `stats` is the second's worst probe (about 50 probes a second), and a window's p99 the worst
+ * second's, so over a run it is the single worst probe. A reader takes the histogram's difference between two
+ * reads instead and gets the p99 over every probe in between.
  */
 export class LoopMonitor {
   #timer: NodeJS.Timeout | null = null;
@@ -156,6 +163,8 @@ export class LoopMonitor {
   /** Lateness (ms) of each probe in the current second. */
   #second: number[] = [];
   #snaps: LoopSnapshot[] = [];
+  /** Every probe since this monitor was made (one per router, so it restarts with a new router). */
+  #all = new Histogram();
 
   start(): void {
     if (this.#timer) {
@@ -174,7 +183,9 @@ export class LoopMonitor {
 
   #probe(): void {
     const now = performance.now();
-    this.#second.push(Math.max(0, now - this.#last - PROBE_MS));
+    const late = Math.max(0, now - this.#last - PROBE_MS);
+    this.#second.push(late);
+    this.#all.add(late);
     this.#last = now;
     if (now - this.#secondAt < 1000) {
       return;
@@ -187,6 +198,11 @@ export class LoopMonitor {
     }
     this.#second = [];
     this.#secondAt = now;
+  }
+
+  /** Every probe's lateness (ms) since the monitor was made: count, sum, max and HIST_BOUNDS buckets. */
+  histogram(): HistogramView {
+    return this.#all.view();
   }
 
   stats(windowMs: number): LoopDelay {

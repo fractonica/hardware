@@ -1,6 +1,7 @@
 // Test runs (design c6 D20, spec 09 §9.4 Tests; stream S4): test_run, and from M2-C1 (design m2-c1-hil D13)
 // test_report. Spread into OPS (packages/protocol/src/ops.ts); the handlers are in packages/hub/src/tests/.
-// The target and hil tiers run tests/e2e/run.ts, which loads the gate scenarios (tests/e2e/<gate>.ts).
+// The target and hil tiers run tests/e2e/run.ts, which loads the gate scenarios (tests/e2e/<gate>.ts); from M2-C2
+// (design m2-c2 D14) the sim tier runs it with --tier sim, which loads the T2 scenarios (tests/sim/scenarios/*.yaml).
 
 import { z } from 'zod';
 
@@ -9,7 +10,8 @@ import { op, sourceDir, waitS } from './common.ts';
 
 /**
  * Test tiers (09 §9.4, 10 §10.1): host (vitest, the C++ host suite), target (the gates on the hub's boards),
- * sim (reserved for M2-C2; NOT_FOUND until then) and hil (the gates that need the HIL fixture, M2-C1 D13).
+ * sim (the T2 virtual fleet, M2-C2 D14: fr_fleet against a private hub) and hil (the gates that need the HIL
+ * fixture, M2-C1 D13).
  */
 export const TEST_TIERS = ['host', 'target', 'sim', 'hil'] as const;
 export type TestTier = (typeof TEST_TIERS)[number];
@@ -31,11 +33,11 @@ export const TESTS_OPS = [
     kind: 'job',
     tier: 'mutate',
     summary:
-      "Run a test tier of source_dir as a job (kind test). host: vitest and the C++ host suite. target: the tests/e2e gate scenarios against the hub's boards, pass/fail per gate with measured values and evidence; scenarios that need a person or wiring report skipped unless allow_human. hil: the gates that need the HIL fixture (after a bench_get preflight). sim: reserved (M2-C2). args go to the one suite. test_report returns the report of a finished run. Example: tier target, suite t-input.",
+      "Run a test tier of source_dir as a job (kind test). host: vitest and the C++ host suite. target: the tests/e2e gate scenarios against the hub's boards, pass/fail per gate with measured values and evidence; scenarios that need a person or wiring report skipped unless allow_human. hil: the gates that need the HIL fixture (after a bench_get preflight). sim: the T2 scenarios (tests/sim/scenarios), each on fr_fleet against a private hub of its own, never this hub or its boards; a tier-wide run takes the gated scenarios, a published one runs only by its id; its args are the runner's (--seed n, --time-scale 0.5, --keep). args go to the one suite. test_report returns the report of a finished run. Example: tier target, suite t-input.",
     input: z.object({
       source_dir: sourceDir,
       tier: z.enum(TEST_TIERS),
-      suite: z.string().min(1).optional().describe('host: vitest or cpp; target or hil: one gate, by module or id, e.g. t-lat (default: the whole tier)'),
+      suite: z.string().min(1).optional().describe('host: vitest or cpp; target or hil: one gate, by module or id, e.g. t-lat; sim: one scenario, by id, e.g. t2-flood-30 (default: the whole tier)'),
       args: z
         .array(z.string().min(1).max(200))
         .max(32)

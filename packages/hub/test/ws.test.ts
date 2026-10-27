@@ -1,6 +1,7 @@
 // `/ws`, fr-ws/1 (design c6 D6, D7; stream S2): subscriptions, delivery in the publish tick, serialize-once,
 // catch-up from `since` in seq order with no hole or duplicate, `gap` on overflow, the 50 ms log stream,
-// job frames with throttled progress, and a real socket through buildServer and the guard.
+// job frames with throttled progress, and a real socket through buildServer and the guard. M2-C2 (design m2-c2
+// D16): the counters hub_status shows as `ws`.
 
 import type { AddressInfo } from 'node:net';
 
@@ -338,6 +339,37 @@ describe('fr-ws/1 under pressure (D6)', () => {
   });
 });
 
+describe('fr-ws/1 counters (design m2-c2 D16)', () => {
+  it('counts clients, frames and their bytes, gaps, overflows and selector resolves', async () => {
+    const r = openRig();
+    const { ws, connect } = server(r, { limits: { eventBufferedBytes: 1000, logDropBufferedBytes: 500 } });
+    expect(ws.stats()).toEqual({ clients: 0, frames: 0, bytes: 0, gaps: 0, overflows: 0, resolves: 0 });
+    const a = connect();
+    const b = connect();
+    a.send({ op: 'sub', id: 'all', events: {} });
+    b.send({ op: 'sub', id: 'c6', events: { selector: 'pad-c6' } });
+    expect(ws.stats()).toMatchObject({ clients: 2, frames: 2, resolves: 1 }); // the two hellos
+    const before = ws.stats().bytes;
+    expect(before).toBeGreaterThan(0);
+    publish(r, 'boot.down', PAD_C6);
+    expect(ws.stats().frames).toBe(4);
+    expect(ws.stats().bytes - before).toBe([...a.sock.raw, ...b.sock.raw].reduce((n, t) => n + Buffer.byteLength(t), 0));
+    // A device event: b's selector resolves again at its next match.
+    publish(r, 'device.online', PAD_C6);
+    expect(ws.stats().resolves).toBe(2);
+    // a backs up: one overflow, then one gap once it drains.
+    a.sock.bufferedAmount = 5000;
+    publish(r, 'boot.up', PAD_C6);
+    publish(r, 'boot.click', PAD_C6);
+    expect(ws.stats()).toMatchObject({ overflows: 1, gaps: 0 });
+    a.sock.bufferedAmount = 0;
+    await sleep(30);
+    expect(ws.stats()).toMatchObject({ overflows: 1, gaps: 1 });
+    b.close();
+    expect(ws.stats().clients).toBe(1);
+  });
+});
+
 describe('fr-ws/1 logs (the stream class)', () => {
   it('batches matching lines into one frame per 50 ms (here 10), by selector and minimum level', async () => {
     const r = openRig();
@@ -359,7 +391,7 @@ describe('fr-ws/1 logs (the stream class)', () => {
     const before = r.logs.append(PAD_C6, '/dev/cu.usbmodem1101', 'I (1) app: before');
     r.logs.append(PAD_C6, '/dev/cu.usbmodem1101', 'I (2) app: after');
     const a = server(r, { limits: { logDropBufferedBytes: 500 } }).connect();
-    a.send({ op: 'sub', id: 'logs', logs: { since: formatCursor({ run: 3, seq: before.seq }) } });
+    a.send({ op: 'sub', id: 'logs', logs: { since: formatCursor({ run: 3, seq: before!.seq }) } });
     r.logs.append(PAD_C6, '/dev/cu.usbmodem1101', 'I (3) app: live');
     await sleep(40);
     expect(a.sock.take().flatMap((f) => f.l.map((l: { text: string }) => l.text))).toEqual(['I (2) app: after', 'I (3) app: live']);

@@ -10,6 +10,11 @@
 // so two streams working in one checkout can build and run the suite at once:
 //   FR_HOST_BUILD_DIR=build/host-tests-s1 node tools/host-test.mjs
 // The interop tests (packages/hub/test/cpp-node.ts) still run build/host-tests/fr_net_node.
+// M2-C2 (design m2-c2 D14): --fleet builds only fr_fleet, into build/host-fleet, RelWithDebInfo and without
+// sanitizers (the T2-*-30 gates time it; the sim runner looks there unless FR_FLEET_BIN names another); and
+// --t2-seeds N hands the test binary FR_T2_SEEDS=N, the seeds per T2-SCALE case (default 1):
+//   node tools/host-test.mjs --fleet
+//   node tools/host-test.mjs t2_scale --t2-seeds 5
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -19,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const source = join(root, 'firmware', 'test', 'host');
 const build = resolve(root, process.env.FR_HOST_BUILD_DIR || join('build', 'host-tests'));
+const fleetBuild = join(root, 'build', 'host-fleet');
 
 function pick(envName, candidates) {
   if (process.env[envName]) {
@@ -52,6 +58,25 @@ if (fuzzAt >= 0) {
     process.exit(64);
   }
   args.splice(fuzzAt, 2);
+}
+let t2Seeds = null;
+const seedsAt = args.indexOf('--t2-seeds');
+if (seedsAt >= 0) {
+  t2Seeds = args[seedsAt + 1];
+  if (!/^\d+$/.test(t2Seeds ?? '') || Number(t2Seeds) === 0) {
+    console.error('host-test: --t2-seeds needs a positive seed count');
+    process.exit(64);
+  }
+  args.splice(seedsAt, 2);
+}
+const fleetAt = args.indexOf('--fleet');
+const fleet = fleetAt >= 0;
+if (fleet) {
+  args.splice(fleetAt, 1);
+  if (args.length > 0 || fuzz !== null || t2Seeds !== null) {
+    console.error('host-test: --fleet only builds fr_fleet; it takes no other arguments');
+    process.exit(64);
+  }
 }
 let expect = null;
 const expectAt = args.indexOf('--expect');
@@ -115,12 +140,21 @@ async function fuzzWithParity(bin, binArgs, env) {
 }
 
 // Configuring every time is cheap and lets CONFIGURE_DEPENDS globs pick up new sources.
-run(cmake, ['-S', source, '-B', build, '-G', 'Ninja', `-DCMAKE_CXX_COMPILER=${cxx}`, `-DCMAKE_C_COMPILER=${cc}`, '-DCMAKE_BUILD_TYPE=Debug', '--log-level=WARNING']);
+if (fleet) {
+  run(cmake, ['-S', source, '-B', fleetBuild, '-G', 'Ninja', `-DCMAKE_CXX_COMPILER=${cxx}`, `-DCMAKE_C_COMPILER=${cc}`, '-DCMAKE_BUILD_TYPE=RelWithDebInfo', '-DFR_HOST_SANITIZE=OFF', '--log-level=WARNING']);
+  run(cmake, ['--build', fleetBuild, '--target', 'fr_fleet']);
+  console.log(`host-test: built ${join(fleetBuild, 'fr_fleet')} (no sanitizers)`);
+  process.exit(0);
+}
+run(cmake, ['-S', source, '-B', build, '-G', 'Ninja', `-DCMAKE_CXX_COMPILER=${cxx}`, `-DCMAKE_C_COMPILER=${cc}`, '-DCMAKE_BUILD_TYPE=Debug', '-DFR_HOST_SANITIZE=ON', '--log-level=WARNING']);
 run(cmake, ['--build', build]);
 
 // LeakSanitizer is unsupported on macOS; elsewhere it stays on.
 const asan = process.platform === 'darwin' ? 'detect_leaks=0:abort_on_error=1' : 'abort_on_error=1';
 const env = { ...process.env, ASAN_OPTIONS: process.env.ASAN_OPTIONS ?? asan, UBSAN_OPTIONS: process.env.UBSAN_OPTIONS ?? 'print_stacktrace=1' };
+if (t2Seeds !== null) {
+  env.FR_T2_SEEDS = t2Seeds;
+}
 if (fuzz !== null && expect !== null) {
   await fuzzWithParity(join(build, 'fr_host_fuzz'), [fuzz, ...args], env);
 } else if (fuzz !== null) {

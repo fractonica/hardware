@@ -1,0 +1,28 @@
+# Published (design m2-c2 D10, §5.4): T2-FLOOD-30's runs with collisions on, the T2 default, and the seed bound lifted
+# (--max-seeds 1000), so the transmissions per broadcast are a figure, not a verdict. Delivery (>= 99.9 % at every
+# node, no duplicate) is still what T-FLOOD reports; a collisions-on bound waits for these figures and an approval (Q2).
+schema: fractonica/sim-scenario@1
+id: t2-flood-30-collisions
+summary: T2-FLOOD-30 with collisions on and no seed bound, for the collisions-on transmission figure
+nodes:
+  count: 30
+  profile: c6-pad
+  hb_ms: 1000
+  usb: [sim-07, sim-18, sim-29]
+seed: 1
+medium:
+  topology: one_room
+  rssi_dbm: [-85, -45]
+  loss: [0.001, 0.015]
+  rate: { broadcast: 1M, unicast: 1M }
+  collisions: true
+  capture_db: 10
+ap: { channel: 6, uplink_ms: [0.5, 3], downlink_ms: [0.5, 3], udp_loss: 0 }
+runs:
+  - name: cut-1
+    run: t-flood
+    args: [--devices, 'sim-01..sim-30', --cut, sim-07, --count, '1000', --interval-ms, '100', --max-seeds, '1000', --min-delivery, '99.9']
+  - name: cut-3
+    run: t-flood
+    args: [--devices, 'sim-01..sim-30', --cut, 'sim-07,sim-18,sim-29', --count, '1000', --interval-ms, '100', --max-seeds, '1000', --min-delivery, '99.9']
+published: true

@@ -7,12 +7,17 @@
 // `forbid` pattern may match a line before the last expected one has. A line is checked against the
 // forbidden patterns first, so a line that matches both fails the assertion. Device text stays in the
 // data fields (09 §9.2): the failure message names patterns and cursors only, its details carry the lines.
+//
+// A device the hub hears only over Wi-Fi (net_log, design m2-c2 D21) never sends panic, bootloader or D/V lines
+// (logs/source.ts): a `forbid` checked against it passes without having seen what it forbids, so the result
+// carries a warning naming the devices and the crash check that works there.
 
 import { FrError, type LogsOpName, parseCursor } from '@fractonica/protocol';
 
 import type { Handler, HubContext, OpInput } from '../context.ts';
-import { mintCursor } from '../events/index.ts';
-import { type StoredLine, toLogLine } from '../logstore.ts';
+import { mintCursor, mintTimeUs } from '../events/index.ts';
+import { staleNetLine, type StoredLine, toLogLine } from '../logstore.ts';
+import { TCP_CRASH_CHECK, TCP_LOG_LIMITS, tcpOnlyDevices } from './source.ts';
 
 /** A line that matched a pattern, as the result and the failure details list it. */
 export interface LogMatch {
@@ -50,8 +55,13 @@ function matcher(pattern: string, regex: boolean): (text: string) => boolean {
   return (text) => re.test(text);
 }
 
-export async function assertLogs(hub: HubContext, input: OpInput<'logs_assert'>): Promise<{ matched: LogMatch[]; forbidden: LogMatch[] }> {
+export async function assertLogs(
+  hub: HubContext,
+  input: OpInput<'logs_assert'>,
+): Promise<{ matched: LogMatch[]; forbidden: LogMatch[]; warnings?: string[] }> {
   const after = sinceSeq(input.since, hub);
+  // A net line logged before the cursor was minted but sent late is neither expected nor forbidden (design m2-c2 D21).
+  const sinceUs = mintTimeUs(hub, after);
   // ops.ts spreads this module's handlers into HANDLERS, so its selector rules are loaded when called.
   const { logDevices } = await import('../ops.ts');
   const devices = logDevices(hub, input.selector);
@@ -59,12 +69,17 @@ export async function assertLogs(hub: HubContext, input: OpInput<'logs_assert'>)
   const forbid = (input.forbid ?? []).map((p) => ({ pattern: p, test: matcher(p, input.regex) }));
   const matched: LogMatch[] = [];
   const forbidden: LogMatch[] = [];
+  // Devices heard over TCP alone at the start or the end of the wait (a reboot may change it in between).
+  const tcpOnly = new Set(tcpOnlyDevices(hub, devices));
   const hit = (pattern: string, l: StoredLine): LogMatch => {
     const { cursor, device, text } = toLogLine(l);
     return { pattern, cursor, device, text };
   };
   /** Checks one line; true once the assertion is decided (every pattern matched, or a forbidden one). */
   const step = (l: StoredLine): boolean => {
+    if (staleNetLine(l, sinceUs)) {
+      return false;
+    }
     const bad = forbid.find((f) => f.test(l.text));
     if (bad) {
       forbidden.push(hit(bad.pattern, l));
@@ -126,16 +141,32 @@ export async function assertLogs(hub: HubContext, input: OpInput<'logs_assert'>)
     unsubscribe();
   }
 
+  for (const d of tcpOnlyDevices(hub, devices)) {
+    tcpOnly.add(d);
+  }
+  const wifiOnly = [...tcpOnly].join(', ');
+  const warnings =
+    tcpOnly.size && forbid.length
+      ? [`${wifiOnly}: ${TCP_LOG_LIMITS}, so forbid ${JSON.stringify(forbid.map((f) => f.pattern))} saw only what came over Wi-Fi; ${TCP_CRASH_CHECK}`]
+      : [];
   if (forbidden.length === 0 && matched.length === expect.length) {
-    return { matched, forbidden };
+    return { matched, forbidden, ...(warnings.length ? { warnings } : {}) };
   }
   const tail = hub.logs.query({ devices, afterSeq: after, limit: 20, direction: 'tail' }).map((l) => l.text);
-  const details = { matched, forbidden, tail, ...(forbidden.length ? {} : { missing: expect[matched.length].pattern, index: matched.length }) };
+  const details = {
+    matched,
+    forbidden,
+    tail,
+    ...(forbidden.length ? {} : { missing: expect[matched.length].pattern, index: matched.length }),
+    ...(warnings.length ? { warnings } : {}),
+  };
   const message = forbidden.length
     ? `forbidden ${JSON.stringify(forbidden[0].pattern)} matched a line (${forbidden[0].cursor}) after ${matched.length} of ${expect.length} expected lines`
     : `no line matching ${JSON.stringify(expect[matched.length].pattern)} (expected ${matched.length + 1} of ${expect.length}) within ${input.timeout_s}s`;
   throw new FrError('ASSERTION_FAILED', message, {
     details,
+    // An expected line that never came from a device heard over Wi-Fi alone may be one that never comes that way.
+    ...(!forbidden.length && tcpOnly.size ? { hint: `${wifiOnly}: ${TCP_LOG_LIMITS}` } : {}),
     remediation: [{ tool: 'logs_read', args: { selector: input.selector, since: input.since } }],
   });
 }

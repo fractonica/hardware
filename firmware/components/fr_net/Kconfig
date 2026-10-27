@@ -120,6 +120,17 @@ menu "Fractonica network"
         range 1 65535
         default 7421
 
+    # LOG frames over TCP (design m2-c2 D20, spec 05 §5.7, §5.17).
+
+    config FR_NET_LOG_LEVEL
+        int "Most verbose ESP_LOG level sent to the hub over TCP (1 E .. 5 V)"
+        range 1 5
+        default 3
+        help
+            Router mode: the ESP_LOG lines esp_log lets through also reach the hub as LOG frames over the TCP
+            session (at most 20 lines/s, never over UDP or ESP-NOW), up to this level: 3 sends E, W and I, in
+            every build type. More verbose lines reach the serial port only. A radio-off image sends none.
+
     # The radio (design m2-c1-hil D5, D6): off on the HIL fixture's profile (`net: {radio: off}`).
 
     config FR_NET_RADIO

@@ -17,7 +17,14 @@
 // that a get_state brought is marked `resync` (its time is the get_state's, not the change's): judged by what
 // it carries (a seq above what the node had sent before the get_state, a stamp from after its send), not only
 // by when it arrives, so a real change in flight behind the heartbeat stays unmarked and a re-send that comes
-// after the get_state timed out is still marked (GetStateWindow).
+// after the get_state timed out is still marked (GetStateWindow). M2-C2 (design m2-c2 D16, D21): LOG frames from
+// net_log nodes go, decoded, to the log ingest (logs/ingest.ts), and the scale counters (scale.ts) are this
+// router's. For 30+ nodes (D16, D18): one fr.node.describe per descriptor hash however many HELLOs of that
+// firmware handshake at once; DIRECTORY to every session on a HELLO only when it moved an addr (a handshake that
+// reads a changed registry, or the tick, catches every other change); a node broadcast fanned out to every
+// session of every other node, as hub broadcasts go (a non-best USB line only while its queue has room); every
+// envelope that goes to many sessions framed once (links Framed); and the counters and 1 s windows of hub_status
+// router.scale.
 //
 // Everything on the receive path runs synchronously in the tick the envelope arrived in (spec 08 §8.2
 // rule 2); only the handshake and commands await answers.
@@ -29,6 +36,7 @@ import {
   ADDR,
   decodeEnvelope,
   decodeMember,
+  decodeLogLine,
   decodeMsgMsg,
   decodeNetResolve,
   decodeNodeDescribeResult,
@@ -81,7 +89,8 @@ import {
 } from '../context.ts';
 import type { Db } from '../db.ts';
 import type { Endpoint, LinkSink, NodeLinksStatus, Source } from '../links/index.ts';
-import { NodeLinks } from '../links/index.ts';
+import { Framed, NodeLinks, queuedOn, SERIAL_MAX_QUEUED, sendFramed } from '../links/index.ts';
+import type { LogIngest } from '../logs/ingest.ts';
 import type { LogStore } from '../logstore.ts';
 import { readNetwork } from '../network.ts';
 import { nowUs } from '../ring.ts';
@@ -89,6 +98,7 @@ import type { SerialPortManager } from '../serial.ts';
 import { CapDirectory, descriptorCaps, instanceAt, type PortCap } from './caps.ts';
 import { type ClockInfo, type ClockView, NodeClock, rttOf, type SyncSample } from './clock.ts';
 import { BINDING_PATHS, type DeviceLatency, LatencyRecorder, type LoopDelay, LoopMonitor } from './latency.ts';
+import { createScaleCounters, HIST_BOUNDS, type ScaleCounters, type ScaleView, type ScaleWindows, scaleWindows } from './scale.ts';
 import { cmp16, cmp32, ReplayWindow } from './window.ts';
 
 /** Timing rules (spec 05 §5.11, §5.17; design c3 §6); tests shorten them. */
@@ -207,6 +217,10 @@ export interface RouterDeps {
   clock?: RouterClock;
   /** Called with the number of node sessions whenever it changes (SleepGuard). */
   onSessions?: (sessions: number) => void;
+  /** LOG frames over TCP (design m2-c2 D21): each fresh one, decoded; without it they are dropped (serial logs only). */
+  logIngest?: LogIngest;
+  /** This router process's scale counters (scale.ts), shared with the log ingest; a fresh set when not given. */
+  scale?: ScaleCounters;
 }
 
 // A RESULT, as sendCommand resolves it: defined with the Router interface (design c6 §3.3 adds the µs stamps).
@@ -289,6 +303,20 @@ export interface DeviceLinkInfo {
   instances: PortCap[] | null;
 }
 
+/**
+ * What a dashboard tile shows of a device's link (device_list `live`, design m2-c2 D16): enough that 30 tiles render
+ * from one device_list, with no device_get each.
+ */
+export interface DeviceLinkSummary {
+  /** Links with a session, best first. */
+  links: Exclude<LinkName, 'udp'>[];
+  udp_blocked: boolean;
+  /** The last HEARTBEAT's RSSI to the AP (dBm; 0: not on Wi-Fi) and uptime, null before one. */
+  rssi_ap: number | null;
+  uptime_s: number | null;
+  fw_id_prefix: string | null;
+}
+
 export interface RouterStatus {
   links: NodeLinksStatus | null;
   listen_error: string | null;
@@ -296,9 +324,17 @@ export interface RouterStatus {
   online: number;
   warnings: string[];
   counters: Record<string, number>;
+  /** The scale counters, windows and loop histogram (design m2-c2 D15, D16). */
+  scale: ScaleView;
 }
 
 type SessionKind = Exclude<LinkName, 'udp'>;
+
+/**
+ * How an in-flight describe ended (#describeOnce): the descriptor is known (or known to be none); its session went
+ * away first; or that session is still up and no descriptor came (lost, late, a transient status).
+ */
+type DescribeEnd = 'named' | 'closed' | 'unanswered';
 
 interface Session {
   ep: Endpoint;
@@ -369,8 +405,10 @@ interface BroadcastRecord {
   kind: number;
   port: number;
   body: Uint8Array;
-  /** The envelope per net (hub frames carry the node's net): the bytes every session of that net got. */
-  bytes: Map<number, Uint8Array>;
+  /** The envelope per net (hub frames carry the node's net), framed once: the bytes every session of that net got. */
+  bytes: Map<number, Framed>;
+  /** The same with ttl_remaining 1, per net, as repairs send it (made at the first repair). */
+  repairBytes: Map<number, Framed>;
   /** Repairs per device: how many, and the clock ms of the last. */
   repairs: Map<string, { n: number; at: number }>;
 }
@@ -394,6 +432,12 @@ const BCAST_TTL = 0x22;
 /** The ttl byte's offset in the envelope (05 §5.6): repair, fan-out and forwarding change only its low nibble. */
 const TTL_OFFSET = 16;
 const EMPTY = new Uint8Array(0);
+/**
+ * A node-broadcast copy goes to a node's USB line that is not its best link only while that line has fewer than
+ * this many envelopes queued (design m2-c2 D18, half of SERIAL_MAX_QUEUED): fan-out from 30 broadcasting sources
+ * must not crowd hub broadcasts, repairs and RESULTs off a USB line. A skipped copy counts fanout_skipped_full.
+ */
+const FANOUT_SERIAL_ROOM = SERIAL_MAX_QUEUED / 2;
 // Device times are u32 µs, compared with RFC 1982, which turns over 2^31 µs (35.8 min) apart. An out-of-order
 // EVENT or STATE arrives within seconds of the newer one, so a frame is older only while the previous one of
 // its instance arrived less than this long ago (C6 bench: a press after 45 quiet minutes came out late).
@@ -500,6 +544,11 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   #rxUs: number | null = null;
   /** Descriptor caps by descriptor_hash (firmware the hub has no manifest for). */
   #descriptors = new Map<number, PortCap[] | null>();
+  /**
+   * The fr.node.describe in flight per descriptor_hash, and how it ended (design m2-c2 D16): HELLOs of one firmware
+   * at once wait for it instead of each sending a BULK describe.
+   */
+  #describing = new Map<number, Promise<DescribeEnd>>();
   /** The BCAST counter: also the broadcast id; WELCOME's bcast_base is its last value (05 §5.8-5.9). */
   #bcast = 0;
   /** Broadcasts not expired yet, oldest first: repair re-sends from these. */
@@ -514,6 +563,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   #forwarded = new Map<string, number>();
   #latency = new LatencyRecorder();
   #loop = new LoopMonitor();
+  #scale: ScaleCounters;
+  #windows: ScaleWindows;
   #unsubscribeEvents: (() => void) | null = null;
   /** networks.net_id, once a network record exists (#currentNetId). */
   #netId: number | null = null;
@@ -542,7 +593,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     bcast_tcp_only: 0,
     /** Broadcasts re-sent from a HEARTBEAT watermark. */
     bcast_repaired: 0,
-    /** Node broadcasts fanned out, counted per receiving session. */
+    /** Node broadcasts fanned out, counted per receiving node (once, on however many of its sessions). */
     fanned_out: 0,
     /** Node -> node frames forwarded; dropped for want of a session to the target, or of TTL. */
     forwarded: 0,
@@ -565,6 +616,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     this.hubEpoch = deps.hubEpoch;
     this.#cfg = { ...ROUTER_DEFAULTS, ...deps.config };
     this.#clock = deps.clock ?? REAL_CLOCK;
+    this.#scale = deps.scale ?? createScaleCounters();
+    this.#windows = scaleWindows(this.#scale);
     this.#caps = new CapDirectory(deps.db);
     const l = deps.links === false ? {} : (deps.links ?? {});
     this.#links = new NodeLinks(this, { ...l, serial: deps.serial ?? null });
@@ -854,6 +907,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       port: frame.port,
       body: frame.body.slice(),
       bytes: new Map(),
+      repairBytes: new Map(),
       repairs: new Map(),
     };
     // Encoded before the counter moves: a frame the codec refuses throws with nothing sent and no gap in
@@ -866,12 +920,16 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     }
     this.#bcast = rec.seq;
     let sessions = 0;
+    const skew = this.#skew();
     for (const peer of this.#peers.values()) {
       // A fixture has no radio to seed with (design m2-c1-hil D6): T-FLOOD's sessions stay the nodes'.
-      if (!isFixture(peer) && this.#sendEvery(peer, this.#bcastBytes(rec, peer.net))) {
+      const wrote = isFixture(peer) ? 0 : this.#sendEvery(peer, this.#bcastBytes(rec, peer.net), skew);
+      if (wrote) {
         sessions++;
+        this.#scale.bcast_session_writes += wrote;
       }
     }
+    skew.done(this.#windows.bcast_skew_us);
     this.#pruneBroadcasts(now);
     this.#bcastLog.push(rec);
     this.#counters.bcast_sent++;
@@ -926,8 +984,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     return false;
   }
 
-  /** A broadcast's envelope for a net (encoded once per net): src HUB, dst BROADCAST, its BCAST seq. */
-  #bcastBytes(rec: BroadcastRecord, net: number): Uint8Array {
+  /** A broadcast's envelope for a net (encoded and framed once per net): src HUB, dst BROADCAST, its BCAST seq. */
+  #bcastBytes(rec: BroadcastRecord, net: number): Framed {
     let bytes = rec.bytes.get(net);
     if (!bytes) {
       const header: Header = {
@@ -943,10 +1001,39 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         port: rec.port,
         ext: [extTlv(EXT.VALID_MS, rec.validMs)],
       };
-      bytes = encodeEnvelope({ header, body: rec.body });
+      bytes = new Framed(encodeEnvelope({ header, body: rec.body }));
       rec.bytes.set(net, bytes);
     }
     return bytes;
+  }
+
+  /** A broadcast's repair for a net: its bytes with ttl_remaining 1, framed once per net. */
+  #repairBytes(rec: BroadcastRecord, net: number): Framed {
+    let bytes = rec.repairBytes.get(net);
+    if (!bytes) {
+      bytes = new Framed(withRemaining(this.#bcastBytes(rec, net).envelope, 1));
+      rec.repairBytes.set(net, bytes);
+    }
+    return bytes;
+  }
+
+  /** First to last copy written of one envelope to many sessions (D16 fanout_skew_us, bcast_skew_us), in µs. */
+  #skew(): { wrote(): void; done(w: { add(v: number): void }): void } {
+    let first = -1;
+    let last = -1;
+    return {
+      wrote() {
+        last = performance.now();
+        if (first < 0) {
+          first = last;
+        }
+      },
+      done(w) {
+        if (first >= 0) {
+          w.add((last - first) * 1000);
+        }
+      },
+    };
   }
 
   /**
@@ -955,13 +1042,14 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
    * writes until wifiSilentX10 passes, and a broadcast lost there is one the node never seeds, which a
    * repair (ttl_remaining 1) cannot make up for at the nodes that only hear it over the air. The node's BCAST
    * window takes the first copy and drops the other as DUP; fr_net counts a second hub copy neither as a
-   * seed nor toward K. True when any session took it.
+   * seed nor toward K. The sessions that took it (0: none).
    */
-  #sendEvery(peer: Peer, bytes: Uint8Array): boolean {
-    let sent = false;
+  #sendEvery(peer: Peer, f: Framed, skew?: { wrote(): void }): number {
+    let sent = 0;
     for (const s of this.#sessionsOf(peer)) {
-      if (s.welcomed && this.#send(s, bytes)) {
-        sent = true;
+      if (s.welcomed && this.#sendShared(s, f)) {
+        sent++;
+        skew?.wrote();
       }
     }
     return sent;
@@ -987,6 +1075,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     const now = this.#clock.now();
     this.#pruneBroadcasts(now);
     const floor = cmp32(watermark, peer.bcastBase) > 0 ? watermark : peer.bcastBase;
+    let repaired = false;
     for (const rec of this.#bcastLog) {
       if (cmp32(rec.seq, floor) <= 0 || now - rec.at < this.#cfg.repairGraceMs) {
         continue;
@@ -995,27 +1084,58 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       if (done && (done.n >= this.#cfg.repairMax || now - done.at < peer.hbMs / 2)) {
         continue;
       }
-      if (this.#sendEvery(peer, withRemaining(this.#bcastBytes(rec, peer.net), 1))) {
+      if (this.#sendEvery(peer, this.#repairBytes(rec, peer.net))) {
         rec.repairs.set(peer.id, { n: (done?.n ?? 0) + 1, at: now });
         this.#counters.bcast_repaired++;
+        repaired = true;
       }
+    }
+    if (repaired) {
+      this.#scale.repair_rounds++;
     }
   }
 
   /**
-   * A node's broadcast it also flooded (05 §5.9: ttl_initial > 1): the same bytes to every other node's
-   * session with ttl_remaining 1, so a node whose radio missed it still gets it and none re-seeds it.
+   * A node's broadcast it also flooded (05 §5.9: ttl_initial > 1): the same bytes, framed once, with
+   * ttl_remaining 1 to every welcomed session of every other node, so a node whose radio missed it still gets
+   * it and none re-seeds it. Every session, as hub broadcasts go (design m2-c2 D18): a dual-link node whose
+   * Wi-Fi died without a FIN keeps getting them over USB while TCP is still its best link; the node drops the
+   * second copy as a DUP. A USB line that is not the node's best link takes a copy only while its queue has
+   * room (FANOUT_SERIAL_ROOM). Never to the fixture (design m2-c1-hil D6). Counted once per node.
    */
   #fanOut(from: Peer, bytes: Uint8Array): void {
-    const out = withRemaining(bytes, 1);
+    const t0 = performance.now();
+    const out = new Framed(withRemaining(bytes, 1));
+    const skew = this.#skew();
+    let wrote = false;
     for (const peer of this.#peers.values()) {
       if (peer === from || isFixture(peer)) {
         continue;
       }
-      const s = this.#best(peer);
-      if (s?.welcomed && this.#send(s, out)) {
+      const best = this.#best(peer);
+      let took = false;
+      for (const s of this.#sessionsOf(peer)) {
+        if (!s.welcomed) {
+          continue;
+        }
+        if (s !== best && s.ep.kind === 'serial' && queuedOn(s.ep) >= FANOUT_SERIAL_ROOM) {
+          this.#scale.fanout_skipped_full++;
+          continue;
+        }
+        if (this.#sendShared(s, out)) {
+          took = true;
+          skew.wrote();
+          this.#scale.fanout_bytes += out.envelope.length;
+        }
+      }
+      if (took) {
+        wrote = true;
         this.#counters.fanned_out++;
       }
+    }
+    if (wrote) {
+      this.#windows.fanout_us.add((performance.now() - t0) * 1000);
+      skew.done(this.#windows.fanout_skew_us);
     }
   }
 
@@ -1049,7 +1169,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   /**
    * Sends the DIRECTORY pages to every session that has its WELCOME when they differ from the last ones sent
    * (05 §5.10: on every registry change, not only after WELCOME). Provisioning calls it through its event,
-   * the tick every directoryCheckMs, and a HELLO (which can retire another device's addr).
+   * the tick every directoryCheckMs, and a HELLO that moved an addr (design m2-c2 D16: not every HELLO, which
+   * cost O(N) each, O(N²) per reconnect storm).
    */
   syncDirectory(): void {
     this.#dirCheckAt = this.#clock.now();
@@ -1057,7 +1178,15 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     if (!devices) {
       return; // an unreadable registry (the hub stopping) is no change: nobody gets an empty directory
     }
-    const pages = [...this.#directoryPages(devices)];
+    this.#publishPages([...this.#directoryPages(devices)]);
+  }
+
+  /**
+   * The registry's DIRECTORY pages as just read: when they differ from the last ones sent, to every welcomed
+   * session but `except` (a handshake that sends them itself). So a handshake that reads a changed registry
+   * brings the others up to date at once, and the tick does not send them a second copy of what they have.
+   */
+  #publishPages(pages: Uint8Array[], except?: Session): void {
     const sig = pages.map(hex).join('/');
     if (this.#dirSig === sig) {
       return;
@@ -1069,9 +1198,9 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     }
     let sent = 0;
     for (const s of this.#sessions.values()) {
-      if (s.welcomed && !s.closed && !isFixture(s.peer)) {
+      if (s !== except && s.welcomed && !s.closed && !isFixture(s.peer)) {
         for (const page of pages) {
-          this.#sendFrame(s, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, page);
+          this.#sendDirectory(s, page);
         }
         sent++;
       }
@@ -1177,6 +1306,45 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       online: this.online().length,
       warnings,
       counters: { ...this.#counters },
+      scale: this.scale(),
+    };
+  }
+
+  /**
+   * hub_status router.scale (design m2-c2 D15, D16): this process's counters, the 1 s windows with their
+   * cumulative histograms, the loop histogram and the links' unsent high-water marks. Every figure starts at zero
+   * with the router; a reader takes differences between two reads of one process.
+   */
+  scale(): ScaleView {
+    const w = this.#windows;
+    const events = this.#deps.events as { flushMs?: { view(): ScaleView['handshake_ms'] } };
+    return {
+      ...this.#scale,
+      handshake_ms: w.handshake_ms.view(),
+      fanout_us: w.fanout_us.view(),
+      fanout_skew_us: w.fanout_skew_us.view(),
+      bcast_skew_us: w.bcast_skew_us.view(),
+      receive_us: w.receive_us.view(),
+      events_flush_ms: events.flushMs?.view() ?? null,
+      logs_flush_ms: w.logs_flush_ms.view(),
+      loop: this.#loop.histogram(),
+      max_unsent_bytes: this.#links.maxUnsent(),
+      bounds: [...HIST_BOUNDS],
+    };
+  }
+
+  /** What a dashboard tile shows of a device's link (device_list `live`); null for a device this run has not seen. */
+  summary(deviceId: string): DeviceLinkSummary | null {
+    const peer = this.#peers.get(deviceId);
+    if (!peer) {
+      return null;
+    }
+    return {
+      links: this.#ranked(peer).map((s) => s.ep.kind),
+      udp_blocked: peer.udpBlocked,
+      rssi_ap: peer.heartbeat?.rssi_ap ?? null,
+      uptime_s: peer.heartbeat?.uptime_s ?? null,
+      fw_id_prefix: peer.hello?.fw_id_prefix ?? null,
     };
   }
 
@@ -1207,6 +1375,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     // Its arrival, for everything this envelope stamps: RESULT rx_us, TIME t4, PONG round trips, events.
     const outer = this.#rxUs;
     this.#rxUs = this.#clock.nowUs();
+    const t0 = performance.now();
     try {
       this.#receive(from, bytes);
     } catch (e) {
@@ -1215,6 +1384,9 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       console.error(JSON.stringify({ event: 'router_error', message: (e as Error).message, stack: (e as Error).stack }));
     } finally {
       this.#rxUs = outer;
+      if (outer === null) {
+        this.#windows.receive_us.add((performance.now() - t0) * 1000); // the outermost receive only
+      }
     }
   }
 
@@ -1322,6 +1494,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
 
   #hello(ep: Endpoint, env: Envelope): void {
     const h = env.header;
+    this.#scale.hellos++;
     const d = decodePresenceHello(env.body);
     if (!d.ok || d.value.mac.length !== 6) {
       this.#counters.rx_bad++;
@@ -1354,6 +1527,8 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       this.#resetEpoch(peer);
     }
     peer.epoch = h.epoch;
+    // An addr moved: this device's changed since this hub run last saw it, or another device held it.
+    let moved = peer.addr !== ADDR.UNASSIGNED && peer.addr !== h.src;
     if (peer.addr !== h.src && this.#byAddr.get(peer.addr) === peer) {
       this.#byAddr.delete(peer.addr);
     }
@@ -1363,6 +1538,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       if (other && other !== peer) {
         // Two devices claim one addr (a re-provisioned board): the newer HELLO owns it.
         this.#offline(other, 'addr_taken', { keep: ep });
+        moved = true;
       }
       this.#byAddr.set(h.src, peer);
     }
@@ -1397,14 +1573,25 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       console.error(JSON.stringify({ event: 'registry_touch_failed', device: id, message: (e as Error).message }));
     }
     peer.alias = peer.device?.alias || hello.alias || id;
-    // A HELLO can retire another device's addr (a re-provisioned board): the others' directories follow.
-    this.syncDirectory();
+    // A HELLO that moved an addr (a re-provisioned board) changes the others' directories: at once. Any other
+    // registry change is caught by the next handshake's read of it or the tick's comparison (design m2-c2 D16).
+    if (moved) {
+      this.syncDirectory();
+    }
     peer.window.check(h.seq);
     // One session per link kind: a new HELLO supersedes the older connection of its kind (05 §5.11).
     const session: Session = { ep, peer, startedAt: now, lastTx: now, lastRx: now, welcomed: false, ready: false, closed: false };
     const old = peer.sessions[ep.kind];
     peer.sessions[ep.kind] = session;
     this.#sessions.set(ep, session);
+    // A HELLO while that link's handshake still ran (the node gave up waiting, hello_retry_ms) restarts it; one
+    // on another connection after it completed supersedes it.
+    const replaced = old ?? (previous?.peer === peer ? previous : undefined);
+    if (replaced && !replaced.closed && !replaced.ready) {
+      this.#scale.handshakes_restarted++;
+    } else if (old && old !== previous && old.ready) {
+      this.#scale.handshakes_superseded++;
+    }
     if (old && old !== previous) {
       this.#endSession(old, 'superseded by a new HELLO');
     } else if (previous && previous.peer === peer) {
@@ -1526,8 +1713,11 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       case CLS.OTA:
         this.#ota(peer, link, env);
         break;
+      case CLS.LOG:
+        this.#log(peer, link, env);
+        break;
       default:
-      // LOG (serial logs suffice in C3).
+      // A class the hub does not know: dropped.
     }
     // A node-originated broadcast the node also flooded (05 §5.9): fanned out to every other session with
     // ttl_remaining 1, so its receivers do not seed it again. A link-local one (ttl_remaining 1) stays.
@@ -1738,6 +1928,29 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     done?.({ t2: Number(d.value.t2), t3: Number(d.value.t3), t4 });
   }
 
+  /** A LOG frame (design m2-c2 D21): its LOG.LINE to the log ingest; without one it is dropped (serial logs only). */
+  #log(peer: Peer, link: LinkName, env: Envelope): void {
+    const ingest = this.#deps.logIngest;
+    if (!ingest) {
+      return;
+    }
+    const d = decodeLogLine(env.body);
+    if (!d.ok) {
+      this.#scale.log_bad++;
+      return;
+    }
+    ingest.frame({
+      device: peer.id,
+      alias: peer.alias,
+      link,
+      header: env.header,
+      level: env.header.kind,
+      line: d.value,
+      rx_us: this.#rxUs ?? this.#clock.nowUs(),
+      clock: peer.clock,
+    });
+  }
+
   #msg(peer: Peer, link: LinkName, env: Envelope): void {
     const d = decodeMsgMsg(env.body);
     if (!d.ok) {
@@ -1784,7 +1997,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     const s = this.#best(peer);
     if (s && !isFixture(peer) && dev?.provisioned && dev.addr === d.value.addr) {
       const entries = [{ addr: dev.addr, mac: Buffer.from(dev.device_id, 'hex') }];
-      this.#sendFrame(s, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, encodeNetDirectory({ page: 0, pages: 1, entries }));
+      this.#sendDirectory(s, encodeNetDirectory({ page: 0, pages: 1, entries }));
     }
   }
 
@@ -1921,31 +2134,47 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     });
     this.#send(session, this.#encode(peer, seq, CLS.NET, KIND.NET.WELCOME, PORT.NODE, welcome));
     session.welcomed = true;
+    this.#scale.handshakes_started++;
     // The node's BCAST window restarts here (05 §5.9: a late joiner never gets older broadcasts).
     peer.bcastBase = this.#bcast;
-    // 2. DIRECTORY (paged; 05 §5.10); none for a fixture (design m2-c1-hil D6).
-    for (const page of isFixture(peer) ? [] : this.#directoryPages()) {
-      this.#sendFrame(session, CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, page);
+    // 2. DIRECTORY (paged; 05 §5.10); none for a fixture (design m2-c1-hil D6). Pages that differ from the last
+    // ones sent go to the other sessions too (#publishPages), so the registry is read once here.
+    if (!isFixture(peer)) {
+      const devices = this.#directoryDevices();
+      const pages = [...this.#directoryPages(devices ?? [])];
+      if (devices) {
+        this.#publishPages(pages, session);
+      }
+      for (const page of pages) {
+        this.#sendDirectory(session, page);
+      }
     }
     // 3. TIME burst.
     await this.#timeBurst(session, true);
     if (!live()) {
       return;
     }
-    // 3b. Names for firmware the hub has no manifest for, before get_state reports its properties.
+    // 3b. Names for firmware the hub has no manifest for, before get_state reports its properties: one describe
+    // per descriptor hash, however many sessions of that firmware are here at once.
     if (!this.#capsOf(peer) && hello.descriptor_hash && !this.#descriptors.has(hello.descriptor_hash)) {
-      await this.#describe(peer, session);
+      await this.#describeOnce(peer, session, live);
       if (!live()) {
         return;
       }
     }
     // 4. get_state: every property again, so the mirror is current before apps hear device.online.
     peer.resyncAt = this.#clock.now();
-    await this.#getState(peer, session, this.#cfg.handshakeCmdTimeoutMs, peer.latestMax).catch(() => undefined);
+    await this.#getState(peer, session, this.#cfg.handshakeCmdTimeoutMs, peer.latestMax).catch((e: unknown) => {
+      if (e instanceof FrError && e.code === 'TIMEOUT') {
+        this.#scale.get_state_timeouts++;
+      }
+    });
     if (!live()) {
       return;
     }
     session.ready = true;
+    this.#scale.handshakes_completed++;
+    this.#windows.handshake_ms.add(this.#clock.now() - session.startedAt);
     peer.nextSyncAt = this.#clock.now() + this.#timing(peer).resyncMs;
     // 5. online, and per link: a node online over USB that joins Wi-Fi gets device.link, not a second
     // device.online (provisioning waits for its TCP link this way).
@@ -1964,6 +2193,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     // The registry wins on alias (06 §6.3): re-send it when the node's differs.
     const dev = peer.device;
     if (dev && (dev.alias !== hello.alias || dev.alias_rev !== hello.alias_rev) && dev.alias_rev >= hello.alias_rev) {
+      this.#scale.set_alias_pushes++;
       this.#setAlias(peer);
     }
     // Bindings compare the node's table with the registry's (design c5 §4: re-push on a HELLO that differs).
@@ -2019,6 +2249,9 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         const r = await answer;
         clearTimeout(timer);
         this.#syncWait.delete(key);
+        if (!r && !session.closed) {
+          this.#scale.time_samples_lost++;
+        }
         if (r) {
           samples.push({ t1, ...r });
           // Each round trip less the node's own hold time is a PING RTT sample of this link (latency_stats).
@@ -2092,12 +2325,54 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     return false;
   }
 
+  /**
+   * The descriptor of `peer`'s firmware, asked once per descriptor hash (design m2-c2 D16): the survey's storm sent
+   * a BULK describe per HELLO of one firmware, since the check before the await let every concurrent handshake
+   * through. A handshake that finds one in flight waits for it, and is done when it named the firmware. When its
+   * session went away before the answer, the next waiting handshake asks on its own session. When it ended on a
+   * live session with no descriptor (the answer lost or late, or a transient status), every handshake it held asks
+   * on its own session at once, as each did before D16: one lost answer costs no node its names, a firmware that
+   * never answers costs each of them one timeout (not one per handshake ahead of it), and describe_sent shows it.
+   */
+  async #describeOnce(peer: Peer, session: Session, live: () => boolean): Promise<void> {
+    const hash = peer.hello!.descriptor_hash;
+    for (;;) {
+      const running = this.#describing.get(hash);
+      if (!running) {
+        break;
+      }
+      const end = await running;
+      if (!live() || this.#descriptors.has(hash) || this.#capsOf(peer)) {
+        return;
+      }
+      if (end === 'unanswered') {
+        await this.#describe(peer, session);
+        return;
+      }
+      // 'closed': the next waiting handshake asks (the first to get here finds none in flight).
+    }
+    const asked = this.#describe(peer, session).then((): DescribeEnd => (this.#descriptors.has(hash) ? 'named' : session.closed ? 'closed' : 'unanswered'));
+    const settled = asked.finally(() => {
+      if (this.#describing.get(hash) === settled) {
+        this.#describing.delete(hash);
+      }
+    });
+    this.#describing.set(hash, settled);
+    await settled;
+  }
+
   async #describe(peer: Peer, session: Session): Promise<void> {
     const hash = peer.hello!.descriptor_hash;
     try {
+      this.#scale.describe_sent++;
       const r = await this.#request(peer, session, PORT.NODE, NODE_DESCRIBE, EMPTY, { ack: 'result', timeoutMs: this.#cfg.handshakeCmdTimeoutMs, bulk: true });
+      if (r.status === STATUS.UNSUPPORTED || r.status === STATUS.FAILED) {
+        // An older node, or one whose descriptor does not fit (fr_core answers FAILED for good): do not ask again.
+        this.#descriptors.set(hash, null);
+        return;
+      }
       if (r.status !== STATUS.OK) {
-        this.#descriptors.set(hash, null); // UNSUPPORTED (an older node): do not ask again
+        // EXPIRED (it came over a second late), BUSY, ...: this answer, not the firmware. Asked again as a timeout is.
         return;
       }
       const d = decodeNodeDescribeResult(r.fields);
@@ -2107,7 +2382,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       }
       this.#descriptors.set(hash, caps);
     } catch {
-      // Timed out or the link went away; the next HELLO tries again.
+      // Timed out or the link went away: handshakes waiting on it ask themselves (#describeOnce), the next HELLO too.
     }
   }
 
@@ -2447,6 +2722,30 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     return this.#send(session, this.#encode(peer, this.#nextSeq(peer), cls, kind, port, body, opts));
   }
 
+  /** One envelope framed once for many sessions (Framed): a hub broadcast, its repair, a node broadcast's fan-out. */
+  #sendShared(session: Session, f: Framed): boolean {
+    if (session.closed) {
+      return false;
+    }
+    const ok = sendFramed(session.ep, f);
+    if (ok) {
+      session.lastTx = this.#clock.now();
+    }
+    return ok;
+  }
+
+  /** One NET/DIRECTORY page to `session`, counted (directory_frames, directory_bytes). */
+  #sendDirectory(session: Session, page: Uint8Array): boolean {
+    const peer = session.peer;
+    const bytes = this.#encode(peer, this.#nextSeq(peer), CLS.NET, KIND.NET.DIRECTORY, PORT.NODE, page);
+    if (!this.#send(session, bytes)) {
+      return false;
+    }
+    this.#scale.directory_frames++;
+    this.#scale.directory_bytes += bytes.length;
+    return true;
+  }
+
   /** ACK (or another RESULT-prefixed answer) to the frame `h` from the node, on `session` or its best link. */
   #ack(peer: Peer, h: Header, status: number, session?: Session): void {
     this.#reply(peer, h, CLS.ACK, status, session);
@@ -2564,6 +2863,11 @@ export function routerStatus(router: Router | undefined): RouterStatus | null {
 /** Presence, links, clock offset and the property mirror of a device (device_get), or null. */
 export function routerInfo(router: Router | undefined, deviceId: string): DeviceLinkInfo | null {
   return router instanceof HubRouter ? router.info(deviceId) : null;
+}
+
+/** A device's link as a dashboard tile shows it (device_list `live`, design m2-c2 D16), or null. */
+export function routerSummary(router: Router | undefined, deviceId: string): DeviceLinkSummary | null {
+  return router instanceof HubRouter ? router.summary(deviceId) : null;
 }
 
 /** The instances a device's firmware has, as the router knows them (manifest or descriptor), or null. */

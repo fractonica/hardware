@@ -1,0 +1,28 @@
+# T2-CHURN-30 (design m2-c2 D12, approved): about 10 min of overlapping events on 30 nodes and 3 spare rows, drawn
+# from the scenario's seed with the minimum counts per kind (>= 5 BYE reboots, >= 5 power cuts with 2 on USB nodes,
+# >= 4 wifi_down with 1 on a USB node, >= 4 udp_block, 3 joins, 2 hub restarts at about 3 and 7 min). Each event is
+# judged in its own window by T-PRES's checks; the run-wide rules hold between them. tests/sim/t2-churn.ts.
+schema: fractonica/sim-scenario@1
+id: t2-churn-30
+gate: T2-CHURN-30
+summary: reboots, power cuts, Wi-Fi drops, UDP blocks, joins and hub restarts on 30 nodes, overlapping
+nodes:
+  count: 30
+  profile: c6-pad
+  hb_ms: 1000
+  usb: [sim-05, sim-15, sim-25]
+  spares: 3
+seed: 1
+medium:
+  topology: one_room
+  rssi_dbm: [-85, -45]
+  loss: [0.001, 0.015]
+  rate: { broadcast: 1M, unicast: 1M }
+  collisions: true
+  capture_db: 10
+ap: { channel: 6, uplink_ms: [0.5, 3], downlink_ms: [0.5, 3], udp_loss: 0 }
+runs:
+  - name: churn
+    run: t2-churn
+    args: [--duration-s, '600']
+published: false

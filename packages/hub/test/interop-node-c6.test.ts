@@ -96,14 +96,15 @@ describe.skipIf(!existsSync(BIN))('fr_net_node C6 hooks against the router', () 
     const full = (await diag(r, mac, 'stats')).response;
     // The C3/C6 counters T-LED and T-PRES read (dup, cached_replies, delivery_failed), then the C5 sections.
     expect(full).toMatchObject({ ok: true, dup: 0, cached_replies: 0, delivery_failed: 0, events_dropped: 0, loss_tx: 0 });
-    expect(Object.keys(full).filter((k) => typeof full[k] === 'object')).toEqual(['links', 'bcast', 'relay', 'espnow', 'bindings', 'nodes', 'msgs']);
+    expect(Object.keys(full).filter((k) => typeof full[k] === 'object')).toEqual(['links', 'bcast', 'relay', 'espnow', 'bindings', 'nodes', 'msgs', 'net_logs']);
     expect(Number((full.links as { tcp: { tx: number } }).tcp.tx)).toBeGreaterThan(0);
     // One section alone, as T-FLOOD and T-NN read them.
-    expect((await diag(r, mac, 'stats bcast')).response).toEqual({ ok: true, bcast: { delivered: 0, dup: 0, old: 0, watermark: expect.any(Number) } });
-    expect((await diag(r, mac, 'stats relay')).response).toEqual({ ok: true, relay: { seeded: 0, relayed: 0, cancelled: 0, dropped: 0 } });
+    expect((await diag(r, mac, 'stats bcast')).response).toEqual({ ok: true, bcast: { delivered: 0, dup: 0, old: 0, watermark: expect.any(Number), adopted: 0 } });
+    expect((await diag(r, mac, 'stats relay')).response).toEqual({ ok: true, relay: { seeded: 0, relayed: 0, cancelled: 0, dropped: 0, refused: 0 } });
     expect((await diag(r, mac, 'stats bindings')).response).toEqual({ ok: true, bindings: { fired: 0, failed: 0, rtt_p50_us: 0 } });
     expect((await diag(r, mac, 'stats nodes')).response).toMatchObject({ ok: true, nodes: { delivered: 0, via_espnow: 0, via_hub: 0, via_flood: 0 } });
     expect((await diag(r, mac, 'stats msgs')).response).toEqual({ ok: true, msgs: { other: 0 } });
+    expect((await diag(r, mac, 'stats net_logs')).response).toEqual({ ok: true, net_logs: { sent: 0, ring_drop: 0, age_drop: 0, rate_drop: 0, cut: 0 } });
     expect((await diag(r, mac, 'stats espnow')).response).toMatchObject({ ok: true, espnow: { tx: 0, peers: 0 } });
     expect((await diag(r, mac, 'stats bogus')).response).toMatchObject({ ok: false, error: 'invalid_args' });
     expect((await diag(r, mac, 'net wifi_down x')).response).toMatchObject({ ok: false, error: 'invalid_args' });

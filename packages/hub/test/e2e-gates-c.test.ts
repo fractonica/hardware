@@ -44,6 +44,7 @@ import { sleep } from '../../../tests/e2e/lib/tasks.ts';
 import { DEFAULTS as FLOOD_B, parseArgs as parseFloodB, planOutage, runTFloodB } from '../../../tests/e2e/t-flood-b.ts';
 import { countsOf, DEFAULTS as FLOOD, hookSeconds, parseArgs as parseFlood, runTFlood } from '../../../tests/e2e/t-flood.ts';
 import { DEFAULTS as NN, parseArgs as parseNn, runTNn, stoppedBlocked, toPark } from '../../../tests/e2e/t-nn.ts';
+import { StartLine } from '../../../tests/sim/lib/runner.ts';
 import { BIN, CppNode, type Line } from './cpp-node.ts';
 import { until } from './fake-node.ts';
 import { type RealHub, startRealHub } from './real-hub.ts';
@@ -548,6 +549,49 @@ describe('tests/e2e/t-nn.ts', () => {
     // --phase running alone passes.
     const only = await runTNn(ctxOn(hub.url, { allowHuman: false }).ctx, { ...NN, presses: N, gapMs: 0, phases: ['running'] });
     expect(only.pass).toBe(true);
+  });
+
+  it("paced (T2-NN-30's pairs): every pair starts from one start line and clicks at its own offset, once per gap on the clock", async () => {
+    const N = 3;
+    const GAP = 800;
+    const hub = await nnHub({
+      binding_list: () => ok({ bindings: [] }),
+      binding_set: () => ok({ slot: 0, pushed: true, replaced: false }),
+      input_simulate: () => ok({ results: [{ status: 'ok' }] }),
+      events_read: (input) => {
+        const types = String(input.types);
+        const n = (f: (i: number) => Record<string, unknown>) => Array.from({ length: N }, (_, i) => ({ type: types, fields: f(i) }));
+        if (types === 'node.binding_fired') {
+          return ok({ events: n((i) => ({ slot: 0, path: 0, target_status: 0, rtt_us: 4000 + i * 100 })) });
+        }
+        return ok({ events: n(() => (types === 'boot.down' ? {} : { effect: 'blink' })) });
+      },
+      latency_stats: () => ok({ devices: [{ bindings: {} }] }),
+    });
+    // Two pairs on one start line (the second's setup is slower: the line waits for it), offsets 0 and 400 ms.
+    const line = new StartLine(2);
+    const offsets = [0, 400];
+    const triggers = ['pad-c6', 'pad-c3b'];
+    const starts: number[] = [];
+    const runs = offsets.map(async (offsetMs, k) => {
+      const { ctx, measured } = ctxOn(hub.url, { allowHuman: false });
+      await sleep(k * 300);
+      const out = await runTNn(ctx, { ...NN, from: triggers[k], presses: N, gapMs: GAP, phases: ['running'] }, { pace: { start: async (sig) => (starts[k] = await line.arrive(k, sig)), offsetMs } });
+      return { out, measured };
+    });
+    const done = await Promise.all(runs);
+    expect(done.map((d) => d.out.pass)).toEqual([true, true]);
+    expect(starts[0]).toBe(starts[1]);
+    expect(done.map((d) => (d.measured.running as Record<string, unknown>).press_offset_ms)).toEqual([0, 400]);
+    // The clicks: N per pair, the second pair's 400 ms behind the first's, each pair's a gap apart (on the clock).
+    const clicks = (alias: string) => hub.calls.filter((c) => c.op === 'input_simulate' && c.input.selector === alias).map((c) => c.at - starts[0]);
+    const [first, second] = triggers.map(clicks);
+    expect(first).toHaveLength(N);
+    expect(second).toHaveLength(N);
+    for (let i = 0; i < N; i++) {
+      expect(first[i]).toBeGreaterThanOrEqual(i * GAP);
+      expect(second[i]).toBeGreaterThanOrEqual(400 + i * GAP);
+    }
   });
 });
 

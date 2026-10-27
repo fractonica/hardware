@@ -23,6 +23,9 @@
 //      counters again: fired ≥ 5 with none failed, and the target took as many node frames.
 //   5. The binding put back as it was (cleared if the run made it, its args restored if it had others), and
 //      the parked ones restored; one that could not be is logged with its `fr bind` and reported.
+// On the sim fleet (design m2-c2 §5.4, T2-NN-30) the runner runs 15 pairs at once and injects a press schedule
+// (TNnDeps.pace): every pair starts from one start line and clicks at its own offset, every --gap-ms on the clock, as
+// independent users would. Without it (the bench) the running phase is as before: one click, then the gap.
 // The hub is stopped only with --allow-hub-stop, only through the CLI (which manages the hub of this Mac's
 // FR_HOME on 127.0.0.1:7420), never from under test_run (this process would be the hub's own child), and
 // `fr hub stop` refuses while jobs run. Under tests/e2e/run.ts (test_run) FR_T_NN_ARGS holds the flags.
@@ -207,20 +210,39 @@ async function eventsSince(ctx: ScenarioCtx, selector: string, types: string, si
   return (await ctx.hub.ok<{ events: { type: string; fields?: Record<string, unknown> }[] }>('events_read', { selector, types, since, max_events: 1000 })).events;
 }
 
-async function runningPhase(ctx: ScenarioCtx, o: TNnOptions, p: Pair): Promise<PhaseResult> {
+async function runningPhase(ctx: ScenarioCtx, o: TNnOptions, p: Pair, pace?: PressPace): Promise<PhaseResult> {
   const since = await cursorNow(ctx);
   const t0 = Date.now();
   const simulate = o.sim || !ctx.allowHuman;
   const problems: string[] = [];
+  const paced: Record<string, unknown> = {};
   if (simulate) {
-    ctx.log(`${o.presses} input_simulate clicks on ${p.a.alias}.${o.input}, ${o.gapMs} ms apart`);
+    // Paced (T2-NN-30, several pairs at once): every pair starts from one start line, each at its own offset, then
+    // one click per gap from there, on the clock rather than after each click's answer. Otherwise (the bench) one
+    // click, then the gap.
+    const start = pace ? await pace.start(ctx.signal) : 0;
+    const first = start + (pace?.offsetMs ?? 0);
+    ctx.log(`${o.presses} input_simulate clicks on ${p.a.alias}.${o.input}, ${o.gapMs} ms apart${pace ? `, the first ${pace.offsetMs} ms after the common start` : ''}`);
+    const late: number[] = [];
     for (let i = 0; i < o.presses; i++) {
       ctx.signal.throwIfAborted();
+      if (pace) {
+        const due = first + i * o.gapMs;
+        await sleep(Math.max(0, due - Date.now()), ctx.signal);
+        late.push(Math.max(0, Date.now() - due));
+      }
       const r = await ctx.hub.ok<{ results: { status: string; error?: string }[] }>('input_simulate', { selector: p.a.alias, instance: o.input, gesture: 'click', timeout_s: 5 });
       if (r.results[0]?.status !== 'ok') {
         problems.push(`click ${i + 1}: ${r.results[0]?.status} ${r.results[0]?.error ?? ''}`.trim());
       }
-      await sleep(o.gapMs, ctx.signal);
+      if (!pace) {
+        await sleep(o.gapMs, ctx.signal);
+      }
+    }
+    if (pace) {
+      // As on the bench, a gap after the last click before the read.
+      await sleep(Math.max(0, first + o.presses * o.gapMs - Date.now()), ctx.signal);
+      Object.assign(paced, { press_offset_ms: pace.offsetMs, press_late_max_ms: late.length ? Math.max(...late) : null });
     }
   } else {
     // D15: the board to press blinks.
@@ -281,6 +303,7 @@ async function runningPhase(ctx: ScenarioCtx, o: TNnOptions, p: Pair): Promise<P
     reasons: [...v.reasons, ...problems],
     measured: {
       presses_by: simulate ? 'input_simulate (simulated)' : 'person',
+      ...paced,
       ...m,
       latency_stats_espnow: espnow ?? null,
       summary:
@@ -400,11 +423,24 @@ interface Ours {
   prior: BindingRow | null;
 }
 
+/**
+ * The running phase's simulated presses when several pairs run at once (the sim runner's T2-NN-30, design m2-c2
+ * §5.4): each pair waits at one start line for the others' setup, then clicks at `offsetMs` after it and every
+ * --gap-ms from there, as an independent user would; offset 0 for every pair is the lockstep case.
+ */
+export interface PressPace {
+  /** Resolves with the common start (Date.now()) once every pair reached it; rejects when the run aborts. */
+  start(signal: AbortSignal): Promise<number>;
+  offsetMs: number;
+}
+
 export interface TNnDeps {
   /** The boards' diag (default diag_exec through the hub). */
   diag?: Diag;
   /** How the hub is stopped and started again (default the CLI, for the hub on 127.0.0.1:7420 only). */
   hub?: HubControl;
+  /** The running phase's presses on a schedule shared with other pairs (default: none, one click then the gap). */
+  pace?: PressPace;
 }
 
 export async function runTNn(ctx: ScenarioCtx, o: TNnOptions, deps: TNnDeps = {}): Promise<Outcome> {
@@ -454,7 +490,7 @@ export async function runTNn(ctx: ScenarioCtx, o: TNnOptions, deps: TNnDeps = {}
 
     if (o.phases.includes('running')) {
       ctx.signal.throwIfAborted();
-      const r = await runningPhase(ctx, o, { a, b, slot: set.slot });
+      const r = await runningPhase(ctx, o, { a, b, slot: set.slot }, deps.pace);
       ctx.measure('running', r.measured);
       measured.running = r.measured;
       results.push(r.pass);

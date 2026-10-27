@@ -1,7 +1,7 @@
 // Handlers for the operation registry (packages/protocol/src/ops.ts).
 
 import { randomInt } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { checkSourceDir, paths, pytoolsSource } from '@fractonica/host';
@@ -13,13 +13,14 @@ import { NET_HANDLERS } from './bindings/ops.ts';
 import { runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
 import { HUB_HANDLERS } from './doctor/ops.ts';
-import { mintCursor } from './events/index.ts';
+import { mintCursor, mintTimeUs } from './events/index.ts';
 import { fenceDiag, fenceDiagDevice, portDevice } from './fixture/fence.ts';
 import { FIXTURE_HANDLERS } from './fixture/ops.ts';
 import { hardResetCapturing, runPytools } from './flash.ts';
 import { PROBE_HANDLERS } from './latency/ops.ts';
 import { LOGS_HANDLERS } from './logs/ops.ts';
-import { type StoredLine, toLogLine } from './logstore.ts';
+import { TCP_LOG_LIMITS, tcpOnlyDevices } from './logs/source.ts';
+import { staleNetLine, type StoredLine, toLogLine } from './logstore.ts';
 import { readNetwork, writeNetwork } from './network.ts';
 import { assertPortFree, listPorts, nameBusyHolder } from './ports/holders.ts';
 import { PORTS_HANDLERS } from './ports/ops.ts';
@@ -30,6 +31,7 @@ import { REGISTRY_HANDLERS } from './registry/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
 import { routerStatus } from './router/index.ts';
 import { LINKS_HANDLERS } from './router/ops.ts';
+import { type ProcessView, restStats, type WsStatsView } from './router/scale.ts';
 import { OTA_HANDLERS } from './ota/ops.ts';
 import { normalizeMac } from './serial.ts';
 import { TESTS_HANDLERS } from './tests/ops.ts';
@@ -50,6 +52,18 @@ function sinceSeq(since: string | undefined, hub: HubContext): number | undefine
     throw new FrError('HUB_RESTARTED', `cursor ${since} is from an earlier hub run`, { details: { resume_cursor: mintCursor(hub) } });
   }
   return c.seq;
+}
+
+/** hub_status `process` (design m2-c2 D16): resident set, CPU since start, open descriptors. */
+function processView(): ProcessView {
+  const cpu = process.cpuUsage();
+  let fds: number | null = null;
+  try {
+    fds = readdirSync('/dev/fd').length - 1; // less the descriptor the listing itself held
+  } catch {
+    // no /dev/fd (Windows): unknown
+  }
+  return { rss: process.memoryUsage.rss(), cpu_ms: Math.round((cpu.user + cpu.system) / 1000), fds };
 }
 
 async function startedJob(hub: HubContext, jobId: string, waitS: number | undefined) {
@@ -256,6 +270,8 @@ export const HANDLERS: Record<OpName, Handler> = {
       warnings.push(...(part?.warnings?.() ?? []));
     }
     const lnp = hub.lnp?.status();
+    // `/ws` counters (design m2-c2 D16), from the hub's own WsServer (createWsServer's `ws`).
+    const ws = (hub.wsServer as { ws?: { stats?(): WsStatsView } } | undefined)?.ws?.stats?.();
     return {
       version: HUB_VERSION,
       registry_hash: REGISTRY_HASH,
@@ -278,7 +294,11 @@ export const HANDLERS: Record<OpName, Handler> = {
       ...(hub.advert ? { advert: hub.advert.status() } : {}),
       ...(hub.staticSite ? { dashboard: hub.staticSite.dashboard() } : {}),
       ...(hub.sleepGuard ? { sleep_guard: { active: hub.sleepGuard.active() } } : {}),
-      ...(router ? { router: { counters: router.counters } } : {}),
+      ...(router ? { router: { counters: router.counters, scale: router.scale } } : {}),
+      // Scale (design m2-c2 D16): /ws, REST calls per op, and the process.
+      ...(ws ? { ws } : {}),
+      rest: restStats(hub).view(),
+      process: processView(),
     };
   },
 
@@ -395,6 +415,8 @@ export const HANDLERS: Record<OpName, Handler> = {
 
   wait_for_log: async (input: { selector?: string; pattern: string; regex: boolean; since: string; count: number; timeout_s: number }, hub) => {
     const after = sinceSeq(input.since, hub) ?? 0;
+    // A net line logged before the cursor was minted but sent late (a backlog after a reconnect) is not new (D21).
+    const sinceUs = mintTimeUs(hub, after);
     const devices = logDevices(hub, input.selector);
     let re: RegExp | null = null;
     if (input.regex) {
@@ -404,7 +426,8 @@ export const HANDLERS: Record<OpName, Handler> = {
         throw new FrError('INVALID_ARGS', `bad regex: ${(e as Error).message}`);
       }
     }
-    const matches = (l: StoredLine) => (!devices || devices.includes(l.device)) && (re ? re.test(l.text) : l.text.includes(input.pattern));
+    const matches = (l: StoredLine) =>
+      (!devices || devices.includes(l.device)) && (re ? re.test(l.text) : l.text.includes(input.pattern)) && !staleNetLine(l, sinceUs);
     const found: StoredLine[] = [];
     let lastSeen = after;
     // Subscribe before the backlog query so no line can fall between the two.
@@ -437,8 +460,11 @@ export const HANDLERS: Record<OpName, Handler> = {
     const matched = found.length >= input.count;
     if (!matched) {
       const tail = hub.logs.query({ devices, afterSeq: after, limit: 20, direction: 'tail' }).map((l) => l.text);
+      // A device heard over Wi-Fi alone never sends some lines at all (design m2-c2 D21, logs/source.ts).
+      const wifiOnly = tcpOnlyDevices(hub, devices);
       throw new FrError('TIMEOUT', `no line matching ${JSON.stringify(input.pattern)} within ${input.timeout_s}s (${found.length}/${input.count})`, {
         details: { matches: found.map(toLogLine), tail },
+        ...(wifiOnly.length ? { hint: `${wifiOnly.join(', ')}: ${TCP_LOG_LIMITS}` } : {}),
       });
     }
     return { matched, matches: found.map(toLogLine), cursor: mintCursor(hub) };

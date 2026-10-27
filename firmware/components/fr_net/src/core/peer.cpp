@@ -133,10 +133,14 @@ std::expected<Path, Err> Net::broadcast_frame(uint8_t cls, uint8_t kind, uint8_t
     // ESP-NOW first: the neighbours hear it in about a millisecond and relay it within its TTL. A TTL-1
     // frame is link-local (never relayed), so it is no flood and needs no rate.
     bool air = false;
-    if (air_up() && (t == 1 || flood_rate_take(addr_, now)) &&
-        air_send(kBroadcastMac, env, AirPrio::normal, next_token())) {
-        ++state_.relay.seeded;
-        air = true;
+    const bool flood = t > 1;
+    if (air_up() && (!flood || flood_rate_take(addr_, now))) {
+        if (air_send(kBroadcastMac, env, AirPrio::normal, next_token())) {
+            ++state_.relay.seeded;
+            air = true;
+        } else if (flood) {
+            flood_rate_refund(addr_);  // design m2-c2 D17: the driver refused it, so no flood went out
+        }
     }
     // 05 §5.9: the same bytes to the hub, which delivers them to apps and fans them out over TCP with
     // ttl_remaining 1 (so they are not seeded again). TTL-1 frames stay on ESP-NOW.
@@ -275,7 +279,8 @@ bool Net::out_flood(NodeOut &o, uint8_t ttl)
 {
     const TimeUs now = core_.now();
     // A flood from this node counts against its own rate; a TTL-1 frame is not relayed, so it is none.
-    if (!air_up() || (ttl > 1 && !flood_rate_take(addr_, now))) {
+    const bool flood = ttl > 1;
+    if (!air_up() || (flood && !flood_rate_take(addr_, now))) {
         return false;
     }
     const uint8_t keep = o.bytes[kOffTtl];
@@ -283,8 +288,14 @@ bool Net::out_flood(NodeOut &o, uint8_t ttl)
     const AirPrio prio = o.answer || (o.bytes[kOffFlags] & kFlagUrgent) != 0 ? AirPrio::urgent : AirPrio::normal;
     const bool ok = air_send(kBroadcastMac, {o.bytes, o.len}, prio, next_token()).has_value();
     o.bytes[kOffTtl] = keep;  // a later attempt starts the chain again with the frame's own TTL
-    if (ok && ttl > 1) {
-        ++state_.relay.seeded;
+    if (flood) {
+        if (ok) {
+            ++state_.relay.seeded;
+        } else {
+            // Design m2-c2 D17: the driver refused it: the token goes back, so each retry of a reliable frame
+            // through a full queue does not spend another of this node's floods.
+            flood_rate_refund(addr_);
+        }
     }
     return ok;
 }

@@ -26,6 +26,10 @@
 //   6. Every node's counters once all are online: the topic's delivered count against the broadcasts sent.
 // Any way out of 2–5 ends every hook still armed (else the log names `fr diag <alias> net wifi_down 0`) and
 // cancels the message_send job. Under tests/e2e/run.ts (test_run) FR_T_FLOOD_B_ARGS holds the flags.
+// From M2-C2 (design m2-c2 D11, §5.4) the same run judges T2-FLOOD-B-30 on the fleet: `--isolate` takes a list, and a
+// node's hook is ended through `deps.diag` only when `deps.reachable(dev)` says the diag can reach it with its hub link
+// down (default: on a USB port the hub holds, or any node when the diag is injected, as the loopback suites do), so a
+// wifi_down node's back-on-TCP time is timed from a real end; one that cannot be reached is left to its hook's expiry.
 
 import type { Job } from '@fractonica/protocol';
 
@@ -39,7 +43,9 @@ import {
   DiagRefused,
   endHook,
   hubDiag,
+  onUsb,
   radioOf,
+  type Reachable,
   readFlags,
   readStats,
   rebooted,
@@ -59,7 +65,10 @@ export interface TFloodBOptions {
   devices?: string[];
   /** The nodes whose Wi-Fi goes down; default every node of the run (all of them with --router-off). */
   down?: string[];
-  /** Also `net drop_hub_link`: its USB line carries no hub frames. undefined: pad-c3 when it is in the run; null: none. */
+  /**
+   * Also `net drop_hub_link`: their USB lines carry no hub frames, comma-separated. undefined: pad-c3 when it is in
+   * the run; null: none.
+   */
   isolate?: string | null;
   outageS: number;
   rateHz: number;
@@ -84,8 +93,8 @@ export function parseArgs(argv: readonly string[]): TFloodBOptions {
     '--devices': (v) => (o.devices = v.list()),
     '--down': (v) => (o.down = v.list()),
     '--isolate': (v) => {
-      const a = v.text();
-      o.isolate = a === 'none' ? null : a;
+      const a = v.list();
+      o.isolate = a.length === 1 && a[0] === 'none' ? null : a.join(',');
     },
     '--outage-s': (v) => (o.outageS = v.num(5)),
     '--rate': (v) => (o.rateHz = v.num(0.05)),
@@ -105,11 +114,19 @@ export function parseArgs(argv: readonly string[]): TFloodBOptions {
   return o;
 }
 
-/** The run's plan: who goes down, who is isolated, who keeps a hub link, or why it cannot run. */
+/** The isolated nodes of a plan or of the options (`isolate` is comma-separated). */
+export function isolatesOf(isolate: string | null | undefined): string[] {
+  return (isolate ?? '')
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+/** The run's plan: who goes down, who is isolated (comma-separated), who keeps a hub link, or why it cannot run. */
 export function planOutage(devs: readonly Dev[], o: Pick<TFloodBOptions, 'down' | 'isolate'> & { routerOff?: boolean }): { down: string[]; isolate: string | null; keepers: string[]; notes: string[] } {
   const aliases = devs.map((d) => d.alias);
   const notes: string[] = [];
-  let isolate: string | null = null;
+  let isolated: string[] = [];
   // Isolation only cuts a USB node's serial link: a node on Wi-Fi alone has nothing but ESP-NOW once its
   // wifi_down is armed, and dropping its hub link first would leave the hub no way to arm that hook.
   const onUsb = (a: string) => devs.find((d) => d.alias === a)?.port_state === 'open';
@@ -119,16 +136,18 @@ export function planOutage(devs: readonly Dev[], o: Pick<TFloodBOptions, 'down' 
     } else if (!onUsb(DEFAULT_ISOLATE)) {
       notes.push(`${DEFAULT_ISOLATE} is not on USB: its wifi_down alone leaves it ESP-NOW only, so no node is isolated`);
     } else {
-      isolate = DEFAULT_ISOLATE;
+      isolated = [DEFAULT_ISOLATE];
     }
   } else if (o.isolate !== null) {
-    if (!aliases.includes(o.isolate)) {
-      throw new Error(`--isolate ${o.isolate} is not one of the run's nodes (${aliases.join(', ')})`);
+    for (const a of isolatesOf(o.isolate)) {
+      if (!aliases.includes(a)) {
+        throw new Error(`--isolate ${a} is not one of the run's nodes (${aliases.join(', ')})`);
+      }
+      if (!onUsb(a)) {
+        throw new Error(`--isolate ${a}: it is not on a USB port the hub holds, so wifi_down alone already leaves it ESP-NOW only`);
+      }
     }
-    if (!onUsb(o.isolate)) {
-      throw new Error(`--isolate ${o.isolate}: it is not on a USB port the hub holds, so wifi_down alone already leaves it ESP-NOW only`);
-    }
-    isolate = o.isolate;
+    isolated = isolatesOf(o.isolate);
   }
   if (o.routerOff && o.down?.length) {
     notes.push('--down is ignored with --router-off: every node loses Wi-Fi');
@@ -137,19 +156,25 @@ export function planOutage(devs: readonly Dev[], o: Pick<TFloodBOptions, 'down' 
   if (!o.routerOff && unknown.length) {
     throw new Error(`--down ${unknown.join(',')}: not among the run's nodes (${aliases.join(', ')})`);
   }
-  const down = o.routerOff || !o.down?.length ? [...aliases] : [...new Set([...o.down, ...(isolate ? [isolate] : [])])];
+  const down = o.routerOff || !o.down?.length ? [...aliases] : [...new Set([...o.down, ...isolated])];
   // A hub link through the outage: a node that keeps Wi-Fi, or one on a USB port the hub holds that is not isolated.
-  const keepers = devs.filter((d) => d.alias !== isolate && (!down.includes(d.alias) || d.port_state === 'open')).map((d) => d.alias);
+  const keepers = devs.filter((d) => !isolated.includes(d.alias) && (!down.includes(d.alias) || d.port_state === 'open')).map((d) => d.alias);
   if (!keepers.length) {
     throw new Error(
       'no node keeps a hub link through the outage, so no broadcast can reach the flood: put one on a USB port of this Mac (the hub holding it), or leave one out of --down / --isolate',
     );
   }
-  return { down, isolate, keepers, notes };
+  return { down, isolate: isolated.length ? isolated.join(',') : null, keepers, notes };
 }
 
 export interface TFloodBDeps {
   diag?: Diag;
+  /**
+   * Whether `diag` reaches a node whose hub link is down, so its hook can be ended (design m2-c2 D11). Default: a
+   * node on a USB port the hub holds (onUsb), or any node when `diag` is injected (the loopback suites' stdin, the
+   * fleet's control channel).
+   */
+  reachable?: Reachable;
 }
 
 const SECTIONS = ['bcast', 'relay', 'msgs'] as const;
@@ -200,11 +225,13 @@ async function promptUntil(ctx: ScenarioCtx, o: TFloodBOptions, text: string, se
 
 export async function runTFloodB(ctx: ScenarioCtx, o: TFloodBOptions, deps: TFloodBDeps = {}): Promise<Outcome> {
   const diag = deps.diag ?? hubDiag(ctx);
+  const reachable: Reachable = deps.reachable ?? (deps.diag ? () => true : onUsb);
   if (o.routerOff && !ctx.allowHuman) {
     return { pass: false, measured: { variant: 'router_off', skipped: 'needs a person at the bench (--allow-human) to power the router off and on' }, evidence: {} };
   }
-  const devs = await runDevices(ctx, o.devices, [...(o.down ?? []), ...(o.isolate ? [o.isolate] : [])]);
+  const devs = await runDevices(ctx, o.devices, [...(o.down ?? []), ...isolatesOf(o.isolate)]);
   const plan = planOutage(devs, o);
+  const isolated = isolatesOf(plan.isolate);
   const measured: Record<string, unknown> = {
     variant: o.routerOff ? 'router_off' : 'wifi_down',
     devices: devs.map((d) => d.alias),
@@ -259,7 +286,7 @@ export async function runTFloodB(ctx: ScenarioCtx, o: TFloodBOptions, deps: TFlo
     if (at === undefined) {
       return Date.now();
     }
-    const ok = await endHook(ctx, diag, dev(alias), `net ${hook} 0`);
+    const ok = reachable(dev(alias)) ? await endHook(ctx, diag, dev(alias), `net ${hook} 0`) : false;
     armed.get(alias)!.delete(hook);
     if (ok) {
       return Date.now();
@@ -282,8 +309,8 @@ export async function runTFloodB(ctx: ScenarioCtx, o: TFloodBOptions, deps: TFlo
   try {
     const c0 = await cursorNow(ctx);
     // 2. The outage.
-    if (plan.isolate) {
-      await arm(plan.isolate, 'drop_hub_link');
+    for (const a of isolated) {
+      await arm(a, 'drop_hub_link');
     }
     if (o.routerOff) {
       const off = await promptUntil(ctx, o, `Power the home router off now and keep it off until asked (about ${Math.ceil(o.outageS / 60)} min)`, plan.down.join(','), { link: 'tcp', up: false }, c0);
@@ -334,8 +361,8 @@ export async function runTFloodB(ctx: ScenarioCtx, o: TFloodBOptions, deps: TFlo
       const waitSignal = AbortSignal.any([ctx.signal, waits.signal]);
       const arrivals = new Map(plan.down.map((a) => [a, tcpBack(ctx, a, c1, deadline, waitSignal)]));
       arrivals.forEach((p) => p.catch(() => undefined)); // awaited below
-      if (plan.isolate) {
-        await disarm(plan.isolate, 'drop_hub_link');
+      for (const a of isolated) {
+        await disarm(a, 'drop_hub_link');
       }
       if (o.routerOff) {
         // The router's return is seen as the first STA that joins (diag info over USB, every 500 ms).
@@ -375,7 +402,7 @@ export async function runTFloodB(ctx: ScenarioCtx, o: TFloodBOptions, deps: TFlo
     // Every way out ends what is still armed (a failure, a cancel).
     for (const [alias, hooks] of armed) {
       for (const hook of hooks.keys()) {
-        if (!(await endHook(ctx, diag, dev(alias), `net ${hook} 0`))) {
+        if (!reachable(dev(alias)) || !(await endHook(ctx, diag, dev(alias), `net ${hook} 0`))) {
           unended = true;
         }
       }
@@ -436,7 +463,7 @@ export async function runTFloodB(ctx: ScenarioCtx, o: TFloodBOptions, deps: TFlo
   const backs = Object.values(back).filter((x): x is number => x !== null);
   const relay: Record<string, Counters> = Object.fromEntries(nodes.map((n) => [n.alias, n.relay]));
   Object.assign(measured, {
-    summary: `delivered ${nodes.map((n) => `${n.alias} ${n.delivered}/${sent}${n.alias === plan.isolate ? ' (ESP-NOW only)' : ''}`).join(', ')}; back on TCP within ${backs.length ? `${(Math.max(...backs) / 1000).toFixed(1)} s` : 'n/a'} of Wi-Fi's return`,
+    summary: `delivered ${nodes.map((n) => `${n.alias} ${n.delivered}/${sent}${isolated.includes(n.alias) ? ' (ESP-NOW only)' : ''}`).join(', ')}; back on TCP within ${backs.length ? `${(Math.max(...backs) / 1000).toFixed(1)} s` : 'n/a'} of Wi-Fi's return`,
     flood: floodSummary(nodes, sent),
     sent,
     seeded: res.seeded,
@@ -470,7 +497,7 @@ const scenario = defineScenario({
   needs: ROUTER_OFF_FROM_ENV ? { human: true, usb: true } : { usb: true },
   usage: `--devices a,b,c              the run's nodes (default every online device)
 --down a,b                   the nodes whose Wi-Fi goes down (net wifi_down; default all)
---isolate pad-c3|none        also net drop_hub_link on it: ESP-NOW alone (default pad-c3 when in the run)
+--isolate pad-c3|a,b|none    also net drop_hub_link on them: ESP-NOW alone (default pad-c3 when in the run)
 --outage-s 120 --rate 1      the outage and the broadcast rate (Hz)
 --router-off                 a person powers the router off and on instead (needs --allow-human)
 --say                        speak each request with sk say

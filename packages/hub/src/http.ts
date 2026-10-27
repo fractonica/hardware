@@ -1,7 +1,10 @@
 // REST surface generated from the operation registry: POST /api/v1/op/<name> with the op's JSON
 // input returns a Result envelope (spec 09 §9.1-9.2). Loopback only, behind the web guard (web/guard.ts,
 // design c6 D9). Every cursor handed out here is minted (mintCursor), so a wait since it is dated by when
-// the caller got it (09 §9.2). The C6 web parts (/app, /ws, static serving) add their routes here once.
+// the caller got it (09 §9.2). The C6 web parts (/app, /ws, static serving) add their routes here once. Each op
+// call is counted with its duration, for hub_status `rest` (design m2-c2 D16).
+
+import { performance } from 'node:perf_hooks';
 
 import websocket from '@fastify/websocket';
 import { CLIENT_HEADER, errorResult, findOp, FrError, HUB_VERSION, JOB_ORIGINS, okResult, REGISTRY_HASH, type JobOrigin } from '@fractonica/protocol';
@@ -12,6 +15,7 @@ import { mintCursor } from './events/index.ts';
 import { requestClient } from './jobs.ts';
 import { HANDLERS, type HubContext } from './ops.ts';
 import { requestSignal } from './prompts.ts';
+import { restStats } from './router/scale.ts';
 import { installGuard } from './web/guard.ts';
 
 /**
@@ -48,6 +52,8 @@ export function buildServer(hub: HubContext, port: number): FastifyInstance {
 
   app.get('/api/v1/health', async () => ({ ok: true, version: HUB_VERSION, registry_hash: REGISTRY_HASH, pid: process.pid }));
 
+  const rest = restStats(hub);
+
   app.post<{ Params: { name: string }; Body: unknown }>('/api/v1/op/:name', async (req, reply) => {
     const cursor = mintCursor(hub); // taken BEFORE any side effect
     const op = findOp(req.params.name);
@@ -74,10 +80,13 @@ export function buildServer(hub: HubContext, port: number): FastifyInstance {
       }
     });
     const call = () => requestSignal.run(gone.signal, () => handler(parsed.data, hub));
+    const t0 = performance.now();
     try {
       return okResult(await (client ? requestClient.run(client, call) : call()), cursor);
     } catch (err) {
       return errorResult(err, cursor);
+    } finally {
+      rest.add(op.name, performance.now() - t0);
     }
   });
 

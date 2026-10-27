@@ -2,13 +2,17 @@
 // it takes the cursor from the Seq that logs share, notifies subscribers synchronously, and queues the
 // row; rows are written to the `events` table in one transaction every 50 ms, off the input path. The
 // table is a ring trimmed like logs (main.ts runs a RingRetention on it). The store also remembers when
-// cursors were handed out (mintCursor), which dates a wait's `since` (09 §9.2).
+// cursors were handed out (mintCursor), which dates a wait's `since` (09 §9.2). Each write's duration goes into
+// a 1 s window (flushMs), which hub_status shows as router.scale.events_flush_ms (design m2-c2 D16).
+
+import { performance } from 'node:perf_hooks';
 
 import { formatCursor } from '@fractonica/protocol';
 
 import type { Events, HubContext, HubEvent, Lifecycle, Seq } from '../context.ts';
 import type { Db } from '../db.ts';
 import { nowUs } from '../ring.ts';
+import { WindowStat } from '../router/scale.ts';
 import { sqliteGlob } from './match.ts';
 
 export { matchType, matchTypes, matchWhere, parseTypes } from './match.ts';
@@ -49,6 +53,8 @@ export class EventStore implements Events, Lifecycle {
   #listeners = new Set<(e: HubEvent) => void>();
   /** seq -> when that cursor was first handed out (µs since the Unix epoch), oldest first. */
   #mints = new Map<number, number>();
+  /** How long each batched write took (ms), in 1 s windows (design m2-c2 D16 events_flush_ms). */
+  readonly flushMs = new WindowStat('ms');
 
   constructor(db: Db, seq: Seq, run: number) {
     this.#db = db;
@@ -114,12 +120,14 @@ export class EventStore implements Events, Lifecycle {
     }
     const rows = this.#pending;
     this.#pending = [];
+    const t0 = performance.now();
     const insert = this.#db.prepare('INSERT INTO events (seq, run, ts_us, t_hub_us, type, device, json) VALUES (@seq, @run, @ts_us, @t_hub_us, @type, @device, @json)');
     this.#db.transaction((all: Row[]) => {
       for (const r of all) {
         insert.run(r);
       }
     })(rows);
+    this.flushMs.add(performance.now() - t0);
   }
 
   /** Oldest first, after `afterSeq`. */

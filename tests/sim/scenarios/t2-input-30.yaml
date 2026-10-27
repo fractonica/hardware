@@ -1,0 +1,30 @@
+# T2-INPUT-30 (design m2-c2 §5.4): T-INPUT's own verdict per node, the sim phase then the loss phase on all 30 at
+# once. All 30 are on the bridge, so diag_exec answers via serial as on the bench (the loss phase's rule); the human
+# phase is left out. At half the time scale --gap-ms doubles, and t-input re-arms its loss hook (D11).
+schema: fractonica/sim-scenario@1
+id: t2-input-30
+gate: T2-INPUT-30
+summary: T-INPUT's sim and loss phases on 30 nodes at once
+nodes:
+  count: 30
+  profile: c6-pad
+  hb_ms: 1000
+  usb: [sim-01, sim-02, sim-03, sim-04, sim-05, sim-06, sim-07, sim-08, sim-09, sim-10, sim-11, sim-12, sim-13, sim-14, sim-15,
+        sim-16, sim-17, sim-18, sim-19, sim-20, sim-21, sim-22, sim-23, sim-24, sim-25, sim-26, sim-27, sim-28, sim-29, sim-30]
+seed: 1
+medium:
+  topology: one_room
+  rssi_dbm: [-85, -45]
+  loss: [0.001, 0.015]
+  rate: { broadcast: 1M, unicast: 1M }
+  collisions: true
+  capture_db: 10
+ap: { channel: 6, uplink_ms: [0.5, 3], downlink_ms: [0.5, 3], udp_loss: 0 }
+runs:
+  - name: sim
+    run: t-input
+    args: [--phase, sim, --devices, 'sim-01..sim-30']
+  - name: loss
+    run: t-input
+    args: [--phase, loss, --devices, 'sim-01..sim-30']
+published: false

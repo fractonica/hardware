@@ -6,9 +6,11 @@
 // the device last went down (see DeviceRun.since). A device already running the build is `already_current`
 // and is not handed over. One parent job of kind `deploy`; the build and ota_deploy jobs it starts are
 // ordinary jobs of their own, cancelled with it. Profiles run side by side: a profile's devices update while
-// the next one builds (builds of one checkout queue on its build lock anyway). `expect_log` needs every device
-// on a USB port the hub holds open: the hub stores log lines only from USB (a node on Wi-Fi alone sends none
-// in M1), so it is refused up front for any other device; expect_event works over any link.
+// the next one builds (builds of one checkout queue on its build lock anyway). `expect_log` needs a source of log
+// lines for every device: a USB port the hub holds open, or (design m2-c2 D21) a TCP session whose last HELLO said
+// `net_log` (the node sends its lines as LOG frames over TCP). It is refused up front for any other device;
+// expect_event works over any link. The rule reads the running image's HELLO: an image built from an older source
+// sends no LOG frames after the update, and its expectation then times out (the timeout's message says so).
 
 import { checkSourceDir } from '@fractonica/host';
 import { type FaultKind, findOp, formatCursor, FrError, type Job, MAX_WAIT_S, type Remediation, type ToolError } from '@fractonica/protocol';
@@ -19,6 +21,7 @@ import type { Device, Handler, HubContext, HubEvent } from '../context.ts';
 import { mintCursor } from '../events/index.ts';
 import type { JobCtx } from '../jobs.ts';
 import type { StoredLine } from '../logstore.ts';
+import { type LogSourceInfo, logSourceOf, routerLinks, TCP_LOG_LIMITS } from '../logs/source.ts';
 import { routerInfo } from '../router/index.ts';
 import { OTA_JOB_STATE_EVENT, OTA_JOB_STATES, type OtaJobState } from './index.ts';
 
@@ -301,9 +304,11 @@ interface Plan {
   devices: Device[];
   /** The devices by registry profile; one whose row names none is in no group (it fails, nothing to build). */
   groups: Map<string, Device[]>;
+  /** What expect_log's source rule reads (DeployOptions.linkInfo). */
+  linkInfo: LogSourceInfo;
 }
 
-function plan(input: DeployInput, hub: HubContext): Plan {
+function plan(input: DeployInput, hub: HubContext, info: LogSourceInfo = routerLinks): Plan {
   if (input.fault && input.build_type !== 'debug') {
     throw new FrError('INVALID_ARGS', 'fault builds are debug only (spec 03 §3.8): drop --build-type release');
   }
@@ -334,29 +339,32 @@ function plan(input: DeployInput, hub: HubContext): Plan {
     });
   }
   if (input.expect_log !== undefined) {
-    checkLogSource(input, hub, devices);
+    checkLogSource(input, hub, devices, info);
   }
-  return { src, via, devices, groups };
+  return { src, via, devices, groups, linkInfo: info };
 }
 
+// The source rule lives with the log ingest (logs/source.ts); re-exported for the callers that know it from here.
+export { CAP_NET_LOG, type LogSourceInfo, logSourceOf } from '../logs/source.ts';
+
 /**
- * expect_log matches lines in the hub's log store, and only a USB port the hub holds open feeds it (not
- * closed, leased to a flash, or held by another program): a node on Wi-Fi alone sends no LOG frames in M1,
- * so its expectation would time out after a good update. Refused for each device that would be updated
- * (one with a profile; the others fail without an expectation).
+ * expect_log matches lines in the hub's log store, which a USB port the hub holds open feeds, and since M2-C2 a TCP
+ * session of a node whose HELLO says net_log (logSourceOf). A node on Wi-Fi alone without net_log (an image older
+ * than M2-C2, a gateway-only node) sends no log lines, so its expectation would time out after a good update.
+ * Refused for each device that would be updated (one with a profile; the others fail without an expectation).
  */
-function checkLogSource(input: DeployInput, hub: HubContext, devices: Device[]): void {
+function checkLogSource(input: DeployInput, hub: HubContext, devices: Device[], info: LogSourceInfo): void {
   const ports = hub.serial.list();
   const noLogs = devices.flatMap((d) => {
     const port = ports.find((p) => p.device_id === d.device_id);
-    return d.profile && port?.state !== 'open' ? [{ alias: d.alias, port: port ? `${port.path} ${port.state}` : null }] : [];
+    return d.profile && !logSourceOf(hub, d.device_id, info) ? [{ alias: d.alias, port: port ? `${port.path} ${port.state}` : null }] : [];
   });
   if (!noLogs.length) {
     return;
   }
   const what = noLogs.map((n) => `${n.alias} (${n.port ? `USB port ${n.port}` : 'not on USB'})`).join(', ');
-  throw new FrError('INVALID_ARGS', `expect_log needs each device on a USB port this hub holds open, the only source of its log lines: ${what}`, {
-    hint: 'a node on Wi-Fi alone sends the hub no log lines (M1): use --expect-event instead (e.g. node.boot), or plug the board into this Mac',
+  throw new FrError('INVALID_ARGS', `expect_log needs each device on a USB port this hub holds open or online over Wi-Fi with net_log, the sources of its log lines: ${what}`, {
+    hint: 'a node on Wi-Fi alone sends the hub log lines only when its HELLO says net_log (an image from M2-C2 on, router mode): use --expect-event instead (e.g. node.boot), or plug the board into this Mac',
     details: { no_log_source: noLogs },
     remediation: [
       {
@@ -762,6 +770,14 @@ class DeployRun {
       r.expect = 'timeout';
       const err = toolError(e);
       r.error = err.code === 'TIMEOUT' ? `no ${expect_log !== undefined ? `log line containing ${JSON.stringify(expect_log)}` : `${expect_event} event`} within ${expect_timeout_s}s since ${since}` : `${err.code}: ${err.message}`;
+      const source = err.code === 'TIMEOUT' && expect_log !== undefined ? logSourceOf(this.#hub, r.dev.device_id, this.#plan.linkInfo) : 'usb';
+      if (source === null) {
+        // Design m2-c2 D21: the source rule read the image that ran before; the one it runs now says no net_log.
+        r.error += ': no log lines reach the hub from it now (not on a USB port this hub holds open, and the image it runs does not say net_log: built from a source older than M2-C2?); use expect_event';
+      } else if (source === 'tcp') {
+        // Its lines come over TCP alone: a bootloader, panic or D-level line the expectation names never does.
+        r.error += `: the hub hears its log lines over Wi-Fi only, and ${TCP_LOG_LIMITS}: expect such a line with the board on USB, or use expect_event`;
+      }
       this.#ctx.log(`${r.dev.alias}: ${r.error}`, 'event');
     }
   }
@@ -841,12 +857,14 @@ class DeployRun {
 export interface DeployOptions {
   /** Seconds a device has to be online on the new fw_id after SUCCEEDED (BACK_ONLINE_S; tests shorten it). */
   backOnlineS?: number;
+  /** The device links expect_log's source rule reads (default the router's; tests stand in for it). */
+  linkInfo?: LogSourceInfo;
 }
 
 /** The deploy handler over the given children (build_start and ota_deploy by default). */
 export function createDeploy(deps: DeployDeps = OP_DEPS, opts: DeployOptions = {}): Handler {
   return async (input: DeployInput, hub: HubContext) => {
-    const p = plan(input, hub);
+    const p = plan(input, hub, opts.linkInfo);
     if (input.dry_run) {
       return dryRun(input, hub, p);
     }

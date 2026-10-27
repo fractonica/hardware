@@ -8,7 +8,8 @@
 //   rename undone and an erased board recovered when a step fails; T-OTA's deploy with the forced reinstall
 //   of an already-current board, the fault deploy with the forced retry of REJECT same_fw, the power cut
 //   (the test plays the person: it answers the unplug and replug prompts), a cut that came too late tried
-//   again on the other image, a cancel that cancels the OTA job, and the restore at the end;
+//   again on the other image, a cancel that cancels the OTA job, and the restore at the end (via auto on the bench;
+//   over Wi-Fi as the sim runner runs it on the fleet, whose bridged USB nodes cannot be flashed);
 // - a dry run on a real hub process (real-hub.ts) with the C++ fr_net_node (cpp-node.ts) as the board:
 //   T-OTA --no-build end to end (a forced Wi-Fi reinstall, a health-fault image rolled back, a power cut the
 //   test makes by killing the node mid-download, the resume from a 64 KB stride, the restore) and T-PROV's
@@ -54,6 +55,7 @@ import type { ScenarioCtx } from '../../../tests/e2e/lib/scenario.ts';
 import { sleep } from '../../../tests/e2e/lib/tasks.ts';
 import tOta, { DEFAULTS as T_OTA, parseArgs as otaArgs, runTOta } from '../../../tests/e2e/t-ota.ts';
 import tProv, { DEFAULTS as T_PROV, parseArgs as provArgs, runTProv } from '../../../tests/e2e/t-prov.ts';
+import { MODULES, type RunEnv } from '../../../tests/sim/lib/runner.ts';
 import { openDb } from '../src/db.ts';
 import { markImageFlashed } from '../src/registry/store.ts';
 import { BIN, CppBoard, makeImage } from './cpp-node.ts';
@@ -906,6 +908,22 @@ describe('t-ota.ts on a scripted hub', { timeout: 60_000 }, () => {
     expect(cut.cut_hub_bytes as number).toBeGreaterThanOrEqual(256 * 1024);
     expect(measured.restore).toMatchObject({ 'pad-c6': { restored: true, build: A.build_id } });
     expect(d.fw).toBe(A.fw_id);
+  });
+
+  it('on the fleet (the sim runner\'s t-ota) the restore goes over Wi-Fi: via auto would pick serial on the bridged port', async () => {
+    const b = await bench();
+    const d = b.add({ ...C6, fw: A.fw_id.slice(0, 16) });
+    b.artifacts = [F, A];
+    otaScripts(b);
+    b.run.build_start = async () => ({ build_id: R.build_id, fw_id: R.fw_id, cache_hit: true });
+    b.onPrompt = person(b, d);
+    const { ctx, measured } = ctxOn(b.url);
+    const out = await MODULES['t-ota'](ctx, ['--phase', 'cut', '--devices', 'pad-c6', '--off-s', '0.05'], {} as RunEnv);
+    expect(out.pass, JSON.stringify(measured)).toBe(true);
+    // The board's USB port is open (usb_log), where via auto means serial: the fleet's restore names Wi-Fi.
+    expect((measured.cut as Record<string, Record<string, unknown>>)['pad-c6']).toMatchObject({ usb_log: true });
+    expect(ops(b, 'ota_deploy').at(-1)).toEqual({ selector: `id:${C6.id}`, build: A.build_id, via: 'wifi', allow_downgrade: true, wait_s: 0 });
+    expect(measured.restore).toMatchObject({ 'pad-c6': { restored: true, build: A.build_id } });
   });
 
   it('a cut that came too late (installed first) is tried again on the other image', async () => {

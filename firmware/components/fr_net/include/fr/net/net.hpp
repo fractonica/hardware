@@ -10,6 +10,9 @@
 //
 // C6 (design c6 D21-D23) adds the `net loss` hook, hub CMDs scheduled by exec_at, and the link task's receive
 // time, which TIME, PONG, expire_at, exec_at and the session keepalive count from.
+//
+// M2-C2 (design m2-c2 D17, D19, D20) adds LOG frames over TCP from a LogSource (log.cpp), the flood-rate refund of a
+// send the driver refused, and the adoption of a newer hub run heard over the air while no session is up.
 #pragma once
 
 #include <algorithm>
@@ -26,6 +29,7 @@
 #include "fr/core/core.hpp"
 #include "fr/net/air.hpp"
 #include "fr/net/link.hpp"
+#include "fr/net/log_source.hpp"
 #include "fr/net/stores.hpp"
 #include "fr/net/window.hpp"
 #include "protocol.hpp"  // generated fr::proto enums (Role, OtaState)
@@ -39,6 +43,7 @@ inline constexpr uint32_t kCapSleepy = 1u << 2;
 inline constexpr uint32_t kCapSec = 1u << 3;
 inline constexpr uint32_t kCapInjectEnabled = 1u << 4;
 inline constexpr uint32_t kCapProvisioned = 1u << 5;
+inline constexpr uint32_t kCapNetLog = 1u << 6;  // LOG frames over TCP (design m2-c2 D20): a LogSource is attached
 
 // PRESENCE.HEARTBEAT `state` bits (05 §5.7).
 inline constexpr uint32_t kStateWifiUp = 1u << 0;
@@ -134,7 +139,7 @@ struct LinkInfo {
     uint32_t sweeps = 0;  // all-channel sweeps this boot (05 §5.4): a new one sets the next HEARTBEAT's swept bit
     bool hub_session = false;  // a WELCOMEd hub session on serial or TCP now (State::hub_link())
     TimeUs hub_heard_at = 0;   // the newest frame of the hub's (Net::hub_heard_at()); 0: none this boot
-    uint16_t hub_epoch = 0;    // the hub run of the last WELCOME (State::hub_epoch); 0: none yet
+    uint16_t hub_epoch = 0;    // the last WELCOME's hub run, or one adopted over the air (m2-c2 D19); 0: none yet
 };
 
 /** Node-side HEARTBEAT values Net cannot see from the core task's own state. */
@@ -263,6 +268,8 @@ struct RelayStats {
     /** Relays a frame was due that never went out: relay off, ota_busy, the queue full, the per-source flood
      * rate spent, or AirLink refused it. A spent TTL is the normal end of a flood, not counted. */
     uint32_t dropped = 0;
+    /** Of `dropped`: AirLink refused the relay (a busy driver, not the flood rate; design m2-c2 D17). */
+    uint32_t refused = 0;
 };
 
 /** Node <-> node traffic (design c5 §3), whichever link brought or took it. */
@@ -284,6 +291,17 @@ struct BcastStats {
     uint32_t dup = 0;        // copies already seen (the flood's and the hub's paths both arrive)
     uint32_t old = 0;        // below the window
     uint32_t watermark = 0;  // the hub BCAST window's, as HEARTBEAT reports it (state() fills it in)
+    /** Newer hub runs taken from the air while no session was up (design m2-c2 D19). */
+    uint32_t adopted = 0;
+};
+
+/** LOG frames over TCP (design m2-c2 D20; diag `stats` net_logs): lines sent, and lines dropped by cause. */
+struct LogStats {
+    uint32_t sent = 0;       // LOG frames handed to the TCP link
+    uint32_t ring_drop = 0;  // lines the ring had no room for
+    uint32_t age_drop = 0;   // lines older than 30 s when their turn came
+    uint32_t rate_drop = 0;  // lines over 20/s
+    uint32_t cut = 0;        // lines cut to LOG.LINE's 384 B
 };
 
 /** Bindings (07 §7.11): what node.binding_fired reported. */
@@ -310,7 +328,7 @@ enum class LossDir : uint8_t { both = 0, tx = 1, rx = 2 };
 
 struct State {
     std::array<LinkState, kLinkKinds> links{};
-    uint16_t hub_epoch = 0;        // from the last WELCOME
+    uint16_t hub_epoch = 0;        // from the last WELCOME, or the run adopted over the air (design m2-c2 D19)
     uint32_t state_seq = 0;        // seq of the newest STATE meant for the hub (HEARTBEAT state_seq)
     uint32_t events_dropped = 0;   // no path to the hub, or older than event_max_age_ms
     uint32_t delivery_failed = 0;  // Q1 frames given up on
@@ -333,7 +351,7 @@ struct State {
     uint32_t loss_rx = 0;           // ... and on their way in
     uint32_t cmds_scheduled = 0;    // exec_at CMDs stored to run at their time (05 §5.6)
     uint32_t exec_late = 0;         // exec_at CMDs answered LATE: not 0-2 s ahead when they arrived
-    uint32_t exec_cancelled = 0;    // scheduled CMDs a WELCOME of a new hub run dropped unrun
+    uint32_t exec_cancelled = 0;    // scheduled CMDs a new hub run's WELCOME, or an adopted run (D19), dropped unrun
     uint32_t exec_late_us_max = 0;  // the most a scheduled CMD ran after its time, in µs (not a counter)
     uint32_t rx_queue_us_max = 0;   // the longest a hub-link envelope waited between its link task and Net (µs)
     // C5 (design c5 §2 diag stats; the per-topic MSG counts are Net::msg_stats()); reset_stats() zeroes them.
@@ -341,6 +359,7 @@ struct State {
     BcastStats bcast;
     BindingStats bindings;
     NodeStats nodes;
+    LogStats logs;  // M2-C2 (design m2-c2 D20); reset_stats() zeroes it
 
     const LinkState &link(LinkKind k) const { return links[index_of(k)]; }
     bool hub_link() const { return link(LinkKind::serial).session || link(LinkKind::tcp).session; }
@@ -404,7 +423,8 @@ public:
      * stay fresh while drop_hub_link freezes the session.
      */
     TimeUs hub_heard_at() const { return hub_heard_at_; }
-    /** The hub run of the last WELCOME (State::hub_epoch, without the copy state() makes); 0 before any. */
+    /** The hub run of the last WELCOME, or the run adopted over the air (design m2-c2 D19; State::hub_epoch, without
+     * the copy state() makes); 0 before any. */
     uint16_t hub_epoch() const { return state_.hub_epoch; }
     /** A WELCOMEd hub session on serial or TCP now (State::hub_link(), without the copy state() makes). */
     bool hub_link() const { return state_.hub_link(); }
@@ -495,6 +515,21 @@ public:
     const MsgStats &msg_stats() const { return msgs_; }
     /** relay_enabled and the flood timing (05 §5.9); Config::relay until changed. */
     void set_relay(const RelayConfig &relay);
+
+    // ---- LOG frames over TCP (design m2-c2 D20, spec 05 §5.7, §5.12.1): log.cpp ----
+
+    /** The node's log lines (null: none). While one is attached, HELLO caps say kCapNetLog, and Net's timer drains
+     * it to the hub over a settled TCP session only (never serial, UDP or ESP-NOW), at most 20 lines/s. */
+    void attach_logs(LogSource *logs);
+    /** The ring went from empty to non-empty: one coalesced post from the log hook, so a line pushed on another
+     * task is drained without waiting for an unrelated deadline. Core task. */
+    void logs_ready();
+    /**
+     * What the LogSource's own ring counted since its last call: lines it had no room for (State::logs ring_drop,
+     * told to the hub in the next `<n> log lines dropped` line) and lines it had to cut (cut). Core task; a source
+     * may call it from inside its pop().
+     */
+    void logs_dropped(uint32_t ring_drop, uint32_t cut);
 
     // Debug hooks (09 §9.7) for fr_diag's `net` commands, which only FR_TEST_HOOKS builds expose. They
     // start after the RESULT of the request that asked for them; 0 seconds ends the hook at once.
@@ -650,6 +685,36 @@ private:
     void end_ip_block();
     /** Session timeouts resume after a hook: a session in `which` (kVia* bits) silent too long ends now. */
     void lose_stale_sessions(uint8_t which);
+    /** Scheduled CMDs of a hub run other than `epoch` are dropped unrun (exec_cancelled): their hub is gone, and
+     * its clock offset with it (design c6 D22). A WELCOME of another run, and adopt_hub_run. */
+    void drop_other_run_cmds(uint16_t epoch);
+    /** LOG frames due now (design m2-c2 D20), from tick(). */
+    void service_logs(TimeUs now);
+    /** When service_logs() next has work: kNever without lines to send or a session to send them on. */
+    TimeUs next_log_due() const;
+    // The drain's helpers and what it follows of the TCP session (log.cpp).
+    /** The drain may send: a settled TCP session, not wifi-silent, not frozen by a hook. */
+    bool log_open(TimeUs now) const;
+    /** The TCP session's handshake is over: its get_state answered after a TIME burst, or kLogSettleMs since WELCOME. */
+    bool log_settled(TimeUs now) const;
+    /** No room in the 1 KB window (or no free charge) for the line held, or for any line when none is. */
+    bool log_window_full() const;
+    void log_refill(TimeUs now);
+    /** Pops lines until one is fresh enough to hold (sanitized, its LOG.LINE body in log_buf_); false when none is left. */
+    bool log_take(TimeUs now);
+    /** A line pushed at `pushed_at` waited out kLogMaxAgeMs: rate_drop if the drain was open all along, else age_drop. */
+    void log_drop_aged(TimeUs pushed_at);
+    /** One LOG frame over TCP when the bucket, the TX FIFO and the window allow; charged to the window when sent. */
+    bool log_send(uint8_t level, std::span<const uint8_t> body, TimeUs now);
+    /** `W (<ms>) fr_net: <n> log lines dropped`, for the lines dropped since the last one; `<ms>` from
+     * LogSource::text_ms, the clock the other lines' text prints. */
+    bool log_send_marker(TimeUs now);
+    /** A hub frame came over TCP at `at`: charges sent at least one RTT before it are cleared. */
+    void log_heard(TimeUs at);
+    void log_welcome(TimeUs at);
+    /** A SYNC_REQ that arrived at `req_at` was answered at `res_at` over TCP: the RTT samples of a burst. */
+    void log_synced(TimeUs req_at, TimeUs res_at);
+    void log_session_end();
     bool dropping() const { return state_.hub_link_dropped; }
     /** A hook freezes link `k`: nothing in or out, and on a session link no timeout, HELLO or reconnect. The
      * hooks cut hub links only: ESP-NOW carries on (T-FLOOD drops a node's hub link to test the flood). */
@@ -827,6 +892,13 @@ private:
     /** One flood of `src` within its rate (kFloodRatePerS); false when spent. */
     bool flood_rate_take(uint16_t src, TimeUs now);
     void send_air_heartbeat();
+    /** Gives back the flood token flood_rate_take(src) just took, when the send it was for was refused (design
+     * m2-c2 D17): exact, as nothing refills or evicts the bucket in between. */
+    void flood_rate_refund(uint16_t src);
+    /** In router mode with no session up, a hub broadcast of a newer run heard over the air (design m2-c2 D19):
+     * hub_epoch becomes `epoch`, the BCAST window restarts empty just below `seq`, exec_at CMDs of other runs
+     * are dropped, and bcast.adopted counts it. C6's BEACON path reuses it. */
+    void adopt_hub_run(uint16_t epoch, uint32_t seq);
     /** The HEARTBEAT this node reports now (to the hub, and as the ESP-NOW heartbeat). */
     fr::proto::PresenceHeartbeat heartbeat_msg(const LinkInfo &li, const Vitals &vit) const;
 
@@ -970,6 +1042,54 @@ private:
     std::array<uint32_t, kRttSamples> rtts_{};
     size_t rtt_n_ = 0;
     size_t rtt_next_ = 0;
+
+    // LOG frames over TCP (design m2-c2 D20, spec 05 §5.7, §5.12.1; log.cpp).
+    /** 05 §5.7: LOG lines per second, and the burst a full bucket allows. */
+    static constexpr uint32_t kLogPerS = 20;
+    /** The drain runs at most this often while it has lines (one line's worth of the bucket). */
+    static constexpr uint32_t kLogPassMs = 50;
+    /** 05 §5.12.1: LOG bytes sent and not yet cleared by a hub frame one RTT later. */
+    static constexpr size_t kLogWindowBytes = 1024;
+    /** LOG frames charged to the window at once: a window of short lines is full at this many. */
+    static constexpr size_t kLogCharges = 32;
+    /** A line older than this when its turn comes is dropped: a USB node's TCP copy must land well inside the
+     * hub's 60 s dedup window (design m2-c2 D21). */
+    static constexpr uint32_t kLogMaxAgeMs = 30'000;
+    /** A TCP session is settled at its get_state RESULT after a TIME burst, or this long after its WELCOME. */
+    static constexpr uint32_t kLogSettleMs = 3'000;
+    /** A charge waits at least this long for a hub frame to clear it (the TIME-sync RTT's floor). */
+    static constexpr uint32_t kLogRttFloorMs = 20;
+    /** LOG.LINE's text and tag (schema/protocol.yaml), in bytes of UTF-8. */
+    static constexpr size_t kLogTextMax = 384;
+    static constexpr size_t kLogTagMax = 16;
+    /** What LogSource::pop copies a line into (a source cuts a longer one), then the held line's LOG.LINE body. */
+    static constexpr size_t kLogScratch = 512;
+
+    LogSource *logs_ = nullptr;
+    bool log_ready_ = false;  // the source may have lines: attached, woken, or not emptied at the last pass
+    bool log_held_ = false;   // a popped line waits in log_buf_ (its LOG.LINE body) for its turn
+    uint8_t log_level_ = 0;   // ... its kind (E 1 .. V 5)
+    uint16_t log_body_len_ = 0;
+    uint32_t log_pushed_ms_ = 0;  // ... its push stamp (core clock, ms; LogLine::pushed_ms)
+    uint32_t log_unreported_ = 0;           // lines dropped since the last marker line
+    uint32_t log_tokens_ = kLogPerS * 1000;  // the 20/s bucket, in thousandths of a line
+    TimeUs log_refill_at_ = 0;
+    TimeUs log_pass_at_ = 0;          // no drain pass before this
+    TimeUs log_open_since_ = kNever;  // the drain open without a break since (rate_drop vs age_drop)
+    // The TCP session as the drain follows it: its WELCOME, the get_state RESULT, the TIME burst's RTT.
+    TimeUs log_welcome_at_ = kNever;
+    bool log_state_answered_ = false;
+    bool log_rtt_new_ = true;  // the next SYNC_REQ starts a burst
+    uint32_t log_rtt_us_ = 0;  // the latest burst's least RTT sample (0: none yet)
+    TimeUs log_sync_res_at_ = kNever;
+    // The 1 KB window: LOG frames sent and not yet cleared, oldest first (a ring of kLogCharges).
+    std::array<TimeUs, kLogCharges> log_charge_at_{};
+    std::array<uint16_t, kLogCharges> log_charge_len_{};
+    size_t log_charge_head_ = 0;
+    size_t log_charge_n_ = 0;
+    size_t log_charged_ = 0;
+    char log_buf_[kLogScratch];
+    char log_text_[kLogTextMax];
 };
 
 }  // namespace fr::net

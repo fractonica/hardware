@@ -1,0 +1,37 @@
+# T2-FLOOD-B-30 (design m2-c2 §5.4): T-FLOOD-B's own verdict at 30 nodes. Four nodes on the bridge: three keepers
+# (sim-27, sim-28, sim-29) and sim-30, which (b) isolates (t-flood-b refuses to isolate a node the hub holds no port
+# for). (a) Wi-Fi down on 27 nodes, three keep TCP (sim-28..sim-30), hooks ended through the fleet diag (D11). (b) The
+# router off: the person bot answers the PLEASE lines with `fleet ap off` / `ap on`; its back times are model output
+# (D7: no scan, no bounded sweep). (c) The epoch check (D19): AP off, 30 broadcasts at 1 Hz, a private-hub restart
+# (the USB nodes re-WELCOMEd over serial), 200 more at 2 Hz, AP on; each Wi-Fi-only node must take >= 99 % of the new
+# run's broadcasts through the air with bcast.adopted 1 (proposed). (a) and (b) name all 30 nodes (--devices), so a
+# keeper or any other node offline at a run's start fails it instead of dropping out of the verdict.
+schema: fractonica/sim-scenario@1
+id: t2-flood-b-30
+gate: T2-FLOOD-B-30
+summary: T-FLOOD-B's verdict at 30 nodes (Wi-Fi down, router off), and the hub restarted during the outage (D19)
+nodes:
+  count: 30
+  profile: c6-pad
+  hb_ms: 1000
+  usb: [sim-28, sim-29, sim-30, sim-27]
+seed: 1
+medium:
+  topology: one_room
+  rssi_dbm: [-85, -45]
+  loss: [0.001, 0.015]
+  rate: { broadcast: 1M, unicast: 1M }
+  collisions: true
+  capture_db: 10
+ap: { channel: 6, uplink_ms: [0.5, 3], downlink_ms: [0.5, 3], udp_loss: 0 }
+runs:
+  - name: wifi-down
+    run: t-flood-b
+    args: [--devices, 'sim-01..sim-30', --down, 'sim-01..sim-27', --isolate, none, --outage-s, '120', --rate, '1', --min-delivery, '99', --back-s, '10']
+  - name: router-off
+    run: t-flood-b
+    args: [--devices, 'sim-01..sim-30', --router-off, --isolate, sim-30, --outage-s, '120', --rate, '1', --min-delivery, '99', --back-s, '10']
+  - name: epoch
+    run: flood-b-epoch
+    args: [--before, '30', --before-rate, '1', --after, '200', --after-rate, '2', --min-delivery, '99', --back-s, '10']
+published: false

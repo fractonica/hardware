@@ -482,7 +482,8 @@ bool fits(cJSON *json, size_t room)
  * `{"other": <all>}` (`msgs_folded`), then drops whole sections from the end of this list, each named in
  * `omitted`, so a Wi-Fi-only node always answers; the dropped ones are a `stats <section>` away.
  */
-constexpr std::string_view kStatSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs"};
+constexpr std::string_view kStatSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs",
+                                              "net_logs"};
 constexpr size_t kStatSectionCount = sizeof(kStatSections) / sizeof(kStatSections[0]);
 
 /** The index of `name` in kStatSections, or kStatSectionCount. */
@@ -517,11 +518,13 @@ void add_stat_section(cJSON *res, size_t i, const NetStatus &n)
         cJSON_AddNumberToObject(o, "dup", n.bcast.dup);
         cJSON_AddNumberToObject(o, "old", n.bcast.old);
         cJSON_AddNumberToObject(o, "watermark", n.bcast.watermark);
+        cJSON_AddNumberToObject(o, "adopted", n.bcast.adopted);
     } else if (name == "relay") {
         cJSON_AddNumberToObject(o, "seeded", n.relay.seeded);
         cJSON_AddNumberToObject(o, "relayed", n.relay.relayed);
         cJSON_AddNumberToObject(o, "cancelled", n.relay.cancelled);
         cJSON_AddNumberToObject(o, "dropped", n.relay.dropped);
+        cJSON_AddNumberToObject(o, "refused", n.relay.refused);
     } else if (name == "espnow") {
         const EspnowStatus &a = n.espnow;
         cJSON_AddNumberToObject(o, "tx", a.tx);
@@ -553,6 +556,12 @@ void add_stat_section(cJSON *res, size_t i, const NetStatus &n)
         cJSON_AddNumberToObject(o, "via_flood", n.nodes.via_flood);
         cJSON_AddNumberToObject(o, "failed", n.nodes.failed);
         cJSON_AddNumberToObject(o, "resolves", n.nodes.resolves);
+    } else if (name == "net_logs") {  // LOG frames over TCP (design m2-c2 D20)
+        cJSON_AddNumberToObject(o, "sent", n.net_logs.sent);
+        cJSON_AddNumberToObject(o, "ring_drop", n.net_logs.ring_drop);
+        cJSON_AddNumberToObject(o, "age_drop", n.net_logs.age_drop);
+        cJSON_AddNumberToObject(o, "rate_drop", n.net_logs.rate_drop);
+        cJSON_AddNumberToObject(o, "cut", n.net_logs.cut);
     } else {  // msgs: per topic, the first kMsgTopics seen, then `other`
         for (const MsgTopicCount &t : n.msgs) {
             if (t.name[0] != '\0') {
@@ -594,7 +603,7 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t room)
     std::string_view opt = next_word(args);
     const size_t section = stat_section(opt);
     if (!args.empty() || (!opt.empty() && opt != "reset" && section == kStatSectionCount)) {
-        return fail("invalid_args", "usage: stats [reset|links|bcast|relay|espnow|bindings|nodes|msgs]");
+        return fail("invalid_args", "usage: stats [reset|links|bcast|relay|espnow|bindings|nodes|msgs|net_logs]");
     }
     NetStatus n = host.net_status();
     if (section != kStatSectionCount) {

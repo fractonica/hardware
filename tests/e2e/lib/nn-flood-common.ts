@@ -3,7 +3,8 @@
 // as t-input.ts and t-ports.ts do), diag lines to the boards (one function, so a loopback test can stand in
 // for a board's diag), the counters of `diag stats <section>`, a node's boot (to tell a reboot from a
 // counter), its radio (AP and ESP-NOW neighbour RSSI), a job followed to its end and cancelled on the way
-// out, debug hooks ended on every way out, and for T-NN the hub stopped and started again with the CLI.
+// out, debug hooks ended on every way out, and for T-NN the hub stopped and started again with the CLI. From
+// M2-C2 (design m2-c2 D11) the same functions run on the T2 fleet, with an injected diag and `reachable`.
 
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
@@ -113,6 +114,15 @@ export interface Dev {
 }
 
 export const isUp = (d: Dev): boolean => d.presence === 'online' || d.presence === 'suspect';
+
+/**
+ * Whether a run's diag can reach a node while its hub link is down (design m2-c2 D11): on the bench only over a USB
+ * port the hub holds (`onUsb`), so a hook on a Wi-Fi-only node can only be left to expire; on the fleet the control
+ * channel reaches every node that is powered on (tests/sim/lib/fleet-diag.ts).
+ */
+export type Reachable = (dev: Dev) => boolean;
+
+export const onUsb: Reachable = (d) => d.port_state === 'open';
 
 /** The devices a selector names, in the hub's order. */
 export async function devicesOf(ctx: ScenarioCtx, selector: string): Promise<Dev[]> {

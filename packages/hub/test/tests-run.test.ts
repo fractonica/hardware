@@ -1,9 +1,11 @@
-// test_run's M2-C1 surface (design m2-c1-hil D13; stream S5): tier sim reserved (NOT_FOUND), tier hil
-// through the gate runner with `--tier hil`, `args` for one suite (after `--` to the gate runner, or to the
-// host suite) with --allow-erase, --allow-hub-stop and --router-off refused, the report's tier taken from
-// the run, test_report on finished test jobs (also after a hub restart), and the cancel grace (SIGKILL
-// only after it: builds 5 s, tests 10 s). The gate runner here is a stand-in tests/e2e/run.ts that reports
-// the arguments it was given; the real one (stream S6) is not run, and nothing reaches the lab hub.
+// test_run's M2-C1 surface (design m2-c1-hil D13; stream S5): tier hil through the gate runner with `--tier hil`,
+// `args` for one suite (after `--` to the gate runner, or to the host suite) with --allow-erase, --allow-hub-stop
+// and --router-off refused, the report's tier taken from the run, test_report on finished test jobs (also after a
+// hub restart), and the cancel grace (SIGKILL only after it: builds 5 s, tests 10 s). From M2-C2 (design m2-c2 D14;
+// stream S6) tier sim: the gate runner with `--tier sim`, the test:target lock, no FR_HUB, allow_human ignored, a
+// published scenario's failure never failing the job, and ENV_MISSING with the fleet build when fr_fleet is missing.
+// The gate runner here is a stand-in tests/e2e/run.ts that reports the arguments it was given; the real one is not
+// run, and nothing reaches the lab hub.
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -93,17 +95,6 @@ describe('test_run tiers and args (D13)', { timeout: 60_000 }, () => {
     src = checkout('echo', { 'tests/e2e/run.ts': ECHO_RUNNER, 'node_modules/vitest/vitest.mjs': VITEST_ARGS, 'tools/host-test.mjs': VITEST_ARGS });
   });
 
-  it('answers tier sim NOT_FOUND (reserved until M2-C2), before a job', async () => {
-    const before = jobs.list(100).length;
-    await expect(startTestRun(hub(), { source_dir: src, tier: 'sim', allow_human: false }, deps)).rejects.toMatchObject({
-      code: 'NOT_FOUND',
-      message: expect.stringContaining('M2-C2'),
-      details: { not_implemented: 'test_run tier sim' },
-    });
-    await expect(TESTS_HANDLERS.test_run(findOp('test_run')!.input.parse({ source_dir: src, tier: 'sim' }), hub())).rejects.toMatchObject({ code: 'NOT_FOUND' });
-    expect(jobs.list(100)).toHaveLength(before);
-  });
-
   it('runs tier hil as the gate runner with --tier hil, its suite and args after --, and reports tier hil', async () => {
     const job = await testRun({ source_dir: src, tier: 'hil', suite: 't-hil', args: ['--phase', 'fit', '--rounds', '3'] });
     expect(job, JSON.stringify(job.error)).toMatchObject({ kind: 'test', status: 'completed', targets: ['hil:t-hil'] });
@@ -165,6 +156,118 @@ describe('test_run tiers and args (D13)', { timeout: 60_000 }, () => {
     expect(hil.error).toMatchObject({ code: 'INVALID_ARGS', message: expect.stringContaining('unknown option --tier'), hint: expect.stringContaining('before M2-C1') });
     const target = await testRun({ source_dir: old, tier: 'target' });
     expect(target.error).toMatchObject({ code: 'NOT_FOUND', message: expect.stringContaining('no gate scenarios') });
+  });
+});
+
+// A sim runner that reports what it was asked: one gated entry and one published one (failing when asked), an
+// ENV_MISSING error as the real runner gives without fr_fleet, or (--loaded) the gated entry skipped for host_load as
+// the real runner reports a Mac too loaded for its preflight (conclusive false, exit 4).
+const SIM_RUNNER = `const argv = process.argv.slice(2);
+const at = argv.indexOf('--');
+const args = at < 0 ? [] : argv.slice(at + 1);
+const own = at < 0 ? argv : argv.slice(0, at);
+const suite = own.includes('--suite') ? own[own.indexOf('--suite') + 1] : null;
+const missing = args.includes('--missing');
+const loaded = args.includes('--loaded');
+const gates = loaded
+  ? [{ gate: 'T2-FLOOD-30:cut-1', file: 'tests/sim/scenarios/t2-flood-30.yaml', status: 'skipped', reason: 'inconclusive: host_load', needs: {}, measured: { inconclusive: { reason: 'host_load' } }, duration_ms: 1 }]
+  : missing
+  ? [{ gate: 'T2-FLOOD-30', file: 'tests/sim/scenarios/t2-flood-30.yaml', status: 'error', code: 'ENV_MISSING', reason: 'no fr_fleet (FR_FLEET_BIN, or build/host-fleet/fr_fleet): build it', needs: {}, measured: {}, duration_ms: 1 }]
+  : [
+      { gate: 'T2-FLOOD-30:cut-1', file: 'tests/sim/scenarios/t2-flood-30.yaml', status: 'pass', needs: {}, measured: { argv, args, suite, hub: process.env.FR_HUB ?? null }, duration_ms: 1 },
+      { gate: 'T2-FLOOD-60:cut-1', file: 'tests/sim/scenarios/t2-flood-60.yaml', status: args.includes('--fail-published') ? 'fail' : 'pass', published: true, needs: {}, measured: {}, duration_ms: 1 },
+    ];
+const gated = gates.filter((g) => !g.published);
+const bad = gated.some((g) => g.status === 'fail' || g.status === 'error');
+const counts = { pass: gates.filter((g) => g.status === 'pass').length, fail: gates.filter((g) => g.status === 'fail').length, skipped: 0, error: gates.filter((g) => g.status === 'error').length };
+console.error('@e2e ' + JSON.stringify({ gate: gates[0].gate, status: 'running' }));
+counts.skipped = gates.filter((g) => g.status === 'skipped').length;
+const notJudged = gated.filter((g) => g.status === 'skipped').map((g) => g.gate + ' (host_load)');
+console.log(JSON.stringify({ tier: 'sim', pass: !bad, conclusive: notJudged.length === 0, ...(notJudged.length ? { not_judged: notJudged } : {}), hub: 'private (one per scenario)', allow_human: true, counts, gates }));
+process.exit(bad ? 1 : notJudged.length ? 4 : 0);
+`;
+
+describe('test_run tier sim (m2-c2 D14)', { timeout: 60_000 }, () => {
+  let src = '';
+  beforeAll(() => {
+    src = checkout('sim', { 'tests/e2e/run.ts': SIM_RUNNER, 'tests/sim/scenarios/t2-flood-30.yaml': 'id: t2-flood-30\n' });
+  });
+
+  it('runs the gate runner with --tier sim, the scenario and the runner args, no FR_HUB and no --allow-human', async () => {
+    const saved = process.env.FR_HUB;
+    process.env.FR_HUB = 'http://127.0.0.1:7420'; // the lab hub's environment must not reach a sim run
+    try {
+      const job = await testRun({ source_dir: src, tier: 'sim', suite: 't2-flood-30', args: ['--seed', '2'], allow_human: true });
+      expect(job, JSON.stringify(job.error)).toMatchObject({ kind: 'test', status: 'completed', targets: ['sim:t2-flood-30'] });
+      const report = job.result as { tier: string; pass: boolean; gates: { measured: Record<string, unknown> }[] };
+      expect(report).toMatchObject({ tier: 'sim', pass: true });
+      expect(report.gates[0].measured).toEqual({
+        argv: ['--json', '--tier', 'sim', '--suite', 't2-flood-30', '--', '--seed', '2'],
+        args: ['--seed', '2'],
+        suite: 't2-flood-30',
+        hub: null,
+      });
+      expect(jobs.logs(job.job_id, 0, 50, false).lines.map((l) => l.text)).toContain('stage: T2-FLOOD-30:cut-1');
+    } finally {
+      if (saved === undefined) {
+        delete process.env.FR_HUB;
+      } else {
+        process.env.FR_HUB = saved;
+      }
+    }
+    expect(gateArgs('/s', 'sim', { allow_human: true })).toEqual(['--conditions=@fractonica/source', '/s/tests/e2e/run.ts', '--json', '--tier', 'sim']);
+  });
+
+  it('takes the test:target lock: a sim run waits for a hil run, and a hil run for it', async () => {
+    const slow = checkout('sim-lock', { 'tests/e2e/run.ts': SLOW_RUNNER, 'tests/sim/scenarios/x.yaml': '' });
+    const hil = await startTestRun(hub(), { source_dir: slow, tier: 'hil', allow_human: false }, deps);
+    const sim = await startTestRun(hub(), { source_dir: src, tier: 'sim', allow_human: false }, deps);
+    expect(jobs.get(sim.job_id)).toMatchObject({ status: 'queued', blocked_by: { lock: 'test:target', holder_job: hil.job_id } });
+    await jobs.cancel(hil.job_id);
+    const done = await jobs.wait(sim.job_id, 30);
+    expect(done.status).toBe('completed');
+    // A tier-wide run names no suite: the runner takes the gated scenarios.
+    expect((done.result as { gates: { measured: { suite?: unknown } }[] }).gates[0].measured.suite).toBeNull();
+  });
+
+  it("never fails the job for a published scenario's result", async () => {
+    const job = await testRun({ source_dir: src, tier: 'sim', suite: 't2-flood-60', args: ['--fail-published'] });
+    expect(job.status).toBe('completed');
+    expect(job.result).toMatchObject({ tier: 'sim', pass: true, gates: [{ status: 'pass' }, { status: 'fail', published: true }] });
+  });
+
+  it('answers ENV_MISSING with the fleet build when fr_fleet is missing', async () => {
+    const job = await testRun({ source_dir: src, tier: 'sim', suite: 't2-flood-30', args: ['--missing'] });
+    expect(job.status).toBe('failed');
+    expect(job.error).toMatchObject({
+      code: 'ENV_MISSING',
+      message: expect.stringContaining('no fr_fleet'),
+      remediation: [{ tool: 'test_run', args: { tier: 'host', suite: 'cpp', args: ['--fleet'] } }],
+    });
+    expect(testReport(hub(), job.job_id)).toMatchObject({ tier: 'sim', suite: 't2-flood-30', pass: null });
+  });
+
+  it('gives no verdict for a run that judged nothing (host_load): TIMEOUT with the report, never a completed pass', async () => {
+    const job = await testRun({ source_dir: src, tier: 'sim', suite: 't2-flood-30', args: ['--loaded'] });
+    expect(job.status).toBe('failed');
+    expect(job.error).toMatchObject({
+      code: 'TIMEOUT',
+      retryable: true,
+      message: expect.stringContaining('not judged: T2-FLOOD-30:cut-1 (host_load)'),
+      hint: expect.stringContaining('a T2 gate counts only when its own entry passed'),
+      details: { tier: 'sim', pass: true, conclusive: false, gates: [{ status: 'skipped' }] },
+    });
+    // test_report keeps the report but gives no pass: nothing was judged.
+    expect(testReport(hub(), job.job_id)).toMatchObject({ tier: 'sim', pass: null, report: { conclusive: false, not_judged: ['T2-FLOOD-30:cut-1 (host_load)'] }, error: { code: 'TIMEOUT' } });
+  });
+
+  it('refuses a checkout without tests/sim/scenarios, and the flags M2-C7 will confirm, before a job', async () => {
+    const before = jobs.list(100).length;
+    const old = checkout('sim-old', { 'tests/e2e/run.ts': SIM_RUNNER });
+    await expect(startTestRun(hub(), { source_dir: old, tier: 'sim', allow_human: false }, deps)).rejects.toMatchObject({ code: 'NOT_FOUND', message: expect.stringContaining('tests/sim/scenarios') });
+    await expect(startTestRun(hub(), { source_dir: src, tier: 'sim', suite: 't2-flood-b-30', args: ['--router-off'], allow_human: false }, deps)).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    await expect(TESTS_HANDLERS.test_run(findOp('test_run')!.input.parse({ source_dir: old, tier: 'sim' }), hub())).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(jobs.list(100)).toHaveLength(before);
   });
 });
 

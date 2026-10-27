@@ -1,14 +1,15 @@
 // A device on the Devices grid, and the actions every device has (spec 08 §8.9): identify (D15:
 // node.identify, which every node has), rename (the registry's alias rules, checked as it is typed) and
 // tags. The tile carries data-device="<alias>" and, for 900 ms after an input, data-flash (design c6 §5),
-// so a headless check can read the page.
+// so a headless check can read the page. A tile renders from its device_list row alone (design m2-c2 D16): the
+// row's `live` has the links, RSSI and uptime, so 30 tiles cost one device_list, not a device_get each.
 
 import { Link } from '@tanstack/react-router';
 import { useEffect, useState } from 'react';
 
 import type { DeviceView } from '@fractonica/protocol/browser';
 
-import { useAct, useLive, useNow, useOp } from '../hooks.ts';
+import { useAct, useLive, useNow } from '../hooks.ts';
 import { hubClock } from '../runtime.ts';
 import { agoUs, short, span } from '../state/format.ts';
 import { aliasError } from '../state/wizard.ts';
@@ -113,21 +114,30 @@ export function TagsForm({ device }: { device: Pick<DeviceView, 'device_id' | 't
   );
 }
 
-interface Heartbeat {
-  uptime_s?: number;
-  rssi_ap?: number;
-  free_heap_kb?: number;
+/** device_list's `live` (hub registry/ops.ts, design m2-c2 D16): this hub run's view of the device's link. */
+export interface LiveLink {
+  /** Links with a session, best first. */
+  links: string[];
+  udp_blocked: boolean;
+  /** The last HEARTBEAT's RSSI to the AP (0: not on Wi-Fi) and uptime; null before one. */
+  rssi_ap: number | null;
+  uptime_s: number | null;
+  fw_id_prefix: string | null;
 }
 
-/** One device on the grid. */
+/** A device_list row's `live`; null before the device's first HELLO this hub run (or from a hub without it). */
+export function liveOf(device: DeviceView): LiveLink | null {
+  const live = (device as { live?: unknown }).live;
+  return live && typeof live === 'object' && Array.isArray((live as LiveLink).links) ? (live as LiveLink) : null;
+}
+
+/** One device on the grid, from its device_list row alone. */
 export function DeviceTile({ device }: { device: DeviceView }) {
   const now = useNow(1000);
   const flashing = useFlash(device.device_id);
   const last = useLive((s) => s.lastByDevice[device.device_id]);
-  // RSSI, uptime and links are this hub run's (device_get router), not the registry row's.
-  const detail = useOp('device_get', { device: `id:${device.device_id}` }, { refetchInterval: 10_000 });
-  const router = detail.data?.router ?? null;
-  const hb = (router?.heartbeat ?? null) as Heartbeat | null;
+  // RSSI, uptime and links are this hub run's (the row's `live`), not the registry row's.
+  const live = liveOf(device);
   const [renaming, setRenaming] = useState(false);
   return (
     <article
@@ -156,15 +166,15 @@ export function DeviceTile({ device }: { device: DeviceView }) {
       </p>
       <dl className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs">
         <dt className="text-muted">firmware</dt>
-        <dd className="font-mono">{short(device.fw_id ?? router?.fw_id_prefix)}</dd>
+        <dd className="font-mono">{short(device.fw_id ?? live?.fw_id_prefix)}</dd>
         <dt className="text-muted">RSSI</dt>
-        <dd>{hb?.rssi_ap !== undefined && hb.rssi_ap !== 0 ? `${hb.rssi_ap} dBm` : '–'}</dd>
+        <dd>{live?.rssi_ap != null && live.rssi_ap !== 0 ? `${live.rssi_ap} dBm` : '–'}</dd>
         <dt className="text-muted">uptime</dt>
-        <dd>{hb?.uptime_s !== undefined ? span(hb.uptime_s * 1000) : '–'}</dd>
+        <dd>{live?.uptime_s != null ? span(live.uptime_s * 1000) : '–'}</dd>
         <dt className="text-muted">links</dt>
         <dd>
-          {router?.links.length ? router.links.join(', ') : '–'}
-          {router?.udp_blocked ? <Badge tone="warn">udp blocked</Badge> : null}
+          {live?.links.length ? live.links.join(', ') : '–'}
+          {live?.udp_blocked ? <Badge tone="warn">udp blocked</Badge> : null}
         </dd>
         <dt className="text-muted">USB</dt>
         <dd className="truncate" title={device.port}>

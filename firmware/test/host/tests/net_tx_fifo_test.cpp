@@ -1,6 +1,7 @@
 // The TCP link's TX FIFO (fr/net/tx_fifo.hpp, design c3 §3 "Links"): whole `len u16 LE | envelope`
 // records in, a byte stream out in contiguous runs, across the ring's end and across the wrap of its
-// free-running counters (32 bits on target: once per 4 GiB of node-to-hub TCP in one boot).
+// free-running counters (32 bits on target: once per 4 GiB of node-to-hub TCP in one boot), and the fill LOG frames
+// wait on (design m2-c2 D20).
 #include <cstdint>
 #include <vector>
 
@@ -100,4 +101,25 @@ TEST(net_tx_fifo_discard_counts_the_frames_lost)
     got.clear();
     drain(f, got, 64);
     CHECK(got == (std::vector<uint8_t>{3, 0, 7, 7, 7}));
+}
+
+TEST(net_tx_fifo_fill_counts_queued_bytes_across_the_wrap)
+{
+    // Link::queued() on target (design m2-c2 D20): LOG frames wait until it is 0.
+    fr::net::TxFifo<64, uint32_t> f(0xFFFFFFFFu - 4);
+    CHECK_EQ(f.fill(), 0u);
+    REQUIRE(f.push(std::vector<uint8_t>(10, 1)));  // across the counters' wrap
+    REQUIRE(f.push(std::vector<uint8_t>(20, 2)));
+    CHECK_EQ(f.fill(), 34u);  // records with their length bytes
+    std::vector<uint8_t> got;
+    size_t taken = drain(f, got, 7);  // the run ends at the ring's end: 5, then 2 more from its start
+    taken += drain(f, got, 7 - taken);
+    REQUIRE_EQ(taken, 7u);
+    CHECK_EQ(f.fill(), 27u);  // a record half sent still counts what is left of it
+    while (drain(f, got, 64) > 0) {
+    }
+    CHECK_EQ(f.fill(), 0u);
+    REQUIRE(f.push(std::vector<uint8_t>(3, 3)));
+    CHECK_EQ(f.discard(), 1u);
+    CHECK_EQ(f.fill(), 0u);
 }
