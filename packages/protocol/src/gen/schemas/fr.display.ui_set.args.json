@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.display.ui_set.args",
+  "title": "fr.display.ui_set arguments",
+  "description": "Updates widget `id`: `fields` says which of the others are set (1 text, 2 value, 4 color, 8 visible). NOT_FOUND for an unknown id; UNSUPPORTED where trait ui is false.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 16,
+      "description": "(<= 16 UTF-8 bytes)"
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "(<= 64 UTF-8 bytes)"
+    },
+    "value": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "color": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "visible": {
+      "type": "boolean"
+    },
+    "fields": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 15,
+      "description": "bit mask: 1 text, 2 value, 4 color, 8 visible (0..15)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "id": "ok",
+      "text": "Done",
+      "fields": 1
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // `fr`: the Fractonica CLI. Op commands are generated from the operation registry; `doctor`, `gen`
-// and `hub start|stop|restart` run locally without a hub (spec 09 §9.5). `fr mcp`, `fr serial lease|monitor`
-// and `fr codegen client` are hand-written in their own modules (design c6 §3.3).
+// and `hub start|stop|restart` run locally without a hub (spec 09 §9.5). `fr mcp`, `fr serial lease|monitor`,
+// `fr codegen client` and `fr display window` (design m2-c5-display D6) are hand-written in their own modules
+// (design c6 §3.3).
 
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import { z } from 'zod';
@@ -11,6 +12,7 @@ import { cliFlag, findOp, MAX_WAIT_S, OPS, REGISTRY_HASH, type ErrorCode, type O
 
 import { callTimeoutMs, hubCall, hubHealth } from './client.ts';
 import { addCodegenClientCommand, CODEGEN_CLIENT_OPS } from './codegen-client.ts';
+import { addDisplayWindowCommand } from './display.ts';
 import { genAll, genFirmware } from './gen.ts';
 import { restartHub, startHub, stopHub } from './hub.ts';
 import type { CliKit } from './kit.ts';
@@ -301,6 +303,7 @@ const kit: CliKit = {
 };
 addSerialCommands(group(['serial']), kit);
 addCodegenClientCommand(group(['codegen']), kit);
+addDisplayWindowCommand(group(['display']), kit);
 addMcpCommand(program, kit);
 
 try {

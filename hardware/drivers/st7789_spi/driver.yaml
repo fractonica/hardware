@@ -1,0 +1,32 @@
+# Driver manifest (design m2-c5-display D7; spec 07 §7.8). `fr gen firmware` validates profiles against it and
+# fills fr::drv::St7789Spi::Config from the bound `displays.<name>` entry. Stream D implements it (M2-C5).
+schema: fractonica/driver@1
+id: st7789_spi
+summary: ST7789 / ST7789T3 RGB565 panel on an SPI master (DMA), with LEDC PWM on the backlight; rendered through LVGL.
+implements: hal.Display
+class: fr::drv::St7789Spi               # header: include/fr/drv/st7789_spi.hpp
+targets: [esp32s3]
+binds: displays
+accepts_kinds: [st7789, st7789t3]
+config:                                 # same order as St7789Spi::Config
+  kind:          { type: enum, values: [st7789, st7789t3], from: board.kind }
+  sclk:          { type: gpio, from: board.sclk }
+  mosi:          { type: gpio, from: board.mosi }
+  cs:            { type: gpio, from: board.cs }
+  dc:            { type: gpio, from: board.dc }
+  rst:           { type: gpio, from: board.rst, optional: true, doc: "null: no reset line (power-up reset and SWRESET)" }
+  backlight:     { type: gpio, from: board.backlight, optional: true, doc: "LEDC PWM; null: no backlight control" }
+  width:         { type: u16, from: board.width, doc: "native (rotation 0) pixels" }
+  height:        { type: u16, from: board.height }
+  column_offset: { type: u16, from: board.column_offset, default: 0 }
+  row_offset:    { type: u16, from: board.row_offset, default: 0 }
+  spi_mhz:       { type: u8, default: 40, doc: "inferred safe for both S3 panels (design D7)" }
+  # The chip selects of the other devices on this SPI bus (the Touch-LCD-2's TF card, CS 41, on the LCD's MOSI/SCLK):
+  # driven high (deselected) before the bus comes up and kept so. Not claimed: the pins stay in pins.reserved.
+  idle_high:     { type: gpio_mask, from: board.idle_high, doc: "bit n = GPIOn; absent: none" }
+  # Which level lights the backlight (M2-C5 bench: the LCD-1.9's is active-low, the Touch-LCD-2's NPN switch high).
+  backlight_active: { type: enum, values: [high, low], from: board.backlight_active, default: high }
+# fr.display traits its service reports (design m2-c5-display D3): RGB565 through the LVGL backend (fr_ui).
+traits: { color: rgb565, ui: true }
+resources: { gpio: 6, spi_host: 1, ledc_channels: 1, ledc_timers: 1 }   # the backlight PWM takes a channel and a timer
+dependencies: {}

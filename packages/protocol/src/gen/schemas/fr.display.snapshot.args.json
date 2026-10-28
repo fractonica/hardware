@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.display.snapshot.args",
+  "title": "fr.display.snapshot arguments",
+  "description": "The framebuffer as drawn: its CRC-32 (IEEE, as zlib) and size. Read it with snapshot_read; T-DISPLAY compares the CRC with the desktop render's. BULK like snapshot_read: a device reachable only through a gateway is refused before a frame is frozen that no read could fetch.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

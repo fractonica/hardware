@@ -28,7 +28,7 @@ import {
   type Result,
 } from '@fractonica/protocol';
 
-import { callTimeoutMs, hubCall, hubHealth, hubUrl } from './client.ts';
+import { callTimeoutMs, hubCall, hubHealth, hubUrl, opWaitS } from './client.ts';
 import { startHub } from './hub.ts';
 import type { CliKit } from './kit.ts';
 
@@ -294,7 +294,7 @@ export async function callTool(name: string, rawArgs: Record<string, unknown>, c
   if (ctx.progress) {
     const started = Date.now();
     const every = deps.progressMs ?? PROGRESS_MS;
-    const bound = Number(args.wait_s ?? args.timeout_s);
+    const bound = opWaitS(op, args);
     let last = 0;
     timer = setInterval(() => {
       const s = Math.max(last + 1, Math.round((Date.now() - started) / 1000));

@@ -21,7 +21,7 @@ typedef enum {
     LEDC_CHANNEL_7,
     LEDC_CHANNEL_MAX,
 } ledc_channel_t;
-typedef enum { LEDC_TIMER_1_BIT = 1, LEDC_TIMER_11_BIT = 11, LEDC_TIMER_14_BIT = 14, LEDC_TIMER_BIT_MAX } ledc_timer_bit_t;
+typedef enum { LEDC_TIMER_1_BIT = 1, LEDC_TIMER_8_BIT = 8, LEDC_TIMER_11_BIT = 11, LEDC_TIMER_14_BIT = 14, LEDC_TIMER_BIT_MAX } ledc_timer_bit_t;
 typedef enum { LEDC_AUTO_CLK = 0, LEDC_USE_APB_CLK = 4 } ledc_clk_cfg_t;
 typedef enum { LEDC_SLEEP_MODE_NO_ALIVE_NO_PD = 0, LEDC_SLEEP_MODE_KEEP_ALIVE = 2 } ledc_sleep_mode_t;
 

@@ -3,3 +3,4 @@
 boot: 1
 status: 2
 analog: 3
+oled: 4

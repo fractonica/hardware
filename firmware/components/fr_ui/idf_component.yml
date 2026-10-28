@@ -1,0 +1,8 @@
+# Design m2-c5-display D5: the one pinned LVGL, the newest 9.x in the IDF component registry at least two weeks old
+# when M2-C5 chose it (9.6.0~1, 2026-09-17: the v9.6.0 tag plus the registry's ESP-IDF < 6 PPA fallback, which the S3
+# never builds). tools/display fetches the same release from GitHub (tag v9.6.0) for the desktop renderer; keep
+# both in step. The per-profile dependencies.lock.<profile> of firmware/apps/node records the hash.
+dependencies:
+  lvgl/lvgl:
+    version: "==9.6.0~1"
+    require: private

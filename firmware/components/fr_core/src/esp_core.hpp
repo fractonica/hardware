@@ -9,6 +9,7 @@
 #include "fr/core/core.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 namespace fr {
 
@@ -120,8 +121,10 @@ public:
     static constexpr size_t kNetPosts = 32;
     static constexpr UBaseType_t kPriority = 10;
     // fr.diag.exec over TCP or serial dispatches with a bulk Reply (1445 B) on this stack, under Net's own
-    // frames and cJSON's recursion.
-    static constexpr uint32_t kStack = 8192;
+    // frames and cJSON's recursion. 8192 by default; fr gen raises it for profiles with a panel
+    // (CONFIG_FR_CORE_TASK_STACK, design m2-c5-display D3): fr.display ui_load decodes a 24-widget layout on this
+    // stack, in nested copies.
+    static constexpr uint32_t kStack = CONFIG_FR_CORE_TASK_STACK;
 
     /** Creates the wake-up esp_timer; timers may be started from then on (they fire once run() runs). */
     bool begin();

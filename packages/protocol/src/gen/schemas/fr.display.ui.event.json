@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.display.ui.event",
+  "title": "fr.display.ui event",
+  "description": "A widget was touched (or an injected touch hit it); `value` is the slider's or switch's new value.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 16,
+      "description": "(<= 16 UTF-8 bytes)"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "clicked",
+        "pressed",
+        "released",
+        "value_changed"
+      ]
+    },
+    "value": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    }
+  },
+  "additionalProperties": false
+}

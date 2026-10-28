@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0x41558ed8;
+export const CATALOG_HASH = 0x9b63c6b7;
 
 // ---- fr.button ----
 
@@ -118,6 +118,124 @@ export interface LedProps {
   color: number;
 }
 
+// ---- fr.display ----
+
+export type DisplayColorFormat = 'mono1' | 'rgb565';
+
+export type DisplayRotation = 'r0' | 'r90' | 'r180' | 'r270';
+
+export type DisplayUiWidgetKind = 'label' | 'button' | 'bar' | 'slider' | 'arc' | 'switch' | 'rect';
+
+export type DisplayUiAlign = 'left' | 'center' | 'right';
+
+export type DisplayUiEventKind = 'clicked' | 'pressed' | 'released' | 'value_changed';
+
+/** fr.display.clear arguments (all optional: the device applies the defaults). */
+export interface DisplayClearArgs {
+  /** (0xRRGGBB) */
+  color?: number;
+}
+
+/** fr.display.text arguments (all optional: the device applies the defaults). */
+export interface DisplayTextArgs {
+  /** (px) */
+  x?: number;
+  /** (px) */
+  y?: number;
+  /** (<= 64 UTF-8 bytes) */
+  text?: string;
+  /** (0xRRGGBB; default 16777215) */
+  color?: number;
+  /** (0xRRGGBB) */
+  bg?: number;
+  /** (1..4; default 1) */
+  size?: number;
+}
+
+/** fr.display.fill_rect arguments (all optional: the device applies the defaults). */
+export interface DisplayFillRectArgs {
+  /** (px) */
+  x?: number;
+  /** (px) */
+  y?: number;
+  /** (px) */
+  w?: number;
+  /** (px) */
+  h?: number;
+  /** (0xRRGGBB) */
+  color?: number;
+}
+
+/** fr.display.set_brightness arguments (all optional: the device applies the defaults). */
+export interface DisplaySetBrightnessArgs {
+  level?: number;
+}
+
+/** fr.display.ui_load arguments (all optional: the device applies the defaults). */
+export interface DisplayUiLoadArgs {
+  layout?: { bg?: number; widgets?: readonly { id?: string; kind?: DisplayUiWidgetKind; x?: number; y?: number; w?: number; h?: number; text?: string; value?: number; min?: number; max?: number; color?: number; bg?: number; font?: number; align?: DisplayUiAlign }[] };
+}
+
+/** fr.display.ui_load RESULT fields. */
+export interface DisplayUiLoadResult {
+  /** widgets created */
+  widgets: number;
+}
+
+/** fr.display.ui_set arguments (all optional: the device applies the defaults). */
+export interface DisplayUiSetArgs {
+  /** (<= 16 UTF-8 bytes) */
+  id?: string;
+  /** (<= 64 UTF-8 bytes) */
+  text?: string;
+  value?: number;
+  /** (0xRRGGBB) */
+  color?: number;
+  visible?: boolean;
+  /** bit mask: 1 text, 2 value, 4 color, 8 visible (0..15) */
+  fields?: number;
+}
+
+/** fr.display commands, as methods of an instance. */
+export interface DisplayClient {
+  /** Drops every primitive and any layout, and fills the panel with `color`. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  clear(args?: DisplayClearArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** A text primitive at (x, y), its top left. Size 1 is the panel's smallest font (LVGL: Montserrat 14/20/28 for sizes 1-3, 28 for 4; the C3: 5x7 glyphs scaled by size). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  text(args?: DisplayTextArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** A filled rectangle primitive. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  fillRect(args?: DisplayFillRectArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Sets the backlight (property brightness); accepted and ignored on panels without backlight control. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  setBrightness(args?: DisplaySetBrightnessArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Replaces the screen with `layout` (LVGL panels; UNSUPPORTED where trait ui is false). BULK: TCP or serial, never over a gateway; the layout must fit one BULK frame. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  uiLoad(args?: DisplayUiLoadArgs, opts?: CallOptions): Promise<CmdResult<DisplayUiLoadResult>>;
+  /** Updates widget `id`: `fields` says which of the others are set (1 text, 2 value, 4 color, 8 visible). NOT_FOUND for an unknown id; UNSUPPORTED where trait ui is false. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  uiSet(args?: DisplayUiSetArgs, opts?: CallOptions): Promise<CmdResult>;
+}
+
+/** fr.display.ui event fields (normal; with trait ui). A widget was touched (or an injected touch hit it); `value` is the slider's or switch's new value. */
+export interface DisplayUiFields {
+  /** (<= 16 UTF-8 bytes) */
+  id: string;
+  kind: DisplayUiEventKind | number;
+  value: number;
+}
+
+/** fr.display events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface DisplayEvents {
+  ui: DisplayUiFields;
+}
+
+/** fr.display properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface DisplayState {
+  /** the backlight level (255 on panels without backlight control) */
+  brightness: number;
+}
+
+/** fr.display property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface DisplayProps {
+  brightness: number;
+}
+
 // ---- fr.analog_in ----
 
 export type AnalogInFilter = 'none' | 'ema' | 'median3';
@@ -159,6 +277,47 @@ export interface AnalogInState {
 /** fr.analog_in property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
 export interface AnalogInProps {
   value: number;
+}
+
+// ---- fr.touch ----
+
+export type TouchGestureKind = 'tap' | 'long_press' | 'swipe_up' | 'swipe_down' | 'swipe_left' | 'swipe_right';
+
+/** fr.touch commands, as methods of an instance. */
+export interface TouchClient {}
+
+/** fr.touch.down event fields (realtime). */
+export interface TouchDownFields {
+  x: number;
+  y: number;
+}
+
+/** fr.touch.up event fields (realtime). */
+export interface TouchUpFields {
+  x: number;
+  y: number;
+}
+
+/** fr.touch.gesture event fields (normal). */
+export interface TouchGestureFields {
+  kind: TouchGestureKind | number;
+}
+
+/** fr.touch events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface TouchEvents {
+  down: TouchDownFields;
+  up: TouchUpFields;
+  gesture: TouchGestureFields;
+}
+
+/** fr.touch properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface TouchState {
+  pressed: boolean;
+}
+
+/** fr.touch property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface TouchProps {
+  pressed: boolean;
 }
 
 // ---- fr.node ----
@@ -355,7 +514,9 @@ export interface DiagProps {}
 export interface CapClients {
   'fr.button': ButtonClient;
   'fr.led': LedClient;
+  'fr.display': DisplayClient;
   'fr.analog_in': AnalogInClient;
+  'fr.touch': TouchClient;
   'fr.node': NodeClient;
   'fr.ota': OtaClient;
   'fr.diag': DiagClient;
@@ -365,7 +526,9 @@ export interface CapClients {
 export interface CapEvents {
   'fr.button': ButtonEvents;
   'fr.led': LedEvents;
+  'fr.display': DisplayEvents;
   'fr.analog_in': AnalogInEvents;
+  'fr.touch': TouchEvents;
   'fr.node': NodeEvents;
   'fr.ota': OtaEvents;
   'fr.diag': DiagEvents;
@@ -375,7 +538,9 @@ export interface CapEvents {
 export interface CapState {
   'fr.button': ButtonState;
   'fr.led': LedState;
+  'fr.display': DisplayState;
   'fr.analog_in': AnalogInState;
+  'fr.touch': TouchState;
   'fr.node': NodeState;
   'fr.ota': OtaState;
   'fr.diag': DiagState;
@@ -385,7 +550,9 @@ export interface CapState {
 export interface CapProps {
   'fr.button': ButtonProps;
   'fr.led': LedProps;
+  'fr.display': DisplayProps;
   'fr.analog_in': AnalogInProps;
+  'fr.touch': TouchProps;
   'fr.node': NodeProps;
   'fr.ota': OtaProps;
   'fr.diag': DiagProps;
@@ -398,7 +565,9 @@ export type CapName = keyof CapClients;
 export const CAP_META: Readonly<Record<string, CapMeta>> = {
   'fr.button': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['down', 'up', 'click', 'long_press'], props: ['pressed'] },
   'fr.led': { commands: { set: { method: 'set', delivery: 'fast', args: true }, toggle: { method: 'toggle', delivery: 'reliable' }, blink: { method: 'blink', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' } }, events: ['effect_done'], props: ['on', 'brightness', 'color'] },
+  'fr.display': { commands: { clear: { method: 'clear', delivery: 'reliable', args: true }, text: { method: 'text', delivery: 'reliable', args: true }, fill_rect: { method: 'fillRect', delivery: 'reliable', args: true }, set_brightness: { method: 'setBrightness', delivery: 'reliable', args: true }, ui_load: { method: 'uiLoad', delivery: 'reliable', args: true }, ui_set: { method: 'uiSet', delivery: 'reliable', args: true }, snapshot: { method: 'snapshot', delivery: 'reliable', test: true }, snapshot_read: { method: 'snapshotRead', delivery: 'reliable', args: true, test: true } }, events: ['ui'], props: ['brightness'] },
   'fr.analog_in': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true }, read: { method: 'read', delivery: 'reliable' } }, events: ['crossed'], props: ['value'] },
+  'fr.touch': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['down', 'up', 'gesture'], props: ['pressed'] },
   'fr.node': { commands: { identify: { method: 'identify', delivery: 'reliable', args: true }, describe: { method: 'describe', delivery: 'reliable' }, reboot: { method: 'reboot', delivery: 'reliable', args: true }, set_alias: { method: 'setAlias', delivery: 'reliable', args: true }, set_groups: { method: 'setGroups', delivery: 'reliable', args: true }, net_set: { method: 'netSet', delivery: 'reliable', args: true }, get_state: { method: 'getState', delivery: 'reliable' }, bind_set: { method: 'bindSet', delivery: 'reliable', args: true }, bind_clear: { method: 'bindClear', delivery: 'reliable', args: true }, bind_list: { method: 'bindList', delivery: 'reliable' } }, events: ['boot', 'binding_fired'], props: [] },
   'fr.ota': { commands: {}, events: [], props: [] },
   'fr.diag': { commands: { exec: { method: 'exec', delivery: 'reliable', args: true } }, events: ['mark'], props: [] },

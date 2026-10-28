@@ -439,9 +439,12 @@ type GatewayStatus = { up: boolean; last_pong_ms_ago: number | null; sessions?: 
 
 type HubStatus = { links?: { gateways?: Record<string, GatewayStatus> }; router?: { counters?: { bcast_gateway_writes?: number } } };
 
-/** `signal`: the run's, or undefined for the cleanup, which runs after a cancel too. */
-async function deviceGet(ctx: ScenarioCtx, alias: string, signal: AbortSignal | undefined = ctx.signal): Promise<DeviceGet> {
-  return ctx.hub.ok<DeviceGet>('device_get', { device: alias }, 10_000, signal);
+/**
+ * `signal`: the run's, or null for the cleanup, which runs after a cancel too (null, not undefined: an undefined
+ * argument would take the default, the run's signal).
+ */
+async function deviceGet(ctx: ScenarioCtx, alias: string, signal: AbortSignal | null = ctx.signal): Promise<DeviceGet> {
+  return ctx.hub.ok<DeviceGet>('device_get', { device: alias }, 10_000, signal ?? undefined);
 }
 
 async function hubStatus(ctx: ScenarioCtx): Promise<HubStatus> {
@@ -563,7 +566,7 @@ function watchGateway(ctx: ScenarioCtx, id: string, everyMs: number): { samples:
  */
 async function endHookPatiently(ctx: ScenarioCtx, diag: Diag, dut: Dev): Promise<boolean> {
   for (let i = 0; i < 3; i++) {
-    await until(undefined, 60_000, 1000, async () => ((await deviceGet(ctx, dut.alias, undefined)).router?.links.length ?? 0) > 0 || null);
+    await until(undefined, 60_000, 1000, async () => ((await deviceGet(ctx, dut.alias, null)).router?.links.length ?? 0) > 0 || null);
     if (await endHook(ctx, diag, dut, 'net wifi_down 0')) {
       return true;
     }
@@ -788,7 +791,7 @@ export async function runTGwLink(ctx: ScenarioCtx, o: TGwLinkOptions, deps: TGwL
       if (!ended) {
         ctx.log(`${dut.alias}: the hook could not be ended; waiting up to ${Math.round(leftS + 90)} s for it to run out and the DUT back on TCP`);
       }
-      const tcp = await until(undefined, (leftS + 90) * 1000, 1000, async () => (await deviceGet(ctx, o.device, undefined)).router?.links.includes('tcp') || null);
+      const tcp = await until(undefined, (leftS + 90) * 1000, 1000, async () => (await deviceGet(ctx, o.device, null)).router?.links.includes('tcp') || null);
       backOnTcp = tcp !== null;
       measured.hook_ended_early = ended;
       ctx.measure('hook_ended_early', ended);

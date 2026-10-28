@@ -28,7 +28,7 @@
 
 | Range | Use |
 |---|---|
-| `0x0001–0x00EF` | standard: `0x0001` fr.button, `0x0002` fr.led, `0x0003` fr.display, `0x0004` fr.audio_out, `0x0005` fr.analog_in, `0x0006` fr.fixture (since M2-C1, `test_only`: the HIL fixture's lines) (planned: haptic, encoder) |
+| `0x0001–0x00EF` | standard: `0x0001` fr.button, `0x0002` fr.led, `0x0003` fr.display (1.0 since M2-C5), `0x0004` fr.audio_out, `0x0005` fr.analog_in, `0x0006` fr.fixture (since M2-C1, `test_only`: the HIL fixture's lines), `0x0007` free (planned: haptic or encoder), `0x0008` fr.touch (1.0 since M2-C5) |
 | `0x00F0–0x00FF` | system: `0x00F0` fr.node (port 0), `0x00F1` fr.ota (port 240), `0x00F2` fr.diag (port 241) |
 | `0x8000–0xFFFE` | project and experimental |
 
@@ -38,15 +38,18 @@
 - `capability`, `id`, `version` (`"major.minor"`; minor is additive only), `summary`, `doc`, `maps_to`;
 - `test_only` (since M2-C1): a test instrument's capability (`fr.fixture`). Firmware codecs, the hub's decoders and the golden vectors carry it. Everything an app or client sees leaves it out: the app-facing catalog and `catalog_hash` (so provisioning a fixture changes neither), the SDK facades (`packages/sdk/src/gen/caps.ts`), `fr codegen client` and the dashboard's capability lists. Only standard and project capabilities may set it, not system ones;
 - `ordered` (since M2-C3, default false; [design m2-c3-inputs](../design/m2-c3-inputs.md) D8, approved): the capability's events are delivered in order per port. The generated `emit_*` hand `Sink::event` `ordered = true` (C++ `kOrdered`); Net stamps each such event with EXT `0x05 port_seq` and sends it on one route, and the hub's reorder buffer restores the order ([05 §5.8](05-network.md) Ordering). A capability with no events may not set it. `CAPS` (`CapInfo.ordered`) and the catalog carry it. `fr.button` is `ordered` (since M2-C3); `fr.led`, `fr.analog_in` and `fr.fixture` are not;
-- `types` (enums), `traits`, `config`, `properties`, `commands`, `events`.
+- `types` (enums, and since M2-C5 message types: an entry with `fields:` instead of `enum:`), `traits`, `config`, `properties`, `commands`, `events`.
 
 **Members:**
 - **Commands:** `{id, fields, result, delivery: fast|reliable, idempotent, visibility: public|test, examples, doc}`. `result` lists the RESULT fields.
+- **`bulk: true`** on a command (since M2-C5, [design m2-c5-display](../design/m2-c5-display.md) D1): the command always goes BULK, so over TCP or serial and never over a gateway, however small its frame. It needs `delivery: reliable` (codegen refuses it otherwise) and is carried into the catalog (`bulk: true`); the hub's router sends such a command BULK only (`bulkOnly`) and refuses it on a gateway-only device instead of trying the air ([08 §8.4](08-hub.md)). `fr.display`'s `ui_load`, `snapshot` and `snapshot_read` set it. Before M2-C5 BULK followed from size alone (`describe`, `diag.exec` and `bind_list` are BULK because their RESULTs may be long).
 - **Events:** `{id, fields, priority: realtime|normal|bulk}`.
 - **Fields:** `{id, type, optional, default, range, max, unit, doc}`. A field id is its wire field number and is never reused.
 - **Traits are derived, never set directly.** Generated glue computes them: the `multi_press_max` trait from the config of the same name, the `long_press` trait from `long_press_ms > 0`, and LED traits from the driver's `features()`. Profiles set only `config`. Since C6 `fr gen firmware` also writes them into the build manifest (§7.4).
 
 **Types:** `bool`, `u8/u16/u32`, `i8/i16/i32`, `f32`, enums, `rgb` (u32 0xRRGGBB), `duration_ms`, `string{max}`, `bytes{max}`, `array<T>{max}`.
+
+**Message types** (since M2-C5, [design m2-c5-display](../design/m2-c5-display.md) D2). A capability's `types:` entry with `fields:` (each `{id, type, …}` as above, plus `doc`) is a nested protobuf-wire message, generated like the protocol `types:` (C++ struct with `valid()`, `operator==`, `kMaxSize`; TS type and codec; JSON Schema). A command, result or event field may hold one directly (`layout: UiLayout`) or as `array<T>{max}`; an entry may hold the ones declared before it (`UiLayout` holds `array<UiWidget>`); traits, config and properties may not hold one. A nested message field is always encoded (wire type 2), and an absent one decodes as its defaults. `examples` may write a message as a YAML map of its fields, checked like any field. A `fast` command or a realtime event that held one would have its worst case checked against the 200 B budget like any field (§7.5); `fr.display`'s hold theirs in reliable commands only.
 
 ```yaml
 # schema/capabilities/button.cap.yaml
@@ -142,7 +145,211 @@ events:
 
 System capabilities are generated like the others. Since C3 the node implements `fr.node` `identify` (blinks the first `fr.led` instance, or logs when there is none), `describe`, `reboot`, `set_alias` (writes `fr_ovr`), `net_set` (the `fr_net2` override, [06 §6.3](06-identity-ota.md)) and `get_state`, and `fr.diag.exec`; the hub reaches them over every link. Since C5 it implements `bind_set`, `bind_clear` and `bind_list` (§7.11). `set_groups` (M2) answers `UNSUPPORTED`.
 
-`fr.display` (`text`, `clear`, `fill_rect`, `set_brightness`) is M2. Its first driver is the SSD1306 0.42" OLED on your C3 boards. `fr.audio_out` (`tone`, `play`, `stop`, `set_volume`) comes later. Both are drafted in [research/hal-capabilities-sdk.md](../research/hal-capabilities-sdk.md).
+`fr.audio_out` (`tone`, `play`, `stop`, `set_volume`) comes later; it is drafted in [research/hal-capabilities-sdk.md](../research/hal-capabilities-sdk.md).
+
+**`fr.display` 1.0 and `fr.touch` 1.0** (since M2-C5, [design m2-c5-display](../design/m2-c5-display.md) D1–D6). A pixel panel with drawing primitives on every panel, LVGL layouts where the panel's driver renders through LVGL (trait `ui`), and a touch panel's single pointer. `schema/capabilities/display.cap.yaml` as built:
+
+```yaml
+capability: fr.display
+id: 0x0003
+version: "1.0"
+summary: A pixel panel with drawing primitives everywhere and LVGL layouts where the panel's driver says so (trait ui).
+doc: |
+  Colours are 0xRRGGBB on the wire; a mono panel (color mono1) lights a pixel whose colour is at least 50 % luminance.
+  Commands are queued to the renderer and never draw inside dispatch; the panel is flushed at most every flush_ms.
+  Primitives (clear, text, fill_rect) work on every panel. ui_load and ui_set answer UNSUPPORTED where `ui` is false
+  (the C3 OLED's built-in 1-bit renderer); on LVGL panels a layout replaces the screen and primitives sent after it
+  draw on top. snapshot and snapshot_read read back the framebuffer as drawn (test builds), so an agent sees the real
+  screen and compares it with the desktop render of the same commands (T-DISPLAY).
+types:
+  ColorFormat: { enum: { mono1: 0, rgb565: 1 } }
+  Rotation:    { enum: { r0: 0, r90: 1, r180: 2, r270: 3 } }
+  UiWidgetKind: { enum: { label: 0, button: 1, bar: 2, slider: 3, arc: 4, switch: 5, rect: 6 } }
+  UiAlign:     { enum: { left: 0, center: 1, right: 2 } }
+  UiEventKind: { enum: { clicked: 0, pressed: 1, released: 2, value_changed: 3 } }
+  # Design m2-c5-display D2: one widget of a layout (about 45 B on the wire for a typical one).
+  UiWidget:
+    doc: "One widget: `id` names it for ui_set and ui events; button, slider and switch emit ui events when touched."
+    fields:
+      id:    { id: 1,  type: string, max: 16 }
+      kind:  { id: 2,  type: UiWidgetKind }
+      x:     { id: 3,  type: i16, unit: px }
+      y:     { id: 4,  type: i16, unit: px }
+      w:     { id: 5,  type: u16, unit: px, doc: "0: sized to its content" }
+      h:     { id: 6,  type: u16, unit: px, doc: "0: sized to its content" }
+      text:  { id: 7,  type: string, max: 48, doc: "label and button text" }
+      value: { id: 8,  type: i32, doc: "bar, slider, arc: the value; switch: 0 off, else on" }
+      min:   { id: 9,  type: i32, doc: "bar, slider, arc: the range's bottom" }
+      max:   { id: 10, type: i32, default: 100, doc: "bar, slider, arc: the range's top" }
+      color: { id: 11, type: rgb, default: 0xFFFFFF, doc: "text, indicator or fill colour" }
+      bg:    { id: 12, type: rgb, doc: "background colour" }
+      font:  { id: 13, type: u8, range: [0, 2], doc: "0: 14 px, 1: 20 px, 2: 28 px (the built-in Montserrat sizes)" }
+      align: { id: 14, type: UiAlign, doc: "text alignment inside the widget" }
+  # Design m2-c5-display D2: a whole screen. 24 widgets at their maximum size exceed one BULK frame; a layout must fit one.
+  UiLayout:
+    doc: "A screen: its background and up to 24 widgets, drawn in order (later ones on top)."
+    fields:
+      bg:      { id: 1, type: rgb, doc: "screen background" }
+      widgets: { id: 2, type: "array<UiWidget>", max: 24 }
+traits:
+  width:  { id: 1, type: u16 }              # pixels, after rotation (from the board entry)
+  height: { id: 2, type: u16 }              # pixels, after rotation
+  color:  { id: 3, type: ColorFormat }      # from the driver: ssd1306_i2c mono1, st7789_spi rgb565
+  ui:     { id: 4, type: bool }             # LVGL layouts (ui_load, ui_set): the driver renders through LVGL
+  touch:  { id: 5, type: bool }             # an fr.touch instance of the profile is bound to this panel
+config:
+  rotation:   { type: Rotation, default: r0, doc: "panel rotation; a board entry's `rotation` (0, 90, 180, 270) is its default" }
+  brightness: { type: u8, default: 255, doc: "backlight level at boot; ignored on panels without backlight control" }
+  flush_ms:   { type: u16, default: 20, range: [20, 1000], unit: ms, doc: "coalescing period: the panel is flushed at most this often (50 Hz)" }
+properties:
+  brightness: { id: 1, type: u8, doc: "the backlight level (255 on panels without backlight control)" }
+commands:
+  clear:
+    id: 1
+    delivery: reliable
+    idempotent: true
+    doc: Drops every primitive and any layout, and fills the panel with `color`.
+    fields: { color: { id: 1, type: rgb } }
+    examples: [ { color: 0x000000 } ]
+  text:
+    id: 2
+    delivery: reliable
+    doc: "A text primitive at (x, y), its top left. Size 1 is the panel's smallest font (LVGL: Montserrat 14/20/28 for sizes 1-3, 28 for 4; the C3: 5x7 glyphs scaled by size)."
+    fields:
+      x:     { id: 1, type: i16, unit: px }
+      y:     { id: 2, type: i16, unit: px }
+      text:  { id: 3, type: string, max: 64 }
+      color: { id: 4, type: rgb, default: 0xFFFFFF }
+      bg:    { id: 5, type: rgb }
+      size:  { id: 6, type: u8, default: 1, range: [1, 4] }
+    examples: [ { x: 4, y: 4, text: "hello", size: 2 } ]
+  fill_rect:
+    id: 3
+    delivery: reliable
+    doc: A filled rectangle primitive.
+    fields:
+      x:     { id: 1, type: i16, unit: px }
+      y:     { id: 2, type: i16, unit: px }
+      w:     { id: 3, type: u16, unit: px }
+      h:     { id: 4, type: u16, unit: px }
+      color: { id: 5, type: rgb }
+    examples: [ { x: 0, y: 0, w: 40, h: 20, color: 0xFF0000 } ]
+  set_brightness:
+    id: 4
+    delivery: reliable
+    idempotent: true
+    doc: Sets the backlight (property brightness); accepted and ignored on panels without backlight control.
+    fields: { level: { id: 1, type: u8 } }
+    examples: [ { level: 128 } ]
+  ui_load:
+    id: 5
+    delivery: reliable
+    bulk: true
+    doc: "Replaces the screen with `layout` (LVGL panels; UNSUPPORTED where trait ui is false). BULK: TCP or serial, never over a gateway; the layout must fit one BULK frame."
+    fields: { layout: { id: 1, type: UiLayout } }
+    result: { widgets: { id: 1, type: u8, doc: "widgets created" } }
+    examples:
+      - layout:
+          bg: 0x000000
+          widgets:
+            - { id: title, kind: label, x: 10, y: 10, text: "Fractonica", font: 1 }
+            - { id: ok, kind: button, x: 60, y: 120, w: 120, h: 50, text: "OK", bg: 0x2060C0 }
+  ui_set:
+    id: 6
+    delivery: reliable
+    doc: "Updates widget `id`: `fields` says which of the others are set (1 text, 2 value, 4 color, 8 visible). NOT_FOUND for an unknown id; UNSUPPORTED where trait ui is false."
+    fields:
+      id:      { id: 1, type: string, max: 16 }
+      text:    { id: 2, type: string, max: 64 }
+      value:   { id: 3, type: i32 }
+      color:   { id: 4, type: rgb }
+      visible: { id: 5, type: bool }
+      fields:  { id: 6, type: u8, range: [0, 15], doc: "bit mask: 1 text, 2 value, 4 color, 8 visible" }
+    examples: [ { id: ok, text: "Done", fields: 1 } ]
+  snapshot:
+    id: 7
+    visibility: test
+    delivery: reliable
+    bulk: true
+    doc: "The framebuffer as drawn: its CRC-32 (IEEE, as zlib) and size. Read it with snapshot_read; T-DISPLAY compares the CRC with the desktop render's. BULK like snapshot_read: a device reachable only through a gateway is refused before a frame is frozen that no read could fetch."
+    result:
+      crc:    { id: 1, type: u32 }
+      width:  { id: 2, type: u16 }
+      height: { id: 3, type: u16 }
+      format: { id: 4, type: ColorFormat, doc: "mono1: 1 bit per pixel, rows packed MSB first; rgb565: 2 bytes per pixel, little-endian" }
+      bytes:  { id: 5, type: u32, doc: "framebuffer size in bytes" }
+  snapshot_read:
+    id: 8
+    visibility: test
+    delivery: reliable
+    bulk: true
+    doc: "A chunk of the framebuffer of the last snapshot (BULK: TCP or serial)."
+    fields:
+      offset: { id: 1, type: u32 }
+      len:    { id: 2, type: u16, default: 1024, range: [1, 1024] }
+    result: { data: { id: 1, type: bytes, max: 1024 } }
+events:
+  ui:
+    id: 1
+    priority: normal
+    requires: { trait: ui }
+    doc: A widget was touched (or an injected touch hit it); `value` is the slider's or switch's new value.
+    fields:
+      id:    { id: 1, type: string, max: 16 }
+      kind:  { id: 2, type: UiEventKind }
+      value: { id: 3, type: i32 }
+```
+
+`schema/capabilities/touch.cap.yaml` as built:
+
+```yaml
+capability: fr.touch
+id: 0x0008
+version: "1.0"
+summary: A touch panel's single pointer, in its display's coordinates, with gestures.
+doc: |
+  Coordinates are rotated to the display the instance is bound to (config `display`, that instance's port), so a
+  touch at (x, y) is the pixel (x, y) of that panel's fr.display. The LVGL renderer of that panel reads the same
+  touches as its pointer input, so a touched button emits fr.display `ui` events too.
+types:
+  GestureKind: { enum: { tap: 0, long_press: 1, swipe_up: 2, swipe_down: 3, swipe_left: 4, swipe_right: 5 } }
+traits:
+  width:   { id: 1, type: u16 }   # pixels, as the bound display's width (after rotation)
+  height:  { id: 2, type: u16 }
+  display: { id: 3, type: u8 }    # the bound fr.display instance's port; 0: none
+config:
+  display: { type: u8, doc: "port of the fr.display instance this panel covers (0: none); codegen checks it names one" }
+properties:
+  pressed: { id: 1, type: bool }
+events:
+  down:    { id: 1, priority: realtime, fields: { x: { id: 1, type: u16 }, y: { id: 2, type: u16 } } }
+  up:      { id: 2, priority: realtime, fields: { x: { id: 1, type: u16 }, y: { id: 2, type: u16 } } }
+  gesture: { id: 3, priority: normal, fields: { kind: { id: 1, type: GestureKind } } }
+commands:
+  inject:
+    id: 1
+    visibility: test
+    delivery: reliable
+    doc: "A touch at (x, y) as `gesture`, fed to the same path as the panel's (events, property, the LVGL pointer). A swipe starts at (x, y)."
+    fields:
+      x:       { id: 1, type: u16 }
+      y:       { id: 2, type: u16 }
+      gesture: { id: 3, type: GestureKind }
+    examples: [ { x: 120, y: 145 }, { x: 120, y: 145, gesture: long_press } ]
+```
+
+- **`DisplayService`** (`fr_core`) implements `fr::cap::Display` over a `hal::Display` panel (§7.7) and a **backend**, which codegen picks from the driver's `traits: {ui}` ([design m2-c5-display](../design/m2-c5-display.md) D3). Both backends take commands on the core task inside dispatch and never draw on the panel there (the row rule):
+  - **`MonoBackend`** (`fr_core`, `ui: false`, the C3 OLED): a 1-bit framebuffer in RAM (72 × 40 = 360 B), drawn at once with the full-ASCII 5×7 font (scaled by `size`), flushed from a core timer one dirty page per firing, at most every `flush_ms`. `ui_load` and `ui_set` answer `UNSUPPORTED`, after the decode.
+  - **`LvglBackend`** (`fr_ui`, `ui: true`, both S3 panels): LVGL 9.6.0 on its own `fr_ui` task (priority 4, 8 KB stack, core 0; [03 §3.4](03-firmware.md)). Dispatch copies each command into a 16-deep queue (full: `BUSY`) and returns. A primitive is an LVGL object on the active screen (`text` a label whose box is filled with `bg`, `fill_rect` a plain object), at most 64 between two `clear`s or `ui_load`s (`BUSY` beyond); `ui_load` builds the layout on a fresh screen with the pinned default theme, `ui_set` changes one widget by `id` (`NOT_FOUND` otherwise); button, slider and switch emit `ui` pressed, released and clicked, slider and switch also value_changed. LVGL draws into two partial buffers of 1/10 screen in internal DMA-capable RAM; its pool (64 KB) and the shadow and frozen framebuffers are in PSRAM (the S3 display profiles turn it on, [04 §4.3](04-boards.md)). Touch reaches LVGL as an atomic latest point plus one queue marker, so a release is never lost behind a full queue.
+  - **One LVGL, one config** for the boards and the Mac: the IDF registry's `lvgl/lvgl ==9.6.0~1` (locked per profile) and the GitHub v9.6.0 archive (SHA256 pinned in `tools/display/CMakeLists.txt`); one `firmware/components/fr_ui/config/lv_conf.h` (RGB565, Montserrat 14/20/28, the label, button, bar, slider, arc, switch and obj widgets, no float or vector graphics, no animations or transitions, the default theme pinned). Every option menuconfig would otherwise set on the board is set there explicitly (41; `LV_KCONFIG_IGNORE` does not keep `sdkconfig.h` out), and `node tools/display/lv-conf-check.mjs` diffs the board's LV_* macros against the Mac's.
+- **The framebuffer and its CRC** (`fr/display/backend.hpp`), as `snapshot` hashes it, `snapshot_read` returns it and the desktop renderer writes it, in the panel's geometry after rotation:
+  - `mono1`: row-major from the top-left pixel, 1 bit per pixel, MSB first (bit 7 of byte 0 is pixel (0, 0)); each row starts on a byte boundary (⌈width / 8⌉ bytes, padding bits 0); a lit pixel is 1. `bytes` = ⌈width / 8⌉ × height.
+  - `rgb565`: row-major from the top-left pixel, the u16 `RRRRRGGGGGGBBBBB` little-endian. `bytes` = width × height × 2 (153,600 B at 240 × 320).
+  - `crc`: CRC-32/ISO-HDLC (zlib's `crc32`) over those bytes. `snapshot` freezes the frame (on LVGL panels a copy in PSRAM) so its `snapshot_read` chunks all come from one frame; `brightness` is the backlight only and never changes the pixels.
+- **`TouchService`** (`fr_core`) implements `fr::cap::Touch` over a `hal::TouchSource`: `down`/`up` with coordinates rotated to the bound display, `gesture`, `pressed`, and `inject`, which feeds the same path (events, property and the bound `LvglBackend`'s pointer). A tap by `inject` is down, then up 50 ms later. A panel without a working controller still takes `inject` (the bench's Touch-LCD-2 has none, [04 §4.2](04-boards.md)).
+- **The desktop renderer** (`tools/display`, `fr_display_render`; built by `node tools/display-build.mjs` into `build/host-display/`; its stable command line and JSON result are in `tools/display/README.md`). It is the board's display stack built for the Mac: `DisplayService` and `TouchService`, the generated dispatch and JSON codec of `fr_caps`, `LvglBackend` or `MonoBackend`, a host panel that keeps every flush, and a virtual clock (core timers and LVGL's tick together). It reads a script of `{cmd, args}` JSON lines (`fr.display`'s commands with exactly the generated fields; `touch` `{x, y, gesture?}` as an `fr.touch` inject, or `{x, y, pressed}` as a raw point), takes the snapshot itself at the end, and prints one JSON line: `crc`, size, format, the PNG path, the `ui` events touches caused, `errors` (commands a board would refuse; the render goes on) and LVGL's pool. Same version, config and fonts give the same pixels: T-DISPLAY found the board's snapshot CRC equal to the render's on all three panels ([10 §10.5](10-testing.md)). The hub op `display_render` and `fr display window` run it ([08 §8.4](08-hub.md), [09 §9.4](09-agent-api.md)).
+- **Limits:** a layout must fit one BULK frame (24 widgets at their maximum size do not); `text` is at most 64 B, widget text 48 B, ids 16 B; 64 primitives between clears on an LVGL panel.
+- **On the bench** (M2-C5, T-DISPLAY 3; [11 §11.6](11-roadmap.md)): `clear` → the first snapshot with the render's CRC p50 20.5 ms (OLED), 91.3 ms (LCD 1.9, max 147), 107.4 ms (LCD 2, max 177); LVGL's pool high-water 7,108 / 7,136 B of 64 KB and the `fr_ui` stack's least headroom 4,360 / 3,676 B of 8 KB (pad-s3 / pad-s3t).
 
 **`fr.analog_in` 1.0** (since M2-C3, [design m2-c3-inputs](../design/m2-c3-inputs.md) D1–D4) covers potentiometers, sliders, FSRs and other analog sensors. `schema/capabilities/analog_in.cap.yaml` as built:
 
@@ -356,6 +563,8 @@ class Led : public Capability {
 
 Both are host-testable with a fake HAL and a fake clock.
 
+Since M2-C5 ([design m2-c5-display](../design/m2-c5-display.md) D3, D4) `fr_core/hal` also has `hal::Display` (`init(core, rotation)`, native size, `format()` mono1 or rgb565, `flush(x, y, w, h, pixels)`, `has_backlight()`/`set_backlight(level)`, `selftest()`) and `hal::TouchSource` (`init(core, TouchSink&)`, `poll()`, `selftest()`; the sink takes `on_touch(x, y, pressed, gesture, at)`), with `DisplayService` and `TouchService` over them (§7.3), host-tested with fake panels and the host panel of the desktop renderer.
+
 ## 7.8 M1 drivers (hardware library)
 
 | Driver | Implements | Backend | Notes |
@@ -367,6 +576,13 @@ Both are host-testable with a fake HAL and a fake clock.
 Since M2-C1 the HIL fixture adds `fixture_gpio` (open-drain or MOSFET-gate presses from ISR-dispatched esp_timers, any-edge capture in an IRAM ISR) and `fixture_ws2812_rx` (WS2812 decode on RMT RX), both `hal::FixtureLine` for `fr.fixture`, S3 only, bound to bare pins (`binds: gpio`) ([design m2-c1-hil](../design/m2-c1-hil.md) D4). Since M2-C3 `fr.fixture` is 0.2: `fixture_gpio` also drives `drive: pwm` lines, an analog setpoint through an RC on LEDC (low-speed mode, 20 kHz, 11-bit, one timer for both lines, a channel each), set by the new command `set_duty {duty}` (id 4, reliable, idempotent; 1/10,000 of full scale, 0..10,000 mapped to 0..2,048 LEDC steps, 2,048 being fully on) → RESULT `{at_us}`, when the duty was applied. `set_duty` is `UNSUPPORTED` on any other drive and `press` on a pwm line; `release` sets duty 0, and `read.level` is true while the duty is above 0. Duty is 0 at init and on every release path ([09 §9.7](09-agent-api.md); [design m2-c3-inputs](../design/m2-c3-inputs.md) D5).
 
 Since M2-C3 `fr.analog_in` adds **`adc_oneshot`** (`hal::AnalogSource`; esp32c3/c6/s3; `binds: gpio`, a pin of the board's `pins.adc1`, never an ADC2 pin or the `battery` input; `resources: {gpio: 1, adc1_channel: 1}`; `traits: {resolution_bits: 12}`): one ADC1 channel through IDF `adc_oneshot` at 12 dB with curve-fitting calibration, read on the core task, each reading the mean of 8 conversions (§7.3). One ADC1 unit per firmware (`fr::platform::adc1_unit()`), shared with the vitals' battery reader ([05 §5.7](05-network.md)).
+
+Since M2-C5 `fr.display` and `fr.touch` add three drivers ([design m2-c5-display](../design/m2-c5-display.md) D7–D8), each bound to a board entry, `traits` from the driver:
+- **`st7789_spi`** (`hal::Display`; esp32s3; `binds: displays`, kinds `st7789`, `st7789t3`; traits `{color: rgb565, ui: true}`): SPI2 master with DMA at 40 MHz (*inferred* safe for both panels; both ran at it), MADCTL per rotation, INVON, 16-bit COLMOD, the entry's offsets and size; the backlight PWM on LEDC (timer 3, channel 7 on the bench boards) at the entry's `backlight_active` level; the entry's `idle_high` chip selects driven high before the bus comes up. `selftest`: "init sent, backlight PWM on LEDC 7 at 255/255, 0 flush errors". Resources: 6 GPIOs, an SPI host, an LEDC channel and timer.
+- **`ssd1306_i2c`** (`hal::Display`; esp32c3/c6/s3; kinds `ssd1306`, `ssd1306b`; traits `{color: mono1, ui: false}`): hwprobe's SSD1306B init (COM 0x12, IREF 0xAD 0x30, A1/C8), the visible window at its column offset, page-mode flush of dirty pages, 400 kHz. `selftest`: "ACK at 0x3C, init accepted, 72x40, 0 flush errors".
+- **`cst816_i2c`** (`hal::TouchSource`; esp32c3/c6/s3; kinds `cst816s`, `cst816d`, `cst816t`): INT (falling edge) into a core input slot; coordinates rotated to the bound panel's. When the chip does not answer at init (asleep, or no controller) it is probed again every 5 s for 60 s and on each interrupt, from a core timer, and `selftest` says `absent: no ACK at 0x15 …` until it answers; then `chip id …, interrupts, read errors`. Resources: 4 GPIOs, an I2C port, an input slot and a timer.
+- **Shared platform pieces** (`fr_core/platform`): one I2C master bus per pin pair (the Touch-LCD-2's touch and IMU share one), and one GPIO ISR-service installer for every driver (a second install is not an error; it was at the bench).
+- **Driver manifest keys** they brought: config `type: enum` with `values`, `type: gpio_mask` (bit n = GPIOn; `idle_high`), and `optional: true` for a pin a board may leave `null` (`rst`, `backlight`); the resource `spi_host` (the S3 boards' `resources` list 2: SPI2, SPI3).
 
 Each driver ships `hardware/drivers/<driver>/driver.yaml` (`schema: fractonica/driver@1`), which declares:
 - `id`, `summary`, `implements` and `class` (the C++ class; header `include/fr/drv/<id>.hpp`);

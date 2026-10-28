@@ -20,6 +20,17 @@ menu "Fractonica core"
             `fr gen firmware`. The HIL fixture's profile sets 2 (design m2-c1-hil D6): the hub keeps a fixture
             out of `all`, fences it from clients and never shows it to apps.
 
+    config FR_CORE_TASK_STACK
+        int "Core task stack (bytes)"
+        range 8192 32768
+        default 8192
+        help
+            The fr_core task's stack. Every dispatch runs on it, a bulk Reply (1445 B) and fr.diag exec's cJSON
+            included. `fr gen firmware` raises it in sdkconfig.board for a profile with an fr.display instance
+            (design m2-c5-display D3): the generated fr.display dispatch decodes a ui_load layout (24 widgets, about
+            1.7 KB per copy) in nested copies before the service sees it, on any panel (a mono one answers
+            UNSUPPORTED only after the decode).
+
     config FR_CORE_TASK_WDT
         bool "Watch the core task with the task watchdog"
         depends on ESP_TASK_WDT_INIT

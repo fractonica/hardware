@@ -197,7 +197,8 @@ describe('REGISTRY_HASH (§3)', () => {
 
   it('covers the M2-C1 ops and their inputs', () => {
     expect(OP_NAMES).toEqual(expect.arrayContaining(['bench_get', 'test_report']));
-    expect(OPS).toHaveLength(46);
+    // 46 at M2-C1; M2-C5 adds display_snapshot and display_render (protocol-m2c5.test.ts).
+    expect(OPS.filter((o) => !o.name.startsWith('display_'))).toHaveLength(46);
     expect(hashOf(OPS)).toBe(REGISTRY_HASH);
     expect(REGISTRY_HASH).not.toBe('8805351bae42'); // M1's
     for (const name of ['bench_get', 'test_report']) {

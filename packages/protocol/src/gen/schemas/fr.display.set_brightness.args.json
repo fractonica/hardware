@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.display.set_brightness.args",
+  "title": "fr.display.set_brightness arguments",
+  "description": "Sets the backlight (property brightness); accepted and ignored on panels without backlight control.",
+  "type": "object",
+  "properties": {
+    "level": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "level": 128
+    }
+  ]
+}

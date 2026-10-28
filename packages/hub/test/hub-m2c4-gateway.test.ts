@@ -422,6 +422,30 @@ describe('no BULK or over-MTU frame on a gateway session (review: the air carrie
     expectAllAirable(gw);
   });
 
+  it('never puts a bulkOnly command on the air, however small; over TCP it goes BULK (design m2-c5-display D1)', async () => {
+    const r = await setup();
+    const gw = await gateway(r, GW1, 'gw-1');
+    const id = 'aabbccdd0066';
+    const n = await behind(r, gw, id, 66);
+    n.handlers.set('2/5', () => ({ status: STATUS.OK }));
+    // fr.display ui_load-like: 4 bytes would fit one ESP-NOW frame, yet it is refused rather than sent unflagged.
+    await expect(r.router.sendCommand(id, 2, 5, new Uint8Array(4), { ack: 'result', timeoutMs: 5000, bulkOnly: true })).rejects.toMatchObject({
+      code: 'DEVICE_OFFLINE',
+      message: expect.stringMatching(/only through gateway gw-1.*, BULK/),
+      details: { gateway: GW1, bulk: true },
+    });
+    expect(r.router.status().counters).toMatchObject({ gateway_bulk_unflagged: 0, gateway_too_big: 1 });
+    expect(gw.sent(CLS.CMD).filter((x) => x.header.port === 2)).toEqual([]);
+    // With Wi-Fi up it goes there, flagged BULK.
+    const wifi = await onWifi(r, id, 66);
+    wifi.handlers.set('2/5', () => ({ status: STATUS.OK }));
+    expect(await r.router.sendCommand(id, 2, 5, new Uint8Array(4), { ack: 'result', timeoutMs: 1000, bulkOnly: true })).toMatchObject({ status: STATUS.OK, link: 'tcp' });
+    const sent = wifi.received(CLS.CMD, 5);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].header.flags & FLAG.BULK).toBe(FLAG.BULK);
+    expectAllAirable(gw);
+  });
+
   it('forwards no node frame the air cannot carry to a node behind a gateway (no route), and forwards one that fits', async () => {
     const r = await setup();
     const gw = await gateway(r, GW1, 'gw-1');

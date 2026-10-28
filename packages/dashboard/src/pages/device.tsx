@@ -1,7 +1,8 @@
 // A device (`#/device/<alias>`, spec 08 §8.9): what the registry and this hub run know of it, its
 // capabilities rendered from the catalog (command buttons, live properties from `part:'state'` events with a
 // sparkline of numeric ones, gestures through input_simulate on a debug build for fr.button instances, and for
-// fr.analog_in a value form, design m2-c3-inputs D7), its recent events, bindings, logs (xterm), the
+// fr.analog_in a value form, design m2-c3-inputs D7; for fr.display a snapshot, tap-on-image and layout preview
+// card, design m2-c5-display D10), its recent events, bindings, logs (xterm), the
 // node's own diagnostics (diag_exec info and stats), OTA history, and crashes ("not built": crash_list is
 // open after C4, design c6 §1).
 
@@ -13,6 +14,7 @@ import { CATALOG, type CatalogCapability, type CatalogCommand } from '@fractonic
 import { opMissing } from '../api/rest.ts';
 import type { CommandOutcome, DeviceDetail } from '../api/types.ts';
 import { IdentifyButton, RenameForm, TagsForm, useFlash } from '../components/device.tsx';
+import { DisplayCard } from '../components/display.tsx';
 import { LogTerm } from '../components/log-term.tsx';
 import { Badge, Button, Empty, ErrorBox, Input, Json, KV, Mono, Panel, presenceTone, Table } from '../components/ui.tsx';
 import { useAct, useLive, useNow, useOp } from '../hooks.ts';
@@ -124,7 +126,33 @@ function Sparkline({ points, max }: { points: readonly PropPoint[] | undefined; 
   );
 }
 
-function InstanceCard({ deviceId, inst, cap, mirror, helloCaps }: { deviceId: string; inst: InstanceView; cap: CatalogCapability | undefined; mirror: Record<string, unknown>; helloCaps: number | null }) {
+/** fr.display's read-back commands, which the display card runs (display_snapshot) instead of a command form. */
+const SNAPSHOT_COMMANDS = ['snapshot', 'snapshot_read'];
+
+/** The fr.touch instance bound to a panel (its trait display is the panel's port); with traits unknown, the only one. */
+function touchOf(panel: InstanceView, instances: readonly InstanceView[]): string | null {
+  const touches = instances.filter((i) => i.cap === 'fr.touch');
+  const bound = touches.find((t) => t.traits?.display === panel.port);
+  return bound?.name ?? (touches.length === 1 && touches[0].traits === null ? touches[0].name : null);
+}
+
+function InstanceCard({
+  deviceId,
+  inst,
+  cap,
+  mirror,
+  helloCaps,
+  touch,
+  profile,
+}: {
+  deviceId: string;
+  inst: InstanceView;
+  cap: CatalogCapability | undefined;
+  mirror: Record<string, unknown>;
+  helloCaps: number | null;
+  touch: string | null;
+  profile: string | null;
+}) {
   const live = useLive((s) => s.properties[deviceId]);
   const history = useLive((s) => s.history[deviceId]);
   const m = cap ? visibleMembers(cap, inst.traits, helloCaps) : null;
@@ -133,6 +161,7 @@ function InstanceCard({ deviceId, inst, cap, mirror, helloCaps }: { deviceId: st
   const button = hasInject && inst.cap === 'fr.button';
   const analog = hasInject && inst.cap === 'fr.analog_in';
   const injectable = button || analog;
+  const display = inst.cap === 'fr.display';
   return (
     <div className="rounded border border-line p-3" data-instance={inst.name}>
       <div className="mb-2 flex flex-wrap items-baseline gap-2">
@@ -164,13 +193,14 @@ function InstanceCard({ deviceId, inst, cap, mirror, helloCaps }: { deviceId: st
       ) : null}
       <div className="flex flex-col gap-1.5">
         {m?.commands
-          .filter((c) => !(c.name === 'inject' && injectable))
+          .filter((c) => !(c.name === 'inject' && injectable) && !(display && SNAPSHOT_COMMANDS.includes(c.name)))
           .map((c) => (
             <CommandForm key={c.name} deviceId={deviceId} inst={inst.name} cmd={c} />
           ))}
         {button ? <Gestures deviceId={deviceId} inst={inst.name} /> : null}
         {analog ? <AnalogForm deviceId={deviceId} inst={inst.name} /> : null}
       </div>
+      {display ? <DisplayCard deviceId={deviceId} inst={inst.name} traits={inst.traits} touch={touch} profile={profile} /> : null}
       {m?.events.length ? <p className="mt-2 text-xs text-muted">events: {m.events.map((e) => e.name).join(', ')}</p> : null}
     </div>
   );
@@ -194,7 +224,16 @@ function Capabilities({ detail }: { detail: DeviceDetail }) {
       {!rows.length ? <Empty>No capability instances known yet (the device has not said HELLO this hub run).</Empty> : null}
       <div className="grid gap-3 lg:grid-cols-2">
         {rows.map(({ inst, cap }) => (
-          <InstanceCard key={inst.name} deviceId={id} inst={inst} cap={cap} mirror={mirror} helloCaps={detail.router?.hello_caps ?? null} />
+          <InstanceCard
+            key={inst.name}
+            deviceId={id}
+            inst={inst}
+            cap={cap}
+            mirror={mirror}
+            helloCaps={detail.router?.hello_caps ?? null}
+            touch={inst.cap === 'fr.display' ? touchOf(inst, instances) : null}
+            profile={detail.profile ?? null}
+          />
         ))}
       </div>
     </Panel>

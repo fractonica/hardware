@@ -61,6 +61,7 @@ file(GLOB FR_LIB_SRCS CONFIGURE_DEPENDS
     ${COMPONENTS_DIR}/fr_caps/src/*.cpp
     ${COMPONENTS_DIR}/fr_caps/gen/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/services/*.cpp
+    ${COMPONENTS_DIR}/fr_core/src/display/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/host/*.cpp
     ${COMPONENTS_DIR}/fr_net/src/core/*.cpp
     ${COMPONENTS_DIR}/fr_gw/src/*.cpp
@@ -103,16 +104,36 @@ target_include_directories(fr_cjson PUBLIC ${FR_CJSON_DIR})
 target_compile_options(fr_cjson PRIVATE -w)
 target_link_libraries(fr_host_lib PUBLIC fr_cjson)
 
-# fixture_gpio.cpp and ws2812_rx.cpp as the fixture's image builds them, against shim/idf (the IDF calls they make,
+# fixture_gpio.cpp and ws2812_rx.cpp as the fixture's image builds them (with fr_core's shared GPIO ISR installer,
+# src/gpio_isr.cpp, which esp_sim::reset() resets), against shim/idf (the IDF calls they make,
 # on FakeCore's clock: shim/esp_sim.cpp). Only the test binary links it; shim/esp_sim.hpp is the tests' side.
 add_library(fr_fixture_sim STATIC
     ${HOST_DIR}/shim/esp_sim.cpp
+    ${COMPONENTS_DIR}/fr_core/src/gpio_isr.cpp
     ${REPO_DIR}/hardware/drivers/fixture_gpio/src/fixture_gpio.cpp
     ${REPO_DIR}/hardware/drivers/fixture_ws2812_rx/src/ws2812_rx.cpp)
 target_include_directories(fr_fixture_sim PRIVATE ${HOST_DIR}/shim/idf PUBLIC ${HOST_DIR}/shim ${FR_FIXTURE_INCLUDES})
 target_compile_definitions(fr_fixture_sim PRIVATE FR_HOST_SHIM=1)
 target_link_libraries(fr_fixture_sim PUBLIC fr_host_lib)
 target_compile_options(fr_fixture_sim PRIVATE ${FR_CXX_WARNINGS})
+
+# The display and touch drivers (design m2-c5-display D4, D7, D8) and fr_core's shared I2C buses, unchanged, against
+# shim/idf's I2C and SPI (shim/panel_sim.cpp) and esp_sim's GPIO, LEDC and esp_timer: the tests check the bytes the
+# drivers put on the bus.
+set(FR_PANEL_INCLUDES
+    ${REPO_DIR}/hardware/drivers/st7789_spi/include
+    ${REPO_DIR}/hardware/drivers/ssd1306_i2c/include
+    ${REPO_DIR}/hardware/drivers/cst816_i2c/include)
+add_library(fr_panel_sim STATIC
+    ${HOST_DIR}/shim/panel_sim.cpp
+    ${COMPONENTS_DIR}/fr_core/src/i2c_bus.cpp
+    ${REPO_DIR}/hardware/drivers/st7789_spi/src/st7789_spi.cpp
+    ${REPO_DIR}/hardware/drivers/ssd1306_i2c/src/ssd1306_i2c.cpp
+    ${REPO_DIR}/hardware/drivers/cst816_i2c/src/cst816_i2c.cpp)
+target_include_directories(fr_panel_sim PRIVATE ${HOST_DIR}/shim/idf PUBLIC ${HOST_DIR}/shim ${FR_PANEL_INCLUDES})
+target_compile_definitions(fr_panel_sim PRIVATE FR_HOST_SHIM=1)
+target_link_libraries(fr_panel_sim PUBLIC fr_fixture_sim fr_host_lib)
+target_compile_options(fr_panel_sim PRIVATE ${FR_CXX_WARNINGS})
 
 # The T2 fleet kit (design m2-c2 §3 item 5, D1-D8; namespace frsim): the N-node medium, each node's radio over the
 # real air::Scheduler, a core per node and the executor, and the node classes fr_net_node and fr_fleet share. The
@@ -126,7 +147,7 @@ target_link_libraries(fr_sim PUBLIC fr_host_lib Threads::Threads)
 target_compile_options(fr_sim PRIVATE ${FR_CXX_WARNINGS})
 
 add_executable(fr_host_tests ${FR_TEST_SRCS} ${FR_FUZZ_TARGET_SRCS})
-target_link_libraries(fr_host_tests PRIVATE fr_sim fr_fixture_sim fr_host_lib)
+target_link_libraries(fr_host_tests PRIVATE fr_sim fr_panel_sim fr_fixture_sim fr_host_lib)
 target_include_directories(fr_host_tests PRIVATE ${FR_FIXTURE_INCLUDES})
 target_compile_options(fr_host_tests PRIVATE ${FR_CXX_WARNINGS})
 

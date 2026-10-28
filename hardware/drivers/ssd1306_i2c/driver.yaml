@@ -1,0 +1,22 @@
+# Driver manifest (design m2-c5-display D8; spec 07 §7.8). `fr gen firmware` validates profiles against it and
+# fills fr::drv::Ssd1306I2c::Config from the bound `displays.<name>` entry. Stream D implements it (M2-C5).
+schema: fractonica/driver@1
+id: ssd1306_i2c
+summary: SSD1306 / SSD1306B 1-bit OLED on I2C (the hwprobe init), page-mode flush of dirty pages; the built-in mono renderer.
+implements: hal.Display
+class: fr::drv::Ssd1306I2c              # header: include/fr/drv/ssd1306_i2c.hpp
+targets: [esp32c3, esp32c6, esp32s3]
+binds: displays
+accepts_kinds: [ssd1306, ssd1306b]
+config:                                 # same order as Ssd1306I2c::Config
+  sda:           { type: gpio, from: board.sda }
+  scl:           { type: gpio, from: board.scl }
+  address:       { type: u8, from: board.address, default: 0x3C }
+  width:         { type: u16, from: board.width, doc: "the visible window (72 x 40 on the C3 OLED)" }
+  height:        { type: u16, from: board.height }
+  column_offset: { type: u16, from: board.column_offset, default: 0, doc: "the window's first column in GDDRAM (28 on the C3 OLED)" }
+  i2c_khz:       { type: u16, default: 400 }
+# fr.display traits its service reports (design m2-c5-display D3): the 1-bit mono backend, no LVGL layouts.
+traits: { color: mono1, ui: false }
+resources: { gpio: 2, i2c: 1 }
+dependencies: {}

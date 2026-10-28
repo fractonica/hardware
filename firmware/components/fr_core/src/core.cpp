@@ -21,6 +21,7 @@
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_core.hpp"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -869,7 +870,9 @@ public:
     net::Vitals vitals() override
     {
         net::Vitals v;
-        v.free_heap_kb = esp_get_free_heap_size() / 1024;
+        // Internal RAM only: esp_get_free_heap_size() also counts PSRAM (8 MB on s3l/s3t), which hides an internal
+        // shortage, the one that fails DMA buffers, task stacks and Wi-Fi.
+        v.free_heap_kb = static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024);
         v.ota_busy = s_ota.busy();  // HEARTBEAT ota_busy (06 §6.6)
         // vbat_mv (design m2-c3-inputs D11): measured once per heartbeat. Net also asks for vitals on the
         // ESP-NOW heartbeat and on every relay decision (for ota_busy); those reuse the last measurement.
@@ -1600,9 +1603,12 @@ void start_wifi()
 {
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(kAlivePeriodMs));
-        // fw= lets a deploy's expect_log tell the new image's heartbeat from the old one's.
-        ESP_LOGI(TAG, "alive fw=%s id=%s uptime_s=%" PRId64 " heap=%" PRIu32, s_fw_id, s_identity.device_id,
-                 esp_timer_get_time() / 1000000, static_cast<uint32_t>(esp_get_free_heap_size()));
+        // fw= lets a deploy's expect_log tell the new image's heartbeat from the old one's. heap= is internal RAM in
+        // bytes (PSRAM apart: psram_free_kb, 0 without PSRAM).
+        ESP_LOGI(TAG, "alive fw=%s id=%s uptime_s=%" PRId64 " heap=%" PRIu32 " psram_free_kb=%" PRIu32, s_fw_id,
+                 s_identity.device_id, esp_timer_get_time() / 1000000,
+                 static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     }
 }
 

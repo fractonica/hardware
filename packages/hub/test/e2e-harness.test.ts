@@ -523,10 +523,11 @@ function node(args: string[], env: Record<string, string>): Promise<{ code: numb
   });
 }
 
-/** Every target-tier gate module (spec 11 §11.1; T-VBAT since M2-C3, T-GW-LINK since M2-C4), what it needs, and one of its own flags its --help must name. */
+/** Every target-tier gate module (spec 11 §11.1; T-VBAT since M2-C3, T-GW-LINK since M2-C4, T-DISPLAY since M2-C5), what it needs, and one of its own flags its --help must name. */
 const GATES = [
   ['t-agent.ts', 'T-AGENT', { human: true, usb: true }, '--since c:<run>.<seq>'],
   ['t-codec.ts', 'T-CODEC', {}, '--cases 1000000'],
+  ['t-display.ts', 'T-DISPLAY', { human: true }, '--no-human'],
   ['t-flood-b.ts', 'T-FLOOD-B', { usb: true }, '--router-off'],
   ['t-flood.ts', 'T-FLOOD', {}, '--cut pad-c3'],
   ['t-gw-link.ts', 'T-GW-LINK', { human: true, usb: true }, '--gateway gw-c6'],

@@ -12,6 +12,7 @@ import { buildVariant, listArtifacts } from './artifacts.ts';
 import { NET_HANDLERS } from './bindings/ops.ts';
 import { profileApp, runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
+import { DISPLAY_HANDLERS } from './display/ops.ts';
 import { HUB_HANDLERS } from './doctor/ops.ts';
 import { mintCursor, mintTimeUs } from './events/index.ts';
 import { fenceDiag, fenceDiagDevice, portDevice } from './fixture/fence.ts';
@@ -541,4 +542,6 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...PROBE_HANDLERS, // latency_probe (S7)
   // M2-C1 (design m2-c1-hil): bench_get (S4; input_simulate's gpio layer is in LINKS_HANDLERS).
   ...FIXTURE_HANDLERS,
+  // M2-C5 (design m2-c5-display D10): display_snapshot, display_render (H; input_simulate's touch is in LINKS_HANDLERS).
+  ...DISPLAY_HANDLERS,
 };

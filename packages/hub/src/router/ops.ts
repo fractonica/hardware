@@ -8,13 +8,14 @@
 
 import { z } from 'zod';
 
-import { formatCursor, FrError, type JobOrigin, type LinksOpName, OP_CALLED_OPS, parseCursor } from '@fractonica/protocol';
+import { formatCursor, FrError, INPUT_GESTURES, type JobOrigin, type LinksOpName, OP_CALLED_OPS, parseCursor, TOUCH_GESTURES } from '@fractonica/protocol';
 import { ANALOG_IN_CONFIG_DEFAULTS, decodeMember, encodeMember, findCap, jsonSchema, statusName } from '@fractonica/protocol/gen';
 
 import { manifestCapsByFwPrefix } from '../artifacts.ts';
 import type { Device, Handler, HubContext, HubEvent, OpInput, Presence } from '../context.ts';
 import type { Db } from '../db.ts';
 import { type EventQuery, EventStore, matchTypes, matchWhere, mintCursor, mintTimeUs, parseTypes, tailEvents } from '../events/index.ts';
+import { checkArgsSize } from '../display/layout.ts';
 import { fenceCommand, fixtureIds } from '../fixture/fence.ts';
 import { requestClient } from '../jobs.ts';
 import { humanPrompt, type WaitPrompt } from '../prompts.ts';
@@ -67,7 +68,7 @@ export function jsonObject(v: unknown, name: string): Record<string, unknown> | 
   return o as Record<string, unknown>;
 }
 
-function selectDevices(hub: HubContext, selector: string): Device[] {
+export function selectDevices(hub: HubContext, selector: string): Device[] {
   const devices = hub.registry.resolve(selector, (id) => hub.router.presence(id));
   if (!devices.length) {
     throw new FrError('NOT_FOUND', `no device matches ${selector}`, { remediation: [{ tool: 'device_list', cli: 'fr devices ls' }] });
@@ -134,19 +135,49 @@ export function valueToMv(value: number, r: AnalogRange): number {
   return Math.round(r.min_mv + (value * (r.max_mv - r.min_mv)) / 65535);
 }
 
-/** What input_simulate asks of an instance (D7): a gesture of an fr.button, or a value of an fr.analog_in. */
-export type InputKind = 'gesture' | 'analog';
+/**
+ * What input_simulate asks of an instance (D7): a gesture of an fr.button, a value of an fr.analog_in, or a point
+ * (x, y and a touch gesture) of an fr.touch (design m2-c5-display D10).
+ */
+export type InputKind = 'gesture' | 'analog' | 'touch';
 /** The capability each kind of input needs. */
-const INPUT_CAP: Record<InputKind, string> = { gesture: 'fr.button', analog: 'fr.analog_in' };
+const INPUT_CAP: Record<InputKind, string> = { gesture: 'fr.button', analog: 'fr.analog_in', touch: 'fr.touch' };
+/** Gestures of fr.touch alone (long_press is a button's too). */
+const TOUCH_ONLY: readonly string[] = TOUCH_GESTURES.filter((g) => !(INPUT_GESTURES as readonly string[]).includes(g));
 
 /**
- * input_simulate's input checked (D7): exactly one of gesture, value, mv; hold_ms only with an analog value on
- * layer inject; bounce only on gpio. Throws INVALID_ARGS.
+ * input_simulate's input checked (D7): exactly one of gesture, value, mv, or a touch point (x and y, with a touch
+ * gesture or none: tap); hold_ms only with an analog value on layer inject; bounce only on gpio; a touch only on
+ * inject. Throws INVALID_ARGS.
  */
 export function inputKind(input: OpInput<'input_simulate'>): InputKind {
+  if (input.x !== undefined || input.y !== undefined) {
+    const example = { selector: input.selector, instance: input.instance, x: input.x ?? 0, y: input.y ?? 0, gesture: 'tap' };
+    if (input.x === undefined || input.y === undefined) {
+      throw new FrError('INVALID_ARGS', `a touch needs both x and y (got only ${input.x !== undefined ? 'x' : 'y'})`, { remediation: [{ tool: 'input_simulate', args: example }] });
+    }
+    const extra = (['value', 'mv', 'hold_ms'] as const).filter((k) => input[k] !== undefined);
+    if (extra.length) {
+      throw new FrError('INVALID_ARGS', `x, y is a touch (fr.touch): ${extra.join(', ')} ${extra.length > 1 ? 'are' : 'is'} not for a touch`);
+    }
+    if (input.gesture !== undefined && !(TOUCH_GESTURES as readonly string[]).includes(input.gesture)) {
+      throw new FrError('INVALID_ARGS', `gesture ${input.gesture} is not a touch gesture (${TOUCH_GESTURES.join(', ')})`, { remediation: [{ tool: 'input_simulate', args: example }] });
+    }
+    if (input.layer === 'gpio') {
+      throw new FrError('INVALID_ARGS', 'a touch is layer inject only: the HIL fixture has no line to a touch panel', {
+        remediation: [{ tool: 'input_simulate', args: { ...example, layer: 'inject' } }],
+      });
+    }
+    return 'touch';
+  }
+  if (input.gesture !== undefined && TOUCH_ONLY.includes(input.gesture)) {
+    throw new FrError('INVALID_ARGS', `gesture ${input.gesture} is a touch gesture: give x and y too (fr.touch)`, {
+      remediation: [{ tool: 'input_simulate', args: { selector: input.selector, instance: input.instance, x: 0, y: 0, gesture: input.gesture } }],
+    });
+  }
   const given = (['gesture', 'value', 'mv'] as const).filter((k) => input[k] !== undefined);
   if (given.length !== 1) {
-    throw new FrError('INVALID_ARGS', `give exactly one of gesture, value or mv${given.length ? ` (got ${given.join(', ')})` : ''}`, {
+    throw new FrError('INVALID_ARGS', `give exactly one of gesture, value or mv, or x and y for a touch${given.length ? ` (got ${given.join(', ')})` : ''}`, {
       remediation: [{ tool: 'input_simulate', args: { selector: input.selector, instance: input.instance, gesture: 'click' } }],
     });
   }
@@ -165,10 +196,13 @@ export function inputKind(input: OpInput<'input_simulate'>): InputKind {
   return kind;
 }
 
+/** What each kind of input is, for the invalid_input message. */
+const INPUT_WHAT: Record<InputKind, string> = { gesture: 'a gesture', analog: 'a value or mv', touch: 'a touch (x, y)' };
+
 /**
- * The per-device outcome when the device's instance is of the other capability than the input needs (D7), else
- * null: a gesture needs fr.button, a value or mv fr.analog_in. A device whose instances are unknown, or that has
- * no such instance, passes here (the command path says not_found).
+ * The per-device outcome when the device's instance is of another capability than the input needs (D7), else
+ * null: a gesture needs fr.button, a value or mv fr.analog_in, x, y fr.touch. A device whose instances are
+ * unknown, or that has no such instance, passes here (the command path says not_found).
  */
 export function inputMismatch(hub: Pick<HubContext, 'db' | 'router'>, dev: Device, instance: string, kind: InputKind): CommandOutcome | null {
   const inst = instanceNamed(instancesOf(hub, dev), instance);
@@ -176,8 +210,8 @@ export function inputMismatch(hub: Pick<HubContext, 'db' | 'router'>, dev: Devic
   if (!inst || inst.cap === want) {
     return null;
   }
-  const what = kind === 'gesture' ? 'a gesture' : 'a value or mv';
-  return { device: dev.device_id, alias: dev.alias, status: 'invalid_input', error: `${dev.alias} ${instance} is ${inst.cap}: ${what} needs ${want}` };
+  const also = inst.cap === 'fr.touch' ? ' (a touch instance takes x and y)' : '';
+  return { device: dev.device_id, alias: dev.alias, status: 'invalid_input', error: `${dev.alias} ${instance} is ${inst.cap}: ${INPUT_WHAT[kind]} needs ${want}${also}` };
 }
 
 /** The instances of a device: what the router knows (live HELLO firmware, descriptor), else its registry firmware's manifest. */
@@ -250,7 +284,7 @@ type CommandPlan =
   | { base: { device: string; alias: string }; outcome: CommandOutcome }
   | { base: { device: string; alias: string }; outcome: null; inst: PortCap; cap: Cap; cmd: Cap['commands'][number]; bytes: Uint8Array };
 
-/** Checks one device's command and encodes its args (throws INVALID_ARGS), sending nothing. */
+/** Checks one device's command and encodes its args (throws INVALID_ARGS, also for args no BULK frame carries), sending nothing. */
 function planCommand(hub: HubContext, dev: Device, instance: string, command: string, args: Record<string, unknown>): CommandPlan {
   const base = { device: dev.device_id, alias: dev.alias };
   if (!isUp(hub.router.presence(dev.device_id))) {
@@ -272,7 +306,10 @@ function planCommand(hub: HubContext, dev: Device, instance: string, command: st
   if (cmd.visibility === 'test' && helloCaps != null && !(helloCaps & INJECT_ENABLED)) {
     return { base, outcome: { ...base, status: 'injection_disabled', error: `${dev.alias} runs a release build: ${inst.name}.${cmd.name} is compiled out (rebuild as debug)` } };
   }
-  return { base, inst, cap, cmd, bytes: encodeArgs(cap.name, cmd.name, args), outcome: null };
+  const bytes = encodeArgs(cap.name, cmd.name, args);
+  // No args over what a BULK frame carries (design m2-c5-display D10: a ui_load layout can be).
+  checkArgsSize(cap.name, cmd.name, args, bytes);
+  return { base, inst, cap, cmd, bytes, outcome: null };
 }
 
 /** Sends a planned command; offline and timeout are outcomes, other failures throw. */
@@ -282,7 +319,8 @@ async function sendPlanned(hub: HubContext, p: CommandPlan, opts: { ack: 'none' 
   }
   const { base, inst, cap, cmd, bytes } = p;
   try {
-    const r = await hub.router.sendCommand(base.device, inst.port, cmd.id, bytes, opts);
+    // A `bulk: true` command (design m2-c5-display D1: fr.display ui_load, snapshot_read) goes BULK, never on the air.
+    const r = await hub.router.sendCommand(base.device, inst.port, cmd.id, bytes, cmd.bulk ? { ...opts, bulk: true, bulkOnly: true } : opts);
     if (opts.ack === 'none') {
       return { ...base, status: 'sent', link: r.link, t_hub_us: r.t_hub_us };
     }
@@ -368,7 +406,7 @@ export function publishOpCalled(hub: Pick<HubContext, 'events'>, devices: readon
  * The op fails only when nothing could be sent to any selected device for one hub-side reason (09 §9.3):
  * all offline, or all release builds for a test-only command. Otherwise per-device outcomes are results.
  */
-function allRefused(results: CommandOutcome[]): FrError | null {
+export function allRefused(results: Pick<CommandOutcome, 'alias' | 'status'>[]): FrError | null {
   const aliases = results.map((r) => r.alias).join(', ');
   if (results.every((r) => r.status === 'offline')) {
     return new FrError('DEVICE_OFFLINE', `${aliases}: no hub link`, {
@@ -621,6 +659,8 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
   // (fr.analog_in); an instance of the other capability is a per-device invalid_input (all of them: INVALID_ARGS).
   // An analog inject sends inject {value, hold_ms} with mv converted over the instance's min_mv/max_mv, and its
   // result adds the value per device; on gpio the fixture module sets the analog line's PWM setpoint (Driver.setMv).
+  // M2-C5 (design m2-c5-display D10): x, y (and a touch gesture, tap by default) on an fr.touch instance sends its
+  // inject {x, y, gesture}, layer inject only.
   input_simulate: async (input: OpInput<'input_simulate'>, hub) => {
     const kind = inputKind(input);
     if (input.layer === 'gpio' && !hub.fixture) {
@@ -644,7 +684,11 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     const devices = all.filter((d) => !mismatched.has(d.device_id));
     const ordered = (results: CommandOutcome[]) => all.map((d) => mismatched.get(d.device_id) ?? results.find((r) => r.device === d.device_id)!);
     const what =
-      kind === 'gesture' ? { gesture: input.gesture } : { ...(input.value !== undefined ? { value: input.value } : { mv: input.mv }), ...(input.hold_ms !== undefined ? { hold_ms: input.hold_ms } : {}) };
+      kind === 'gesture'
+        ? { gesture: input.gesture }
+        : kind === 'touch'
+          ? { x: input.x, y: input.y, gesture: input.gesture ?? 'tap' }
+          : { ...(input.value !== undefined ? { value: input.value } : { mv: input.mv }), ...(input.hold_ms !== undefined ? { hold_ms: input.hold_ms } : {}) };
     const called: OpCalled = { op: 'input_simulate', instance: input.instance, ...what, layer: input.layer };
     if (input.layer === 'gpio') {
       // op.called once the fixture module has gated every device, before it presses (or drives).
@@ -655,6 +699,9 @@ export const LINKS_HANDLERS: Record<LinksOpName, Handler> = {
     let results: CommandOutcome[];
     if (kind === 'gesture') {
       results = await sendToAll(hub, devices, input.instance, 'inject', { gesture: input.gesture }, opts, called);
+    } else if (kind === 'touch') {
+      // fr.touch inject (design m2-c5-display D4): the same path as the panel's touches, LVGL included.
+      results = await sendToAll(hub, devices, input.instance, 'inject', what, opts, called);
     } else {
       // The value per device: an mv maps over each instance's own range.
       const values = devices.map((d) => input.value ?? mvToValue(input.mv!, analogRange(hub, d, input.instance)));

@@ -1,0 +1,33 @@
+capability: fr.touch
+id: 0x0008
+version: "1.0"
+summary: A touch panel's single pointer, in its display's coordinates, with gestures.
+doc: |
+  Coordinates are rotated to the display the instance is bound to (config `display`, that instance's port), so a
+  touch at (x, y) is the pixel (x, y) of that panel's fr.display. The LVGL renderer of that panel reads the same
+  touches as its pointer input, so a touched button emits fr.display `ui` events too.
+types:
+  GestureKind: { enum: { tap: 0, long_press: 1, swipe_up: 2, swipe_down: 3, swipe_left: 4, swipe_right: 5 } }
+traits:
+  width:   { id: 1, type: u16 }   # pixels, as the bound display's width (after rotation)
+  height:  { id: 2, type: u16 }
+  display: { id: 3, type: u8 }    # the bound fr.display instance's port; 0: none
+config:
+  display: { type: u8, doc: "port of the fr.display instance this panel covers (0: none); codegen checks it names one" }
+properties:
+  pressed: { id: 1, type: bool }
+events:
+  down:    { id: 1, priority: realtime, fields: { x: { id: 1, type: u16 }, y: { id: 2, type: u16 } } }
+  up:      { id: 2, priority: realtime, fields: { x: { id: 1, type: u16 }, y: { id: 2, type: u16 } } }
+  gesture: { id: 3, priority: normal, fields: { kind: { id: 1, type: GestureKind } } }
+commands:
+  inject:
+    id: 1
+    visibility: test
+    delivery: reliable
+    doc: "A touch at (x, y) as `gesture`, fed to the same path as the panel's (events, property, the LVGL pointer). A swipe starts at (x, y)."
+    fields:
+      x:       { id: 1, type: u16 }
+      y:       { id: 2, type: u16 }
+      gesture: { id: 3, type: GestureKind }
+    examples: [ { x: 120, y: 145 }, { x: 120, y: 145, gesture: long_press } ]

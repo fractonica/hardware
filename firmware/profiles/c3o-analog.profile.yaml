@@ -9,3 +9,4 @@ caps:
   status: { cap: fr.led,       driver: led_gpio,    bind: leds.status }
   analog: { cap: fr.analog_in, driver: adc_oneshot, bind: gpio.3,
             config: { thresholds: [16384, 32768, 49152] } }
+  oled:   { cap: fr.display,   driver: ssd1306_i2c, bind: displays.oled }   # M2-C5, as in c3o-pad (design D9)

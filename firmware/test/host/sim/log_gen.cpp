@@ -14,7 +14,7 @@ namespace frsim {
 // (esp_flash.cpp) and fr_core's OTA decision lines (core.cpp log_ota), exactly as the firmware formats them.
 const char *const KitLogs::kReadyFmt = "ready id=%s fw=%s state=%s addr=%04x alias=%s board=%s profile=%s part=%s app=%s ver=%s idf=%s "
                                        "reset=%s slot=%s caps=%u epoch=%u";
-const char *const KitLogs::kAliveFmt = "alive fw=%s id=%s uptime_s=%" PRId64 " heap=%" PRIu32;
+const char *const KitLogs::kAliveFmt = "alive fw=%s id=%s uptime_s=%" PRId64 " heap=%" PRIu32 " psram_free_kb=%" PRIu32;
 const char *const KitLogs::kSlotOpenFmt = "slot %s open for %u B at %u";
 // fr_core's log_ota: one line per OTA decision the node sends (core.cpp), what T-OTA's resume evidence reads.
 const char *const KitLogs::kOtaAcceptFmt = "ota: ACCEPT %.*s%s%s";
@@ -134,7 +134,8 @@ bool KitLogs::start(const NodeSpec &spec, std::span<const uint8_t> running_fw, u
     id_ = hex(spec.mac);
     alive_ = core_.timer([this] {
         const fr::TimeUs now = core_.now();
-        log('I', "fr", sformat(kAliveFmt, alive_fw_.c_str(), id_.c_str(), static_cast<int64_t>(now / 1'000'000), uint32_t{200 * 1024}));
+        log('I', "fr", sformat(kAliveFmt, alive_fw_.c_str(), id_.c_str(), static_cast<int64_t>(now / 1'000'000), uint32_t{200 * 1024},
+                               uint32_t{0}));
         alive_->start(kAliveMs * 1000);
     });
     if (alive_ == nullptr) {

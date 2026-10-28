@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.touch.gesture.event",
+  "title": "fr.touch.gesture event",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": [
+        "tap",
+        "long_press",
+        "swipe_up",
+        "swipe_down",
+        "swipe_left",
+        "swipe_right"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

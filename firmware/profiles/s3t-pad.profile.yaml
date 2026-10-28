@@ -1,0 +1,12 @@
+profile: s3t-pad
+board: waveshare-esp32s3-touch-lcd2
+app: node
+net: { link_profile: default }
+# M2-C5 (design m2-c5-display D9): the Touch-LCD-2 as DUT pad-s3t. No status LED on this board (*inferred*), and
+# no test pin (the board has none). LVGL's shadow framebuffer (150 KB at 240x320) is in PSRAM (D3, decision 7).
+psram: on
+caps:
+  boot:  { cap: fr.button,  driver: button_gpio, bind: buttons.boot }
+  lcd:   { cap: fr.display, driver: st7789_spi,  bind: displays.lcd }
+  # config display: the lcd instance's port (s3t-pad.slots.lock), so touches are in its coordinates.
+  touch: { cap: fr.touch,   driver: cst816_i2c,  bind: touch.tp, config: { display: 2 } }

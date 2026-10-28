@@ -208,11 +208,25 @@ function enumCpp(def: EnumDef): string {
   return def.scope === 'protocol' ? def.name : `${capPascal(def.scope)}${def.name}`;
 }
 
+/** A message type's C++ struct: protocol types by name, a capability's prefixed like its enums (DisplayUiLayout). */
+function structCpp(def: StructDef): string {
+  return def.scope === 'protocol' ? def.name : `${capPascal(def.scope)}${def.name}`;
+}
+
+function qualifiedStruct(def: StructDef): string {
+  return `fr::${def.scope === 'protocol' ? 'proto' : 'cap'}::${structCpp(def)}`;
+}
+
+/** decode_directory_entry, decode_display_ui_layout */
+function structDecode(def: StructDef): string {
+  return `decode_${snakeOf(structCpp(def))}`;
+}
+
 function elementCpp(el: ElementType): string {
   if (el.kind === 'scalar') {
     return SCALAR_CPP[el.name];
   }
-  return el.kind === 'enum' ? enumCpp(el.def) : el.def.name;
+  return el.kind === 'enum' ? enumCpp(el.def) : structCpp(el.def);
 }
 
 function typeCpp(t: TypeRef): string {
@@ -227,14 +241,19 @@ function typeCpp(t: TypeRef): string {
       return 'std::span<const uint8_t>';
     case 'array':
       return `fr::proto::Array<${elementCpp(t.element)}, ${t.max}>`;
+    case 'struct':
+      return structCpp(t.def);
   }
 }
 
 /** typeCpp() usable outside fr::proto / fr::cap (host test tables). */
 function qualifiedCpp(t: TypeRef): string {
-  const el = (e: ElementType): string => (e.kind === 'scalar' ? SCALAR_CPP[e.name] : e.kind === 'enum' ? qualifiedEnum(e.def) : `fr::proto::${e.def.name}`);
+  const el = (e: ElementType): string => (e.kind === 'scalar' ? SCALAR_CPP[e.name] : e.kind === 'enum' ? qualifiedEnum(e.def) : qualifiedStruct(e.def));
   if (t.kind === 'enum') {
     return qualifiedEnum(t.def);
+  }
+  if (t.kind === 'struct') {
+    return qualifiedStruct(t.def);
   }
   return t.kind === 'array' ? `fr::proto::Array<${el(t.element)}, ${t.max}>` : typeCpp(t);
 }
@@ -243,9 +262,9 @@ function qualifiedEnum(def: EnumDef): string {
   return `fr::${def.scope === 'protocol' ? 'proto' : 'cap'}::${enumCpp(def)}`;
 }
 
-/** Parameter type: arrays by const reference, everything else (scalars, views) by value. */
+/** Parameter type: arrays and messages by const reference, everything else (scalars, views) by value. */
 function paramCpp(t: TypeRef): string {
-  return t.kind === 'array' ? `const ${typeCpp(t)} &` : `${typeCpp(t)} `;
+  return t.kind === 'array' || t.kind === 'struct' ? `const ${typeCpp(t)} &` : `${typeCpp(t)} `;
 }
 
 const UNSIGNED: ReadonlySet<ScalarName> = new Set(['u8', 'u16', 'u32', 'u64', 'rgb', 'duration_ms']);
@@ -421,6 +440,10 @@ function fieldWireMax(f: { id: number; type: TypeRef }): number {
       }
       return tag + varintSize(t.max * el) + t.max * el;
     }
+    case 'struct': {
+      const body = structWireMax(t.def.fields);
+      return tag + varintSize(body) + body;
+    }
   }
 }
 
@@ -489,6 +512,9 @@ function writeValue(c: Code, f: Field, x: string): void {
     case 'bytes':
       c.line(`w.field_bytes(${f.id}, ${x});`);
       return;
+    case 'struct':
+      c.line(`const auto m = w.begin_len(${f.id});`).line(`encode(${x}, w);`).line('w.end_len(m);');
+      return;
     case 'array':
       if (t.element.kind === 'struct') {
         c.open(`for (const auto &e : ${x})`, () => {
@@ -509,7 +535,7 @@ function encodeField(c: Code, f: Field, x: string, has: string | null): void {
   if (f.presence === 'optional' && has !== null) {
     c.open(`if (${has})`, () => writeValue(c, f, x));
   } else if (f.presence === 'always') {
-    if (f.type.kind === 'array') {
+    if (f.type.kind === 'array' || f.type.kind === 'struct') {
       c.block(() => writeValue(c, f, x));
     } else {
       writeValue(c, f, x);
@@ -565,6 +591,8 @@ function readField(t: TypeRef, r: string): string {
       return `${r}.read_bytes(${t.max})`;
     case 'array':
       throw new Error('arrays are decoded element by element');
+    case 'struct':
+      throw new Error('messages are decoded from their bytes');
   }
 }
 
@@ -601,6 +629,17 @@ function decodeCase(c: Code, f: Field, x: string, has: string | null): void {
       c.line(`${has} = true;`);
     }
   };
+  if (t.kind === 'struct') {
+    // One nested message; the last occurrence wins, as for scalars.
+    c.line(`case ${f.id}: {`).indent();
+    c.line('const auto b = r.read_bytes(SIZE_MAX);');
+    c.open('if (!r.ok())', () => c.line('break;'));
+    c.line(`const auto e = ${structDecode(t.def)}(b);`);
+    c.line('if (e) {').indent().line(`${x} = *e;`).dedent();
+    c.line('} else {').indent().line('r.fail(e.error());').dedent().line('}');
+    c.line('break;').dedent().line('}');
+    return;
+  }
   if (t.kind !== 'array') {
     c.line(`case ${f.id}:`).indent();
     setHas();
@@ -615,7 +654,7 @@ function decodeCase(c: Code, f: Field, x: string, has: string | null): void {
     c.open(`if (${x}.full())`, () => c.line('r.fail(fr::wire::DecodeErr::too_long);').line('break;'));
     c.line('const auto b = r.read_bytes(SIZE_MAX);');
     c.open('if (!r.ok())', () => c.line('break;'));
-    c.line(`const auto e = decode_${snakeOf(el.def.name)}(b);`);
+    c.line(`const auto e = ${structDecode(el.def)}(b);`);
     c.line('if (e) {').indent().line(`${x}.push_back(*e);`).dedent();
     c.line('} else {').indent().line('r.fail(e.error());').dedent().line('}');
   } else {
@@ -658,6 +697,11 @@ function validClauses(f: Field, x: string): string[] {
     out.push(`is_known(${x})`);
   } else if (t.kind === 'array' && t.element.kind === 'enum') {
     out.push(`std::ranges::all_of(${x}, [](${enumCpp(t.element.def)} e) { return is_known(e); })`);
+  } else if (t.kind === 'struct' && t.def.scope !== 'protocol') {
+    // Capability message types have valid() (protocol types are not checked against the schema).
+    out.push(`valid(${x})`);
+  } else if (t.kind === 'array' && t.element.kind === 'struct' && t.element.def.scope !== 'protocol') {
+    out.push(`std::ranges::all_of(${x}, [](const ${structCpp(t.element.def)} &e) { return valid(e); })`);
   } else if (t.kind === 'scalar' && f.range) {
     const [lo, hi] = f.range;
     const parts: string[] = [];
@@ -1420,6 +1464,18 @@ function capNames(cap: Capability): CapNames {
   };
 }
 
+/** The capability's message types (design m2-c5-display D2), in YAML order: each may hold the ones before it. */
+function capTypeSpecs(cap: Capability): StructSpec[] {
+  return cap.types.map((t) => ({
+    name: structCpp(t),
+    fields: t.fields,
+    decode: structDecode(t),
+    comment: docLines(`${cap.name} ${t.name} (message type)${t.doc ? `: ${oneLine(t.doc)}` : '.'}`),
+    statics: [],
+    validate: true,
+  }));
+}
+
 function capStructs(cap: Capability): StructSpec[] {
   const n = capNames(cap);
   const s = cap.shortName;
@@ -1456,7 +1512,7 @@ function checkCapNames(cap: Capability): void {
   }
   claim(cap.pascalName, 'the capability class');
   claim(`${cap.pascalName}Config`, 'config');
-  for (const s of capStructs(cap)) {
+  for (const s of [...capTypeSpecs(cap), ...capStructs(cap)]) {
     claim(s.name, s.comment[0]);
     claim(s.decode, `${s.name} decoder`);
   }
@@ -1518,7 +1574,7 @@ function capHeader(cap: Capability): string {
     c.line();
   }
 
-  for (const s of capStructs(cap)) {
+  for (const s of [...capTypeSpecs(cap), ...capStructs(cap)]) {
     emitStructDecl(c, s);
   }
 
@@ -1567,7 +1623,7 @@ function capHeader(cap: Capability): string {
         if (test) {
           c.pp('#if FR_TEST_HOOKS');
         }
-        const note = `${cmd.delivery}${cmd.idempotent ? ', idempotent' : ''}${test ? ', visibility: test' : ''}`;
+        const note = `${cmd.delivery}${cmd.idempotent ? ', idempotent' : ''}${cmd.bulk ? ', bulk' : ''}${test ? ', visibility: test' : ''}`;
         c.lines(docLines(cmd.doc));
         c.line(`virtual ${commandSignature(cap, cmd)} = 0;  // ${note}`);
         if (test) {
@@ -1619,13 +1675,13 @@ function capHeader(cap: Capability): string {
 function capSource(cap: Capability): string {
   const n = capNames(cap);
   const P = cap.pascalName;
-  const structs = capStructs(cap);
+  const structs = [...capTypeSpecs(cap), ...capStructs(cap)];
   const c = new Code();
   c.line(`${GENERATED} Source: ${cap.file}`);
   c.line(`#include "${cap.shortName}.hpp"`).line();
   const allFields = [...structs.flatMap((s) => s.fields), ...cap.properties.map((p) => p.field)];
   const inc = new Set(cppIncludesFor(allFields));
-  if (allFields.some((f) => f.type.kind === 'array' && f.type.element.kind === 'enum')) {
+  if (allFields.some((f) => f.type.kind === 'array' && f.type.element.kind !== 'scalar')) {
     inc.add('<algorithm>');
   }
   c.lines([...inc].sort().map((i) => `#include ${i}`)).line();
@@ -2229,12 +2285,17 @@ function fromJsonExpr(t: TypeRef, j: string, x: string, bytesBuf: string | null)
       return `from_json_bytes(${j}, ${bytesBuf}, ${x})`;
     case 'array': {
       const el = t.element;
-      if (el.kind === 'struct') {
+      if (el.kind === 'struct' && el.def.scope === 'protocol') {
         throw new Error('capability fields cannot hold protocol structs');
       }
       const elType: TypeRef = el.kind === 'scalar' ? { kind: 'scalar', name: el.name } : el;
       return `from_json_array(${j}, ${x}, [](const cJSON *e, ${elementCpp(el)} &out) { return ${fromJsonExpr(elType, 'e', 'out', null)}; })`;
     }
+    case 'struct':
+      if (t.def.scope === 'protocol') {
+        throw new Error('capability fields cannot hold protocol structs');
+      }
+      return `from_json_${snakeOf(structCpp(t.def))}(${j}, ${x})`;
   }
 }
 
@@ -2254,11 +2315,16 @@ function toJsonExpr(t: TypeRef, x: string): string {
     case 'array': {
       const el = t.element;
       if (el.kind === 'struct') {
-        throw new Error('capability fields cannot hold protocol structs');
+        if (el.def.scope === 'protocol') {
+          throw new Error('capability fields cannot hold protocol structs');
+        }
+        return `json_array(${x}, [](const ${structCpp(el.def)} &e) { return to_json(e); })`;
       }
       const elType: TypeRef = el.kind === 'scalar' ? { kind: 'scalar', name: el.name } : el;
       return `json_array(${x}, [](${elementCpp(el)} e) { return ${toJsonExpr(elType, 'e')}; })`;
     }
+    case 'struct':
+      return `to_json(${x})`;
   }
 }
 
@@ -2276,7 +2342,8 @@ function diagJsonSource(model: Model): string {
   // lookup at its definition. Traits are printed in every build (diag `caps`); the other structs only
   // by the `call` codecs, which exist with FR_TEST_HOOKS.
   const traitStructs = (cap: Capability) => capStructs(cap).filter((s) => s.name === capNames(cap).traits);
-  const callStructs = (cap: Capability) => capStructs(cap).filter((s) => s.name !== capNames(cap).traits);
+  // Message types (design m2-c5-display D2) are printed and parsed only inside the `call` bodies that hold them.
+  const callStructs = (cap: Capability) => [...capTypeSpecs(cap), ...capStructs(cap).filter((s) => s.name !== capNames(cap).traits)];
   c.line('namespace {').line();
   for (const cap of model.capabilities) {
     for (const s of traitStructs(cap)) {
@@ -2318,6 +2385,39 @@ function diagJsonSource(model: Model): string {
   toJsonDefs(model.capabilities.flatMap(traitStructs));
   c.pp('#if FR_TEST_HOOKS').line();
   toJsonDefs(model.capabilities.flatMap(callStructs));
+
+  // JSON -> message types, in YAML order (a type's parser calls those of the types it holds).
+  for (const cap of model.capabilities) {
+    for (const t of cap.types) {
+      if (t.fields.some((f) => f.type.kind === 'bytes')) {
+        throw new Error(`${cap.file}: types.${t.name}: diag JSON cannot parse a bytes field inside a message type`);
+      }
+      c.fn(`bool from_json_${snakeOf(structCpp(t))}(const cJSON *j, ${structCpp(t)} &v)`, () => {
+        c.open('if (!cJSON_IsObject(j))', () => c.line('return false;'));
+        c.line('bool ok = true;');
+        c.open('for (const cJSON *it = j->child; ok && it != nullptr; it = it->next)', () => {
+          c.line('const std::string_view key = it->string != nullptr ? it->string : "";');
+          t.fields.forEach((f, i) => {
+            c.line(`${i === 0 ? '' : '} else '}if (key == ${cString(f.name)}) {`).indent();
+            if (f.presence === 'optional') {
+              c.line(`v.has_${f.name} = true;`);
+            }
+            const stmt = `ok = ${fromJsonExpr(f.type, 'it', `v.${cppIdent(f.name)}`, null)};`;
+            const at = stmt.indexOf(', [](');
+            if (stmt.length > 90 && at > 0) {
+              c.line(stmt.slice(0, at + 1)).indent().line(stmt.slice(at + 2)).dedent();
+            } else {
+              c.line(stmt);
+            }
+            c.dedent();
+          });
+          c.line('} else {').indent().line('ok = false;  // unknown key').dedent().line('}');
+        });
+        c.line('return ok;');
+      });
+      c.line();
+    }
+  }
 
   // JSON -> args, one function per command.
   for (const cap of model.capabilities) {
@@ -2650,6 +2750,8 @@ class VectorWriter {
           const elType: TypeRef = el.kind === 'scalar' ? { kind: 'scalar', name: el.name } : el;
           return `${typeCpp(t)}{${v.map((x, i) => this.valueExpr(elType, x, `${where}[${i}]`)).join(', ')}}`;
         }
+        case 'struct':
+          throw new Error('messages are assigned field by field');
       }
     } catch (e) {
       throw new Error(`${where}: ${(e as Error).message}`);
@@ -2670,6 +2772,10 @@ class VectorWriter {
         this.c.line(`${target}.has_${f.name} = true;`);
       }
       const x = `${target}.${cppIdent(f.name)}`;
+      if (f.type.kind === 'struct') {
+        this.assign(f.type.def.fields, v, x, `${where}.${k}`);
+        continue;
+      }
       if (f.type.kind === 'array' && f.type.element.kind === 'struct') {
         if (!Array.isArray(v)) {
           throw new Error(`${where}.${k}: expected an array`);
@@ -2680,7 +2786,7 @@ class VectorWriter {
         this.depth++;
         v.forEach((el, i) => {
           this.c.block(() => {
-            this.c.line(`fr::proto::${def.name} ${e}{};`);
+            this.c.line(`${qualifiedStruct(def)} ${e}{};`);
             this.assign(def.fields, el, e, `${where}.${k}[${i}]`);
             this.c.line(`${x}.push_back(${e});`);
           });

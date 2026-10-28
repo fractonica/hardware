@@ -2,7 +2,7 @@
 // wait_for_device, command_send, input_simulate. Spread into OPS (packages/protocol/src/ops.ts); handlers
 // in packages/hub/src/router/ops.ts. C6 adds wait_for_event.prompt_human (design c6 D3; stream S5), M2-C1
 // input_simulate's `layer` and gesture `bounce` (design m2-c1-hil D8), M2-C3 input_simulate's analog `value` /
-// `mv` and `hold_ms` (design m2-c3-inputs D7).
+// `mv` and `hold_ms` (design m2-c3-inputs D7), M2-C5 its fr.touch point `x`, `y` (design m2-c5-display D10).
 
 import { z } from 'zod';
 
@@ -25,6 +25,14 @@ export type InputLayer = (typeof INPUT_LAYERS)[number];
 /** input_simulate gestures; `bounce` (a bouncy click, judged on counts) is gpio-only. */
 export const INPUT_GESTURES = ['press', 'release', 'click', 'double_click', 'long_press', 'bounce'] as const;
 export type InputGesture = (typeof INPUT_GESTURES)[number];
+/**
+ * fr.touch's gestures (design m2-c5-display D4): an input_simulate of a touch instance takes x, y and one of
+ * these (tap by default); long_press is also a button gesture.
+ */
+export const TOUCH_GESTURES = ['tap', 'long_press', 'swipe_up', 'swipe_down', 'swipe_left', 'swipe_right'] as const;
+export type TouchGesture = (typeof TOUCH_GESTURES)[number];
+/** input_simulate's gesture field: a button's or a touch's. */
+const SIM_GESTURES = [...INPUT_GESTURES, ...TOUCH_GESTURES.filter((g) => !(INPUT_GESTURES as readonly string[]).includes(g))] as [InputGesture | TouchGesture, ...(InputGesture | TouchGesture)[]];
 /** The longest inject hold of an analog value (fr.analog_in inject: 0 means 1,000 ms, at most 60,000). */
 export const INPUT_HOLD_MS_MAX = 60_000;
 
@@ -104,13 +112,16 @@ export const LINKS_OPS = [
     kind: 'command',
     tier: 'mutate',
     summary:
-      "Simulate an input; give exactly one of gesture (fr.button: press, release, click, double_click, long_press), value (0..65535) or mv (fr.analog_in). An instance of the other capability is invalid_input. layer inject (default) runs the instance's inject command (debug builds): press is a raw hold (down only, no long_press or click); a value holds for hold_ms (default 1,000, max 60,000), mv mapped by the instance's min_mv/max_mv. layer gpio uses the HIL fixture on a bench-wired line (any build; see bench_get): press is a real hold (long_press at long_press_ms, a click if released before), bounce (gpio only) a click with contact bounce, and mv (or value) sets the line's PWM setpoint until changed or 0 (no hold_ms); setpoint.at_hub_us says when. Wait for the events with wait_for_event since the returned cursor.",
+      "Simulate an input: gesture (fr.button: press, release, click, double_click, long_press), value (0..65535) or mv (fr.analog_in), or x, y (fr.touch, gesture tap default, long_press, swipe_*). An instance of another capability is invalid_input. layer inject (default) runs the instance's inject command (debug builds): press is a raw hold (down only, no long_press or click); a value holds hold_ms (default 1,000, max 60,000), mv mapped by the instance's min_mv/max_mv; a touch hits the panel's widgets (ui events). layer gpio uses the HIL fixture on a bench-wired line (see bench_get; not touch): press is a real hold (long_press at long_press_ms, a click if released before), bounce a click with contact bounce, mv (or value) sets the line's PWM setpoint until changed or 0 (no hold_ms; setpoint.at_hub_us says when). Wait for the events with wait_for_event since the returned cursor.",
+
     input: z.object({
       selector,
-      instance: z.string().min(1).describe('button or analog instance, e.g. boot, analog'),
-      gesture: z.enum(INPUT_GESTURES).optional().describe('fr.button: the gesture (exactly one of gesture, value, mv)'),
+      instance: z.string().min(1).describe('button, analog or touch instance, e.g. boot, analog, touch'),
+      gesture: z.enum(SIM_GESTURES).optional().describe('fr.button: the gesture (exactly one of gesture, value, mv); fr.touch: with x, y (default tap)'),
       value: z.number().int().min(0).max(65535).optional().describe('fr.analog_in: the value 0..65535 over the instance min_mv..max_mv'),
       mv: z.number().int().min(0).max(5500).optional().describe('fr.analog_in: millivolts, converted with the instance min_mv/max_mv (inject) or the bench vdd_mv (gpio)'),
+      x: z.number().int().min(0).max(65535).optional().describe("fr.touch: the point's x in panel pixels (after rotation); needs y"),
+      y: z.number().int().min(0).max(65535).optional().describe("fr.touch: the point's y in panel pixels (after rotation); needs x"),
       hold_ms: z
         .number()
         .int()

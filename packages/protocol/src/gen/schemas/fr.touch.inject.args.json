@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.touch.inject.args",
+  "title": "fr.touch.inject arguments",
+  "description": "A touch at (x, y) as `gesture`, fed to the same path as the panel's (events, property, the LVGL pointer). A swipe starts at (x, y).",
+  "type": "object",
+  "properties": {
+    "x": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "y": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "gesture": {
+      "type": "string",
+      "enum": [
+        "tap",
+        "long_press",
+        "swipe_up",
+        "swipe_down",
+        "swipe_left",
+        "swipe_right"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "x": 120,
+      "y": 145
+    },
+    {
+      "x": 120,
+      "y": 145,
+      "gesture": "long_press"
+    }
+  ]
+}

@@ -3,9 +3,9 @@ id: lab
 fixture:
   device: e8f60a81bc48             # fix-s3: ESP32-S3-DevKitC-1-style, WROOM-1-N16R8, on the powered desk hub
   profile: s3k-fixture
-  # s3k-fixture debug with ch12/ch13 (pwm, M2-C3), flashed 2026-10-27; first provisioned 2026-10-24 (m2-c1 §5.3
-  # step 2), RGB LED confirmed on GPIO48.
-  fw_id: fad97d76d4563cdac9461c47201f2a9fd397b68284d5c407d406eedbb731c298
+  # s3k-fixture debug, flashed 2026-10-28 (M2-C5: the shared GPIO ISR-service installer); ch12/ch13 pwm since
+  # M2-C3; first provisioned 2026-10-24 (m2-c1 §5.3 step 2), RGB LED confirmed on GPIO48.
+  fw_id: 4d5fab5a3bdafa91df61049a99dee0daf4d358d32398000aa1b561e6cb904379
   vdd_mv: 3300                     # the fixture's 3V3 rail: set_duty = round(mV / vdd_mv * 10000) (M2-C3)
 duts:
   1cdbd4175cc4:                    # pad-c3: C3 OLED board #2 (8.5 dBm cap; -80 dBm at M1 step 7)

@@ -45,6 +45,8 @@ export interface CapCommandInfo {
   readonly delivery: 'fast' | 'reliable';
   readonly idempotent: boolean;
   readonly visibility: 'public' | 'test';
+  /** bulk: true (design m2-c5-display D1): sent BULK (TCP or serial, never over a gateway), however small. */
+  readonly bulk?: true;
   readonly args: Codec<any>;
   /** null when the command declares no result fields (the RESULT body is empty). */
   readonly result: Codec<any> | null;
@@ -273,6 +275,16 @@ export function readRepeated<T>(r: Reader, out: T[], max: number, element: (p: R
   }
 }
 
+/** One nested message field (design m2-c5-display D2): the last occurrence wins; a malformed one fails the reader. */
+export function readNested<T>(r: Reader, element: (p: Reader) => T, prev: T): T {
+  const p = r.readSub();
+  if (!r.ok) {
+    return prev;
+  }
+  const e = element(p);
+  return r.adopt(p) ? e : prev;
+}
+
 export function done<T>(r: Reader, value: T): Decoded<T> {
   return r.error === null ? decodeOk(value) : decodeFail(r.error);
 }
@@ -397,6 +409,14 @@ export function invalid(fields: readonly JsonField[], value: Record<string, unkn
       continue;
     }
     if (typeof f.json === 'object') {
+      // A repeated message (array) or one nested message.
+      if (!Array.isArray(v)) {
+        const p = invalid(f.json, v as Record<string, unknown>, name);
+        if (p !== null) {
+          return p;
+        }
+        continue;
+      }
       const items = v as Record<string, unknown>[];
       for (let i = 0; i < items.length; i++) {
         const p = invalid(f.json, items[i], name + '[' + i + ']');

@@ -906,7 +906,13 @@ bool start(const Settings &settings, const Hooks &hooks)
                "ip event handler")) {
         return false;
     }
+#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+    // S3: on core 0 with Wi-Fi and lwIP. Unpinned, this task (priority 11) could preempt the core task (10), which owns
+    // core 1 (spec 03 §3.4): M2-C5 bench, pad-s3's T-HIL LED rule saw a ~5.5 ms gap between an LED write and its STATE.
+    if (xTaskCreatePinnedToCore(task_main, "fr_net", kTaskStack, nullptr, kTaskPrio, nullptr, 0) != pdPASS) {
+#else
     if (xTaskCreate(task_main, "fr_net", kTaskStack, nullptr, kTaskPrio, nullptr) != pdPASS) {
+#endif
         ESP_LOGE(TAG, "cannot create the fr_net task");
         return false;
     }

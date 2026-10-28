@@ -181,7 +181,7 @@ export interface Router {
     port: number,
     cmdId: number,
     args: Uint8Array,
-    opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate?: boolean; bulk?: boolean },
+    opts: { ack: 'none' | 'result'; timeoutMs: number; duplicate?: boolean; bulk?: boolean; bulkOnly?: boolean },
   ): Promise<CommandResult>;
   /**
    * Ends the device's serial session for a reason of the hub's own (a serial lease, design c6 D4): a hub

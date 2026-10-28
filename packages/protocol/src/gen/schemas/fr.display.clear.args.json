@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.display.clear.args",
+  "title": "fr.display.clear arguments",
+  "description": "Drops every primitive and any layout, and fills the panel with `color`.",
+  "type": "object",
+  "properties": {
+    "color": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "color": 0
+    }
+  ]
+}

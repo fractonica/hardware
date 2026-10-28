@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.display.fill_rect.args",
+  "title": "fr.display.fill_rect arguments",
+  "description": "A filled rectangle primitive.",
+  "type": "object",
+  "properties": {
+    "x": {
+      "type": "integer",
+      "minimum": -32768,
+      "maximum": 32767,
+      "description": "(px)"
+    },
+    "y": {
+      "type": "integer",
+      "minimum": -32768,
+      "maximum": 32767,
+      "description": "(px)"
+    },
+    "w": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(px)"
+    },
+    "h": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(px)"
+    },
+    "color": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "x": 0,
+      "y": 0,
+      "w": 40,
+      "h": 20,
+      "color": 16711680
+    }
+  ]
+}

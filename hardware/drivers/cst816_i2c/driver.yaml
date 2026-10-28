@@ -1,0 +1,21 @@
+# Driver manifest (design m2-c5-display D4; spec 07 §7.8). `fr gen firmware` validates profiles against it and
+# fills fr::drv::Cst816I2c::Config from the bound `touch.<name>` entry. Stream D implements it (M2-C5).
+schema: fractonica/driver@1
+id: cst816_i2c
+summary: CST816S/D/T capacitive touch on I2C; INT (falling edge) feeds a core input slot, coordinates rotated to the panel's.
+implements: hal.TouchSource
+class: fr::drv::Cst816I2c               # header: include/fr/drv/cst816_i2c.hpp
+targets: [esp32c3, esp32c6, esp32s3]
+binds: touch
+accepts_kinds: [cst816s, cst816d, cst816t]
+config:                                 # same order as Cst816I2c::Config
+  sda:     { type: gpio, from: board.sda }
+  scl:     { type: gpio, from: board.scl }
+  irq:     { type: gpio, from: board.int, doc: "INT, active low (falling edge)" }
+  rst:     { type: gpio, from: board.rst, optional: true, doc: "null: no reset line of its own" }
+  address: { type: u8, from: board.address, default: 0x15 }
+  i2c_khz: { type: u16, default: 400 }
+# input_slot: fr_core's pool (8), fed by the INT edge ISR; timer: fr_core's pool, the absent controller's probe (taken
+# only when the chip does not answer at init).
+resources: { gpio: 4, i2c: 1, input_slot: 1, timer: 1 }
+dependencies: {}

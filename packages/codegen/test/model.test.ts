@@ -87,8 +87,10 @@ describe('loading the committed schema', () => {
     expect(m.capabilities.map((c) => [c.id, c.name, c.pascalName, c.section])).toEqual([
       [0x0001, 'fr.button', 'Button', 'standard'],
       [0x0002, 'fr.led', 'Led', 'standard'],
+      [0x0003, 'fr.display', 'Display', 'standard'],
       [0x0005, 'fr.analog_in', 'AnalogIn', 'standard'],
       [0x0006, 'fr.fixture', 'Fixture', 'standard'],
+      [0x0008, 'fr.touch', 'Touch', 'standard'],
       [0x00f0, 'fr.node', 'Node', 'system'],
       [0x00f1, 'fr.ota', 'Ota', 'system'],
       [0x00f2, 'fr.diag', 'Diag', 'system'],
@@ -520,5 +522,126 @@ describe('names', () => {
     expect(cppIdent('new')).toBe('new_');
     expect(cppIdent('click')).toBe('click');
     expect(model().protocol.enums.find((e) => e.name === 'OtaState')!.members.map((m) => m.name)).toContain('new');
+  });
+});
+
+// ---- M2-C5: fr.display, fr.touch, message types and bulk commands (design m2-c5-display D1, D2, D4) ----
+
+const DISPLAY = 'schema/capabilities/display.cap.yaml';
+
+describe('capability message types and bulk commands (design m2-c5-display D1, D2)', () => {
+  const expectIssue = (issues: SchemaIssue[], file: string, path: string, message: RegExp) => {
+    expect(issues).toContainEqual(expect.objectContaining({ file, path, message: expect.stringMatching(message) }));
+  };
+
+  it('fr.display: UiWidget, then UiLayout holding array<UiWidget> of 24, which ui_load holds directly', () => {
+    const d = cap(model(), 'fr.display');
+    expect(d).toMatchObject({ id: 0x0003, section: 'standard', version: { major: 1, minor: 0 }, ordered: false });
+    expect(d.types.map((t) => [t.name, t.scope])).toEqual([
+      ['UiWidget', 'fr.display'],
+      ['UiLayout', 'fr.display'],
+    ]);
+    const [widget, layout] = d.types;
+    expect(widget.fields.map((f) => f.name)).toEqual(['id', 'kind', 'x', 'y', 'w', 'h', 'text', 'value', 'min', 'max', 'color', 'bg', 'font', 'align']);
+    expect(widget.maxSize).toBe(120);
+    expect(layout.fields[1].type).toMatchObject({ kind: 'array', max: 24, element: { kind: 'struct', def: { name: 'UiWidget' } } });
+    expect(layout.maxSize).toBe(6 + 24 * (1 + 1 + 120));
+    const load = d.commands.find((c) => c.name === 'ui_load')!;
+    expect(load.fields).toEqual([expect.objectContaining({ name: 'layout', presence: 'always', type: { kind: 'struct', def: layout } })]);
+    // BULK: the worst case is far over the realtime budget (and over one BULK frame: a layout must fit one).
+    expect(load).toMatchObject({ delivery: 'reliable', bulk: true, realtime: false, maxArgs: 1 + 2 + layout.maxSize });
+    expect(load.maxArgs).toBeGreaterThan(200);
+    expect(d.commands.filter((c) => c.bulk).map((c) => c.name)).toEqual(['ui_load', 'snapshot', 'snapshot_read']);
+    expect(d.commands.filter((c) => c.visibility === 'test').map((c) => c.name)).toEqual(['snapshot', 'snapshot_read']);
+    expect(d.commands.map((c) => [c.name, c.id])).toEqual([
+      ['clear', 1],
+      ['text', 2],
+      ['fill_rect', 3],
+      ['set_brightness', 4],
+      ['ui_load', 5],
+      ['ui_set', 6],
+      ['snapshot', 7],
+      ['snapshot_read', 8],
+    ]);
+    expect(d.traits.map((t) => t.name)).toEqual(['width', 'height', 'color', 'ui', 'touch']);
+    expect(d.events).toEqual([expect.objectContaining({ name: 'ui', priority: 'normal', requires: { trait: 'ui' } })]);
+    expect(d.properties.map((p) => p.name)).toEqual(['brightness']);
+    // Every other command still fits the realtime budget.
+    expect(d.commands.filter((c) => c.name !== 'ui_load').every((c) => c.maxArgs <= 200)).toBe(true);
+    // No other capability declares a bulk command (the hub's existing BULK callers pass the flag themselves).
+    expect(model().capabilities.filter((c) => c.name !== 'fr.display').flatMap((c) => c.commands.filter((x) => x.bulk))).toEqual([]);
+  });
+
+  it('fr.touch is 0x0008, 0x0007 stays free; its down and up are realtime', () => {
+    const m = model();
+    const t = cap(m, 'fr.touch');
+    expect(t).toMatchObject({ id: 0x0008, section: 'standard' });
+    expect(m.registry.entries.some((e) => e.id === 0x0007)).toBe(false);
+    expect(t.events.map((e) => [e.name, e.priority])).toEqual([
+      ['down', 'realtime'],
+      ['up', 'realtime'],
+      ['gesture', 'normal'],
+    ]);
+    expect(t.traits.map((x) => x.name)).toEqual(['width', 'height', 'display']);
+    expect(t.config.map((x) => x.name)).toEqual(['display']);
+    expect(t.commands).toEqual([expect.objectContaining({ name: 'inject', visibility: 'test', delivery: 'reliable', bulk: false })]);
+    expect(t.enums[0].members.map((x) => x.name)).toEqual(['tap', 'long_press', 'swipe_up', 'swipe_down', 'swipe_left', 'swipe_right']);
+  });
+
+  it('checks an example against the message type it holds', () => {
+    const issues = issuesOf(
+      edited(DISPLAY, (y) => {
+        y.commands.ui_load.examples = [{ layout: { bg: 0, widgets: [{ kind: 'dial' }] } }, { layout: { nope: 1 } }, { layout: 3 }];
+      }),
+    );
+    expectIssue(issues, DISPLAY, 'commands.ui_load.examples.0.layout', /widgets: element: kind: expected one of label, .* \(UiWidgetKind\), got "dial"/);
+    expectIssue(issues, DISPLAY, 'commands.ui_load.examples.1.layout', /'nope' is not a field of UiLayout/);
+    expectIssue(issues, DISPLAY, 'commands.ui_load.examples.2.layout', /expected a UiLayout object, got 3/);
+  });
+
+  it('refuses message types in traits, config and properties, an optional or defaulted message field, a later type, and bulk on a fast command', () => {
+    const issues = issuesOf(
+      edited(DISPLAY, (y) => {
+        y.traits.layout = { id: 6, type: 'UiLayout' };
+        y.config.widgets = { type: 'array<UiWidget>', max: 2 };
+        y.properties.screen = { id: 2, type: 'UiLayout' };
+        y.commands.ui_load.fields.layout.optional = true;
+        y.commands.ui_set.fields.widget = { id: 7, type: 'UiWidget', default: 1 };
+        y.types.UiWidget.fields.inner = { id: 15, type: 'UiLayout' };
+        y.types.lower = { fields: { a: { id: 1, type: 'u8' } } };
+        y.types.Empty = { fields: {} };
+        y.commands.clear.delivery = 'fast';
+        y.commands.clear.bulk = true;
+      }),
+    );
+    expectIssue(issues, DISPLAY, 'traits.layout.type', /a trait cannot hold message type 'UiLayout'/);
+    expectIssue(issues, DISPLAY, 'config.widgets.type', /a config entry cannot hold message type 'UiWidget'/);
+    expectIssue(issues, DISPLAY, 'properties.screen.type', /a property cannot hold message type 'UiLayout'/);
+    expectIssue(issues, DISPLAY, 'commands.ui_load.fields.layout.optional', /a UiLayout field cannot be optional/);
+    expectIssue(issues, DISPLAY, 'commands.ui_set.fields.widget.default', /struct fields cannot have a default/);
+    expectIssue(issues, DISPLAY, 'types.UiWidget.fields.inner.type', /unknown type 'UiLayout'/);
+    expectIssue(issues, DISPLAY, 'types.lower', /type name 'lower' must be PascalCase/);
+    expectIssue(issues, DISPLAY, 'types.Empty.fields', /a message type needs at least one field/);
+    expectIssue(issues, DISPLAY, 'commands.clear.bulk', /a bulk command is delivery: reliable/);
+  });
+
+  it('protocol.yaml keeps its rule: a protocol type is an array element only', () => {
+    const issues = issuesOf(edited(PROTOCOL, (y) => (y.types.Descriptor.one = { id: 7, type: 'DescriptorCap' })));
+    expectIssue(issues, PROTOCOL, 'types.Descriptor.one.type', /may only be used as an array element/);
+  });
+
+  it('the catalog carries the message types and bulk', () => {
+    const c = buildCatalog(model()).capabilities as Yaml[];
+    const d = c.find((x) => x.name === 'fr.display')!;
+    expect(Object.keys(d.messages)).toEqual(['UiWidget', 'UiLayout']);
+    expect(d.messages.UiLayout.fields).toEqual([
+      { name: 'bg', id: 1, type: 'rgb', doc: 'screen background' },
+      { name: 'widgets', id: 2, type: 'array<UiWidget>', max: 24 },
+    ]);
+    const load = d.commands.find((x: Yaml) => x.name === 'ui_load');
+    expect(load).toMatchObject({ bulk: true, fields: [{ name: 'layout', id: 1, type: 'UiLayout' }] });
+    expect(d.commands.find((x: Yaml) => x.name === 'clear').bulk).toBeUndefined();
+    // A capability without message types has no `messages` key, so its catalog entry is as before.
+    expect(c.find((x) => x.name === 'fr.led')!.messages).toBeUndefined();
   });
 });

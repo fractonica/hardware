@@ -264,6 +264,11 @@ export interface CommandOptions {
   duplicate?: boolean;
   bulk?: boolean;
   /**
+   * BULK and never on the air (design m2-c5-display D1: a capability command with `bulk: true`, fr.display ui_load):
+   * unlike `bulk` alone, a frame that would fit one ESP-NOW frame is not sent unflagged over a gateway either.
+   */
+  bulkOnly?: boolean;
+  /**
    * Hub µs to execute at (05 §5.6 EXT exec_at_us): the node's clock at that time through the TIME offset, low
    * 32 bits. INVALID_ARGS before the device is synced, and on a BULK CMD (the node refuses one, D22).
    */
@@ -3224,7 +3229,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     // args: over the realtime MTU it goes BULK, which a CMD carrying exec_at cannot (the node answers
     // INVALID_ARGS, D22).
     const extBytes = Math.max(7, ext.length ? 1 + ext.reduce((n, t) => n + 2 + t.value.length, 0) : 0);
-    let bulk = Boolean(opts.bulk) || 18 + extBytes + args.length > MTU.REALTIME;
+    let bulk = Boolean(opts.bulk) || Boolean(opts.bulkOnly) || 18 + extBytes + args.length > MTU.REALTIME;
     if (opts.execAt !== undefined && bulk) {
       return Promise.reject(new FrError('INVALID_ARGS', 'exec_at: a BULK command cannot carry exec_at'));
     }
@@ -3232,7 +3237,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       // No gateway carries it (one ESP-NOW frame, ≤ MTU.REALTIME, and the node drops BULK from the air): the device's
       // next link, unless the caller named the gateway; with none, refused now rather than lost on the air.
       const alt = opts.via ? undefined : this.#offAir(peer, session);
-      if (!alt && 18 + extBytes + args.length <= MTU.REALTIME) {
+      if (!alt && !opts.bulkOnly && 18 + extBytes + args.length <= MTU.REALTIME) {
         // Only the BULK flag (diag_exec, bind_list: an answer that may be long) keeps it off the air, and the frame
         // itself fits one: sent realtime, so the node answers within one frame, or UNSUPPORTED when its answer
         // would not fit (M2-C4 bench: `net wifi_down 0` and `stats bcast` over the gateway were refused here).
@@ -3246,7 +3251,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
         return Promise.reject(
           new FrError(
             opts.via ? 'INVALID_ARGS' : 'DEVICE_OFFLINE',
-            `${peer.alias} is reachable ${opts.via ? 'here' : 'only'} through gateway ${gw}, which carries one ESP-NOW frame (≤ ${MTU.REALTIME} B, no BULK): this command is ${size} B${opts.bulk ? ', BULK' : ''}`,
+            `${peer.alias} is reachable ${opts.via ? 'here' : 'only'} through gateway ${gw}, which carries one ESP-NOW frame (≤ ${MTU.REALTIME} B, no BULK): this command is ${size} B${opts.bulk || opts.bulkOnly ? ', BULK' : ''}`,
             {
               hint: opts.via ? 'send it without via, or over tcp or serial' : 'wait for its TCP or USB link, or send fewer args',
               details: { device: peer.id, link: 'gateway', gateway: key, gateway_alias: gw, bytes: size, bulk: true, mtu: MTU.REALTIME },

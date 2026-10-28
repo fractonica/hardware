@@ -155,7 +155,7 @@ struct LinkInfo {
 
 /** Node-side HEARTBEAT values Net cannot see from the core task's own state. */
 struct Vitals {
-    uint32_t free_heap_kb = 0;
+    uint32_t free_heap_kb = 0;  // internal RAM (MALLOC_CAP_INTERNAL): PSRAM is not counted
     uint32_t vbat_mv = 0;  // 0: not measured
     bool ota_busy = false;
     bool low_batt = false;

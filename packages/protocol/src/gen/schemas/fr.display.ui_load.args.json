@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.display.ui_load.args",
+  "title": "fr.display.ui_load arguments",
+  "description": "Replaces the screen with `layout` (LVGL panels; UNSUPPORTED where trait ui is false). BULK: TCP or serial, never over a gateway; the layout must fit one BULK frame.",
+  "type": "object",
+  "properties": {
+    "layout": {
+      "type": "object",
+      "properties": {
+        "bg": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "screen background"
+        },
+        "widgets": {
+          "type": "array",
+          "maxItems": 24,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "maxLength": 16,
+                "description": "(<= 16 UTF-8 bytes)"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "label",
+                  "button",
+                  "bar",
+                  "slider",
+                  "arc",
+                  "switch",
+                  "rect"
+                ]
+              },
+              "x": {
+                "type": "integer",
+                "minimum": -32768,
+                "maximum": 32767,
+                "description": "(px)"
+              },
+              "y": {
+                "type": "integer",
+                "minimum": -32768,
+                "maximum": 32767,
+                "description": "(px)"
+              },
+              "w": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535,
+                "description": "0: sized to its content (px)"
+              },
+              "h": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535,
+                "description": "0: sized to its content (px)"
+              },
+              "text": {
+                "type": "string",
+                "maxLength": 48,
+                "description": "label and button text (<= 48 UTF-8 bytes)"
+              },
+              "value": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647,
+                "description": "bar, slider, arc: the value; switch: 0 off, else on"
+              },
+              "min": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647,
+                "description": "bar, slider, arc: the range's bottom"
+              },
+              "max": {
+                "type": "integer",
+                "minimum": -2147483648,
+                "maximum": 2147483647,
+                "description": "bar, slider, arc: the range's top",
+                "default": 100
+              },
+              "color": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "text, indicator or fill colour",
+                "default": 16777215
+              },
+              "bg": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "background colour"
+              },
+              "font": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2,
+                "description": "0: 14 px, 1: 20 px, 2: 28 px (the built-in Montserrat sizes) (0..2)"
+              },
+              "align": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "center",
+                  "right"
+                ],
+                "description": "text alignment inside the widget"
+              }
+            },
+            "additionalProperties": false
+          },
+          "description": "(<= 24 items)"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "layout": {
+        "bg": 0,
+        "widgets": [
+          {
+            "id": "title",
+            "kind": "label",
+            "x": 10,
+            "y": 10,
+            "text": "Fractonica",
+            "font": 1
+          },
+          {
+            "id": "ok",
+            "kind": "button",
+            "x": 60,
+            "y": 120,
+            "w": 120,
+            "h": 50,
+            "text": "OK",
+            "bg": 2121920
+          }
+        ]
+      }
+    }
+  ]
+}

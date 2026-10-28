@@ -14,6 +14,7 @@
 #include "diag_json.hpp"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -218,7 +219,10 @@ Fail cmd_info(std::string_view, Host &host, cJSON *res, size_t)
     cJSON_AddStringToObject(res, "fw_id", host.fw_id());
     cJSON_AddStringToObject(res, "idf", app->idf_ver);
     cJSON_AddNumberToObject(res, "uptime_ms", static_cast<double>(esp_timer_get_time() / 1000));
-    cJSON_AddNumberToObject(res, "heap", esp_get_free_heap_size());
+    // heap: internal RAM free, in bytes (esp_get_free_heap_size() would add PSRAM, 8 MB on s3l/s3t, and hide an
+    // internal shortage); PSRAM free apart, 0 without PSRAM.
+    cJSON_AddNumberToObject(res, "heap", static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+    cJSON_AddNumberToObject(res, "psram_free_kb", static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
     cJSON_AddStringToObject(res, "reset", reset_reason());
     cJSON_AddStringToObject(res, "slot", running != nullptr ? running->label : "?");
     cJSON_AddBoolToObject(res, "inject_enabled", FR_TEST_HOOKS != 0);

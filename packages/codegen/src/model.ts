@@ -50,13 +50,18 @@ export interface EnumDef {
 }
 
 /**
- * protocol.yaml `types:` (DirectoryEntry, Descriptor): array elements of messages and of later types, and
- * encodable on their own (fr.node.describe carries an encoded Descriptor as bytes).
+ * A message-shaped type: protocol.yaml `types:` (DirectoryEntry, Descriptor), array elements of messages and of
+ * later types, and encodable on their own (fr.node.describe carries an encoded Descriptor as bytes); or a
+ * capability's `types:` entry with `fields:` (design m2-c5-display D2: fr.display UiLayout, UiWidget), which a
+ * command, result or event field may also hold directly (one nested message, `layout: UiLayout`).
  */
 export interface StructDef {
   name: string;
+  /** 'protocol' or the owning capability ('fr.display'), as for enums. */
+  scope: string;
   fields: Field[];
   maxSize: number;
+  doc?: string;
 }
 
 export type ElementType = { kind: 'scalar'; name: ScalarName } | { kind: 'enum'; def: EnumDef } | { kind: 'struct'; def: StructDef };
@@ -66,12 +71,15 @@ export type TypeRef =
   | { kind: 'enum'; def: EnumDef }
   | { kind: 'string'; max: number }
   | { kind: 'bytes'; max: number }
-  | { kind: 'array'; max: number; element: ElementType };
+  | { kind: 'array'; max: number; element: ElementType }
+  /** One nested message (capability fields only): always encoded; an absent one decodes as its defaults. */
+  | { kind: 'struct'; def: StructDef };
 
 /**
  * Field encoding (design c2 §3, spec 07 §7.5): `optional` is present iff set (structs carry
  * has_<field>); `always` has a non-zero default and is always encoded, so absent and 0 differ;
- * `implicit` is omitted when it equals its zero value.
+ * `implicit` is omitted when it equals its zero value. A nested message field is `always` (design m2-c5-display
+ * D2): written even when every field is at its default.
  */
 export type Presence = 'implicit' | 'always' | 'optional';
 
@@ -141,6 +149,11 @@ export interface Command {
   maxResult: number | null;
   /** Subject to the realtime payload budget (fast commands). */
   realtime: boolean;
+  /**
+   * `bulk: true` (design m2-c5-display D1): the command goes BULK (TCP or serial, never over a gateway), however
+   * small its args: its args may exceed the realtime budget (ui_load) or its answer is long (snapshot_read).
+   */
+  bulk: boolean;
 }
 
 export interface Event {
@@ -183,6 +196,8 @@ export interface Capability {
   doc?: string;
   mapsTo?: Record<string, string>;
   enums: EnumDef[];
+  /** Message types (`types:` entries with `fields:`), in YAML order: each may hold the ones before it. */
+  types: StructDef[];
   traits: Field[];
   config: ConfigEntry[];
   properties: Property[];
@@ -439,6 +454,8 @@ export function valueMaxSize(type: TypeRef, range?: [number, number]): number {
     case 'string':
     case 'bytes':
       return varintSize(type.max) + type.max;
+    case 'struct':
+      return varintSize(type.def.maxSize) + type.def.maxSize;
     case 'array': {
       const el = elementMaxSize(type.element);
       if (type.element.kind === 'struct') {
@@ -526,7 +543,10 @@ const RawCapability = z.strictObject({
   summary: z.string(),
   doc: z.string().optional(),
   maps_to: z.record(z.string(), z.string()).optional(),
-  types: z.record(z.string(), z.strictObject({ enum: z.record(z.string(), int) })).optional(),
+  // An enum, or a message type (design m2-c5-display D2) that fields may hold directly or in an array.
+  types: z
+    .record(z.string(), z.union([z.strictObject({ enum: z.record(z.string(), int) }), z.strictObject({ doc: z.string().optional(), fields: RawFields })]))
+    .optional(),
   traits: RawFields.optional(),
   config: z.record(z.string(), RawConfig).optional(),
   properties: z
@@ -551,6 +571,7 @@ const RawCapability = z.strictObject({
         delivery: z.enum(['fast', 'reliable']),
         idempotent: z.boolean().optional(),
         visibility: z.enum(['public', 'test']).optional(),
+        bulk: z.boolean().optional(),
         doc: z.string().optional(),
         fields: RawFields.optional(),
         result: RawFields.optional(),
@@ -686,6 +707,10 @@ interface Scope {
   enums: Map<string, EnumDef>;
   structs: Map<string, StructDef>;
   issues: Issues;
+  /** A field may hold one of `structs` directly, not only as an array element (capability fields). */
+  nested?: boolean;
+  /** No message types here at all (capability traits, config and properties): what holds them, for the issue. */
+  flat?: string;
 }
 
 function hex(n: number): string {
@@ -744,9 +769,13 @@ function resolveType(typeName: string, max: number | undefined, scope: Scope, pa
     } else if (scope.enums.has(inner)) {
       element = { kind: 'enum', def: scope.enums.get(inner)! };
     } else if (scope.structs.has(inner)) {
+      if (scope.flat) {
+        issues.add(file, [...path, 'type'], `${scope.flat} cannot hold message type '${inner}' (only command, result and event fields can)`);
+        return null;
+      }
       element = { kind: 'struct', def: scope.structs.get(inner)! };
     } else {
-      issues.add(file, [...path, 'type'], `unknown array element type '${inner}' (arrays hold scalars, enums or protocol types)`);
+      issues.add(file, [...path, 'type'], `unknown array element type '${inner}' (arrays hold scalars, enums or message types)`);
       return null;
     }
     const m = needMax('array');
@@ -762,6 +791,13 @@ function resolveType(typeName: string, max: number | undefined, scope: Scope, pa
     return { kind: 'enum', def: scope.enums.get(typeName)! };
   }
   if (scope.structs.has(typeName)) {
+    if (scope.flat) {
+      issues.add(file, [...path, 'type'], `${scope.flat} cannot hold message type '${typeName}' (only command, result and event fields can)`);
+      return null;
+    }
+    if (scope.nested) {
+      return { kind: 'struct', def: scope.structs.get(typeName)! };
+    }
     issues.add(file, [...path, 'type'], `type '${typeName}' may only be used as an array element (array<${typeName}>)`);
     return null;
   }
@@ -816,9 +852,6 @@ function checkValue(type: TypeRef, range: [number, number] | undefined, v: unkno
         return `array has ${v.length} elements, max ${type.max}`;
       }
       const el = type.element;
-      if (el.kind === 'struct') {
-        return null; // struct literals appear only in vectors, which their emitter checks
-      }
       const elType: TypeRef = el.kind === 'scalar' ? { kind: 'scalar', name: el.name } : el;
       for (const x of v) {
         const p = checkValue(elType, undefined, x);
@@ -828,7 +861,27 @@ function checkValue(type: TypeRef, range: [number, number] | undefined, v: unkno
       }
       return null;
     }
+    case 'struct':
+      return checkStruct(type.def, v);
   }
+}
+
+/** A message literal (examples): an object of known fields, each holding a value of its type. */
+function checkStruct(def: StructDef, v: unknown): string | null {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+    return `expected a ${def.name} object, got ${JSON.stringify(v)}`;
+  }
+  for (const [k, x] of Object.entries(v)) {
+    const f = def.fields.find((y) => y.name === k);
+    if (!f) {
+      return `'${k}' is not a field of ${def.name}`;
+    }
+    const p = checkValue(f.type, f.range, x);
+    if (p) {
+      return `${k}: ${p}`;
+    }
+  }
+  return null;
 }
 
 function isZero(type: TypeRef, v: JsonScalar): boolean {
@@ -874,7 +927,7 @@ function resolveCommon(name: string, raw: RawFieldLike, scope: Scope, path: Path
     }
   }
   if (raw.default !== undefined) {
-    if (type.kind === 'bytes' || type.kind === 'array') {
+    if (type.kind === 'bytes' || type.kind === 'array' || type.kind === 'struct') {
       issues.add(file, [...path, 'default'], `${type.kind} fields cannot have a default`);
     } else {
       const p = checkValue(type, raw.range, raw.default);
@@ -902,7 +955,12 @@ function buildField(name: string, raw: RawFieldT, scope: Scope, path: PathPart[]
     return null;
   }
   const optional = raw.optional === true;
-  const presence: Presence = optional ? 'optional' : common.default !== undefined && !isZero(common.type, common.default) ? 'always' : 'implicit';
+  if (optional && common.type.kind === 'struct') {
+    // Absent is its defaults, as in an array element: there is no "unset" message to tell apart.
+    scope.issues.add(scope.file, [...path, 'optional'], `a ${common.typeName} field cannot be optional; it is always encoded`);
+  }
+  const presence: Presence =
+    common.type.kind === 'struct' ? 'always' : optional ? 'optional' : common.default !== undefined && !isZero(common.type, common.default) ? 'always' : 'implicit';
   const field: Field = { name, id: raw.id, optional, presence, ...common, maxSize: 0 };
   field.maxSize = fieldMaxSize(field);
   return field;
@@ -1013,7 +1071,7 @@ function buildProtocol(raw: RawProtocol, file: string, issues: Issues): Protocol
     // Built against the types declared above it: a type may hold arrays of earlier types (the descriptor's
     // caps), and a later or its own name is unknown here, so types never recurse.
     const fields = buildFields(rawFields, { ...scope, structs: new Map(scope.structs) }, ['types', name]);
-    const def: StructDef = { name, fields, maxSize: maxEncodedSize(fields) };
+    const def: StructDef = { name, scope: 'protocol', fields, maxSize: maxEncodedSize(fields) };
     types.push(def);
     scope.structs.set(name, def);
   }
@@ -1309,14 +1367,39 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
     issues.add(file, ['ordered'], `${name} has no events; ordered applies to a capability's events`);
   }
 
-  const enums = Object.entries(raw.types ?? {}).map(([n, t]) => buildEnum(n, t.enum, name, file, ['types', n, 'enum'], issues));
+  const enums: EnumDef[] = [];
+  for (const [n, t] of Object.entries(raw.types ?? {})) {
+    if ('enum' in t) {
+      enums.push(buildEnum(n, t.enum, name, file, ['types', n, 'enum'], issues));
+    }
+  }
+  // Traits, config and properties hold scalars, enums, strings and arrays of them; message types are for
+  // command, result and event fields (design m2-c5-display D2).
   const scope: Scope = { file, enums: new Map(enums.map((e) => [e.name, e])), structs: new Map(), issues };
+  const types: StructDef[] = [];
+  for (const [n, t] of Object.entries(raw.types ?? {})) {
+    if ('enum' in t) {
+      continue;
+    }
+    if (!PASCAL.test(n)) {
+      issues.add(file, ['types', n], `type name '${n}' must be PascalCase`);
+    }
+    // As in protocol.yaml: a type may hold the types declared above it (directly or in arrays), so none recurses.
+    const fields = buildFields(t.fields, { ...scope, structs: new Map(scope.structs), nested: true }, ['types', n, 'fields']);
+    if (fields.length === 0) {
+      issues.add(file, ['types', n, 'fields'], 'a message type needs at least one field');
+    }
+    const def: StructDef = { name: n, scope: name, fields, maxSize: maxEncodedSize(fields), ...(t.doc !== undefined ? { doc: t.doc } : {}) };
+    types.push(def);
+    scope.structs.set(n, def);
+  }
+  const memberScope: Scope = { ...scope, nested: true };
 
-  const traits = buildFields(raw.traits, scope, ['traits']);
+  const traits = buildFields(raw.traits, { ...scope, flat: 'a trait' }, ['traits']);
 
   const config: ConfigEntry[] = [];
   for (const [n, c] of Object.entries(raw.config ?? {})) {
-    const common = resolveCommon(n, c as RawConfigT, scope, ['config', n]);
+    const common = resolveCommon(n, c as RawConfigT, { ...scope, flat: 'a config entry' }, ['config', n]);
     if (common) {
       config.push({ name: n, ...common });
     }
@@ -1341,7 +1424,7 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
   const properties: Property[] = [];
   for (const [n, p] of Object.entries(raw.properties ?? {})) {
     claim(n, 'properties');
-    const common = resolveCommon(n, { type: p.type, range: p.range, max: p.max }, scope, ['properties', n]);
+    const common = resolveCommon(n, { type: p.type, range: p.range, max: p.max }, { ...scope, flat: 'a property' }, ['properties', n]);
     if (!common) {
       continue;
     }
@@ -1370,8 +1453,8 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
   const commands: Command[] = [];
   for (const [n, c] of Object.entries(raw.commands ?? {})) {
     claim(n, 'commands');
-    const fields = buildFields(c.fields, scope, ['commands', n, 'fields']);
-    const result = c.result ? buildFields(c.result, scope, ['commands', n, 'result']) : null;
+    const fields = buildFields(c.fields, memberScope, ['commands', n, 'fields']);
+    const result = c.result ? buildFields(c.result, memberScope, ['commands', n, 'result']) : null;
     const examples: Record<string, JsonValue>[] = [];
     (c.examples ?? []).forEach((ex, i) => {
       for (const [k, val] of Object.entries(ex)) {
@@ -1401,16 +1484,20 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
       maxResult: result ? maxEncodedSize(result) : null,
       // Fast commands are fire-and-forget on the realtime path; reliable ones may go BULK (fr.diag.exec).
       realtime: c.delivery === 'fast',
+      bulk: c.bulk === true,
     };
     if (cmd.realtime && cmd.maxArgs > budget) {
       issues.add(file, ['commands', n], `worst-case CMD payload ${cmd.maxArgs} B exceeds the ${budget} B realtime budget`);
+    }
+    if (cmd.bulk && cmd.delivery !== 'reliable') {
+      issues.add(file, ['commands', n, 'bulk'], 'a bulk command is delivery: reliable (BULK is TCP or serial, never the fire-and-forget path)');
     }
     commands.push(cmd);
   }
 
   const events: Event[] = [];
   for (const [n, e] of Object.entries(raw.events ?? {})) {
-    const fields = buildFields(e.fields, scope, ['events', n, 'fields']);
+    const fields = buildFields(e.fields, memberScope, ['events', n, 'fields']);
     const requires = buildRequires(e.requires, traits, scope, ['events', n]);
     const ev: Event = {
       name: n,
@@ -1442,6 +1529,7 @@ function buildCapability(raw: RawCapability, file: string, registry: Registry, b
     ...(raw.doc !== undefined ? { doc: raw.doc } : {}),
     ...(raw.maps_to ? { mapsTo: raw.maps_to } : {}),
     enums,
+    types,
     traits,
     config,
     properties: properties.sort((a, b) => a.id - b.id),
@@ -1542,6 +1630,10 @@ export function buildCatalog(model: Model): Record<string, JsonValue> {
       ...(c.doc !== undefined ? { doc: c.doc } : {}),
       ...(c.mapsTo ? { maps_to: c.mapsTo } : {}),
       types: Object.fromEntries(c.enums.map((e) => [e.name, Object.fromEntries(e.members.map((m) => [m.name, m.value]))])),
+      // Message types (design m2-c5-display D2): what a field typed `UiLayout` or `array<UiWidget>` holds.
+      ...(c.types.length > 0
+        ? { messages: Object.fromEntries(c.types.map((t) => [t.name, { ...(t.doc !== undefined ? { doc: t.doc } : {}), fields: t.fields.map(fieldJson) }])) }
+        : {}),
       traits: c.traits.map(fieldJson),
       config: c.config.map((e) => ({
         name: e.name,
@@ -1568,6 +1660,7 @@ export function buildCatalog(model: Model): Record<string, JsonValue> {
         delivery: cmd.delivery,
         idempotent: cmd.idempotent,
         visibility: cmd.visibility,
+        ...(cmd.bulk ? { bulk: true } : {}),
         ...(cmd.doc !== undefined ? { doc: cmd.doc } : {}),
         fields: cmd.fields.map(fieldJson),
         ...(cmd.result ? { result: cmd.result.map(fieldJson) } : {}),

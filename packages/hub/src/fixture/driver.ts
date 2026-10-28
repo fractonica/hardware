@@ -584,9 +584,10 @@ export class Driver {
       const results = await Promise.all(devices.map((d, i) => this.setMv(d, input.instance, mvs[i], { timeoutMs })));
       return { results, cursor };
     }
-    // Gated before anything is sent: one refused device refuses the op, as invalid args do on inject.
+    // Gated before anything is sent: one refused device refuses the op, as invalid args do on inject. A touch
+    // gesture never gets here (inputKind refuses a touch on gpio and a touch gesture without x, y).
     for (const d of devices) {
-      this.gate(d, input.instance, input.gesture);
+      this.gate(d, input.instance, input.gesture as InputGesture);
     }
     gated?.();
     const results = await Promise.all(devices.map((d) => this.gesture(d, input)));

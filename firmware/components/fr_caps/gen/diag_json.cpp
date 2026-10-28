@@ -12,8 +12,10 @@
 #include "cJSON.h"
 #include "button.hpp"
 #include "led.hpp"
+#include "display.hpp"
 #include "analog_in.hpp"
 #include "fixture.hpp"
+#include "touch.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -25,8 +27,10 @@ namespace {
 
 cJSON *to_json(const ButtonTraits &v);
 cJSON *to_json(const LedTraits &v);
+cJSON *to_json(const DisplayTraits &v);
 cJSON *to_json(const AnalogInTraits &v);
 cJSON *to_json(const FixtureTraits &v);
+cJSON *to_json(const TouchTraits &v);
 #if FR_TEST_HOOKS
 cJSON *to_json(const ButtonInjectArgs &v);
 cJSON *to_json(const ButtonDown &v);
@@ -36,6 +40,19 @@ cJSON *to_json(const ButtonLongPress &v);
 cJSON *to_json(const LedSetArgs &v);
 cJSON *to_json(const LedBlinkArgs &v);
 cJSON *to_json(const LedEffectDone &v);
+cJSON *to_json(const DisplayUiWidget &v);
+cJSON *to_json(const DisplayUiLayout &v);
+cJSON *to_json(const DisplayClearArgs &v);
+cJSON *to_json(const DisplayTextArgs &v);
+cJSON *to_json(const DisplayFillRectArgs &v);
+cJSON *to_json(const DisplaySetBrightnessArgs &v);
+cJSON *to_json(const DisplayUiLoadArgs &v);
+cJSON *to_json(const DisplayUiLoadResult &v);
+cJSON *to_json(const DisplayUiSetArgs &v);
+cJSON *to_json(const DisplaySnapshotResult &v);
+cJSON *to_json(const DisplaySnapshotReadArgs &v);
+cJSON *to_json(const DisplaySnapshotReadResult &v);
+cJSON *to_json(const DisplayUi &v);
 cJSON *to_json(const AnalogInInjectArgs &v);
 cJSON *to_json(const AnalogInReadResult &v);
 cJSON *to_json(const AnalogInCrossed &v);
@@ -46,6 +63,10 @@ cJSON *to_json(const FixtureSetDutyArgs &v);
 cJSON *to_json(const FixtureSetDutyResult &v);
 cJSON *to_json(const FixtureEdges &v);
 cJSON *to_json(const FixtureFrame &v);
+cJSON *to_json(const TouchInjectArgs &v);
+cJSON *to_json(const TouchDown &v);
+cJSON *to_json(const TouchUp &v);
+cJSON *to_json(const TouchGesture &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
 cJSON *to_json(const NodeDescribeResult &v);
 cJSON *to_json(const NodeRebootArgs &v);
@@ -366,6 +387,18 @@ cJSON *to_json(const LedTraits &v)
     return finish(o, ok);
 }
 
+cJSON *to_json(const DisplayTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "width", json_number(v.width));
+    ok = ok && add(o, "height", json_number(v.height));
+    ok = ok && add(o, "color", json_enum(v.color));
+    ok = ok && add(o, "ui", json_bool(v.ui));
+    ok = ok && add(o, "touch", json_bool(v.touch));
+    return finish(o, ok);
+}
+
 cJSON *to_json(const AnalogInTraits &v)
 {
     cJSON *o = cJSON_CreateObject();
@@ -381,6 +414,16 @@ cJSON *to_json(const FixtureTraits &v)
     bool ok = o != nullptr;
     ok = ok && add(o, "drive", json_enum(v.drive));
     ok = ok && add(o, "decode", json_enum(v.decode));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const TouchTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "width", json_number(v.width));
+    ok = ok && add(o, "height", json_number(v.height));
+    ok = ok && add(o, "display", json_number(v.display));
     return finish(o, ok);
 }
 
@@ -456,6 +499,145 @@ cJSON *to_json(const LedEffectDone &v)
     cJSON *o = cJSON_CreateObject();
     bool ok = o != nullptr;
     ok = ok && add(o, "effect", json_enum(v.effect));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayUiWidget &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "id", json_string(v.id));
+    ok = ok && add(o, "kind", json_enum(v.kind));
+    ok = ok && add(o, "x", json_number(v.x));
+    ok = ok && add(o, "y", json_number(v.y));
+    ok = ok && add(o, "w", json_number(v.w));
+    ok = ok && add(o, "h", json_number(v.h));
+    ok = ok && add(o, "text", json_string(v.text));
+    ok = ok && add(o, "value", json_number(v.value));
+    ok = ok && add(o, "min", json_number(v.min));
+    ok = ok && add(o, "max", json_number(v.max));
+    ok = ok && add(o, "color", json_number(v.color));
+    ok = ok && add(o, "bg", json_number(v.bg));
+    ok = ok && add(o, "font", json_number(v.font));
+    ok = ok && add(o, "align", json_enum(v.align));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayUiLayout &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "bg", json_number(v.bg));
+    ok = ok && add(o, "widgets", json_array(v.widgets, [](const DisplayUiWidget &e) { return to_json(e); }));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayClearArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "color", json_number(v.color));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayTextArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "x", json_number(v.x));
+    ok = ok && add(o, "y", json_number(v.y));
+    ok = ok && add(o, "text", json_string(v.text));
+    ok = ok && add(o, "color", json_number(v.color));
+    ok = ok && add(o, "bg", json_number(v.bg));
+    ok = ok && add(o, "size", json_number(v.size));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayFillRectArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "x", json_number(v.x));
+    ok = ok && add(o, "y", json_number(v.y));
+    ok = ok && add(o, "w", json_number(v.w));
+    ok = ok && add(o, "h", json_number(v.h));
+    ok = ok && add(o, "color", json_number(v.color));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplaySetBrightnessArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "level", json_number(v.level));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayUiLoadArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "layout", to_json(v.layout));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayUiLoadResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "widgets", json_number(v.widgets));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayUiSetArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "id", json_string(v.id));
+    ok = ok && add(o, "text", json_string(v.text));
+    ok = ok && add(o, "value", json_number(v.value));
+    ok = ok && add(o, "color", json_number(v.color));
+    ok = ok && add(o, "visible", json_bool(v.visible));
+    ok = ok && add(o, "fields", json_number(v.fields));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplaySnapshotResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "crc", json_number(v.crc));
+    ok = ok && add(o, "width", json_number(v.width));
+    ok = ok && add(o, "height", json_number(v.height));
+    ok = ok && add(o, "format", json_enum(v.format));
+    ok = ok && add(o, "bytes", json_number(v.bytes));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplaySnapshotReadArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "offset", json_number(v.offset));
+    ok = ok && add(o, "len", json_number(v.len));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplaySnapshotReadResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "data", json_bytes(v.data));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const DisplayUi &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "id", json_string(v.id));
+    ok = ok && add(o, "kind", json_enum(v.kind));
+    ok = ok && add(o, "value", json_number(v.value));
     return finish(o, ok);
 }
 
@@ -550,6 +732,42 @@ cJSON *to_json(const FixtureFrame &v)
     bool ok = o != nullptr;
     ok = ok && add(o, "bits", json_number(v.bits));
     ok = ok && add(o, "grb", json_number(v.grb));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const TouchInjectArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "x", json_number(v.x));
+    ok = ok && add(o, "y", json_number(v.y));
+    ok = ok && add(o, "gesture", json_enum(v.gesture));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const TouchDown &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "x", json_number(v.x));
+    ok = ok && add(o, "y", json_number(v.y));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const TouchUp &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "x", json_number(v.x));
+    ok = ok && add(o, "y", json_number(v.y));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const TouchGesture &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "kind", json_enum(v.kind));
     return finish(o, ok);
 }
 
@@ -688,6 +906,69 @@ cJSON *to_json(const DiagMark &v)
     return finish(o, ok);
 }
 
+bool from_json_display_ui_widget(const cJSON *j, DisplayUiWidget &v)
+{
+    if (!cJSON_IsObject(j)) {
+        return false;
+    }
+    bool ok = true;
+    for (const cJSON *it = j->child; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "id") {
+            ok = from_json_string(it, 16, v.id);
+        } else if (key == "kind") {
+            ok = from_json_enum(it, v.kind);
+        } else if (key == "x") {
+            ok = from_json_sint(it, -0x8000, 0x7FFF, v.x);
+        } else if (key == "y") {
+            ok = from_json_sint(it, -0x8000, 0x7FFF, v.y);
+        } else if (key == "w") {
+            ok = from_json_uint(it, 0xFFFF, v.w);
+        } else if (key == "h") {
+            ok = from_json_uint(it, 0xFFFF, v.h);
+        } else if (key == "text") {
+            ok = from_json_string(it, 48, v.text);
+        } else if (key == "value") {
+            ok = from_json_sint(it, INT32_MIN, INT32_MAX, v.value);
+        } else if (key == "min") {
+            ok = from_json_sint(it, INT32_MIN, INT32_MAX, v.min);
+        } else if (key == "max") {
+            ok = from_json_sint(it, INT32_MIN, INT32_MAX, v.max);
+        } else if (key == "color") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.color);
+        } else if (key == "bg") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.bg);
+        } else if (key == "font") {
+            ok = from_json_uint(it, 0xFF, v.font);
+        } else if (key == "align") {
+            ok = from_json_enum(it, v.align);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    return ok;
+}
+
+bool from_json_display_ui_layout(const cJSON *j, DisplayUiLayout &v)
+{
+    if (!cJSON_IsObject(j)) {
+        return false;
+    }
+    bool ok = true;
+    for (const cJSON *it = j->child; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "bg") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.bg);
+        } else if (key == "widgets") {
+            ok = from_json_array(it, v.widgets,
+                [](const cJSON *e, DisplayUiWidget &out) { return from_json_display_ui_widget(e, out); });
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    return ok;
+}
+
 Status args_button_inject(const cJSON *obj, fr::wire::Writer &w)
 {
     ButtonInjectArgs v{};
@@ -774,6 +1055,177 @@ Status args_led_stop(const cJSON *obj)
     return {};
 }
 
+Status args_display_clear(const cJSON *obj, fr::wire::Writer &w)
+{
+    DisplayClearArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "color") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.color);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_display_text(const cJSON *obj, fr::wire::Writer &w)
+{
+    DisplayTextArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "x") {
+            ok = from_json_sint(it, -0x8000, 0x7FFF, v.x);
+        } else if (key == "y") {
+            ok = from_json_sint(it, -0x8000, 0x7FFF, v.y);
+        } else if (key == "text") {
+            ok = from_json_string(it, 64, v.text);
+        } else if (key == "color") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.color);
+        } else if (key == "bg") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.bg);
+        } else if (key == "size") {
+            ok = from_json_uint(it, 0xFF, v.size);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_display_fill_rect(const cJSON *obj, fr::wire::Writer &w)
+{
+    DisplayFillRectArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "x") {
+            ok = from_json_sint(it, -0x8000, 0x7FFF, v.x);
+        } else if (key == "y") {
+            ok = from_json_sint(it, -0x8000, 0x7FFF, v.y);
+        } else if (key == "w") {
+            ok = from_json_uint(it, 0xFFFF, v.w);
+        } else if (key == "h") {
+            ok = from_json_uint(it, 0xFFFF, v.h);
+        } else if (key == "color") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.color);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_display_set_brightness(const cJSON *obj, fr::wire::Writer &w)
+{
+    DisplaySetBrightnessArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "level") {
+            ok = from_json_uint(it, 0xFF, v.level);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_display_ui_load(const cJSON *obj, fr::wire::Writer &w)
+{
+    DisplayUiLoadArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "layout") {
+            ok = from_json_display_ui_layout(it, v.layout);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_display_ui_set(const cJSON *obj, fr::wire::Writer &w)
+{
+    DisplayUiSetArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "id") {
+            ok = from_json_string(it, 16, v.id);
+        } else if (key == "text") {
+            ok = from_json_string(it, 64, v.text);
+        } else if (key == "value") {
+            ok = from_json_sint(it, INT32_MIN, INT32_MAX, v.value);
+        } else if (key == "color") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.color);
+        } else if (key == "visible") {
+            ok = from_json_bool(it, v.visible);
+        } else if (key == "fields") {
+            ok = from_json_uint(it, 0xFF, v.fields);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_display_snapshot(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_display_snapshot_read(const cJSON *obj, fr::wire::Writer &w)
+{
+    DisplaySnapshotReadArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "offset") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.offset);
+        } else if (key == "len") {
+            ok = from_json_uint(it, 0xFFFF, v.len);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
 Status args_analog_in_inject(const cJSON *obj, fr::wire::Writer &w)
 {
     AnalogInInjectArgs v{};
@@ -847,6 +1299,29 @@ Status args_fixture_set_duty(const cJSON *obj, fr::wire::Writer &w)
         const std::string_view key = it->string != nullptr ? it->string : "";
         if (key == "duty") {
             ok = from_json_uint(it, 0xFFFF, v.duty);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_touch_inject(const cJSON *obj, fr::wire::Writer &w)
+{
+    TouchInjectArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "x") {
+            ok = from_json_uint(it, 0xFFFF, v.x);
+        } else if (key == "y") {
+            ok = from_json_uint(it, 0xFFFF, v.y);
+        } else if (key == "gesture") {
+            ok = from_json_enum(it, v.gesture);
         } else {
             ok = false;  // unknown key
         }
@@ -1184,6 +1659,73 @@ cJSON *led_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
     return nullptr;
 }
 
+cJSON *display_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Display::kCmdClear:
+            return json_of(decode_display_clear_args(body));
+        case Display::kCmdText:
+            return json_of(decode_display_text_args(body));
+        case Display::kCmdFillRect:
+            return json_of(decode_display_fill_rect_args(body));
+        case Display::kCmdSetBrightness:
+            return json_of(decode_display_set_brightness_args(body));
+        case Display::kCmdUiLoad:
+            return json_of(decode_display_ui_load_args(body));
+        case Display::kCmdUiSet:
+            return json_of(decode_display_ui_set_args(body));
+        case Display::kCmdSnapshot:
+            return json_empty(body);
+        case Display::kCmdSnapshotRead:
+            return json_of(decode_display_snapshot_read_args(body));
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Display::kCmdClear:
+            return json_empty(body);
+        case Display::kCmdText:
+            return json_empty(body);
+        case Display::kCmdFillRect:
+            return json_empty(body);
+        case Display::kCmdSetBrightness:
+            return json_empty(body);
+        case Display::kCmdUiLoad:
+            return json_of(decode_display_ui_load_result(body));
+        case Display::kCmdUiSet:
+            return json_empty(body);
+        case Display::kCmdSnapshot:
+            return json_of(decode_display_snapshot_result(body));
+        case Display::kCmdSnapshotRead:
+            return json_of(decode_display_snapshot_read_result(body));
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Display::kEventUi:
+            return json_of(decode_display_ui(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Display::kPropBrightness: {
+            const auto v = decode_display_brightness_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "brightness", json_number(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
 cJSON *analog_in_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
 {
     switch (cls) {
@@ -1271,6 +1813,49 @@ cJSON *fixture_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
             }
             cJSON *o = cJSON_CreateObject();
             return finish(o, o != nullptr && add(o, "level", json_bool(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
+cJSON *touch_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Touch::kCmdInject:
+            return json_of(decode_touch_inject_args(body));
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Touch::kCmdInject:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Touch::kEventDown:
+            return json_of(decode_touch_down(body));
+        case Touch::kEventUp:
+            return json_of(decode_touch_up(body));
+        case Touch::kEventGesture:
+            return json_of(decode_touch_gesture(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Touch::kPropPressed: {
+            const auto v = decode_touch_pressed_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "pressed", json_bool(*v)));
         }
         }
         break;
@@ -1391,10 +1976,14 @@ cJSON *traits_to_json(uint16_t cap_id, std::span<const uint8_t> traits)
         return json_of(decode_button_traits(traits));
     case Led::kId:
         return json_of(decode_led_traits(traits));
+    case Display::kId:
+        return json_of(decode_display_traits(traits));
     case AnalogIn::kId:
         return json_of(decode_analog_in_traits(traits));
     case Fixture::kId:
         return json_of(decode_fixture_traits(traits));
+    case Touch::kId:
+        return json_of(decode_touch_traits(traits));
     case Node::kId:
         return json_empty(traits);
     case Ota::kId:
@@ -1457,6 +2046,33 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_led_stop(obj);
         }
         break;
+    case Display::kId:
+        if (name == "clear") {
+            id = Display::kCmdClear;
+            s = args_display_clear(obj, w);
+        } else if (name == "text") {
+            id = Display::kCmdText;
+            s = args_display_text(obj, w);
+        } else if (name == "fill_rect") {
+            id = Display::kCmdFillRect;
+            s = args_display_fill_rect(obj, w);
+        } else if (name == "set_brightness") {
+            id = Display::kCmdSetBrightness;
+            s = args_display_set_brightness(obj, w);
+        } else if (name == "ui_load") {
+            id = Display::kCmdUiLoad;
+            s = args_display_ui_load(obj, w);
+        } else if (name == "ui_set") {
+            id = Display::kCmdUiSet;
+            s = args_display_ui_set(obj, w);
+        } else if (name == "snapshot") {
+            id = Display::kCmdSnapshot;
+            s = args_display_snapshot(obj);
+        } else if (name == "snapshot_read") {
+            id = Display::kCmdSnapshotRead;
+            s = args_display_snapshot_read(obj, w);
+        }
+        break;
     case AnalogIn::kId:
         if (name == "inject") {
             id = AnalogIn::kCmdInject;
@@ -1479,6 +2095,12 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
         } else if (name == "set_duty") {
             id = Fixture::kCmdSetDuty;
             s = args_fixture_set_duty(obj, w);
+        }
+        break;
+    case Touch::kId:
+        if (name == "inject") {
+            id = Touch::kCmdInject;
+            s = args_touch_inject(obj, w);
         }
         break;
     case Node::kId:
@@ -1538,10 +2160,14 @@ cJSON *decode_to_json(uint16_t cap_id, uint8_t cls, uint8_t member_id, std::span
         return button_to_json(cls, member_id, body);
     case Led::kId:
         return led_to_json(cls, member_id, body);
+    case Display::kId:
+        return display_to_json(cls, member_id, body);
     case AnalogIn::kId:
         return analog_in_to_json(cls, member_id, body);
     case Fixture::kId:
         return fixture_to_json(cls, member_id, body);
+    case Touch::kId:
+        return touch_to_json(cls, member_id, body);
     case Node::kId:
         return node_to_json(cls, member_id, body);
     case Ota::kId:

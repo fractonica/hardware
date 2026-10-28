@@ -102,6 +102,9 @@ function zeroJson(t: TypeRef): JsonValue {
       return '';
     case 'array':
       return [];
+    case 'struct':
+      // An absent nested message decodes as its defaults.
+      return normalize(t.def.fields, {});
   }
 }
 
@@ -124,6 +127,8 @@ function isZeroJson(t: TypeRef, v: JsonValue): boolean {
       return v === '';
     case 'array':
       return (v as JsonValue[]).length === 0;
+    case 'struct':
+      return false; // always written
   }
 }
 
@@ -246,6 +251,12 @@ function writeField(w: Writer, f: Field, v: JsonValue, where: string, mode: Mode
       const m = w.beginLen(f.id);
       items.forEach((x, i) => writeElement(w, el, x, `${where}[${i}]`, mode));
       w.endLen(m);
+      return;
+    }
+    case 'struct': {
+      const m = w.beginLen(f.id);
+      writeFields(w, t.def.fields, v as Obj, where, mode);
+      w.endLen(m);
     }
   }
 }
@@ -297,6 +308,8 @@ function normalize(fields: readonly Field[], value: Obj): Obj {
     } else if (t.kind === 'array' && t.element.kind === 'struct') {
       const def = t.element.def;
       out[f.name] = (v as Obj[]).map((x) => normalize(def.fields, x));
+    } else if (t.kind === 'struct') {
+      out[f.name] = normalize(t.def.fields, v as Obj);
     } else {
       out[f.name] = v;
     }
@@ -379,6 +392,8 @@ function sampleValue(f: Field, k: number): JsonValue {
       const n = Math.min(t.max, t.element.kind === 'struct' ? 2 : 3);
       return Array.from({ length: n }, (_, i) => sampleElement(t.element, k + i));
     }
+    case 'struct':
+      return sampleObj(t.def.fields, k);
   }
 }
 
@@ -422,6 +437,8 @@ function maxValue(f: Field, k: number): JsonValue {
       return bytesPattern(t.max, k);
     case 'array':
       return Array.from({ length: t.max }, (_, i) => maxElement(t.element, k + i));
+    case 'struct':
+      return maxObj(t.def.fields, k);
   }
 }
 
@@ -925,6 +942,41 @@ function capCases(b: Builder): void {
   capEdgeCases(b, c);
 }
 
+/**
+ * fr.display ui_load (design m2-c5-display D2): 24 widgets, every kind, the longest texts with which the args still
+ * fit one BULK frame (MTU bulk, less the header and the hub's EXT expire_at block): the largest layout an agent
+ * can load in practice. The schema's worst case (every field at its max) is about twice that.
+ */
+function bulkLayout(b: Builder): Obj {
+  const kinds = ['label', 'button', 'bar', 'slider', 'arc', 'switch', 'rect'];
+  const room = b.model.protocol.mtu.bulk - b.model.protocol.headerSize - 7;
+  const layout = (len: number): Obj => ({
+    bg: 0x101820,
+    widgets: Array.from({ length: 24 }, (_, i) => ({
+      id: `w${String(i).padStart(2, '0')}`,
+      kind: kinds[i % kinds.length],
+      x: (i % 4) * 60,
+      y: Math.floor(i / 4) * 52,
+      w: 56,
+      h: 48,
+      text: asciiOf(len, i),
+      value: i * 4,
+      ...(i % 3 === 0 ? { min: -100 } : {}),
+      color: 0xffffff - i,
+      bg: 0x2060c0 + i,
+      font: i % 3,
+      align: i % 2 === 0 ? 'left' : 'center',
+    })),
+  });
+  for (let len = 48; len >= 0; len--) {
+    const value = { layout: layout(len) };
+    if (bytesOf(b.encode('fr.display.ui_load.args', value)[0]).length <= room) {
+      return value;
+    }
+  }
+  throw new Error('no 24-widget layout fits one BULK frame');
+}
+
 function capOf(model: Model, name: string): Capability | undefined {
   return model.capabilities.find((x) => x.name === name);
 }
@@ -1032,6 +1084,25 @@ function capEdgeCases(b: Builder, c: Cases): void {
   }
   if (hasMember(m, 'fr.fixture', 'events', 'frame')) {
     b.value(c, 'cap', 'fr.fixture.frame.event', 'green_24_bits', { bits: 24, grb: 0x400000 });
+  }
+  if (hasMember(m, 'fr.display', 'commands', 'ui_load')) {
+    // Design m2-c5-display D2: a nested message (field 1) holding repeated messages (UiLayout.widgets, field 2).
+    const T = 'fr.display.ui_load.args';
+    b.value(c, 'cap', T, 'bulk_frame_24', bulkLayout(b));
+    b.value(c, 'cap', T, 'empty_layout', { layout: {} });
+    // A repeated nested message replaces the earlier one (last wins, as for scalars), in both codecs.
+    b.decodeOnly(c, 'cap', T, 'layout_last_wins', '0a020801 0a020802', { layout: { bg: 2 } });
+    // Absent: the layout's defaults.
+    b.decodeOnly(c, 'cap', T, 'layout_absent', '', {});
+    c.error(`${T}.error_too_many_widgets`, 'cap', T, `0a32${'1200'.repeat(25)}`, 'too_long');
+    c.error(`${T}.error_widget_truncated`, 'cap', T, '0a04 1202 0a05', 'truncated');
+    b.lenient(c, 'cap', T, 'font_3', { layout: { widgets: [{ font: 3 }] } });
+  }
+  if (hasMember(m, 'fr.display', 'commands', 'ui_set')) {
+    b.value(c, 'cap', 'fr.display.ui_set.args', 'value_and_color', { id: 'bar1', value: 42, color: 0x00ff00, fields: 6 });
+  }
+  if (hasMember(m, 'fr.touch', 'events', 'down')) {
+    b.value(c, 'cap', 'fr.touch.down.event', 'corner', { x: 239, y: 319 });
   }
 }
 
@@ -1200,6 +1271,25 @@ function envelopeSpecs(model: Model): EnvSpec[] {
       body: { type: 'fr.node.bind_set.args', value: BINDING_NN },
     });
   }
+  if (hasMember(model, 'fr.display', 'commands', 'ui_load')) {
+    // Design m2-c5-display D1: ui_load is BULK (TCP or serial), with the hub's EXT expire_at; one frame.
+    const load = capOf(model, 'fr.display')!.commands.find((x) => x.name === 'ui_load')!;
+    out.push({
+      name: 'cmd.display_ui_load_bulk',
+      header: hdr({ flags: FLAG.ACK_REQ | FLAG.BULK | FLAG.EXT, cls: CLS.CMD, kind: load.id, seq: 8, src: 0x0000, dst: 0x0012, epoch: 9, port: 3, ext: [extTlv(EXT.EXPIRE_AT_US, 0x00989680)] }),
+      prefix: none,
+      body: { type: 'fr.display.ui_load.args', value: bulkLayoutOf(model) },
+    });
+  }
+  if (hasMember(model, 'fr.touch', 'events', 'down')) {
+    // A realtime touch: URGENT, like a button edge.
+    out.push({
+      name: 'event.touch_down',
+      header: hdr({ flags: FLAG.URGENT, cls: CLS.EVENT, kind: 1, seq: 30, port: 3 }),
+      prefix: { type: 'time', t_us: 2_000_000 },
+      body: { type: 'fr.touch.down.event', value: { x: 120, y: 145 } },
+    });
+  }
   if (has(model, 'LOG.LINE')) {
     out.push({
       name: 'log.info',
@@ -1254,6 +1344,11 @@ function envelopeSpecs(model: Model): EnvSpec[] {
   return out;
 }
 
+/** bulkLayout() for envelopeSpecs, which has the model only. */
+function bulkLayoutOf(model: Model): Obj {
+  return bulkLayout(new Builder(model));
+}
+
 function envelopeCases(b: Builder): Map<string, Uint8Array> {
   const bytes = new Map<string, Uint8Array>();
   for (const e of envelopeSpecs(b.model)) {
@@ -1265,6 +1360,9 @@ function envelopeCases(b: Builder): Map<string, Uint8Array> {
       extra = { body_type: e.body.type, body_value: value };
     }
     const env = packEnvelope({ header: e.header, prefix: e.prefix, body });
+    if (env.length > b.model.protocol.mtu.bulk) {
+      throw new Error(`envelope ${e.name}: ${env.length} B exceeds the ${b.model.protocol.mtu.bulk} B bulk MTU`);
+    }
     bytes.set(e.name, env);
     b.envelope.add({
       name: `envelope.${e.name}`,

@@ -30,6 +30,7 @@ import {
   type ScalarName,
   type SerialBody,
   type SerialLayoutField,
+  type StructDef,
   type TypeRef,
 } from '../model.ts';
 
@@ -143,10 +144,17 @@ function catOf(name: ScalarName): Cat {
   return isSigned(name) ? 'sint' : 'uint';
 }
 
-/** Resolves enum identifiers within one generated module. */
+/** Resolves enum and message type identifiers within one generated module. */
 interface Ctx {
   enumName(def: EnumDef): string;
   enumNames(def: EnumDef): string;
+  /** A message type's interface and codec name: DirectoryEntry, DisplayUiLayout (a capability's, prefixed). */
+  structName(def: StructDef): string;
+}
+
+/** The JSON field table of a message type: DIRECTORY_ENTRY_JSON, DISPLAY_UI_LAYOUT_JSON. */
+function structJson(def: StructDef, ctx: Ctx): string {
+  return `${upperSnake(snakeOf(ctx.structName(def)))}_JSON`;
 }
 
 const UNDERLYING_MAX = { u8: 0xff, u16: 0xffff, u32: 0xffffffff } as const;
@@ -160,7 +168,7 @@ function tsType(t: TypeRef | ElementType, ctx: Ctx): string {
     case 'enum':
       return `${ctx.enumName(t.def)} | number`;
     case 'struct':
-      return t.def.name;
+      return ctx.structName(t.def);
     case 'string':
       return 'string';
     case 'bytes':
@@ -216,6 +224,9 @@ function zeroLit(t: TypeRef, where: string, fresh: boolean): string {
       return fresh ? 'new Uint8Array(0)' : '$.EMPTY';
     case 'array':
       return '[]';
+    case 'struct':
+      // Always a fresh object: an absent message decodes as its defaults.
+      return initObject(t.def.fields, `${where} (${t.def.name})`);
   }
 }
 
@@ -280,6 +291,9 @@ function wireMax(fields: readonly Field[]): number {
       } else {
         n += tagSize(f.id) + varintSize(t.max * el) + t.max * el;
       }
+    } else if (t.kind === 'struct') {
+      const body = valueWireMax(t);
+      n += tagSize(f.id) + varintSize(body) + body;
     } else {
       n += tagSize(f.id) + valueWireMax(t);
     }
@@ -343,6 +357,8 @@ function writeCall(t: TypeRef, id: number, x: string): string {
       return `w.fieldBytes(${id}, ${x})`;
     case 'array':
       throw new Error('arrays are written element by element');
+    case 'struct':
+      throw new Error('messages are written into their own length-delimited field');
   }
 }
 
@@ -397,6 +413,15 @@ function nonZero(t: TypeRef, v: string): string {
 function emitEncodeField(c: Code, f: Field, src: string, label: string, where: string, ctx: Ctx): void {
   const t = f.type;
   const v = `f${f.id}`;
+  if (t.kind === 'struct') {
+    // Always written (presence `always`): an absent message is written with its defaults.
+    c.open('{');
+    c.line(`const m = w.beginLen(${f.id});`);
+    c.line(`write${ctx.structName(t.def)}(w, ${src} ?? {}, ${lit(label)});`);
+    c.line('w.endLen(m);');
+    c.close();
+    return;
+  }
   if (t.kind === 'array') {
     const el = t.element;
     const elLabel = `${label}[\${i}]`;
@@ -413,7 +438,7 @@ function emitEncodeField(c: Code, f: Field, src: string, label: string, where: s
     if (el.kind === 'struct') {
       c.open(`for (let i = 0; i < ${v}.length; i++) {`);
       c.line(`const m = w.beginLen(${f.id});`);
-      c.line(`write${el.def.name}(w, ${v}[i], ${lit(elLabel)});`);
+      c.line(`write${ctx.structName(el.def)}(w, ${v}[i], ${lit(elLabel)});`);
       c.line('w.endLen(m);');
       c.close();
     } else {
@@ -475,6 +500,8 @@ function readExpr(f: Field, ctx: Ctx): string {
       }
       return `$.readPacked(r, ${t.max}, (p) => ${rawElement(el, ctx)})`;
     }
+    case 'struct':
+      return `$.readNested(r, read${ctx.structName(t.def)}, v.${f.name})`;
   }
 }
 
@@ -509,7 +536,7 @@ function emitReadLoop(c: Code, fields: readonly Field[], ctx: Ctx): void {
   for (const f of fields) {
     c.open(`case ${f.id}:`);
     if (f.type.kind === 'array' && f.type.element.kind === 'struct') {
-      c.line(`$.readRepeated(r, v.${f.name}, ${f.type.max}, read${f.type.element.def.name});`);
+      c.line(`$.readRepeated(r, v.${f.name}, ${f.type.max}, read${ctx.structName(f.type.element.def)});`);
     } else {
       c.line(`v.${f.name} = ${readExpr(f, ctx)};`);
     }
@@ -624,7 +651,9 @@ function jsonFieldsLit(fields: readonly Field[], ctx: Ctx): string {
     if (t.kind === 'bytes' || (t.kind === 'scalar' && t.name === 'u64') || (t.kind === 'array' && t.element.kind === 'scalar' && t.element.name === 'u64')) {
       parts.push(`json: '${t.kind === 'bytes' ? 'bytes' : 'u64'}'`);
     } else if (t.kind === 'array' && t.element.kind === 'struct') {
-      parts.push(`json: ${upperSnake(snakeOf(t.element.def.name))}_JSON`);
+      parts.push(`json: ${structJson(t.element.def, ctx)}`);
+    } else if (t.kind === 'struct') {
+      parts.push(`json: ${structJson(t.def, ctx)}`);
     }
     const def = t.kind === 'enum' ? t.def : t.kind === 'array' && t.element.kind === 'enum' ? t.element.def : null;
     if (def) {
@@ -689,8 +718,9 @@ function enumsOf(fields: readonly Field[]): EnumDef[] {
     if (def && !out.includes(def)) {
       out.push(def);
     }
-    if (t.kind === 'array' && t.element.kind === 'struct') {
-      for (const d of enumsOf(t.element.def.fields)) {
+    const nested = t.kind === 'struct' ? t.def : t.kind === 'array' && t.element.kind === 'struct' ? t.element.def : null;
+    if (nested) {
+      for (const d of enumsOf(nested.fields)) {
         if (!out.includes(d)) {
           out.push(d);
         }
@@ -745,6 +775,8 @@ export interface CapCommandInfo {
   readonly delivery: 'fast' | 'reliable';
   readonly idempotent: boolean;
   readonly visibility: 'public' | 'test';
+  /** bulk: true (design m2-c5-display D1): sent BULK (TCP or serial, never over a gateway), however small. */
+  readonly bulk?: true;
   readonly args: Codec<any>;
   /** null when the command declares no result fields (the RESULT body is empty). */
   readonly result: Codec<any> | null;
@@ -973,6 +1005,16 @@ export function readRepeated<T>(r: Reader, out: T[], max: number, element: (p: R
   }
 }
 
+/** One nested message field (design m2-c5-display D2): the last occurrence wins; a malformed one fails the reader. */
+export function readNested<T>(r: Reader, element: (p: Reader) => T, prev: T): T {
+  const p = r.readSub();
+  if (!r.ok) {
+    return prev;
+  }
+  const e = element(p);
+  return r.adopt(p) ? e : prev;
+}
+
 export function done<T>(r: Reader, value: T): Decoded<T> {
   return r.error === null ? decodeOk(value) : decodeFail(r.error);
 }
@@ -1097,6 +1139,14 @@ export function invalid(fields: readonly JsonField[], value: Record<string, unkn
       continue;
     }
     if (typeof f.json === 'object') {
+      // A repeated message (array) or one nested message.
+      if (!Array.isArray(v)) {
+        const p = invalid(f.json, v as Record<string, unknown>, name);
+        if (p !== null) {
+          return p;
+        }
+        continue;
+      }
       const items = v as Record<string, unknown>[];
       for (let i = 0; i < items.length; i++) {
         const p = invalid(f.json, items[i], name + '[' + i + ']');
@@ -1645,6 +1695,7 @@ function protocolCtx(model: Model): Ctx {
   return {
     enumName: (def) => def.name,
     enumNames: (def) => `${def.name}Names`,
+    structName: (def) => def.name,
   };
 }
 
@@ -1671,7 +1722,7 @@ function emitMessages(model: Model, names: Names): GeneratedFile {
   const structs: string[] = [];
   for (const t of p.types) {
     names.claim(t.name, `${p.file} types.${t.name}`);
-    c.line(`const ${upperSnake(snakeOf(t.name))}_JSON: readonly $.JsonField[] = ${jsonFieldsLit(t.fields, ctx)};`);
+    c.line(`const ${structJson(t, ctx)}: readonly $.JsonField[] = ${jsonFieldsLit(t.fields, ctx)};`);
     c.line();
     names.claim(`encode${t.name}`, p.file);
     names.claim(`decode${t.name}`, p.file);
@@ -1736,7 +1787,7 @@ function requiresLit(r: { trait: string; eq?: JsonScalar } | undefined): string 
 function emitCap(model: Model, cap: Capability, names: Names): GeneratedFile {
   const P = cap.pascalName;
   const U = upperSnake(cap.shortName);
-  const ctx: Ctx = { enumName: (def) => `${P}${def.name}`, enumNames: (def) => `${P}${def.name}Names` };
+  const ctx: Ctx = { enumName: (def) => `${P}${def.name}`, enumNames: (def) => `${P}${def.name}Names`, structName: (def) => `${P}${def.name}` };
   const c = new Code();
   c.block(header(cap.file, `${cap.name} codecs: args, results, events, STATE bodies and traits (design c2 §4).`).trimEnd());
   c.line();
@@ -1748,6 +1799,16 @@ function emitCap(model: Model, cap: Capability, names: Names): GeneratedFile {
     emitEnum(c, names.claim(ctx.enumName(e), `${cap.file} types.${e.name}`), e);
     c.line(`const ${ctx.enumNames(e)} = $.enumNames(${ctx.enumName(e)});`);
     c.line();
+  }
+
+  // Message types (design m2-c5-display D2), in YAML order: each one's writer and reader use those before it.
+  for (const t of cap.types) {
+    const T = names.claim(ctx.structName(t), `${cap.file} types.${t.name}`);
+    names.claim(`encode${T}`, cap.file);
+    names.claim(`decode${T}`, cap.file);
+    c.line(`const ${structJson(t, ctx)}: readonly $.JsonField[] = ${jsonFieldsLit(t.fields, ctx)};`);
+    c.line();
+    emitStruct(c, { typeName: T, fnName: T, fields: t.fields, where: `${cap.file}: types.${t.name}`, doc: `${cap.name} ${t.name} (message type).${t.doc ? ` ${t.doc.trim()}` : ''}`, nested: true }, ctx);
   }
 
   let traits = '$.EMPTY_CODEC';
@@ -1807,7 +1868,7 @@ function emitCap(model: Model, cap: Capability, names: Names): GeneratedFile {
       result = codecLit(spec, ctx);
     }
     commands.push(
-      `{ id: ${cmd.id}, name: ${q(cmd.name)}, delivery: '${cmd.delivery}', idempotent: ${cmd.idempotent}, visibility: '${cmd.visibility}', args: ${args}, result: ${result} },`,
+      `{ id: ${cmd.id}, name: ${q(cmd.name)}, delivery: '${cmd.delivery}', idempotent: ${cmd.idempotent}, visibility: '${cmd.visibility}'${cmd.bulk ? ', bulk: true' : ''}, args: ${args}, result: ${result} },`,
     );
   }
 
@@ -1982,6 +2043,8 @@ export interface CatalogCommand {
   readonly delivery: 'fast' | 'reliable';
   readonly idempotent: boolean;
   readonly visibility: 'public' | 'test';
+  /** Sent BULK (TCP or serial, never over a gateway), however small (design m2-c5-display D1). */
+  readonly bulk?: true;
   readonly doc?: string;
   readonly fields: readonly CatalogField[];
   readonly result?: readonly CatalogField[];
@@ -2008,6 +2071,8 @@ export interface CatalogCapability {
   readonly doc?: string;
   readonly maps_to?: Readonly<Record<string, string>>;
   readonly types: Readonly<Record<string, Readonly<Record<string, number>>>>;
+  /** Message types a field may hold (\`layout: UiLayout\`, \`array<UiWidget>\`; design m2-c5-display D2). */
+  readonly messages?: Readonly<Record<string, { readonly doc?: string; readonly fields: readonly CatalogField[] }>>;
   readonly traits: readonly CatalogField[];
   readonly config: readonly CatalogConfig[];
   readonly properties: readonly CatalogProperty[];
@@ -2124,6 +2189,9 @@ function fieldSchema(f: Field): Schema {
       break;
     case 'array':
       s = { type: 'array', maxItems: t.max, items: elementSchema(t.element) };
+      break;
+    case 'struct':
+      s = objectSchema(t.def.fields);
       break;
   }
   const description = fieldDoc({ ...f, default: undefined });

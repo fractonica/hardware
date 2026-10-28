@@ -34,6 +34,7 @@ The Fractonica hub (127.0.0.1:7420) owns every ESP32 node: the registry, the USB
 5. `capability_list {device}`: a device's instances (port, capability, traits, driver) and the commands, events and properties of each capability.
 6. `network_get`: the stored Wi-Fi network (never the password).
 7. `bench_get`: the HIL bench, when there is one: the fixture (fix-s3), each wired line's level and problem, each DUT's profile. The `hil-rig` skill has its rules.
+8. `display_snapshot {selector, instance}`: what a debug build's panel (`fr.display`) shows now, as a PNG path and framebuffer `crc`; `display_render {profile, commands}` draws the same on the Mac without a board.
 
 ## Change things
 

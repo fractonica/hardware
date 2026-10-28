@@ -18,6 +18,7 @@
 #include "esp_private/startup_internal.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "fr/platform/gpio_isr.hpp"
 #include "freertos/FreeRTOS.h"
 #include "hal/gpio_ll.h"
 #include "soc/gpio_sig_map.h"
@@ -266,6 +267,8 @@ void reset()
         }
     }
     s = Sim{};
+    // fr_core's shared installer (src/gpio_isr.cpp) remembers the service: forgotten with it.
+    fr::platform::gpio_isr_service_host_reset();
 }
 
 void attach(fr::Core &core)
@@ -436,6 +439,7 @@ void cpu_reset()
     }
     s.isr_service = false;
     s.isr_flags = 0;
+    fr::platform::gpio_isr_service_host_reset();  // fr_core's record of it was RAM too
     for (Pin &p : s.pins) {
         p.handler = nullptr;  // the ISR service's table was in RAM; the pin's own interrupt config is GPIO block
         p.arg = nullptr;

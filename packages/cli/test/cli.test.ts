@@ -38,6 +38,10 @@ describe('callTimeoutMs', () => {
     expect(callTimeoutMs(op('build_start'), { source_dir: '/x', profile: 'p', wait_s: 110 })).toBe(140_000);
     expect(callTimeoutMs(op('port_list'), {})).toBe(30_000);
   });
+  it('sizes display_snapshot by its whole-read budget (total_timeout_s), not its per-answer timeout_s', () => {
+    expect(callTimeoutMs(op('display_snapshot'), { selector: 'pad-s3t', instance: 'lcd' })).toBe(90_000);
+    expect(callTimeoutMs(op('display_snapshot'), { selector: 'pad-s3t', instance: 'lcd', timeout_s: 5, total_timeout_s: 110 })).toBe(140_000);
+  });
   it('stays a valid AbortSignal delay for bad input', () => {
     expect(callTimeoutMs(op('job_wait'), { job_id: 'j_1', timeout_s: Number.NaN })).toBe(30_000);
     expect(callTimeoutMs(op('job_wait'), { job_id: 'j_1', timeout_s: -100 })).toBe(30_000);

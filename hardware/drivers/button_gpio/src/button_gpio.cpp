@@ -7,6 +7,7 @@
 #include "driver/gpio.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
+#include "fr/platform/gpio_isr.hpp"
 #include "hal/gpio_ll.h"
 #include "soc/gpio_struct.h"
 
@@ -41,8 +42,8 @@ Status ButtonGpio::init(Core &core, hal::ButtonSink &sink)
     // (fr_core's linker.lf maps EspInputSlot::update_from_isr to IRAM and its vtable to DRAM). Here the
     // interrupt stays masked while the cache is off, and a late edge still proves a transition, which
     // is what ButtonService relies on.
-    const esp_err_t err = gpio_install_isr_service(0);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    // fr::platform::gpio_isr_service installs it once: IDF logs every repeat install as an error.
+    if (!platform::gpio_isr_service(0)) {
         return std::unexpected(Err::failed);
     }
     if (gpio_isr_handler_add(pin, &ButtonGpio::isr, this) != ESP_OK) {

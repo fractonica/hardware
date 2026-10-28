@@ -7,7 +7,11 @@
 // (design m2-c1-hil D5) adds bare-pin `gpio.<n>` binds for the HIL fixture's lines, the profile's `role`,
 // `net.radio` and `test_pin: none`, the drivers' own `sdkconfig` lines, and fr_core's 16-instance limit.
 // M2-C3 (design m2-c3-inputs D3, D4, D5, D11) adds array config from a profile, fr.analog_in (its service, the
-// ADC1 pin rules and the adc1_channel budget), fixture pwm lines, and the board's `battery` (kBattery).
+// ADC1 pin rules and the adc1_channel budget), fixture pwm lines, and the board's `battery` (kBattery). M2-C5
+// (design m2-c5-display D1, D4, D9) adds fr.display and fr.touch (their services, traits from the board entry and
+// the profile, a touch bound to its panel by port), pins a driver takes from its own board entry's reserved group,
+// optional driver pins (null: not wired), a board entry's display rotation, and the profile's `psram: on`; a panel's
+// renderer (its display::Backend) follows its driver's `traits: ui` (fr_ui's LvglBackend, else fr_core's MonoBackend).
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -52,10 +56,14 @@ export interface ServiceFacts {
   traits?: (config: Readonly<Record<string, CapValue>>, ctx: TraitContext) => Record<string, JsonScalar>;
 }
 
-/** What ServiceFacts.traits knows beyond the config: the board's IDF target and the driver's declared traits. */
+/**
+ * What ServiceFacts.traits knows beyond the config: the board's IDF target, the driver's declared traits and the
+ * bound board entry (design m2-c5-display D9: a panel's width and height; `{ gpio }` for a bare-pin bind).
+ */
 export interface TraitContext {
   target: string;
   driverTraits: Readonly<Record<string, JsonScalar>>;
+  entry: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -109,10 +117,61 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
       return mv === undefined ? {} : { full_scale_mv: mv };
     },
   },
+  // Design m2-c5-display D3: one timer (the flush coalescing period); color and ui come from driver.yaml `traits:`,
+  // width and height from the board entry after rotation, touch from the profile (bindTouch).
+  'fr.display': {
+    implements: 'hal.Display',
+    service: 'fr::DisplayService',
+    header: 'fr/services/display_service.hpp',
+    timers: 1,
+    traits: (c, { entry }) => {
+      const w = Number(entry.width ?? 0);
+      const h = Number(entry.height ?? 0);
+      const quarter = c.rotation === 'r90' || c.rotation === 'r270';
+      return { width: quarter ? h : w, height: quarter ? w : h };
+    },
+  },
+  // Design m2-c5-display D4: one timer (long press and the release poll); width, height and display come from the
+  // panel it is bound to (bindTouch).
+  'fr.touch': { implements: 'hal.TouchSource', service: 'fr::TouchService', header: 'fr/services/touch_service.hpp', timers: 1 },
 };
 
 /** The HIL fixture's capability: its lines' `drive` decides the power-up glitch rule (design m2-c1-hil D5). */
 const FIXTURE_CAP = 'fr.fixture';
+
+/** fr.display and fr.touch (design m2-c5-display D4, D9): a touch instance names its panel's port in config `display`. */
+const DISPLAY_CAP = 'fr.display';
+const TOUCH_CAP = 'fr.touch';
+
+/**
+ * Reserved pin groups a board entry owns (design m2-c5-display D9): a driver bound to `displays.<name>` may claim the
+ * pins of group `display` its own entry names (sclk, dc, backlight, ...), as one bound to `touch.<name>` those of
+ * `touch`. The group keeps every other instance (a button, a bare-pin bind) off them.
+ */
+const ENTRY_GROUPS: Readonly<Record<string, string>> = { displays: 'display', touch: 'touch' };
+
+/**
+ * The renderer behind an fr.display instance (design m2-c5-display D3): LVGL (fr_ui) where the driver's `traits:` say
+ * `ui: true`, else the 1-bit MonoBackend in fr_core. The glue declares one per panel and hands it to DisplayService.
+ */
+interface DisplayBackend {
+  cls: string;
+  header: string;
+  /** The component it needs beyond fr_core. */
+  component?: string;
+}
+const LVGL_BACKEND: DisplayBackend = { cls: 'fr::ui::LvglBackend', header: 'fr/ui/lvgl_backend.hpp', component: 'fr_ui' };
+const MONO_BACKEND: DisplayBackend = { cls: 'fr::display::MonoBackend', header: 'fr/display/mono_backend.hpp' };
+
+function displayBackend(i: ResolvedInstance): DisplayBackend | undefined {
+  if (i.cap.name !== DISPLAY_CAP) {
+    return undefined;
+  }
+  return i.traits.ui === true ? LVGL_BACKEND : MONO_BACKEND;
+}
+
+/** A board entry's display `rotation` in degrees (design m2-c5-display D1): fr.display's default `rotation`. */
+const ROTATIONS: Readonly<Record<string, string>> = { 0: 'r0', 90: 'r90', 180: 'r180', 270: 'r270' };
 
 /**
  * Fixture drives that drive a line at all; none may sit on a pin that glitches at power-up (D11 item 7), except
@@ -246,6 +305,11 @@ const RawProfile = z.strictObject({
   net: z.looseObject({ radio: z.enum(['on', 'off']).optional() }).optional(),
   /** `none` (design m2-c1-hil D5): no CONFIG_FR_TEST_PIN and a null manifest test_pin, whatever the board has. */
   test_pin: z.literal('none').optional(),
+  /**
+   * `on` (design m2-c5-display D3, decision 7): CONFIG_SPIRAM in the board's PSRAM mode, for heap_caps_malloc
+   * (MALLOC_CAP_SPIRAM) only: LVGL's shadow framebuffer. Without it, or `off`, nothing is rendered (SPIRAM off).
+   */
+  psram: z.enum(['on', 'off']).optional(),
   caps: z.record(
     z.string(),
     z.strictObject({
@@ -281,6 +345,8 @@ const RawBoard = z.looseObject({
   idf_target: z.string(),
   flash: z.looseObject({ size: z.string().regex(/^\d+MB$/, 'expected e.g. 4MB'), part_profile: z.string() }),
   console: z.string(),
+  /** In-package or module PSRAM (null: none); a profile's `psram: on` renders its mode (design m2-c5-display D3). */
+  psram: z.looseObject({ size: z.string(), mode: z.enum(['quad', 'octal']) }).nullable().optional(),
   pins: z.looseObject({
     reserved: z.record(z.string(), z.array(int)).optional(),
     strapping: z.array(int).optional(),
@@ -320,12 +386,25 @@ export function headerPositions(board: BoardManifest, pin: number | string): str
 
 const DRIVER_SCALARS = ['bool', 'u8', 'u16', 'u32', 'i8', 'i16', 'i32'] as const;
 
+/**
+ * A driver field holding a set of GPIOs as a uint64_t bit mask (bit n = GPIOn), from a list in the board entry, e.g.
+ * `displays.lcd.idle_high: [41]` (design m2-c5-display D7: the chip selects of other devices on a shared SPI bus,
+ * which the driver drives high before it brings the bus up). Absent: 0. The pins are not claimed by the instance; each
+ * must be in pins.reserved and claimed by no instance (the driver holds it at a fixed level).
+ */
+const GPIO_MASK = 'gpio_mask';
+
 const RawDriverField = z.strictObject({
-  type: z.enum(['gpio', 'enum', ...DRIVER_SCALARS] as const),
+  type: z.enum(['gpio', GPIO_MASK, 'enum', ...DRIVER_SCALARS] as const),
   values: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'enum values must be C++ identifiers')).optional(),
   // board.<key>: that field of the bound board entry. bind: the pin of a bare `gpio.<n>` bind (design
   // m2-c1-hil D5: the fixture drivers).
   from: z.string().regex(/^(board\.[a-z_][a-z0-9_]*|bind)$/, 'expected board.<key> or bind').optional(),
+  /**
+   * A gpio that may be absent (design m2-c5-display D7: a panel without a reset line): a null or missing board value
+   * is -1 in the Config, and no pin is claimed. resources.gpio still counts the field.
+   */
+  optional: z.boolean().optional(),
   default: jsonScalar.optional(),
   doc: z.string().optional(),
 });
@@ -573,9 +652,43 @@ function renderFragment(inp: Inputs, driverLines: readonly string[]): string {
     // Design c6 D24: debug builds drive it open-drain for diag pin_pulse (fr_core's test_pin.cpp). A profile's
     // `test_pin: none` leaves it unset, so it stays -1 (design m2-c1-hil D5).
     ...(testPin != null ? [`CONFIG_FR_TEST_PIN=${testPin}`] : []),
+    ...psramLines(inp),
+    ...displayStackLines(inp),
     ...(driverLines.length > 0 ? ["# From the bound drivers' driver.yaml `sdkconfig` (design m2-c1-hil D5).", ...driverLines] : []),
     '',
   ].join('\n');
+}
+
+/**
+ * The core task's stack for a profile with an fr.display instance (design m2-c5-display D3): the generated dispatch
+ * decodes a ui_load layout (24 widgets, about 1.7 KB per copy, in nested copies) on that stack before the service
+ * answers, on every panel (a mono one says UNSUPPORTED only after the decode). fr_core's Kconfig default is 8192.
+ */
+export const DISPLAY_CORE_STACK = 16384;
+
+function displayStackLines(inp: Inputs): string[] {
+  if (!Object.values(inp.profile.caps).some((c) => c.cap === DISPLAY_CAP)) {
+    return [];
+  }
+  return [`# fr.display (design m2-c5-display D3): ui_load decodes on the core task's stack.`, `CONFIG_FR_CORE_TASK_STACK=${DISPLAY_CORE_STACK}`];
+}
+
+/**
+ * A profile's `psram: on` (design m2-c5-display D3, decision 7): SPIRAM in the board's mode, reached through
+ * heap_caps_malloc(MALLOC_CAP_SPIRAM) only, so nothing else moves out of internal RAM. checkProfile refuses it on a
+ * board without PSRAM, where nothing is rendered.
+ */
+function psramLines(inp: Inputs): string[] {
+  const psram = inp.board.psram;
+  if (inp.profile.psram !== 'on' || !psram) {
+    return [];
+  }
+  return [
+    `# psram: on (design m2-c5-display D3): ${psram.size} ${psram.mode} PSRAM, caps allocations only.`,
+    'CONFIG_SPIRAM=y',
+    psram.mode === 'octal' ? 'CONFIG_SPIRAM_MODE_OCT=y' : 'CONFIG_SPIRAM_MODE_QUAD=y',
+    'CONFIG_SPIRAM_USE_CAPS_ALLOC=y',
+  ];
 }
 
 /**
@@ -687,6 +800,12 @@ function loadDriverInto(sourceDir: string, id: string, issues: Issues): DriverMa
         bad(['config', name, 'default'], p);
       }
     }
+    if (f.type === GPIO_MASK && f.default !== undefined) {
+      bad(['config', name, 'default'], `a ${GPIO_MASK} has no default (absent from the board entry: no pins)`);
+    }
+    if (f.optional && f.type !== 'gpio') {
+      bad(['config', name, 'optional'], 'optional applies only to gpio fields (an absent pin is -1)');
+    }
     if (f.from === 'bind' && (d.binds !== PIN_SECTION || f.type !== 'gpio')) {
       bad(['config', name, 'from'], `from: bind is the pin of a gpio.<n> bind: it needs binds: ${PIN_SECTION} and type: gpio`);
     }
@@ -738,6 +857,10 @@ const DRIVER_BOUNDS: Record<(typeof DRIVER_SCALARS)[number] | 'gpio', [number, n
 };
 
 function checkDriverValue(f: RawDriverField, v: unknown): string | null {
+  if (f.type === GPIO_MASK) {
+    const ok = Array.isArray(v) && v.every((p) => Number.isInteger(p) && p >= 0 && p <= 63) && new Set(v).size === v.length;
+    return ok ? null : `expected a list of distinct GPIO numbers 0..63, got ${JSON.stringify(v)}`;
+  }
   if (f.type === 'enum') {
     return typeof v === 'string' && f.values?.includes(v) ? null : `expected one of ${(f.values ?? []).join(', ')}, got ${JSON.stringify(v)}`;
   }
@@ -851,6 +974,10 @@ interface ResolvedInstance {
   /** Every capability trait, as ManifestCap.traits. */
   traits: Record<string, JsonScalar>;
   pins: number[];
+  /** Of `pins`, those its own board entry gives (`from: board.<key>`), which may sit in the entry's ENTRY_GROUPS group. */
+  entryPins: number[];
+  /** GPIOs of its gpio_mask fields (GPIO_MASK): driven at a fixed level by the driver, not claimed. */
+  heldPins: number[];
 }
 
 type Slots = Map<string, number>;
@@ -985,6 +1112,9 @@ function checkProfile(inp: Inputs, issues: Issues): void {
   const n = Object.keys(profile.caps).length;
   if (n > MAX_INSTANCES) {
     issues.add(pf, ['caps'], `${n} instances, but fr_core runs at most ${MAX_INSTANCES} (kMaxInstances)`);
+  }
+  if (profile.psram === 'on' && !inp.board.psram) {
+    issues.add(pf, ['psram'], `psram: on, but board ${inp.board.id} has no PSRAM (psram: null)`);
   }
   if (profile.role === 'fixture') {
     if (profile.test_pin !== 'none') {
@@ -1122,6 +1252,8 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     const fromProfile = (key: string): Origin => [pf, [...at, 'config', key]];
     const driverConfig: ResolvedInstance['driverConfig'] = [];
     const pins: number[] = [];
+    const entryPins: number[] = [];
+    const heldPins: number[] = [];
     for (const [fname, field] of Object.entries(driverFields)) {
       // `from: bind` is the pin of the gpio.<n> bind, which the profile cannot override (design m2-c1-hil D5).
       if (field.from === 'bind') {
@@ -1142,9 +1274,17 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         value = entry[fromKey];
         origin = [bf, [section, entryName, fromKey]];
       }
+      if (value === undefined && field.type === GPIO_MASK) {
+        value = [];
+      }
       if (value === undefined) {
         value = field.default;
         origin = [df, ['config', fname, 'default']];
+      }
+      // An optional pin (design m2-c5-display D7) that is null or nowhere: -1, nothing claimed.
+      if (field.optional && field.type === 'gpio' && (value === undefined || value === null)) {
+        driverConfig.push({ name: fname, field, value: -1 });
+        continue;
       }
       if (value === undefined) {
         bad([...at, 'bind'], fromKey ? `${c.bind} has no '${fromKey}', which driver ${driver.id} needs (no default)` : `driver ${driver.id} needs config '${fname}'`);
@@ -1156,9 +1296,18 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         ok = false;
         continue;
       }
+      if (field.type === GPIO_MASK) {
+        const list = value as number[];
+        heldPins.push(...list);
+        driverConfig.push({ name: fname, field, value: list.reduce((m, pin) => m + 2 ** pin, 0) });
+        continue;
+      }
       driverConfig.push({ name: fname, field, value: value as JsonScalar });
       if (field.type === 'gpio') {
         pins.push(value as number);
+        if (origin[0] === bf) {
+          entryPins.push(value as number);
+        }
       }
     }
 
@@ -1167,6 +1316,16 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       // Capability YAML defaults are checked by the model already.
       let value: unknown = e.default;
       let origin: Origin = [cap!.file, ['config', e.name, 'default']];
+      // A panel's rotation defaults to its board entry's (design m2-c5-display D1), in degrees.
+      if (c.cap === DISPLAY_CAP && e.name === 'rotation' && entry.rotation !== undefined) {
+        value = ROTATIONS[String(entry.rotation)];
+        origin = [bf, [section, entryName, 'rotation']];
+        if (value === undefined) {
+          issues.add(bf, [section, entryName, 'rotation'], `rotation ${JSON.stringify(entry.rotation)} is not one of 0, 90, 180, 270`);
+          ok = false;
+          continue;
+        }
+      }
       if (driver.cap_config?.[e.name] !== undefined) {
         value = driver.cap_config[e.name];
         origin = [df, ['cap_config', e.name]];
@@ -1212,7 +1371,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       traits[key] = value;
     }
     if (service?.traits) {
-      const ctx: TraitContext = { target: board.idf_target, driverTraits: ownTraits ?? {} };
+      const ctx: TraitContext = { target: board.idf_target, driverTraits: ownTraits ?? {}, entry };
       Object.assign(traits, service.traits(Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value])), ctx));
     }
     // A fixture line's drive, decode and pull must be ones its driver takes (design m2-c1-hil D4). The
@@ -1231,7 +1390,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     }
 
     if (ok && cap && service) {
-      out.push({ name, port: 0, bind: c.bind, cap, service, driver, driverConfig, capConfig, traits, pins });
+      out.push({ name, port: 0, bind: c.bind, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins });
     }
   }
 
@@ -1255,10 +1414,12 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
   for (const inst of out) {
     const bare = PIN_BIND.test(inst.bind);
     const drive = inst.cap.name === FIXTURE_CAP ? inst.capConfig.find((c) => c.entry.name === 'drive')?.value : undefined;
+    const ownGroup = ENTRY_GROUPS[inst.bind.split('.')[0]];
     for (const pin of inst.pins) {
       const where = ['caps', inst.name, 'bind'];
       const group = reserved.get(pin);
-      if (group !== undefined) {
+      // A display or touch driver takes the pins its own board entry reserves (design m2-c5-display D9).
+      if (group !== undefined && !(group === ownGroup && inst.entryPins.includes(pin))) {
         issues.add(pf, where, `GPIO${pin} (${inst.bind}) is reserved for ${group} on ${board.id}`);
       }
       const other = claimed.get(pin);
@@ -1285,6 +1446,20 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         } else if (!adc1.has(pin)) {
           issues.add(pf, where, `GPIO${pin} (${inst.bind}) is not in pins.adc1 of ${board.id}, which driver ${inst.driver.id} needs (ADC1 only)`);
         }
+      }
+    }
+  }
+
+  // A held pin (gpio_mask) is another device's line the driver keeps idle: reserved on the board, and no instance's.
+  for (const inst of out) {
+    for (const pin of inst.heldPins) {
+      const where = ['caps', inst.name, 'bind'];
+      if (!reserved.has(pin)) {
+        issues.add(pf, where, `GPIO${pin} (${inst.bind}, held by driver ${inst.driver.id}) must be in pins.reserved of ${board.id}`);
+      }
+      const other = claimed.get(pin);
+      if (other !== undefined) {
+        issues.add(pf, where, `GPIO${pin} (${inst.bind}, held by driver ${inst.driver.id}) is claimed by '${other}'`);
       }
     }
   }
@@ -1330,6 +1505,39 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
   return out;
 }
 
+/**
+ * Binds each fr.touch instance to its panel once ports are known (design m2-c5-display D4, D9): config `display` is
+ * the port of an fr.display instance of the profile (0: none), at most one touch per panel. The touch reports that
+ * panel's width and height (after rotation) and its port; the panel reports touch: true.
+ */
+function bindTouch(profile: string, insts: ResolvedInstance[], issues: Issues): void {
+  const pf = profileFile(profile);
+  const owner = new Map<number, string>();
+  for (const t of insts.filter((i) => i.cap.name === TOUCH_CAP)) {
+    const port = Number(t.capConfig.find((c) => c.entry.name === 'display')?.value ?? 0);
+    t.traits.display = port;
+    if (port === 0) {
+      continue;
+    }
+    const panel = insts.find((i) => i.port === port);
+    const at = ['caps', t.name, 'config', 'display'];
+    if (!panel || panel.cap.name !== DISPLAY_CAP) {
+      const panels = insts.filter((i) => i.cap.name === DISPLAY_CAP).map((i) => `${i.name} on port ${i.port}`);
+      issues.add(pf, at, `port ${port} is ${panel ? `${panel.name}, an ${panel.cap.name} instance` : 'no instance'}; display names an fr.display port (${panels.join(', ') || 'none in this profile'})`);
+      continue;
+    }
+    const other = owner.get(port);
+    if (other !== undefined) {
+      issues.add(pf, at, `${panel.name} (port ${port}) already has touch instance '${other}'`);
+      continue;
+    }
+    owner.set(port, t.name);
+    t.traits.width = panel.traits.width;
+    t.traits.height = panel.traits.height;
+    panel.traits.touch = true;
+  }
+}
+
 // ---- emitters ----
 
 function header(profile: string): string {
@@ -1338,12 +1546,15 @@ function header(profile: string): string {
 
 function emitComponentCmake(profile: string, insts: ResolvedInstance[]): string {
   const drivers = [...new Set(insts.map((i) => i.driver.id))].sort();
+  // A panel rendered by LVGL needs fr_ui (design m2-c5-display D3); MonoBackend is fr_core's.
+  const backends = [...new Set(insts.map((i) => displayBackend(i)?.component).filter((c): c is string => c !== undefined))].sort();
+  const priv = [...drivers, ...backends];
   return [
     `# ${GENERATED} from ${profileFile(profile)}. Do not edit.`,
     `# Composition root of profile ${profile}: drivers, services and frozen ports (design c2 §6).`,
     `idf_component_register(SRCS "fr_board.cpp"`,
     `                       INCLUDE_DIRS "include"`,
-    `                       REQUIRES fr_core${drivers.length > 0 ? `\n                       PRIV_REQUIRES ${drivers.join(' ')}` : ''})`,
+    `                       REQUIRES fr_core${priv.length > 0 ? `\n                       PRIV_REQUIRES ${priv.join(' ')}` : ''})`,
     '',
   ].join('\n');
 }
@@ -1363,6 +1574,41 @@ function emitBattery(board: RawBoard): string[] {
     '};',
     `inline constexpr bool kHasBattery = ${b ? 'true' : 'false'};`,
     `inline constexpr Battery kBattery{${b ? `${b.gpio}, ${Math.round(b.divider * 1000)}, ${b.low_mv}` : '-1, 0, 0'}};`,
+  ];
+}
+
+/**
+ * kPanels (design m2-c5-display D6): the profile's fr.display instances as their renderers draw for them, which the
+ * desktop renderer takes from this header: geometry after rotation (the traits), format, LVGL, the bound touch.
+ * Only a profile with a panel gets it.
+ */
+function emitPanels(insts: ResolvedInstance[]): string[] {
+  const panels = insts.filter((i) => i.cap.name === DISPLAY_CAP);
+  if (panels.length === 0) {
+    return [];
+  }
+  const touchOf = (p: ResolvedInstance) => insts.find((t) => t.cap.name === TOUCH_CAP && t.traits.display === p.port)?.port ?? 0;
+  const quarter = (p: ResolvedInstance) => ['r0', 'r90', 'r180', 'r270'].indexOf(String(p.capConfig.find((c) => c.entry.name === 'rotation')?.value ?? 'r0'));
+  return [
+    '/** A panel of the profile, an fr.display instance (design m2-c5-display D6): what its renderer draws for. */',
+    'struct Panel {',
+    '    uint8_t port;',
+    '    const char *name;',
+    '    uint16_t width;  // pixels after rotation (trait width)',
+    '    uint16_t height;  // pixels after rotation (trait height)',
+    '    uint8_t rotation;  // quarter turns: 0, 1 (90), 2 (180), 3 (270)',
+    '    bool rgb565;  // trait color rgb565; false: mono1',
+    '    bool ui;  // trait ui: LVGL layouts',
+    '    uint8_t touch_port;  // the fr.touch instance bound to it (trait touch); 0: none',
+    '};',
+    `inline constexpr size_t kPanelCount = ${panels.length};`,
+    'inline constexpr Panel kPanels[] = {',
+    ...panels.map(
+      (p) =>
+        `    {${p.port}, "${p.name}", ${Number(p.traits.width)}, ${Number(p.traits.height)}, ${quarter(p)}, ${p.traits.color === 'rgb565'}, ${p.traits.ui === true}, ${touchOf(p)}},`,
+    ),
+    '};',
+    '',
   ];
 }
 
@@ -1393,6 +1639,7 @@ function emitBoardHpp(inp: Inputs, insts: ResolvedInstance[]): string {
     '',
     ...emitBattery(inp.board),
     '',
+    ...emitPanels(insts),
     '/** One capability instance of the profile (the system instances node, ota and diag are not listed). */',
     'struct Instance {',
     '    uint8_t port;',
@@ -1438,6 +1685,7 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
     '#include <cstring>',
     '',
     ...driverIds.map((d) => `#include "fr/drv/${d}.hpp"`),
+    ...[...new Set(insts.map((i) => displayBackend(i)?.header).filter((h): h is string => h !== undefined))].sort().map((h) => `#include "${h}"`),
     '',
     'namespace fr::board {',
     '',
@@ -1455,7 +1703,12 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
     // members freely.
     lines.push(`constexpr ${drvCfg} kDriverConfig = [] {`, `    ${drvCfg} c{};`);
     for (const f of i.driverConfig) {
-      const v = f.field.type === 'enum' ? `${i.driver.class}::${pascalCase(f.name)}::${f.value}` : String(f.value);
+      const v =
+        f.field.type === 'enum'
+          ? `${i.driver.class}::${pascalCase(f.name)}::${f.value}`
+          : f.field.type === GPIO_MASK
+            ? `0x${BigInt(f.value as number).toString(16)}ULL`
+            : String(f.value);
       lines.push(`    c.${f.name} = ${v};`);
     }
     lines.push('    return c;', '}();', '');
@@ -1464,7 +1717,13 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
       lines.push(`    c.${cppIdent(f.entry.name)} = ${capLiteral(i.cap, f.entry, f.value)};`);
     }
     lines.push('    return c;', '}();', '');
-    lines.push(`${i.driver.class} driver{kDriverConfig};`, `${i.service.service} service{driver, kConfig};`, '');
+    const backend = displayBackend(i);
+    if (backend) {
+      // Design m2-c5-display D3: the panel's renderer, which the service draws through.
+      lines.push(`${i.driver.class} driver{kDriverConfig};`, `${backend.cls} backend;`, `${i.service.service} service{driver, backend, kConfig};`, '');
+    } else {
+      lines.push(`${i.driver.class} driver{kDriverConfig};`, `${i.service.service} service{driver, kConfig};`, '');
+    }
     lines.push(`}  // namespace ${ns}`, '');
   }
   if (insts.length > 0) {
@@ -1491,6 +1750,13 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
   if (insts.length === 0) {
     lines.push('    (void)core;', '    return {};');
   } else {
+    // Design m2-c5-display D4: a touch instance feeds its panel (trait touch, the LVGL pointer input) before init.
+    for (const t of insts.filter((x) => x.cap.name === TOUCH_CAP)) {
+      const panel = insts.find((x) => x.cap.name === DISPLAY_CAP && x.port === t.traits.display);
+      if (panel) {
+        lines.push(`    inst_${panel.name}::service.bind_touch(inst_${t.name}::service);`);
+      }
+    }
     insts.forEach((i, n) => lines.push(`    s_init[${n}] = inst_${i.name}::service.init(core);`));
     lines.push('    for (const Status &s : s_init) {', '        if (!s) {', '            return s;', '        }', '    }', '    return {};');
   }
@@ -1584,6 +1850,8 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
     i.port = slots.get(i.name)!;
   }
   insts.sort((a, b) => a.port - b.port);
+  bindTouch(opts.profile, insts, issues);
+  issues.throwIfAny();
 
   const driverIds = [...new Set(insts.map((i) => i.driver.id))].sort();
   const manifest = buildManifest(inp!, model, insts);

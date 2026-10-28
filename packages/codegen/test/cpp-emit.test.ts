@@ -52,7 +52,7 @@ function vectorsBody(cases: VectorCase[]): string {
 describe('emitCpp', () => {
   it('writes every C++ output with the generated banner', () => {
     const out = files();
-    const caps = ['button', 'led', 'analog_in', 'fixture', 'node', 'ota', 'diag'];
+    const caps = ['button', 'led', 'display', 'analog_in', 'fixture', 'touch', 'node', 'ota', 'diag'];
     expect([...out.keys()].sort()).toEqual(
       [
         ...['codec_support.hpp', 'protocol.hpp', 'protocol.cpp', 'messages.hpp', 'messages.cpp', 'serial.hpp', 'serial.cpp'].map((f) => `${CPP_PROTO_GEN_DIR}/${f}`),
@@ -286,5 +286,36 @@ describe('vectors.inc', () => {
     const calls = text.match(/^ +v\.(value|error|header|envelope|serial)\(/gm)?.length ?? 0;
     expect(text).toContain(`inline constexpr size_t kCount = ${calls};`);
     expect(calls).toBeGreaterThanOrEqual(cases.length);
+  });
+});
+
+describe('message types in C++ (design m2-c5-display D2)', () => {
+  const out = files();
+  const hpp = file(out, `${CPP_CAPS_GEN_DIR}/display.hpp`);
+  const cpp = file(out, `${CPP_CAPS_GEN_DIR}/display.cpp`);
+  const json = file(out, `${CPP_CAPS_GEN_DIR}/diag_json.cpp`);
+
+  it('declares UiWidget and UiLayout before the args that hold them, prefixed like the enums, with valid()', () => {
+    expect(hpp.indexOf('struct DisplayUiWidget {')).toBeLessThan(hpp.indexOf('struct DisplayUiLayout {'));
+    expect(hpp.indexOf('struct DisplayUiLayout {')).toBeLessThan(hpp.indexOf('struct DisplayUiLoadArgs {'));
+    expect(hpp).toContain('    fr::proto::Array<DisplayUiWidget, 24> widgets{};\n');
+    expect(hpp).toContain('struct DisplayUiLoadArgs {\n    DisplayUiLayout layout{};\n');
+    expect(hpp).toContain('std::expected<DisplayUiLayout, fr::wire::DecodeErr> decode_display_ui_layout(std::span<const uint8_t> in);\n');
+    expect(hpp).toContain('bool valid(const DisplayUiWidget &v);');
+    expect(hpp).toContain('virtual std::expected<DisplayUiLoadResult, Err> ui_load(const DisplayUiLoadArgs &args) = 0;  // reliable, bulk\n');
+  });
+
+  it('encodes the nested message always, decodes the last one, and validates down to each widget', () => {
+    expect(cpp).toContain('    {\n        const auto m = w.begin_len(1);\n        encode(v.layout, w);\n        w.end_len(m);\n    }\n');
+    expect(cpp).toContain('            const auto e = decode_display_ui_layout(b);\n            if (e) {\n                v.layout = *e;\n');
+    expect(cpp).toContain('return std::ranges::all_of(v.widgets, [](const DisplayUiWidget &e) { return valid(e); });');
+    expect(cpp).toContain('bool valid(const DisplayUiLoadArgs &v)\n{\n    return valid(v.layout);\n}');
+  });
+
+  it('diag JSON parses and prints the nested layout (test hooks)', () => {
+    expect(json).toContain('bool from_json_display_ui_widget(const cJSON *j, DisplayUiWidget &v)');
+    expect(json).toContain('ok = from_json_display_ui_layout(it, v.layout);');
+    expect(json).toContain('json_array(v.widgets, [](const DisplayUiWidget &e) { return to_json(e); })');
+    expect(json.indexOf('bool from_json_display_ui_widget')).toBeGreaterThan(json.indexOf('#if FR_TEST_HOOKS'));
   });
 });

@@ -1,17 +1,25 @@
 # Core task, input slots, timers, fr_worker, L1 HAL contracts, L2 services, boot, the hub link wiring and
-# fr_app_desc (spec 03 §3.3-3.5, 06 §6.8, design c2 §5, c3 §3, c4 §2). src/services is IDF-free: the host
-# suite (firmware/test/host) builds the same files (the services and the node descriptor).
+# fr_app_desc (spec 03 §3.3-3.5, 06 §6.8, design c2 §5, c3 §3, c4 §2). src/services and src/display (the fr.display
+# backend contract and the mono renderer, design m2-c5-display D3) are IDF-free: the host suite (firmware/test/host)
+# builds the same files (the services and the node descriptor).
 idf_component_register(SRCS "src/adc1.cpp"
                             "src/app_desc.cpp"
                             "src/core.cpp"
+                            "src/display/crc32.cpp"
+                            "src/display/font5x7.cpp"
+                            "src/display/mono_backend.cpp"
                             "src/esp_core.cpp"
                             "src/esp_worker.cpp"
+                            "src/gpio_isr.cpp"
+                            "src/i2c_bus.cpp"
                             "src/input_slot_isr.cpp"
                             "src/services/analog_in_service.cpp"
                             "src/services/button_service.cpp"
                             "src/services/descriptor.cpp"
+                            "src/services/display_service.cpp"
                             "src/services/fixture_service.cpp"
                             "src/services/led_service.cpp"
+                            "src/services/touch_service.cpp"
                             "src/s2_hooks.cpp"
                             "src/test_pin.cpp"
                        INCLUDE_DIRS "include"
@@ -21,14 +29,17 @@ idf_component_register(SRCS "src/adc1.cpp"
                        # fr_serial and fr_diag sit below fr_core: start() brings them up. fr_net runs the hub
                        # link; it requires fr_core in turn (a cycle IDF links by repeating the libraries), as
                        # fr_ota does (its Kconfig also holds FR_TEST_FAULT_HEALTH, which fr_app_desc reports).
-                       # esp_driver_gpio: the T-LAT test pin (src/test_pin.cpp, design c6 D24). esp_adc: the shared
+                       # esp_driver_gpio: the T-LAT test pin (src/test_pin.cpp, design c6 D24) and the one GPIO ISR
+                       # service installer (src/gpio_isr.cpp, fr/platform/gpio_isr.hpp). esp_adc: the shared
                        # ADC1 unit (src/adc1.cpp, fr/platform/adc1.hpp) and the vitals' vbat_mv (design m2-c3-inputs
                        # D3, D11); adc_oneshot, the one other includer of fr/platform/adc1.hpp, requires it itself.
                        # fr_gw: the gateway's bridge (design m2-c4-gateway D8), which core.cpp builds in role gateway
                        # only (requirements cannot follow CONFIG_FR_ROLE, so every image compiles it; others link none
                        # of it). It requires fr_core in turn, a cycle like fr_net's.
+                       # esp_driver_i2c: the shared I2C buses (src/i2c_bus.cpp, fr/platform/i2c_bus.hpp, design
+                       # m2-c5-display D4, D8); its includers (ssd1306_i2c, cst816_i2c) require it themselves.
                        PRIV_REQUIRES fr_serial fr_diag fr_net fr_gw fr_ota app_update esp_app_format esp_partition
-                                     esp_system esp_timer espcoredump nvs_flash esp_driver_gpio esp_adc
+                                     esp_system esp_timer espcoredump nvs_flash esp_driver_gpio esp_adc esp_driver_i2c
                        LDFRAGMENTS "linker.lf")
 
 # fr_app_desc is referenced by nothing: without this the linker would leave app_desc.cpp's object out of

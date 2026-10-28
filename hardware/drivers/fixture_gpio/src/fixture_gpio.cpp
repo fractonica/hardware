@@ -23,6 +23,7 @@
 #include "esp_private/startup_internal.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "fr/platform/gpio_isr.hpp"
 #include "freertos/FreeRTOS.h"
 #include "hal/gpio_ll.h"
 #include "sdkconfig.h"
@@ -376,13 +377,16 @@ Status FixtureGpio::init(Core &core, const hal::FixtureLineMode &mode, hal::Edge
     // ESP_INTR_FLAG_IRAM: the service keeps its handler table in internal RAM (gpio.c) and runs while flash
     // is busy, so every handler on it must be IRAM-safe. That is why the fixture profile has no button_gpio
     // instance, whose handler is not (design m2-c1-hil D4).
+    // fr::platform::gpio_isr_service installs it once (IDF logs every repeat install as an error) and says with
+    // which flags.
     if (!s_isr_service) {
-        const esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
-        if (err == ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "GPIO ISR service already installed by another driver, maybe without ESP_INTR_FLAG_IRAM: "
-                          "edges are late while flash is busy");
-        } else if (err != ESP_OK) {
+        const auto flags = platform::gpio_isr_service(ESP_INTR_FLAG_IRAM);
+        if (!flags) {
             return std::unexpected(Err::failed);
+        }
+        if ((*flags & ESP_INTR_FLAG_IRAM) == 0) {
+            ESP_LOGW(TAG, "GPIO ISR service already installed by another driver without ESP_INTR_FLAG_IRAM: "
+                          "edges are late while flash is busy");
         }
         s_isr_service = true;
     }

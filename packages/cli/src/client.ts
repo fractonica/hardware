@@ -18,13 +18,19 @@ function unreachable(message: string): Result<never> {
 }
 
 /**
- * HTTP budget for one op call: the op's own wait, with schema defaults applied (job_wait waits 60 s
- * when no --timeout is given), plus a margin so the hub always answers before the client gives up.
+ * The op's own server-side wait in seconds, with schema defaults applied: wait_s, else total_timeout_s (an op whose
+ * timeout_s bounds each step, as display_snapshot's chunks, and total_timeout_s the whole call), else timeout_s
+ * (job_wait waits 60 s when no --timeout is given). NaN when the op has none.
  */
-export function callTimeoutMs(op: OpDef, input: Record<string, unknown>): number {
+export function opWaitS(op: OpDef, input: Record<string, unknown>): number {
   const p = op.input.safeParse(input);
-  const d = (p.success ? p.data : input) as { wait_s?: unknown; timeout_s?: unknown };
-  const s = Number(d.wait_s ?? d.timeout_s ?? 0);
+  const d = (p.success ? p.data : input) as { wait_s?: unknown; total_timeout_s?: unknown; timeout_s?: unknown };
+  return Number(d.wait_s ?? d.total_timeout_s ?? d.timeout_s);
+}
+
+/** HTTP budget for one op call: the op's own wait (opWaitS), plus a margin so the hub always answers before the client gives up. */
+export function callTimeoutMs(op: OpDef, input: Record<string, unknown>): number {
+  const s = opWaitS(op, input);
   return (Math.ceil(Number.isFinite(s) ? Math.max(0, s) : 0) + 30) * 1000;
 }
 

@@ -2,3 +2,4 @@
 # an instance keeps its port for good, and a removed instance keeps its entry so its port is never reused.
 boot: 1
 status: 2
+lcd: 3

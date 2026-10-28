@@ -89,15 +89,15 @@ function locked(dir: string, profile: string): Record<string, number> {
   return parse(readFileSync(join(dir, slotsLockFile(profile)), 'utf8')) as Record<string, number>;
 }
 
+/** M2-C5 (design m2-c5-display D9): the C3 OLED and S3 LCD pads gained their panel on port 3. */
+const PANELS: Readonly<Record<string, [string, number][]>> = { 'c3o-pad': [['oled', 3]], 's3l-pad': [['lcd', 3]] };
+
 describe('the M1 profiles', () => {
   it.each(PROFILES)('%s generates against the committed slots.lock without changing it', (p) => {
     const r = generateFirmware({ sourceDir: ROOT, profile: p, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
     expect(r.slotsLockChanged).toBe(false);
     expect(r.slotsLock.content).toBe(readFileSync(join(ROOT, slotsLockFile(p)), 'utf8'));
-    expect(r.manifest.caps.map((c) => [c.name, c.port])).toEqual([
-      ['boot', 1],
-      ['status', 2],
-    ]);
+    expect(r.manifest.caps.map((c) => [c.name, c.port])).toEqual([['boot', 1], ['status', 2], ...(PANELS[p] ?? [])]);
     expect(r.files.map((f) => f.path)).toEqual([
       'fr_board/CMakeLists.txt',
       'fr_board/include/fr/board.hpp',
@@ -413,7 +413,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: adc_oneshot, button_gpio, fixture_gpio, fixture_ws2812_rx, led_gpio, led_ws2812)",
+      "unknown driver 'button_touch' (known: adc_oneshot, button_gpio, cst816_i2c, fixture_gpio, fixture_ws2812_rx, led_gpio, led_ws2812, ssd1306_i2c, st7789_spi)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -441,7 +441,7 @@ describe('validation', () => {
     expect(messages(dir)).toEqual([
       "instance name 'node' is reserved (spec 03 §3.6)",
       "instance name 'Status' must be snake_case, at most 31 characters",
-      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in)',
+      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch)',
       'board esp32c6-supermini has no entry leds.nope',
     ]);
   });
@@ -551,8 +551,8 @@ describe('validation', () => {
 describe('driver manifests', () => {
   const drivers = listDrivers(ROOT);
 
-  it('lists the M1 drivers, the M2-C1 fixture drivers and M2-C3\'s adc_oneshot', () => {
-    expect(drivers).toEqual(['adc_oneshot', 'button_gpio', 'fixture_gpio', 'fixture_ws2812_rx', 'led_gpio', 'led_ws2812']);
+  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot and the M2-C5 panel and touch drivers', () => {
+    expect(drivers).toEqual(['adc_oneshot', 'button_gpio', 'cst816_i2c', 'fixture_gpio', 'fixture_ws2812_rx', 'led_gpio', 'led_ws2812', 'ssd1306_i2c', 'st7789_spi']);
   });
 
   it.each(drivers)('%s: driver.yaml matches its header and idf_component.yml', (id) => {
@@ -990,6 +990,7 @@ describe('fr.analog_in and c3o-analog (design m2-c3-inputs D3, D4)', () => {
       ['boot', 1],
       ['status', 2],
       ['analog', 3],
+      ['oled', 4],
     ]);
     expect(r.manifest.test_pin).toBe(10);
     expect(r.manifest.caps[2]).toEqual({
@@ -1010,7 +1011,7 @@ describe('fr.analog_in and c3o-analog (design m2-c3-inputs D3, D4)', () => {
     expect(cpp).toContain('fr::drv::AdcOneshot driver{kDriverConfig};\nfr::AnalogInService service{driver, kConfig};');
     expect(cpp).toContain('#include "fr/drv/adc_oneshot.hpp"');
     expect(file(r, 'fr_board/include/fr/board.hpp')).toContain('#include "fr/services/analog_in_service.hpp"');
-    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES adc_oneshot button_gpio led_gpio)');
+    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES adc_oneshot button_gpio led_gpio ssd1306_i2c)');
   });
 
   it('takes an array config from a profile: integers within the element type and max, or an empty list', () => {
@@ -1093,7 +1094,10 @@ describe('fr.analog_in and c3o-analog (design m2-c3-inputs D3, D4)', () => {
       a.bind = 'gpio.7'; // free on the C3, but not ADC1
     });
     expect(paths(dir)).toEqual(['caps.analog.bind: GPIO7 (gpio.7) is not in pins.adc1 of esp32c3-oled042, which driver adc_oneshot needs (ADC1 only)']);
-    // The C3's GPIO5 is ADC2_CH0, even on a board whose manifest lists it.
+    // The C3's GPIO5 is ADC2_CH0, even on a board whose manifest lists it (and the OLED's SDA is moved off it).
+    edit(dir, PROFILE(ANALOG), (y) => {
+      delete y.caps.oled;
+    });
     edit(dir, C3_BOARD, (y) => {
       y.pins.reserved.display = [6];
       y.pins.free.push(5);
@@ -1275,5 +1279,243 @@ describe('the board battery (design m2-c3-inputs D11)', () => {
       y.battery = { gpio: 4, divider: 0.5, low_mv: 3400, extra: 1 };
     });
     expect(issuesOf(() => gen(dir, 's3l-pad', false)).map((i) => i.path).sort()).toEqual(['battery', 'battery.divider']);
+  });
+});
+
+// ---- M2-C5: displays and touch (design m2-c5-display D1, D3, D4, D7-D9) ----
+
+const S3T = 's3t-pad';
+const S3T_BOARD = 'hardware/boards/waveshare-esp32s3-touch-lcd2.board.yaml';
+
+describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => {
+  const messages = (dir: string, profile: string) => issuesOf(() => gen(dir, profile, false)).map((i) => i.message);
+  const paths = (dir: string, profile: string) => issuesOf(() => gen(dir, profile, false)).map((i) => `${i.file}: ${i.path}: ${i.message}`);
+  const committed = (p: string) => generateFirmware({ sourceDir: ROOT, profile: p, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+
+  it('the board manifest: the schematic facts, reserved groups and no status LED', () => {
+    const b = loadBoardManifest(ROOT, 'waveshare-esp32s3-touch-lcd2') as Yaml;
+    expect(b.idf_target).toBe('esp32s3');
+    expect(b.flash.size).toBe('16MB');
+    expect(b.psram).toMatchObject({ size: '8MB', mode: 'octal' });
+    expect(b.usb).toMatchObject({ vid: 0x303a, pid: 0x1001, serial_is_mac: true });
+    expect(b.displays.lcd).toEqual({ kind: 'st7789t3', bus: 'spi', sclk: 39, mosi: 38, cs: 45, dc: 42, rst: null, backlight: 1, width: 240, height: 320, column_offset: 0, row_offset: 0, idle_high: [41], confidence: 'M' });
+    expect(b.touch.tp).toMatchObject({ kind: 'cst816d', bus: 'i2c', sda: 48, scl: 47, int: 46, address: 0x15, confidence: 'L' });
+    expect(b.battery).toEqual({ gpio: 5, divider: 3.0, low_mv: 3400 });
+    expect(b.pins.strapping).toEqual([0, 3, 45, 46]);
+    expect(Object.keys(b.pins.reserved)).toEqual(expect.arrayContaining(['usb', 'uart0', 'camera', 'sd', 'imu', 'display', 'touch', 'battery']));
+    expect(b.buttons.boot.gpio).toBe(0);
+    expect(b.leds).toEqual({});
+    expect(b.test_pin).toBeNull();
+    expect(b.sources).toContain('https://files.waveshare.com/wiki/ESP32-S3-LCD-2/ESP32-S3-Touch-LCD-2-SchDoc.pdf');
+    // Every GPIO is in exactly one place: a reserved group, pins.free or the boot button.
+    const all = [...Object.values(b.pins.reserved as Record<string, number[]>).flat(), ...b.pins.free, 0];
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it('s3t-pad generates against the committed slots.lock: the panel, its touch bound by port, PSRAM on', () => {
+    const r = committed(S3T);
+    expect(r.slotsLockChanged).toBe(false);
+    expect(r.manifest.caps.map((c) => [c.name, c.port, c.cap, c.driver])).toEqual([
+      ['boot', 1, 'fr.button', 'button_gpio'],
+      ['lcd', 2, 'fr.display', 'st7789_spi'],
+      ['touch', 3, 'fr.touch', 'cst816_i2c'],
+    ]);
+    expect(r.manifest.test_pin).toBeNull();
+    expect(r.manifest.caps[1]).toMatchObject({ config: { rotation: 'r0', brightness: 255, flush_ms: 20 }, traits: { width: 240, height: 320, color: 'rgb565', ui: true, touch: true } });
+    expect(r.manifest.caps[2]).toMatchObject({ config: { display: 2 }, traits: { width: 240, height: 320, display: 2 } });
+    // The LCD claims its own entry's pins in the reserved display group; no reset line (rst -1, not claimed).
+    expect(r.instances.lcd).toEqual({
+      bind: 'displays.lcd',
+      pins: [39, 38, 45, 42, 1],
+      driverConfig: { kind: 'st7789t3', sclk: 39, mosi: 38, cs: 45, dc: 42, rst: -1, backlight: 1, width: 240, height: 320, column_offset: 0, row_offset: 0, spi_mhz: 40, idle_high: 2 ** 41, backlight_active: 'high' },
+    });
+    expect(r.instances.touch).toEqual({ bind: 'touch.tp', pins: [48, 47, 46], driverConfig: { sda: 48, scl: 47, irq: 46, rst: -1, address: 0x15, i2c_khz: 400 } });
+    expect(r.warnings).toEqual([
+      expect.stringMatching(/^boot: GPIO0 \(buttons\.boot\) is a strapping pin and must be high at reset/),
+      expect.stringMatching(/^lcd: GPIO45 \(displays\.lcd\) is a strapping pin and must be low at reset/),
+      expect.stringMatching(/^touch: GPIO46 \(touch\.tp\) is a strapping pin and must be low at reset/),
+    ]);
+    const sdk = file(r, 'sdkconfig.board');
+    expect(sdk).toContain('CONFIG_SPIRAM=y\nCONFIG_SPIRAM_MODE_OCT=y\nCONFIG_SPIRAM_USE_CAPS_ALLOC=y\n');
+    // A panel raises the core task's stack: ui_load decodes there (design m2-c5-display D3).
+    expect(sdk).toContain('CONFIG_FR_CORE_TASK_STACK=16384\n');
+    const hpp = file(r, 'fr_board/include/fr/board.hpp');
+    expect(hpp).toContain('#include "fr/services/display_service.hpp"\n#include "fr/services/touch_service.hpp"');
+    expect(hpp).toContain('inline constexpr size_t kPanelCount = 1;\ninline constexpr Panel kPanels[] = {\n    {2, "lcd", 240, 320, 0, true, true, 3},\n};');
+    expect(hpp).toContain('inline constexpr Battery kBattery{5, 3000, 3400};');
+    const cpp = file(r, 'fr_board/fr_board.cpp');
+    expect(cpp).toContain('    c.kind = fr::drv::St7789Spi::Kind::st7789t3;\n');
+    expect(cpp).toContain('    c.rst = -1;\n    c.backlight = 1;\n');
+    // The TF card's CS on the LCD's bus, held high by the driver (idle_high: a gpio_mask, not claimed).
+    expect(cpp).toContain('    c.idle_high = 0x20000000000ULL;\n');
+    // The panel's renderer follows the driver's traits (design m2-c5-display D3): ui: true is fr_ui's LVGL backend.
+    expect(cpp).toContain('fr::drv::St7789Spi driver{kDriverConfig};\nfr::ui::LvglBackend backend;\nfr::DisplayService service{driver, backend, kConfig};');
+    expect(cpp).toContain('#include "fr/drv/st7789_spi.hpp"\n#include "fr/ui/lvgl_backend.hpp"\n');
+    expect(cpp).not.toContain('MonoBackend');
+    expect(cpp).toContain('fr::drv::Cst816I2c driver{kDriverConfig};\nfr::TouchService service{driver, kConfig};');
+    expect(cpp).toContain('    c.display = 2;\n');
+    expect(cpp).toContain('{\n    inst_lcd::service.bind_touch(inst_touch::service);\n    s_init[0] = inst_boot::service.init(core);');
+    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio cst816_i2c st7789_spi fr_ui)');
+  });
+
+  it('s3l-pad and c3o-pad: the LCD-1.9 in rgb565 with LVGL and PSRAM, the C3 OLED mono without', () => {
+    const s3l = committed('s3l-pad');
+    expect(s3l.manifest.caps[2]).toMatchObject({ name: 'lcd', port: 3, traits: { width: 170, height: 320, color: 'rgb565', ui: true, touch: false } });
+    expect(s3l.instances.lcd.pins).toEqual([10, 13, 12, 11, 9, 14]);
+    expect(s3l.instances.lcd.driverConfig).toMatchObject({ kind: 'st7789', column_offset: 35, row_offset: 0, idle_high: 0 });
+    expect(file(s3l, 'sdkconfig.board')).toContain('CONFIG_SPIRAM_MODE_OCT=y');
+    expect(file(s3l, 'fr_board/include/fr/board.hpp')).toContain('    {3, "lcd", 170, 320, 0, true, true, 0},');
+    expect(file(s3l, 'fr_board/fr_board.cpp')).not.toContain('bind_touch');
+    const c3 = committed('c3o-pad');
+    expect(c3.manifest.caps[2]).toMatchObject({ name: 'oled', port: 3, traits: { width: 72, height: 40, color: 'mono1', ui: false, touch: false } });
+    expect(c3.instances.oled).toEqual({ bind: 'displays.oled', pins: [5, 6], driverConfig: { sda: 5, scl: 6, address: 0x3c, width: 72, height: 40, column_offset: 28, i2c_khz: 400 } });
+    expect(file(c3, 'sdkconfig.board')).not.toContain('SPIRAM');
+    expect(file(c3, 'sdkconfig.board')).toContain('CONFIG_FR_CORE_TASK_STACK=16384\n');
+    expect(file(committed('c6-pad'), 'sdkconfig.board')).not.toContain('CORE_TASK_STACK');
+    expect(file(c3, 'fr_board/include/fr/board.hpp')).toContain('    {3, "oled", 72, 40, 0, false, false, 0},');
+    // ui: false is fr_core's 1-bit MonoBackend: no fr_ui (design m2-c5-display D3).
+    const c3cpp = file(c3, 'fr_board/fr_board.cpp');
+    expect(c3cpp).toContain('fr::drv::Ssd1306I2c driver{kDriverConfig};\nfr::display::MonoBackend backend;\nfr::DisplayService service{driver, backend, kConfig};');
+    expect(c3cpp).toContain('#include "fr/display/mono_backend.hpp"\n');
+    expect(c3cpp).not.toContain('fr_ui');
+    expect(file(c3, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio led_gpio ssd1306_i2c)');
+    expect(file(s3l, 'fr_board/CMakeLists.txt')).toMatch(/PRIV_REQUIRES .*st7789_spi fr_ui\)/);
+    // Other services keep their two-argument construction.
+    expect(c3cpp).toContain('fr::drv::ButtonGpio driver{kDriverConfig};\nfr::ButtonService service{driver, kConfig};');
+    // A profile without a panel gets no kPanels.
+    expect(file(committed('c6-pad'), 'fr_board/include/fr/board.hpp')).not.toContain('Panel');
+  });
+
+  it("a panel's driver claims only its own entry's reserved pins; nothing else may", () => {
+    const dir = fixture({ locks: true });
+    edit(dir, S3L_BOARD, (y) => {
+      y.buttons.side = { gpio: 12 }; // the LCD's CS
+      y.displays.lcd.backlight = 4; // the battery input
+    });
+    edit(dir, PROFILE('s3l-pad'), (y) => {
+      y.caps.side = { cap: 'fr.button', driver: 'button_gpio', bind: 'buttons.side' };
+    });
+    expect(messages(dir, 's3l-pad')).toEqual([
+      'GPIO4 (displays.lcd) is reserved for battery on waveshare-esp32s3-lcd19',
+      'GPIO12 (buttons.side) is reserved for display on waveshare-esp32s3-lcd19',
+      "GPIO12 (buttons.side) is already claimed by 'lcd'",
+    ]);
+    // The touch driver may not take the display group's pins either, nor the LCD the touch group's.
+    const t = fixture({ locks: true });
+    edit(t, S3T_BOARD, (y) => {
+      y.touch.tp.int = 42;
+      y.displays.lcd.dc = 47;
+    });
+    expect(messages(t, S3T)).toEqual([
+      'GPIO47 (displays.lcd) is reserved for touch on waveshare-esp32s3-touch-lcd2',
+      "GPIO47 (touch.tp) is already claimed by 'lcd'",
+      'GPIO42 (touch.tp) is reserved for display on waveshare-esp32s3-touch-lcd2',
+    ]);
+  });
+
+  it("rotation: the board entry's default, swapping width and height, a profile over it, and a bad angle", () => {
+    const dir = fixture({ locks: true });
+    edit(dir, S3L_BOARD, (y) => {
+      y.displays.lcd.rotation = 90;
+    });
+    const lcd = (r: FirmwareResult) => r.manifest.caps.find((c) => c.name === 'lcd')!;
+    expect(lcd(gen(dir, 's3l-pad', false))).toMatchObject({ config: { rotation: 'r90' }, traits: { width: 320, height: 170 } });
+    edit(dir, PROFILE('s3l-pad'), (y) => {
+      y.caps.lcd.config = { rotation: 'r180' };
+    });
+    const r = gen(dir, 's3l-pad', false);
+    expect(lcd(r)).toMatchObject({ config: { rotation: 'r180' }, traits: { width: 170, height: 320 } });
+    expect(file(r, 'fr_board/include/fr/board.hpp')).toContain('    {3, "lcd", 170, 320, 2, true, true, 0},');
+    edit(dir, S3L_BOARD, (y) => {
+      y.displays.lcd.rotation = 45;
+    });
+    edit(dir, PROFILE('s3l-pad'), (y) => {
+      delete y.caps.lcd.config;
+    });
+    expect(paths(dir, 's3l-pad')).toEqual([`${S3L_BOARD}: displays.lcd.rotation: rotation 45 is not one of 0, 90, 180, 270`]);
+  });
+
+  it("binds a touch to its panel by port: an fr.display instance's, or 0 for none", () => {
+    const dir = fixture({ locks: true });
+    const touch = (display: number) =>
+      edit(dir, PROFILE(S3T), (y) => {
+        y.caps.touch.config = { display };
+      });
+    touch(1);
+    expect(paths(dir, S3T)).toEqual([
+      `firmware/profiles/${S3T}.profile.yaml: caps.touch.config.display: port 1 is boot, an fr.button instance; display names an fr.display port (lcd on port 2)`,
+    ]);
+    touch(9);
+    expect(messages(dir, S3T)).toEqual(['port 9 is no instance; display names an fr.display port (lcd on port 2)']);
+    touch(0);
+    const r = gen(dir, S3T, false);
+    expect(r.manifest.caps.map((c) => [c.name, c.traits])).toEqual([
+      ['boot', { long_press: true, multi_press_max: 2 }],
+      ['lcd', { width: 240, height: 320, color: 'rgb565', ui: true, touch: false }],
+      ['touch', { width: 0, height: 0, display: 0 }],
+    ]);
+    expect(file(r, 'fr_board/fr_board.cpp')).not.toContain('bind_touch');
+  });
+
+  it('psram: on needs a board with PSRAM; without it, or off, nothing is rendered', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, PROFILE('c3o-pad'), (y) => {
+      y.psram = 'on';
+    });
+    expect(paths(dir, 'c3o-pad')).toEqual(['firmware/profiles/c3o-pad.profile.yaml: psram: psram: on, but board esp32c3-oled042 has no PSRAM (psram: null)']);
+    edit(dir, PROFILE('s3l-pad'), (y) => {
+      y.psram = 'off';
+    });
+    expect(file(gen(dir, 's3l-pad', false), 'sdkconfig.board')).not.toContain('SPIRAM');
+    expect(resolveProfile(ROOT, S3T).fragment).toContain('CONFIG_SPIRAM=y');
+  });
+
+  it('a gpio_mask driver field (idle_high): a bit mask of reserved pins no instance claims, never a default', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, S3T_BOARD, (y) => {
+      y.displays.lcd.idle_high = [40, 41];
+    });
+    const r = gen(dir, S3T, false);
+    expect(r.instances.lcd.driverConfig.idle_high).toBe(2 ** 40 + 2 ** 41);
+    expect(r.instances.lcd.pins).toEqual([39, 38, 45, 42, 1]); // held, not claimed
+    expect(file(r, 'fr_board/fr_board.cpp')).toContain('    c.idle_high = 0x30000000000ULL;\n');
+    // A free pin, a claimed one (the BOOT button) and a bad list.
+    edit(dir, S3T_BOARD, (y) => {
+      y.displays.lcd.idle_high = [18, 0];
+    });
+    expect(messages(dir, S3T)).toEqual([
+      'GPIO18 (displays.lcd, held by driver st7789_spi) must be in pins.reserved of waveshare-esp32s3-touch-lcd2',
+      'GPIO0 (displays.lcd, held by driver st7789_spi) must be in pins.reserved of waveshare-esp32s3-touch-lcd2',
+      "GPIO0 (displays.lcd, held by driver st7789_spi) is claimed by 'boot'",
+    ]);
+    edit(dir, S3T_BOARD, (y) => {
+      y.displays.lcd.idle_high = [41, 41];
+    });
+    expect(messages(dir, S3T)).toEqual(['expected a list of distinct GPIO numbers 0..63, got [41,41]']);
+    edit(dir, 'hardware/drivers/st7789_spi/driver.yaml', (y) => {
+      y.config.idle_high.default = 0;
+    });
+    expect(issuesOf(() => loadDriver(dir, 'st7789_spi')).map((i) => `${i.path}: ${i.message}`)).toEqual([
+      'config.idle_high.default: expected a list of distinct GPIO numbers 0..63, got 0',
+      'config.idle_high.default: a gpio_mask has no default (absent from the board entry: no pins)',
+    ]);
+  });
+
+  it('an optional driver pin: null or missing is -1 and claims nothing; a required one is still required, and only gpio may be optional', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, S3L_BOARD, (y) => {
+      y.displays.lcd.rst = null;
+      delete y.displays.lcd.backlight;
+    });
+    const r = gen(dir, 's3l-pad', false);
+    expect(r.instances.lcd).toMatchObject({ pins: [10, 13, 12, 11], driverConfig: { rst: -1, backlight: -1 } });
+    edit(dir, S3L_BOARD, (y) => {
+      y.displays.lcd.dc = null;
+    });
+    expect(messages(dir, 's3l-pad')).toEqual(['expected an integer in 0..255 (gpio), got null']);
+    edit(dir, 'hardware/drivers/st7789_spi/driver.yaml', (y) => {
+      y.config.spi_mhz.optional = true;
+    });
+    expect(issuesOf(() => loadDriver(dir, 'st7789_spi')).map((i) => `${i.path}: ${i.message}`)).toEqual(['config.spi_mhz.optional: optional applies only to gpio fields (an absent pin is -1)']);
   });
 });

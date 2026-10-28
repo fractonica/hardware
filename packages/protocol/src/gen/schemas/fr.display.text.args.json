@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.display.text.args",
+  "title": "fr.display.text arguments",
+  "description": "A text primitive at (x, y), its top left. Size 1 is the panel's smallest font (LVGL: Montserrat 14/20/28 for sizes 1-3, 28 for 4; the C3: 5x7 glyphs scaled by size).",
+  "type": "object",
+  "properties": {
+    "x": {
+      "type": "integer",
+      "minimum": -32768,
+      "maximum": 32767,
+      "description": "(px)"
+    },
+    "y": {
+      "type": "integer",
+      "minimum": -32768,
+      "maximum": 32767,
+      "description": "(px)"
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "(<= 64 UTF-8 bytes)"
+    },
+    "color": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "default": 16777215
+    },
+    "bg": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4,
+      "description": "(1..4)",
+      "default": 1
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "x": 4,
+      "y": 4,
+      "text": "hello",
+      "size": 2
+    }
+  ]
+}
