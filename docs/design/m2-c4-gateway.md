@@ -1,6 +1,6 @@
 # M2-C4: the gateway link and spike S2
 
-> **As built (2026-10-27): implemented, reviewed, fixed, and its gates run; nothing committed (HEAD `3e3a697`).** Results, figures and the bench round: [spike note](../spikes/2026-10-27-m2-c4-s2-gateway.md). T-GW-LINK passed on its second run (run 1 stopped on a hub bug, fixed); S2 answered all nine questions, with (b) failing the M0 rule on one figure (the gateway broadcast heard by pad-c3, 98.27 %); the T-CODEC re-run passed (96 of 96 common fuzz targets with identical digests at 10⁶); T-HIL, T-INPUT sim, T-NN and T-FLOOD passed as regressions. T-GW-LINK's counts stay proposed (§10 item 7). Two decisions wait for you after the S2 data: whether `game` joins M2 (from (c)) and the fleet-safe analog defaults with T2-ANALOG-30's pass rule (from (g)). The text below is corrected to the code as built. It was drafted on 2026-10-27 for checkpoint M2-C4 of [11 §11.6](../spec/11-roadmap.md) at `3e3a697`, run "lighter" like M2-C3: this note, streams C, then G, N and H in parallel, then K; one review pass by three reviewers; three fix agents. Anything marked *inferred* was not read in code, in a datasheet or on the bench.
+> **As built (2026-10-27): implemented, reviewed, fixed, and its gates run; nothing committed (HEAD `3e3a697`).** Results, figures and the bench round: [spike note](../spikes/2026-10-27-m2-c4-s2-gateway.md). T-GW-LINK passed on its second run (run 1 stopped on a hub bug, fixed); S2 answered all nine questions, with (b) failing the M0 rule on one figure (the gateway broadcast heard by pad-c3, 98.27 %); the T-CODEC re-run passed (96 of 96 common fuzz targets with identical digests at 10⁶); T-HIL, T-INPUT sim, T-NN and T-FLOOD passed as regressions. T-GW-LINK's counts stay proposed (§10 item 7). Two decisions waited for you after the S2 data, and you approved both on 2026-10-28 (§10 items 8–9): `game` joins M2 (from (c)), and the fleet-safe analog defaults with T2-ANALOG-30's pass rule (from (g)). The text below is corrected to the code as built. It was drafted on 2026-10-27 for checkpoint M2-C4 of [11 §11.6](../spec/11-roadmap.md) at `3e3a697`, run "lighter" like M2-C3: this note, streams C, then G, N and H in parallel, then K; one review pass by three reviewers; three fix agents. Anything marked *inferred* was not read in code, in a datasheet or on the bench.
 >
 > **What the bench and the review changed against the plan** (each is marked where it lands; figures in the spike note):
 > - **Contract sizes** (D1, D2): NET.NEIGHBORS ≤ 12 entries (16 would exceed 200 B); OTA.CHUNK data ≤ 187 B (the body exactly 200 B); `GwOp` gains `none: 0`; extra enums `GwRate`, `GwTxOpt`, `GwTxStatus`; NET kind `TEST 0x7F` with a `NetTest` body for S2's bench.
@@ -32,7 +32,7 @@ In, in build order:
 7. **Housekeeping**: gate reports collect `stats tcp_close_*` and `espnow`; the hub loop-delay figure explained (and fixed if it is a measuring artefact).
 8. **Gates**: T-GW-LINK, T-CODEC re-run, the S2 spike note.
 
-Out: dual-homing preference and failover (C8); ESP-NOW-only nodes, channel ownership on the hub, discovery sweeps, T-CHAN (C6); relay OTA (C10, only the CHUNK/SACK bodies now); `game` itself (decided here from S2 (c), built at C6 if it joins).
+Out: dual-homing preference and failover (C8); ESP-NOW-only nodes, channel ownership on the hub, discovery sweeps, T-CHAN (C6); relay OTA (C10, only the CHUNK/SACK bodies now); `game` itself (decided from S2 (c): it joins, approved 2026-10-28; built at C6).
 
 ## 2. The wire contract (D1–D5)
 
@@ -163,13 +163,13 @@ Out: dual-homing preference and failover (C8); ESP-NOW-only nodes, channel owner
 6. **The loop-delay fix** (D23): part of the design (no separate call).
 7. T-GW-LINK's counts stay **proposed** (11 §11.6) until the bench data.
 
-**From the S2 data, waiting for you** (D21; spike note):
-8. **Whether `game` joins M2** (from (c)): unicast at 6 Mbps passed 99.9 % (≥ 99.93 %, RTT p50 1.8–3.2 ms), broadcast at 6 Mbps failed (94.15–96.84 % from the gateway). Recommended: `game` as fast unicast plus robust broadcast.
-9. **The fleet-safe analog default and T2-ANALOG-30's pass rule** (from (g) and M2-C3's dry run): recommended, keep `report_hz` 20 / `deadband` 512.
+**From the S2 data** (D21; spike note), **approved by you on 2026-10-28:**
+8. **Whether `game` joins M2** (from (c)): unicast at 6 Mbps passed 99.9 % (≥ 99.93 %, RTT p50 1.8–3.2 ms), broadcast at 6 Mbps failed (94.15–96.84 % from the gateway). Recommended: `game` as fast unicast plus robust broadcast. **Approved 2026-10-28:** `game` joins M2 as fast unicast (per-peer 11g 6 Mbps) plus a robust (1 Mbps) broadcast peer, built at C6 for ESP-NOW-only nodes.
+9. **The fleet-safe analog default and T2-ANALOG-30's pass rule** (from (g) and M2-C3's dry run): recommended, keep `report_hz` 20 / `deadband` 512 (S2 (g): 981 UDP frames/s at the hub, loop p99 5.19 ms, node PING p99 106–220 ms at 4 × 200 Hz; the dry run 23.52 % at 20 Hz against 35.91 % at 50 Hz). **Approved 2026-10-28:** 20 / 512 are the defaults, no longer provisional, and T2-ANALOG-30 is gated at them by its gate line's rule; it is still to run as a gate.
 
 Taken by the lead from the data (no change, so no decision needed): the C3 TX cap stays 34 qdBm ((a)); the C6 keeps the IDF default, 11ax on ((e)); the lwIP timers stay 50 / 300 ((f)).
 
-**Still open (your decision):** items 7, 8 and 9.
+**Still open (your decision):** item 7. Items 8 and 9 were approved on 2026-10-28.
 
 ## 11. Streams
 
@@ -181,7 +181,7 @@ Taken by the lead from the data (no change, so no decision needed): the C3 TX ca
 
 ## 12. Spec edits
 
-**Folded into the spec on 2026-10-27, see 11 §11.6** ("M2-C4 result"). T-GW-LINK's counts are marked proposed in the spec text too; the `game` and analog-default decisions are written as open.
+**Folded into the spec on 2026-10-27, see 11 §11.6** ("M2-C4 result"). T-GW-LINK's counts are marked proposed in the spec text too; the `game` and analog-default decisions are written as open. After your approval on 2026-10-28 they are written as decided (README status, D18 and "Decisions you made"; 05 §5.2–5.3 and §5.15; 07 §7.3; 10 §10.5; 11 §11.1 and §11.6).
 
 - **README D18:** S2 ran; the provisional `report_hz` 20 / `deadband` 512 are recommended as the default, your decision.
 - **04:** §4.2 the `nanoesp32c6-n4` row and the gateway board's facts (QFN40 rev v0.1, 4 MB, the native port vs the CH343 port, `gw-c6`), with what is inferred (the RGB LED on GPIO8, unconfirmed; the free pins; headers).

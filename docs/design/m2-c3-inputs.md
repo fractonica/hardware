@@ -1,6 +1,6 @@
 # M2-C3: inputs (`fr.analog_in` 1.0, fixture PWM setpoints, streaming STATE, the reorder buffer, `vbat_mv`)
 
-> **As built (2026-10-27): implemented, reviewed, fixed, and its gates passed; nothing committed (HEAD `87eaac1`).** Results, figures and the bench round: [spike note](../spikes/2026-10-27-m2-c3-inputs.md). T-ANALOG passed on pad-c3 and pad-c3b on runs 2 and 3, after run 1 failed on single-conversion ADC noise. T-VBAT passed on pad-s3, circular until a cell is fitted. T-HIL passed on its second run, T-INPUT sim and loss passed with `fr.button` `ordered`, and T-NN passed. T2-ANALOG-30 ran as a dry run (published; no pass rule until S2). The T-ANALOG pass numbers, the provisional `report_hz` 20 / `deadband` 512, the event-store thinning and T-VBAT's median rule are used as proposed and wait for your approval (§9). The text below is corrected to the code as built. It was drafted on 2026-10-27 for checkpoint M2-C3 of [11 §11.6](../spec/11-roadmap.md) at `87eaac1`. Run "lighter" by your choice (2026-10-27): this note, five implementation agents, one review pass by three reviewers, two fix agents. Both C3 boards got an RC line (your choice, 2026-10-27; you soldered them). Anything marked *inferred* was not read in code, in a datasheet or on the bench.
+> **As built (2026-10-27): implemented, reviewed, fixed, and its gates passed; nothing committed (HEAD `87eaac1`).** Results, figures and the bench round: [spike note](../spikes/2026-10-27-m2-c3-inputs.md). T-ANALOG passed on pad-c3 and pad-c3b on runs 2 and 3, after run 1 failed on single-conversion ADC noise. T-VBAT passed on pad-s3, circular until a cell is fitted. T-HIL passed on its second run, T-INPUT sim and loss passed with `fr.button` `ordered`, and T-NN passed. T2-ANALOG-30 ran as a dry run (published; no pass rule until S2). The T-ANALOG pass numbers, the event-store thinning and T-VBAT's median rule are used as proposed and wait for your approval (§9); the then-provisional `report_hz` 20 / `deadband` 512 you approved on 2026-10-28, after S2 (§9 item 4). The text below is corrected to the code as built. It was drafted on 2026-10-27 for checkpoint M2-C3 of [11 §11.6](../spec/11-roadmap.md) at `87eaac1`. Run "lighter" by your choice (2026-10-27): this note, five implementation agents, one review pass by three reviewers, two fix agents. Both C3 boards got an RC line (your choice, 2026-10-27; you soldered them). Anything marked *inferred* was not read in code, in a datasheet or on the bench.
 >
 > **What the bench and the review changed against the plan** (each is marked where it lands; figures in the spike note):
 > - **Event-store thinning for streaming capabilities only** (D6): those with a `report_hz` config, today `fr.analog_in`. Thinning every STATE broke T-HIL's LED phase, which reads `status.on` changes back through `events_read`.
@@ -81,7 +81,7 @@ commands:
 ```
 
 - `raw_min`/`raw_max` go: the range is in calibrated mV (row: "the input range in calibrated mV"). The hub converts value ↔ mV with the instance's `min_mv`/`max_mv` from the manifest.
-- `report_hz` 20 and `deadband` 512 (0.8 %, 20 mV over 2,500 mV) are **provisional** defaults until S2; 07 §7.3 says so.
+- `report_hz` 20 and `deadband` 512 (0.8 %, 20 mV over 2,500 mV) were **provisional** defaults until S2; you approved them on 2026-10-28 after S2 (§9 item 4), and 07 §7.3 says so.
 - Breaking against the 0.1 draft is fine: no firmware ever shipped it.
 
 **D2. HAL and service.** `fr_core/include/fr/hal/analog.hpp`:
@@ -199,7 +199,7 @@ Why not a descriptor flag: it changes the descriptor layout, `descriptor_hash` a
 
 **Regression:** T-HIL full gate, T-INPUT sim and loss on the four pads with the C3 firmware (button `ordered`), the reorder counters collected; T-LED, T-NN, T-FLOOD, T-OTA `--phase wifi` as in C2.
 
-**T2-ANALOG-30 dry run** (`tests/sim/scenarios/t2-analog-30.yaml`, published, not gated until S2): 30 `c3o-analog` sim nodes, every node streaming a seeded 1,000 ms sine 300–2,200 mV at its `report_hz` (runs at 20 and at 50 Hz; a slower sine stays inside the 512 deadband at its top and bottom, so the nodes would stream well below `report_hz`); measured: the rate each node reached (reports / wave_s, next to `report_hz`), STATE delivery share, mirror convergence (last value within 500 ms after the waves stop), router `stale`, hub and fleet lag p99, AP `planning_pct`, event-store rows written. Its pass rule is written after S2.
+**T2-ANALOG-30 dry run** (`tests/sim/scenarios/t2-analog-30.yaml`, published, not gated until S2): 30 `c3o-analog` sim nodes, every node streaming a seeded 1,000 ms sine 300–2,200 mV at its `report_hz` (runs at 20 and at 50 Hz; a slower sine stays inside the 512 deadband at its top and bottom, so the nodes would stream well below `report_hz`); measured: the rate each node reached (reports / wave_s, next to `report_hz`), STATE delivery share, mirror convergence (last value within 500 ms after the waves stop), router `stale`, hub and fleet lag p99, AP `planning_pct`, event-store rows written. Its pass rule is written after S2 (S2 ran at M2-C4; gated at 20 / 512 since 2026-10-28, still to run).
 - **As built:** the runner refuses a checkout `fr_fleet` older than its sources (`fleetStaleness`, `ENV_MISSING` "stale fr_fleet: <file> is newer…"). The first dry run (job `j_505f4d84c038`) ran on an `fr_fleet` built before stream E's kit change, and every node was silent. The re-run (job `j_d99dac222691`): 20 Hz achieved 20.0 Hz with `planning_pct` 23.52 %; 50 Hz achieved 46 Hz with `planning_pct` 35.91 % (spike note).
 
 ## 9. Decisions taken with you (2026-10-27)
@@ -207,12 +207,12 @@ Why not a descriptor flag: it changes the descriptor layout, `descriptor_hash` a
 1. **`ordered` as a capability flag carried by EXT TLV `0x05 port_seq`** instead of a descriptor field (D8): **approved**.
 2. **An ordered port's events take one route** (D10): **approved**.
 3. **`fr.button` becomes `ordered`** if the T-INPUT data shows it pays (§6): **approved by you after the data** (2026-10-27). T-INPUT loss on pad-s3: 1,200 clicks, `late` 6, all flagged, 0 missed, 0 false; held 62, released in order 47, on timeout 15, `hold_us_max` 51,482 µs; sim 170/170 per DUT with nothing held. So the M2-exit T-HIL rule is arrival order with zero `late` on `boot` events.
-4. **T-ANALOG's pass numbers** (§8), and the provisional `report_hz` 20 / `deadband` 512 until S2: **used as proposed; your approval comes after the bench data**.
+4. **T-ANALOG's pass numbers** (§8), and the provisional `report_hz` 20 / `deadband` 512 until S2: **used as proposed; your approval comes after the bench data**. The defaults: **approved 2026-10-28 after S2** (S2 (g) at M2-C4, and the dry run's 23.52 % at 20 Hz against 35.91 % at 50 Hz). T-ANALOG's pass numbers are still proposed.
 5. **STATE thinned to 1/s per property in the event store** (D6): **used as proposed, approval after the data**. As built for streaming capabilities only.
 6. Both C3 boards get an RC line; pad-s3 has a battery, and you have a multimeter for the `vbat_mv` check. As run: you soldered both RC lines; pad-s3 had no cell attached, so the meter read the battery connector on USB.
 7. **T-VBAT's median rule** (§8): **used as proposed, approval after the data**.
 
-**Still open (your decision):** items 4, 5 and 7.
+**Still open (your decision):** items 4 (T-ANALOG's pass numbers; its defaults were approved on 2026-10-28), 5 and 7.
 
 ## 10. Streams
 

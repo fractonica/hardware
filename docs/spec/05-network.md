@@ -52,7 +52,7 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 | Profile | Heartbeat | ESP-NOW rate | Power save | Relay | Offline after |
 |---|---|---|---|---|---|
 | `default` | 1000 ms ±10% | robust (1 Mbps) | none | on | 3.5 s |
-| `game` | 250 ms ±10% | fast (6 Mbps OFDM) when RSSI allows | none | on | 875 ms |
+| `game` | 250 ms ±10% | fast (6 Mbps OFDM) for unicast when RSSI allows; the broadcast peer robust (§5.3) | none | on | 875 ms |
 | `battery` (future) | 10–60 s, sleepy flag | robust | connectionless wake windows | off | shown as *asleep* |
 
 ## 5.3 Radio configuration
@@ -78,7 +78,7 @@ Values marked *(calc)* are computed from 802.11 timing, not measured. The accept
 
 **Measured in spike S2** (M2-C4, 2026-10-27, STAs associated, 10,000 frames of 64 B per run; [spike note](../spikes/2026-10-27-m2-c4-s2-gateway.md), records in `docs/spikes/data/2026-10-27-s2/`):
 - **Robust (1 Mbps), 100 frames/s (b):** unicast 100 % on every pair (C3, C6, S3 and the gateway, both ways), every frame acked; echo RTT p50 4.1–5.1 ms, p99 7.7–14.8 ms. Node broadcasts 99.96–100 %. The gateway's broadcast reached pad-c6 99.92 %, pad-s3 99.32 % and pad-c3 98.27 %: under the M0 rule's 99 % on that one pair (the gateway placed at −74…−80 dBm to the AP, pad-c3 the RF-weak board).
-- **Fast (6 Mbps, the per-peer rate above), 200 frames/s (c):** unicast ≥ 99.93 %, every sent frame acked, echo RTT p50 1.8–3.2 ms; node broadcasts 97.98–99.96 %; the gateway's broadcast 94.15–96.84 %. **Broadcast at 6 Mbps fails the 99 % rule; unicast at 6 Mbps passes.** So the `game` profile's "fast when RSSI allows" (§5.2) fits unicast peers; whether `game` joins M2, as fast unicast plus a robust broadcast peer, is your decision ([11 §11.6](11-roadmap.md)).
+- **Fast (6 Mbps, the per-peer rate above), 200 frames/s (c):** unicast ≥ 99.93 %, every sent frame acked, echo RTT p50 1.8–3.2 ms; node broadcasts 97.98–99.96 %; the gateway's broadcast 94.15–96.84 %. **Broadcast at 6 Mbps fails the 99 % rule; unicast at 6 Mbps passes.** So the `game` profile's "fast when RSSI allows" (§5.2) fits unicast peers. **Decided 2026-10-28** (you approved it after (c)): `game` joins M2 as fast unicast plus a robust broadcast peer, per-peer rate 11g 6 Mbps for unicast peers and 11b 1 Mbps for the broadcast peer; built at M2-C6, for ESP-NOW-only nodes ([11 §11.6](11-roadmap.md)).
 - **Rate of blasts:** 200 frames/s at 1 Mbps sent by a C3, or sent toward it, starved that C3's TCP session (it fell back to the gateway, §5.11). Bench runs at 1 Mbps stay at 100 frames/s.
 - **Peer churn (d):** `esp_now_add_peer` p50 39–53 µs, p99 47–91 µs, max ≤ 345 µs; `del_peer` p50 12–18 µs, p99 ≤ 47 µs (C3, C6, S3).
 - **`guard` and `lost` (h):** 0 over (b) and over four pads streaming 200 Hz (g).
@@ -656,7 +656,7 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | 1470 B (v2, 6 vendor elements) | ~12.6 ms | ~2.1 ms |
 | Planning capacity at ~35% channel use | ~240 frames/s | ~1,200 frames/s |
 
-- Use the `game` rate profile above ~200 frames/s or with more than ~30 active nodes.
+- Use the `game` rate profile above ~200 frames/s or with more than ~30 active nodes. Under `game` only unicast runs at 6 Mbps (decided 2026-10-28, §5.3); broadcasts and floods stay at 1 Mbps, so plan them in the 1 Mbps column.
 - In router mode the router's own Wi-Fi traffic shares channel C, so leave headroom.
 - Gateway-mode heartbeats are unicast to the gateway: 100 nodes at 1 Hz use ~15% of the channel at 1 Mbps and ~3% at 6 Mbps.
 
