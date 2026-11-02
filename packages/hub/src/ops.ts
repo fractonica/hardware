@@ -9,6 +9,7 @@ import { type FaultKind, formatCursor, FrError, HUB_VERSION, type JobOrigin, MAX
 
 import { APPS_HANDLERS } from './apps/ops.ts';
 import { buildVariant, listArtifacts } from './artifacts.ts';
+import { AUDIO_HANDLERS } from './audio/ops.ts';
 import { NET_HANDLERS } from './bindings/ops.ts';
 import { profileApp, runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
@@ -544,4 +545,6 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...FIXTURE_HANDLERS,
   // M2-C5 (design m2-c5-display D10): display_snapshot, display_render (H; input_simulate's touch is in LINKS_HANDLERS).
   ...DISPLAY_HANDLERS,
+  // A1 (design audio-a1 D8): audio_record, audio_play, audio_level (placeholders until stream H).
+  ...AUDIO_HANDLERS,
 };

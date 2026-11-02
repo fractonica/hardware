@@ -177,6 +177,21 @@ struct GwBridgeStatus {
     uint32_t last_tx_us = 0;  // the last verdict's time since its GW_TX arrived (not a counter)
 };
 
+/**
+ * An fr.audio_in or fr.audio_out instance (design audio-a1 §11; fr::audio::WorkerStats): `stats audio`, counters
+ * since boot (`stats reset` leaves them), so a bench run tells I2S DMA loss from Wi-Fi loss and from the room.
+ */
+struct AudioStatus {
+    const char *name = "";  // the instance (the profile's name: a literal)
+    bool input = false;
+    // Inputs: DMA buffers the I2S RX queue lost (the driver's on_recv_q_ovf), samples the record ring dropped,
+    // samples saturated in the conversion.
+    uint32_t rx_overflows = 0, dropped_samples = 0, clipping = 0;
+    // Outputs: DMA buffers the amplifier played starved while a sound ran (on_send_q_ovf), the play ring's dry spells.
+    uint32_t underruns = 0, ring_dry = 0;
+};
+inline constexpr size_t kAudioMax = 4;
+
 /** Hub link and Wi-Fi state for `info` (states) and `stats` (counters). */
 struct NetStatus {
     LinkStatus links[kLinks];
@@ -248,6 +263,9 @@ struct NetStatus {
     // M2-C4 (design m2-c4-gateway D8, D10-D12).
     GatewayStatus gateway;
     GwBridgeStatus gw;
+    // A1 (design audio-a1 §11): the audio instances, the first audio_count of audio[].
+    AudioStatus audio[kAudioMax];
+    size_t audio_count = 0;
 };
 
 // ---- spike S2's test hooks (design m2-c4-gateway D19), FR_TEST_HOOKS builds ----
@@ -330,6 +348,16 @@ public:
     virtual std::expected<CpuStatus, Err> cpu() = 0;
     /** `net stream <hz> <s> [len]` (0 ends it). */
     virtual Status net_stream(uint32_t hz, uint32_t seconds, uint16_t len) = 0;
+    /**
+     * `audio stall <ms>` (design audio-a1 T-AUDIO 1): the running record stream drops `ms` of audio, whole 100 ms
+     * blocks from the next one on, as a ring overflow drops them (counted in dropped_samples, first_sample jumps).
+     * not_found without a record stream.
+     */
+    virtual Status audio_stall(uint32_t ms)
+    {
+        static_cast<void>(ms);
+        return std::unexpected(Err::unsupported);
+    }
 
 protected:
     ~TestHooks() = default;

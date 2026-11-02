@@ -4,13 +4,19 @@
 // from its stored offset, 06 §6.6). Which requests may download is the orchestrator's call (`authorize`):
 // the gate is the source IP of the device's live TCP session, so the listener needs no credentials and
 // serves nothing to a host that has no node link. Crash reports (`POST /node/v1/coredump/...`) answer 501
-// until they land; every other path is 404.
+// until they land. Audio (design audio-a1 D3; audio/streams.ts) adds `POST /v1/audio/in/<stream_id>` and
+// `GET /v1/audio/out/<play_id>` for the ids the audio ops issued; every other path is 404.
 //
 // Plain node:http, not the API's Fastify: the only routes stream files with Range, and the listener binds
-// the node-facing interface (0.0.0.0), so it shares nothing with the loopback API server.
+// the node-facing interface (0.0.0.0), so it shares nothing with the loopback API server. A record POST is
+// chunked and each chunk is one audio block, a boundary node:http does not keep: a connection whose first bytes
+// are `POST /v1/audio/in/` goes to the audio streams as a raw socket, every other one to node:http.
 
 import { createReadStream } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
+
+import { AUDIO_IN_PREFIX, AUDIO_OUT_PATH_RE, type AudioStreams } from '../audio/streams.ts';
 
 /** The image a request may download, as the orchestrator answers `authorize`. */
 export interface OtaImage {
@@ -31,6 +37,8 @@ export interface NodeHttpOptions {
   /** 0 binds an ephemeral port (tests). */
   port: number;
   authorize: Authorize;
+  /** The audio routes (audio/streams.ts); without them both answer 404. */
+  audio?: AudioStreams;
 }
 
 export interface NodeHttpCounters {
@@ -77,6 +85,8 @@ export class NodeHttpServer {
   #opts: NodeHttpOptions;
   #server: Server | null = null;
   #port: number | null = null;
+  /** Connections whose first bytes are awaited (#route), before node:http or the audio streams get them. */
+  #raw = new Set<Socket>();
 
   constructor(opts: NodeHttpOptions) {
     this.#opts = opts;
@@ -88,6 +98,10 @@ export class NodeHttpServer {
     // A node on a slow link may take a while for a 1-2 MB image; the request itself is one line.
     server.requestTimeout = 30_000;
     server.headersTimeout = 10_000;
+    // Every connection is looked at first (#route), then given to node:http's own listener or the audio streams.
+    const toHttp = server.listeners('connection') as ((socket: Socket) => void)[];
+    server.removeAllListeners('connection');
+    server.on('connection', (socket: Socket) => this.#route(socket, (s) => toHttp.forEach((fn) => fn.call(server, s))));
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
       server.listen({ host: this.#opts.host, port: this.#opts.port }, () => {
@@ -114,10 +128,67 @@ export class NodeHttpServer {
     if (!server) {
       return;
     }
+    for (const s of this.#raw) {
+      s.destroy();
+    }
+    this.#opts.audio?.closeAll();
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections();
     });
+  }
+
+  /**
+   * Reads a connection's first bytes: a record POST (`POST /v1/audio/in/`) goes to the audio streams as a raw socket,
+   * anything else back to node:http with those bytes put back in front.
+   */
+  #route(socket: Socket, toHttp: (socket: Socket) => void): void {
+    this.#raw.add(socket);
+    let buf: Buffer = Buffer.alloc(0);
+    const onError = () => socket.destroy();
+    const timer = setTimeout(() => socket.destroy(), 10_000); // nothing sent: node:http's headersTimeout's job
+    const done = () => {
+      clearTimeout(timer);
+      socket.off('data', onData);
+      socket.off('error', onError);
+      this.#raw.delete(socket);
+    };
+    const onData = (d: Buffer) => {
+      buf = buf.length ? Buffer.concat([buf, d]) : d;
+      const n = Math.min(buf.length, AUDIO_IN_PREFIX.length);
+      if (buf.subarray(0, n).equals(AUDIO_IN_PREFIX.subarray(0, n))) {
+        if (buf.length < AUDIO_IN_PREFIX.length) {
+          return; // could still be one: wait for more
+        }
+        done();
+        this.counters.requests++;
+        if (this.#opts.audio) {
+          this.#opts.audio.acceptRecord(socket, buf);
+        } else {
+          this.counters.not_found++;
+          socket.end('HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 10\r\nConnection: close\r\n\r\nnot found\n');
+          socket.resume();
+          setTimeout(() => socket.destroy(), 2000).unref();
+        }
+        return;
+      }
+      done();
+      socket.pause();
+      socket.unshift(buf);
+      toHttp(socket);
+      socket.resume();
+    };
+    socket.on('error', onError);
+    socket.once('end', () => {
+      if (this.#raw.has(socket)) {
+        socket.destroy(); // gone before its first bytes said what it is (the listener's sockets are half-open)
+      }
+    });
+    socket.on('close', () => {
+      clearTimeout(timer);
+      this.#raw.delete(socket);
+    });
+    socket.on('data', onData);
   }
 
   #handle(req: IncomingMessage, res: ServerResponse): void {
@@ -129,6 +200,13 @@ export class NodeHttpServer {
       // body is not read: the connection closes after the answer.
       res.writeHead(501, { 'content-type': 'text/plain', connection: 'close' });
       res.end('core dump upload is not implemented by this hub\n');
+      return;
+    }
+    const audioOut = AUDIO_OUT_PATH_RE.exec(path);
+    if (audioOut) {
+      if (!this.#opts.audio?.serveOut(req, res, audioOut[1], ip)) {
+        this.#notFound(res);
+      }
       return;
     }
     const m = OTA_PATH_RE.exec(path);

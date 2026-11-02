@@ -16,7 +16,7 @@ const hashOf = (ops: readonly { name: string; input: z.ZodType }[]) =>
 
 describe('M2-C5 ops (design m2-c5-display D10)', () => {
   it('adds display_snapshot and display_render as read-tier queries, and moves REGISTRY_HASH', () => {
-    expect(OPS).toHaveLength(48);
+    expect(OPS.filter((o) => !o.name.startsWith('audio_'))).toHaveLength(48); // A1 adds three (protocol-a1.test.ts)
     for (const name of ['display_snapshot', 'display_render']) {
       const op = findOp(name)!;
       expect(op, name).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['display', name.slice('display_'.length)] } });

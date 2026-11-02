@@ -1,4 +1,5 @@
-// Spike S2's test hooks on target (design m2-c4-gateway D19): diag `air ...`, `wifi proto`, `cpu` and `net stream`
+// Spike S2's test hooks on target (design m2-c4-gateway D19): diag `air ...`, `wifi proto`, `cpu`, `net stream` (and,
+// design audio-a1, `audio stall`)
 // through fr_diag's TestHooks. The bench and the stream are Net's (IDF-free, the kit runs the same); the radio hooks are
 // fr_net's ESP side (espnow.cpp, hub_link.cpp). `cpu` compares the idle tasks' run-time counters (FreeRTOS run-time
 // stats on the esp_timer clock, 64-bit: debug builds enable both in firmware/config/sdkconfig.build.debug) against a
@@ -10,6 +11,7 @@
 #include <cstring>
 
 #include "esp_timer.h"
+#include "fr/audio/engine.hpp"
 #include "fr/net/esp.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -194,6 +196,10 @@ public:
     std::expected<diag::CpuStatus, Err> cpu() override { return cpu_share(); }
 
     Status net_stream(uint32_t hz, uint32_t seconds, uint16_t len) override { return net_->stream(hz, seconds, len); }
+    // design audio-a1 T-AUDIO 1: the record stream's drop hook (AudioInService::stall).
+#if FR_TEST_HOOKS
+    Status audio_stall(uint32_t ms) override { return audio::engine().stall(ms); }
+#endif
 
 private:
     net::Net *net_ = nullptr;

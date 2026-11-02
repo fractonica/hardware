@@ -42,6 +42,7 @@ import { radioOff } from '../registry/provision.ts';
 import { CHIP_IDS, markImageFlashed } from '../registry/store.ts';
 import { nowUs } from '../ring.ts';
 import { routerInfo } from '../router/index.ts';
+import { AudioStreams } from '../audio/streams.ts';
 import { NodeHttpServer, type NodeHttpCounters, type OtaImage } from './http.ts';
 
 /** The node HTTP port (spec 08 §8.10): `GET /ota/<fw_id>.bin` for nodes with an outstanding OFFER. */
@@ -432,6 +433,8 @@ export class OtaOrchestrator implements OtaService {
   readonly config: OtaConfig;
   #deps: OtaDeps;
   #http: NodeHttpServer;
+  /** The audio ops' ids and routes on the same listener (design audio-a1 D3). */
+  #audio: AudioStreams;
   #listenError: string | null = null;
   /** Children not finalized yet, by job id (QUEUED ones included). */
   #children = new Map<string, Child>();
@@ -446,7 +449,8 @@ export class OtaOrchestrator implements OtaService {
   constructor(deps: OtaDeps) {
     this.#deps = deps;
     this.config = { ...OTA_DEFAULTS, ...deps.config };
-    this.#http = new NodeHttpServer({ host: deps.http.host, port: deps.http.port, authorize: (fw, ip) => this.#authorize(fw, ip) });
+    this.#audio = new AudioStreams({ tcpAddress: (id) => deps.router.tcpAddress(id) });
+    this.#http = new NodeHttpServer({ host: deps.http.host, port: deps.http.port, authorize: (fw, ip) => this.#authorize(fw, ip), audio: this.#audio });
     this.#sweep();
   }
 
@@ -495,6 +499,10 @@ export class OtaOrchestrator implements OtaService {
 
   httpCounters(): NodeHttpCounters {
     return { ...this.#http.counters };
+  }
+
+  audio(): AudioStreams {
+    return this.#audio;
   }
 
   // ---- plan, start, status ----

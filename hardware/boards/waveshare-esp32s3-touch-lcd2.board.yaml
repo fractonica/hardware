@@ -59,7 +59,7 @@ test_pin: null                # not a T-LAT DUT: no free pin is wired to the fix
 # BAT_ADC (design m2-c5-display D9): the battery through 200 kOhm / 100 kOhm, x3 from the schematic (unlike the
 # LCD-1.9's measured 2.617); re-check it with a cell fitted. low_mv: low_batt below it.
 battery: { gpio: 5, divider: 3.0, low_mv: 3400 }
-resources: { rmt_tx: 4, rmt_rx: 4, ledc_timers: 4, ledc_channels: 8, i2c: 2, spi_host: 2, adc1_channel: 10 }   # spi_host: SPI2, SPI3
+resources: { rmt_tx: 4, rmt_rx: 4, ledc_timers: 4, ledc_channels: 8, i2c: 2, spi_host: 2, adc1_channel: 10, i2s: 2 }   # spi_host: SPI2, SPI3
 defaults:
   boot:  { cap: fr.button,  driver: button_gpio, bind: buttons.boot }
   lcd:   { cap: fr.display, driver: st7789_spi,  bind: displays.lcd }

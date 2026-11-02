@@ -3,7 +3,7 @@
 The Claude Code plugin of [09 §9.8](../docs/spec/09-agent-api.md):
 
 - `.claude-plugin/plugin.json`: one MCP server, `fractonica`, run as `${HOME}/.local/bin/fr mcp` (the shim `fr doctor --fix` writes). `fr mcp` serves every hub op as a tool; when no hub runs, the first tool call starts one (launching the server, which Claude Code does in every session, starts nothing).
-- `skills/`: `fleet-ops`, `build-deploy`, `e2e-verify` and `hil-rig` (the HIL fixture, design m2-c1-hil), in the cross-vendor Agent Skills subset (`name` and `description` only).
+- `skills/`: `fleet-ops`, `build-deploy`, `e2e-verify`, `hil-rig` (the HIL fixture, design m2-c1-hil) and `audio` (record, play, levels and counters, T-AUDIO; design audio-a1), in the cross-vendor Agent Skills subset (`name` and `description` only).
 - `hooks/hooks.json`: SessionStart prints one line of hub status (`hooks/session-start.sh`), or how to fix a missing shim; it never fails the session.
 - `AGENTS.md`: the same guidance for other agents, with CLI equivalents.
 

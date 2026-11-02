@@ -1,11 +1,12 @@
-// Hub events (spec 08 §8.7, 09 §9.2; design c6 D3, D4, D19; m2-c1-hil D9): the HubEvent that events_read
-// returns and `/ws` (fr-ws/1, ws.ts) carries, the hub's own event types and the fields of the ones C6 and
-// M2-C1 add.
+// Hub events (spec 08 §8.7, 09 §9.2; design c6 D3, D4, D19; m2-c1-hil D9; audio-a1 D8): the HubEvent that
+// events_read returns and `/ws` (fr-ws/1, ws.ts) carries, the hub's own event types and the fields of the ones C6,
+// M2-C1 and A1 add.
 // Capability events and states are `<instance>.<member>`, with the fields the generated codecs decode.
 // Field schemas are loose: an emitter may add a field, and a client reads the ones it knows.
 
 import { z } from 'zod';
 
+import { AUDIO_IN_END_REASONS, AUDIO_OUT_END_REASONS } from './ops/audio.ts';
 import { INPUT_LAYERS } from './ops/links.ts';
 import { JOB_KINDS, JOB_ORIGINS, JOB_STATUSES, PORT_STATES } from './types.ts';
 
@@ -65,6 +66,9 @@ export const HUB_EVENT_TYPES = [
   'op.called',
   'hil.edge',
   'hil.frame',
+  // A1 (design audio-a1 D8): a device's audio stream over the hub's node HTTP port began and ended.
+  'audio.stream_started',
+  'audio.stream_ended',
 ] as const;
 export type HubEventType = (typeof HUB_EVENT_TYPES)[number];
 
@@ -210,7 +214,51 @@ export const HilFrameFields = z.looseObject({
   ...hilTimes,
 });
 
-/** The fields schema of each hub event type C6 and M2-C1 define, plus hub.warning. */
+/** Which way an audio stream runs (D3): `in`, a board's microphone to the hub (POST); `out`, the hub to its speaker (GET). */
+export const AUDIO_DIRECTIONS = ['in', 'out'] as const;
+export type AudioDirection = (typeof AUDIO_DIRECTIONS)[number];
+
+/**
+ * audio.stream_started (design audio-a1 D8): the hub issued a stream (audio_record: a stream id, audio_play of a file:
+ * a play id) and the board's first bytes arrived (in) or its GET began (out); published on the device. A tone has no
+ * stream and publishes neither event.
+ */
+export const AudioStreamStartedFields = z.looseObject({
+  instance: z.string(),
+  direction: z.enum(AUDIO_DIRECTIONS),
+  /** The stream_id (in) or play_id (out). */
+  stream_id: z.number().int(),
+  sample_hz: z.number().int(),
+  /** in: the seconds asked for; out: the length of the converted file. */
+  seconds: z.number(),
+  /** in: the WAV being written; out: the file being played. */
+  path: z.string().optional(),
+  job_id: z.string().optional(),
+});
+
+/**
+ * audio.stream_ended (design audio-a1 D8): the stream's end with its figures (stream_ended / play_done, and the hub's
+ * own count of what arrived or was served); `timeout` when the device's event never came.
+ */
+export const AudioStreamEndedFields = z.looseObject({
+  instance: z.string(),
+  direction: z.enum(AUDIO_DIRECTIONS),
+  stream_id: z.number().int(),
+  reason: z.union([z.enum(AUDIO_IN_END_REASONS), z.enum(AUDIO_OUT_END_REASONS)]),
+  sample_hz: z.number().int(),
+  samples: z.number().int(),
+  /** in only: samples the board dropped (written as silence). */
+  dropped_samples: z.number().int().optional(),
+  /** out only: silent gaps the board played. */
+  underruns: z.number().int().optional(),
+  /** in only: of the WAV. */
+  peak_dbfs: z.number().optional(),
+  rms_dbfs: z.number().optional(),
+  path: z.string().optional(),
+  job_id: z.string().optional(),
+});
+
+/** The fields schema of each hub event type C6, M2-C1 and A1 define, plus hub.warning. */
 export const HUB_EVENT_FIELDS = {
   'port.attached': PortAttachedFields,
   'port.detached': PortDetachedFields,
@@ -224,4 +272,6 @@ export const HUB_EVENT_FIELDS = {
   'op.called': OpCalledFields,
   'hil.edge': HilEdgeFields,
   'hil.frame': HilFrameFields,
+  'audio.stream_started': AudioStreamStartedFields,
+  'audio.stream_ended': AudioStreamEndedFields,
 } as const satisfies Partial<Record<HubEventType, z.ZodType>>;

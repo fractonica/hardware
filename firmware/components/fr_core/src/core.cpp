@@ -28,6 +28,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_worker.hpp"
+#include "fr/audio/engine.hpp"
 #include "fr/core/descriptor.hpp"
 #include "fr/core/node_net.hpp"
 #include "fr/diag.hpp"
@@ -974,6 +975,27 @@ public:
 
 OtaHost s_ota_host;
 
+/**
+ * Where fr.audio_in and fr.audio_out stream (design audio-a1 D3): the hub address of the TCP session, as OTA's
+ * endpoint (never a fresh lookup), port 7422, and fr_ident's device_id for X-Fr-Device. Core task.
+ */
+class AudioStreamHost final : public audio::StreamHost
+{
+public:
+    bool endpoint(audio::Endpoint &out) override
+    {
+        ota::Endpoint e;
+        if (!s_ota_host.endpoint(e) || !audio::parse_ipv4(e.host, out.ipv4)) {
+            return false;
+        }
+        out.port = e.port;
+        return true;
+    }
+    const char *device_id() const override { return s_identity.device_id; }
+};
+
+AudioStreamHost s_audio_host;
+
 /** Boot step 2 (03 §3.5): Ota on the target's slot, HTTP client and nvs:fr_ota, then its boot checks. */
 void start_ota()
 {
@@ -1286,6 +1308,19 @@ public:
                 .q_high = b.q_high,
                 .last_tx_us = b.last_tx_us};
 #endif
+        // `stats audio` (design audio-a1 §11): the audio services' counters, read from their atomics.
+        std::array<audio::WorkerStats, diag::kAudioMax> as{};
+        n.audio_count = audio::engine().stats(as);
+        for (size_t i = 0; i < n.audio_count; ++i) {
+            const audio::WorkerStats &a = as[i];
+            n.audio[i] = {.name = a.name,
+                          .input = a.input,
+                          .rx_overflows = a.rx_overflows,
+                          .dropped_samples = a.dropped_samples,
+                          .clipping = a.clipping,
+                          .underruns = a.underruns,
+                          .ring_dry = a.ring_dry};
+        }
         return n;
     }
 
@@ -1697,6 +1732,8 @@ Core &start()
     // 03 §3.5 step 2, with its timer taken before the board's: a PENDING_VERIFY image's health deadline
     // runs from here, and the running image's fw_id is read once for HELLO, the banner and CHECK.
     start_ota();
+    // Before fr::board::init: the audio services take their streams' endpoint from here (design audio-a1 D3).
+    audio::set_stream_host(&s_audio_host);
     load_fw_id();
     if (!serial::start({.frame = on_frame_line, .text = on_text_line})) {
         ESP_LOGE(TAG, "fr_serial did not start: no frames and no diag channel this boot");

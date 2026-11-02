@@ -21,8 +21,10 @@
 #include "button.hpp"
 #include "led.hpp"
 #include "display.hpp"
+#include "audio_out.hpp"
 #include "analog_in.hpp"
 #include "fixture.hpp"
+#include "audio_in.hpp"
 #include "touch.hpp"
 #include "node.hpp"
 #include "ota.hpp"
@@ -37,7 +39,7 @@ inline std::expected<fr::wire::SerialFrame, fr::wire::DecodeErr> decode_serial(s
     return fr::wire::decode_line({reinterpret_cast<const char *>(in.data()), in.size()}, scratch);
 }
 
-inline constexpr size_t kCount = 584;
+inline constexpr size_t kCount = 640;
 
 template <class V>
 void for_each(V &&v)
@@ -5376,6 +5378,188 @@ void for_each(V &&v)
         x = 255;
         v.value("fr.display.brightness.state.max", "fr.display.brightness.state", x, fr::cap::encode_display_brightness_state, fr::cap::decode_display_brightness_state, "08ff01", true);
     }
+    // fr.audio_out.traits.defaults (cap fr.audio_out.traits)
+    {
+        fr::cap::AudioOutTraits x{};
+        x.max_sample_hz = 0;
+        x.bits = 0;
+        v.value("fr.audio_out.traits.defaults", "fr.audio_out.traits", x, enc, fr::cap::decode_audio_out_traits, "", true);
+    }
+    // fr.audio_out.traits.sample (cap fr.audio_out.traits)
+    {
+        fr::cap::AudioOutTraits x{};
+        x.max_sample_hz = 2654435761u;
+        x.bits = 98;
+        v.value("fr.audio_out.traits.sample", "fr.audio_out.traits", x, enc, fr::cap::decode_audio_out_traits, "08b1f3ddf1091062", true);
+    }
+    // fr.audio_out.traits.max (cap fr.audio_out.traits)
+    {
+        fr::cap::AudioOutTraits x{};
+        x.max_sample_hz = 4294967295u;
+        x.bits = 255;
+        v.value("fr.audio_out.traits.max", "fr.audio_out.traits", x, enc, fr::cap::decode_audio_out_traits, "08ffffffff0f10ff01", true);
+    }
+    // fr.audio_out.tone.args.defaults (cap fr.audio_out.tone.args)
+    {
+        fr::cap::AudioOutToneArgs x{};
+        x.freq_hz = 0;
+        x.ms = 500;
+        v.value("fr.audio_out.tone.args.defaults", "fr.audio_out.tone.args", x, enc, fr::cap::decode_audio_out_tone_args, "10f403", true);
+    }
+    // fr.audio_out.tone.args.sample (cap fr.audio_out.tone.args)
+    {
+        fr::cap::AudioOutToneArgs x{};
+        x.freq_hz = 19874;
+        x.ms = 11523;
+        x.has_volume = true;
+        x.volume = 57;
+        v.value("fr.audio_out.tone.args.sample", "fr.audio_out.tone.args", x, enc, fr::cap::decode_audio_out_tone_args, "08a29b0110835a1839", true);
+    }
+    // fr.audio_out.tone.args.max (cap fr.audio_out.tone.args)
+    {
+        fr::cap::AudioOutToneArgs x{};
+        x.freq_hz = 20000;
+        x.ms = 60000;
+        x.has_volume = true;
+        x.volume = 100;
+        v.value("fr.audio_out.tone.args.max", "fr.audio_out.tone.args", x, enc, fr::cap::decode_audio_out_tone_args, "08a09c0110e0d4031864", true);
+    }
+    // fr.audio_out.tone.args.example_0 (cap fr.audio_out.tone.args)
+    {
+        fr::cap::AudioOutToneArgs x{};
+        x.freq_hz = 1000;
+        x.ms = 3000;
+        v.value("fr.audio_out.tone.args.example_0", "fr.audio_out.tone.args", x, enc, fr::cap::decode_audio_out_tone_args, "08e80710b817", true);
+    }
+    // fr.audio_out.tone.args.example_1 (cap fr.audio_out.tone.args)
+    {
+        fr::cap::AudioOutToneArgs x{};
+        x.freq_hz = 440;
+        x.ms = 500;
+        x.has_volume = true;
+        x.volume = 30;
+        v.value("fr.audio_out.tone.args.example_1", "fr.audio_out.tone.args", x, enc, fr::cap::decode_audio_out_tone_args, "08b80310f403181e", true);
+    }
+    // fr.audio_out.play.args.defaults (cap fr.audio_out.play.args)
+    {
+        fr::cap::AudioOutPlayArgs x{};
+        x.play_id = 0;
+        x.sample_hz = 0;
+        v.value("fr.audio_out.play.args.defaults", "fr.audio_out.play.args", x, enc, fr::cap::decode_audio_out_play_args, "", true);
+    }
+    // fr.audio_out.play.args.sample (cap fr.audio_out.play.args)
+    {
+        fr::cap::AudioOutPlayArgs x{};
+        x.play_id = 2654435761u;
+        x.sample_hz = 26804;
+        v.value("fr.audio_out.play.args.sample", "fr.audio_out.play.args", x, enc, fr::cap::decode_audio_out_play_args, "08b1f3ddf10910b4d101", true);
+    }
+    // fr.audio_out.play.args.max (cap fr.audio_out.play.args)
+    {
+        fr::cap::AudioOutPlayArgs x{};
+        x.play_id = 4294967295u;
+        x.sample_hz = 48000;
+        v.value("fr.audio_out.play.args.max", "fr.audio_out.play.args", x, enc, fr::cap::decode_audio_out_play_args, "08ffffffff0f1080f702", true);
+    }
+    // fr.audio_out.play.args.example_0 (cap fr.audio_out.play.args)
+    {
+        fr::cap::AudioOutPlayArgs x{};
+        x.play_id = 1;
+        x.sample_hz = 16000;
+        v.value("fr.audio_out.play.args.example_0", "fr.audio_out.play.args", x, enc, fr::cap::decode_audio_out_play_args, "080110807d", true);
+    }
+    // fr.audio_out.stop.args.empty (cap fr.audio_out.stop.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.audio_out.stop.args.empty", "fr.audio_out.stop.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.audio_out.set_volume.args.defaults (cap fr.audio_out.set_volume.args)
+    {
+        fr::cap::AudioOutSetVolumeArgs x{};
+        x.volume = 0;
+        v.value("fr.audio_out.set_volume.args.defaults", "fr.audio_out.set_volume.args", x, enc, fr::cap::decode_audio_out_set_volume_args, "", true);
+    }
+    // fr.audio_out.set_volume.args.sample (cap fr.audio_out.set_volume.args)
+    {
+        fr::cap::AudioOutSetVolumeArgs x{};
+        x.volume = 19;
+        v.value("fr.audio_out.set_volume.args.sample", "fr.audio_out.set_volume.args", x, enc, fr::cap::decode_audio_out_set_volume_args, "0813", true);
+    }
+    // fr.audio_out.set_volume.args.max (cap fr.audio_out.set_volume.args)
+    {
+        fr::cap::AudioOutSetVolumeArgs x{};
+        x.volume = 100;
+        v.value("fr.audio_out.set_volume.args.max", "fr.audio_out.set_volume.args", x, enc, fr::cap::decode_audio_out_set_volume_args, "0864", true);
+    }
+    // fr.audio_out.set_volume.args.example_0 (cap fr.audio_out.set_volume.args)
+    {
+        fr::cap::AudioOutSetVolumeArgs x{};
+        x.volume = 40;
+        v.value("fr.audio_out.set_volume.args.example_0", "fr.audio_out.set_volume.args", x, enc, fr::cap::decode_audio_out_set_volume_args, "0828", true);
+    }
+    // fr.audio_out.play_done.event.defaults (cap fr.audio_out.play_done.event)
+    {
+        fr::cap::AudioOutPlayDone x{};
+        x.play_id = 0;
+        x.reason = AudioOutPlayEndReason::done;
+        x.underruns = 0;
+        x.samples = 0;
+        v.value("fr.audio_out.play_done.event.defaults", "fr.audio_out.play_done.event", x, enc, fr::cap::decode_audio_out_play_done, "", true);
+    }
+    // fr.audio_out.play_done.event.sample (cap fr.audio_out.play_done.event)
+    {
+        fr::cap::AudioOutPlayDone x{};
+        x.play_id = 2654435761u;
+        x.reason = AudioOutPlayEndReason::underrun;
+        x.underruns = 3668339987u;
+        x.samples = 2027808452;
+        v.value("fr.audio_out.play_done.event.sample", "fr.audio_out.play_done.event", x, enc, fr::cap::decode_audio_out_play_done, "08b1f3ddf10910031893da99d50d20c4cdf7c607", true);
+    }
+    // fr.audio_out.play_done.event.max (cap fr.audio_out.play_done.event)
+    {
+        fr::cap::AudioOutPlayDone x{};
+        x.play_id = 4294967295u;
+        x.reason = AudioOutPlayEndReason::error;
+        x.underruns = 4294967295u;
+        x.samples = 4294967295u;
+        v.value("fr.audio_out.play_done.event.max", "fr.audio_out.play_done.event", x, enc, fr::cap::decode_audio_out_play_done, "08ffffffff0f100418ffffffff0f20ffffffff0f", true);
+    }
+    // fr.audio_out.playing.state.defaults (cap fr.audio_out.playing.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.audio_out.playing.state.defaults", "fr.audio_out.playing.state", x, fr::cap::encode_audio_out_playing_state, fr::cap::decode_audio_out_playing_state, "", true);
+    }
+    // fr.audio_out.playing.state.sample (cap fr.audio_out.playing.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.audio_out.playing.state.sample", "fr.audio_out.playing.state", x, fr::cap::encode_audio_out_playing_state, fr::cap::decode_audio_out_playing_state, "0801", true);
+    }
+    // fr.audio_out.playing.state.max (cap fr.audio_out.playing.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.audio_out.playing.state.max", "fr.audio_out.playing.state", x, fr::cap::encode_audio_out_playing_state, fr::cap::decode_audio_out_playing_state, "0801", true);
+    }
+    // fr.audio_out.volume.state.defaults (cap fr.audio_out.volume.state)
+    {
+        uint8_t x = 0;
+        x = 0;
+        v.value("fr.audio_out.volume.state.defaults", "fr.audio_out.volume.state", x, fr::cap::encode_audio_out_volume_state, fr::cap::decode_audio_out_volume_state, "", true);
+    }
+    // fr.audio_out.volume.state.sample (cap fr.audio_out.volume.state)
+    {
+        uint8_t x = 0;
+        x = 177;
+        v.value("fr.audio_out.volume.state.sample", "fr.audio_out.volume.state", x, fr::cap::encode_audio_out_volume_state, fr::cap::decode_audio_out_volume_state, "08b101", true);
+    }
+    // fr.audio_out.volume.state.max (cap fr.audio_out.volume.state)
+    {
+        uint8_t x = 0;
+        x = 255;
+        v.value("fr.audio_out.volume.state.max", "fr.audio_out.volume.state", x, fr::cap::encode_audio_out_volume_state, fr::cap::decode_audio_out_volume_state, "08ff01", true);
+    }
     // fr.analog_in.traits.defaults (cap fr.analog_in.traits)
     {
         fr::cap::AnalogInTraits x{};
@@ -5722,6 +5906,216 @@ void for_each(V &&v)
         bool x = false;
         x = true;
         v.value("fr.fixture.level.state.max", "fr.fixture.level.state", x, fr::cap::encode_fixture_level_state, fr::cap::decode_fixture_level_state, "0801", true);
+    }
+    // fr.audio_in.traits.defaults (cap fr.audio_in.traits)
+    {
+        fr::cap::AudioInTraits x{};
+        x.max_sample_hz = 0;
+        x.bits = 0;
+        v.value("fr.audio_in.traits.defaults", "fr.audio_in.traits", x, enc, fr::cap::decode_audio_in_traits, "", true);
+    }
+    // fr.audio_in.traits.sample (cap fr.audio_in.traits)
+    {
+        fr::cap::AudioInTraits x{};
+        x.max_sample_hz = 2654435761u;
+        x.bits = 98;
+        v.value("fr.audio_in.traits.sample", "fr.audio_in.traits", x, enc, fr::cap::decode_audio_in_traits, "08b1f3ddf1091062", true);
+    }
+    // fr.audio_in.traits.max (cap fr.audio_in.traits)
+    {
+        fr::cap::AudioInTraits x{};
+        x.max_sample_hz = 4294967295u;
+        x.bits = 255;
+        v.value("fr.audio_in.traits.max", "fr.audio_in.traits", x, enc, fr::cap::decode_audio_in_traits, "08ffffffff0f10ff01", true);
+    }
+    // fr.audio_in.stream_start.args.defaults (cap fr.audio_in.stream_start.args)
+    {
+        fr::cap::AudioInStreamStartArgs x{};
+        x.stream_id = 0;
+        x.seconds = 0;
+        v.value("fr.audio_in.stream_start.args.defaults", "fr.audio_in.stream_start.args", x, enc, fr::cap::decode_audio_in_stream_start_args, "", true);
+    }
+    // fr.audio_in.stream_start.args.sample (cap fr.audio_in.stream_start.args)
+    {
+        fr::cap::AudioInStreamStartArgs x{};
+        x.stream_id = 2654435761u;
+        x.seconds = 62306;
+        x.has_sample_hz = true;
+        x.sample_hz = 3668339987u;
+        v.value("fr.audio_in.stream_start.args.sample", "fr.audio_in.stream_start.args", x, enc, fr::cap::decode_audio_in_stream_start_args, "08b1f3ddf10910e2e6031893da99d50d", true);
+    }
+    // fr.audio_in.stream_start.args.max (cap fr.audio_in.stream_start.args)
+    {
+        fr::cap::AudioInStreamStartArgs x{};
+        x.stream_id = 4294967295u;
+        x.seconds = 65535;
+        x.has_sample_hz = true;
+        x.sample_hz = 4294967295u;
+        v.value("fr.audio_in.stream_start.args.max", "fr.audio_in.stream_start.args", x, enc, fr::cap::decode_audio_in_stream_start_args, "08ffffffff0f10ffff0318ffffffff0f", true);
+    }
+    // fr.audio_in.stream_start.args.example_0 (cap fr.audio_in.stream_start.args)
+    {
+        fr::cap::AudioInStreamStartArgs x{};
+        x.stream_id = 1;
+        x.seconds = 10;
+        v.value("fr.audio_in.stream_start.args.example_0", "fr.audio_in.stream_start.args", x, enc, fr::cap::decode_audio_in_stream_start_args, "0801100a", true);
+    }
+    // fr.audio_in.stream_start.args.example_1 (cap fr.audio_in.stream_start.args)
+    {
+        fr::cap::AudioInStreamStartArgs x{};
+        x.stream_id = 2;
+        x.seconds = 5;
+        x.has_sample_hz = true;
+        x.sample_hz = 48000;
+        v.value("fr.audio_in.stream_start.args.example_1", "fr.audio_in.stream_start.args", x, enc, fr::cap::decode_audio_in_stream_start_args, "080210051880f702", true);
+    }
+    // fr.audio_in.stream_start.result.defaults (cap fr.audio_in.stream_start.result)
+    {
+        fr::cap::AudioInStreamStartResult x{};
+        x.sample_hz = 0;
+        v.value("fr.audio_in.stream_start.result.defaults", "fr.audio_in.stream_start.result", x, enc, fr::cap::decode_audio_in_stream_start_result, "", true);
+    }
+    // fr.audio_in.stream_start.result.sample (cap fr.audio_in.stream_start.result)
+    {
+        fr::cap::AudioInStreamStartResult x{};
+        x.sample_hz = 2654435761u;
+        v.value("fr.audio_in.stream_start.result.sample", "fr.audio_in.stream_start.result", x, enc, fr::cap::decode_audio_in_stream_start_result, "08b1f3ddf109", true);
+    }
+    // fr.audio_in.stream_start.result.max (cap fr.audio_in.stream_start.result)
+    {
+        fr::cap::AudioInStreamStartResult x{};
+        x.sample_hz = 4294967295u;
+        v.value("fr.audio_in.stream_start.result.max", "fr.audio_in.stream_start.result", x, enc, fr::cap::decode_audio_in_stream_start_result, "08ffffffff0f", true);
+    }
+    // fr.audio_in.stream_stop.args.defaults (cap fr.audio_in.stream_stop.args)
+    {
+        fr::cap::AudioInStreamStopArgs x{};
+        x.stream_id = 0;
+        v.value("fr.audio_in.stream_stop.args.defaults", "fr.audio_in.stream_stop.args", x, enc, fr::cap::decode_audio_in_stream_stop_args, "", true);
+    }
+    // fr.audio_in.stream_stop.args.sample (cap fr.audio_in.stream_stop.args)
+    {
+        fr::cap::AudioInStreamStopArgs x{};
+        x.stream_id = 2654435761u;
+        v.value("fr.audio_in.stream_stop.args.sample", "fr.audio_in.stream_stop.args", x, enc, fr::cap::decode_audio_in_stream_stop_args, "08b1f3ddf109", true);
+    }
+    // fr.audio_in.stream_stop.args.max (cap fr.audio_in.stream_stop.args)
+    {
+        fr::cap::AudioInStreamStopArgs x{};
+        x.stream_id = 4294967295u;
+        v.value("fr.audio_in.stream_stop.args.max", "fr.audio_in.stream_stop.args", x, enc, fr::cap::decode_audio_in_stream_stop_args, "08ffffffff0f", true);
+    }
+    // fr.audio_in.stream_stop.args.example_0 (cap fr.audio_in.stream_stop.args)
+    {
+        fr::cap::AudioInStreamStopArgs x{};
+        x.stream_id = 1;
+        v.value("fr.audio_in.stream_stop.args.example_0", "fr.audio_in.stream_stop.args", x, enc, fr::cap::decode_audio_in_stream_stop_args, "0801", true);
+    }
+    // fr.audio_in.level_get.args.empty (cap fr.audio_in.level_get.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.audio_in.level_get.args.empty", "fr.audio_in.level_get.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.audio_in.level_get.result.defaults (cap fr.audio_in.level_get.result)
+    {
+        fr::cap::AudioInLevelGetResult x{};
+        x.dbfs_x10 = 0;
+        x.peak_dbfs_x10 = 0;
+        x.clipping = 0;
+        v.value("fr.audio_in.level_get.result.defaults", "fr.audio_in.level_get.result", x, enc, fr::cap::decode_audio_in_level_get_result, "", true);
+    }
+    // fr.audio_in.level_get.result.sample (cap fr.audio_in.level_get.result)
+    {
+        fr::cap::AudioInLevelGetResult x{};
+        x.dbfs_x10 = -1615;
+        x.peak_dbfs_x10 = 29538;
+        x.clipping = 3668339987u;
+        v.value("fr.audio_in.level_get.result.sample", "fr.audio_in.level_get.result", x, enc, fr::cap::decode_audio_in_level_get_result, "089d1910c4cd031893da99d50d", true);
+    }
+    // fr.audio_in.level_get.result.max (cap fr.audio_in.level_get.result)
+    {
+        fr::cap::AudioInLevelGetResult x{};
+        x.dbfs_x10 = 32767;
+        x.peak_dbfs_x10 = 32767;
+        x.clipping = 4294967295u;
+        v.value("fr.audio_in.level_get.result.max", "fr.audio_in.level_get.result", x, enc, fr::cap::decode_audio_in_level_get_result, "08feff0310feff0318ffffffff0f", true);
+    }
+    // fr.audio_in.level_get.result.min (cap fr.audio_in.level_get.result)
+    {
+        fr::cap::AudioInLevelGetResult x{};
+        x.dbfs_x10 = -32768;
+        x.peak_dbfs_x10 = -32768;
+        x.clipping = 0;
+        v.value("fr.audio_in.level_get.result.min", "fr.audio_in.level_get.result", x, enc, fr::cap::decode_audio_in_level_get_result, "08ffff0310ffff03", true);
+    }
+    // fr.audio_in.stream_ended.event.defaults (cap fr.audio_in.stream_ended.event)
+    {
+        fr::cap::AudioInStreamEnded x{};
+        x.stream_id = 0;
+        x.reason = AudioInStreamEndReason::stopped;
+        x.samples = 0;
+        x.dropped_samples = 0;
+        v.value("fr.audio_in.stream_ended.event.defaults", "fr.audio_in.stream_ended.event", x, enc, fr::cap::decode_audio_in_stream_ended, "", true);
+    }
+    // fr.audio_in.stream_ended.event.sample (cap fr.audio_in.stream_ended.event)
+    {
+        fr::cap::AudioInStreamEnded x{};
+        x.stream_id = 2654435761u;
+        x.reason = AudioInStreamEndReason::overflow;
+        x.samples = 3668339987u;
+        x.dropped_samples = 2027808452;
+        v.value("fr.audio_in.stream_ended.event.sample", "fr.audio_in.stream_ended.event", x, enc, fr::cap::decode_audio_in_stream_ended, "08b1f3ddf10910031893da99d50d20c4cdf7c607", true);
+    }
+    // fr.audio_in.stream_ended.event.max (cap fr.audio_in.stream_ended.event)
+    {
+        fr::cap::AudioInStreamEnded x{};
+        x.stream_id = 4294967295u;
+        x.reason = AudioInStreamEndReason::error;
+        x.samples = 4294967295u;
+        x.dropped_samples = 4294967295u;
+        v.value("fr.audio_in.stream_ended.event.max", "fr.audio_in.stream_ended.event", x, enc, fr::cap::decode_audio_in_stream_ended, "08ffffffff0f100418ffffffff0f20ffffffff0f", true);
+    }
+    // fr.audio_in.level.state.defaults (cap fr.audio_in.level.state)
+    {
+        int16_t x = 0;
+        x = 0;
+        v.value("fr.audio_in.level.state.defaults", "fr.audio_in.level.state", x, fr::cap::encode_audio_in_level_state, fr::cap::decode_audio_in_level_state, "", true);
+    }
+    // fr.audio_in.level.state.sample (cap fr.audio_in.level.state)
+    {
+        int16_t x = 0;
+        x = -1615;
+        v.value("fr.audio_in.level.state.sample", "fr.audio_in.level.state", x, fr::cap::encode_audio_in_level_state, fr::cap::decode_audio_in_level_state, "089d19", true);
+    }
+    // fr.audio_in.level.state.max (cap fr.audio_in.level.state)
+    {
+        int16_t x = 0;
+        x = 32767;
+        v.value("fr.audio_in.level.state.max", "fr.audio_in.level.state", x, fr::cap::encode_audio_in_level_state, fr::cap::decode_audio_in_level_state, "08feff03", true);
+    }
+    // fr.audio_in.level.state.min (cap fr.audio_in.level.state)
+    {
+        int16_t x = 0;
+        x = -32768;
+        v.value("fr.audio_in.level.state.min", "fr.audio_in.level.state", x, fr::cap::encode_audio_in_level_state, fr::cap::decode_audio_in_level_state, "08ffff03", true);
+    }
+    // fr.audio_in.streaming.state.defaults (cap fr.audio_in.streaming.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.audio_in.streaming.state.defaults", "fr.audio_in.streaming.state", x, fr::cap::encode_audio_in_streaming_state, fr::cap::decode_audio_in_streaming_state, "", true);
+    }
+    // fr.audio_in.streaming.state.sample (cap fr.audio_in.streaming.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.audio_in.streaming.state.sample", "fr.audio_in.streaming.state", x, fr::cap::encode_audio_in_streaming_state, fr::cap::decode_audio_in_streaming_state, "0801", true);
+    }
+    // fr.audio_in.streaming.state.max (cap fr.audio_in.streaming.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.audio_in.streaming.state.max", "fr.audio_in.streaming.state", x, fr::cap::encode_audio_in_streaming_state, fr::cap::decode_audio_in_streaming_state, "0801", true);
     }
     // fr.touch.traits.defaults (cap fr.touch.traits)
     {

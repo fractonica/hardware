@@ -4,7 +4,8 @@
 // address of the TCP session, spec 06 §6.5 L0), `Connection: close`, `Range: bytes=<from>-` when
 // continuing; the answer must be 200 or 206 (a 206 whose Content-Range starts at `from`; a 200 to a Range
 // request is skipped up to `from`), with Content-Length or a body that ends at the close, never chunked.
-// Blocking with a timeout on the connect, every send and every receive: only fr_worker calls it.
+// Blocking with a timeout on the connect, every send and every receive: fr_worker calls it for OTA, and fr.audio_out's
+// play GET on fr_stream (design audio-a1 D3), which looks with readable() first so that its record stream is not held up.
 #pragma once
 
 #include <cstddef>
@@ -37,6 +38,13 @@ public:
      * at most the timeout); 0 once all of it came. A body cut short before its Content-Length, a timeout
      * or a reset fail. */
     std::expected<size_t, Err> read(std::span<uint8_t> out) override;
+    /**
+     * Whether a read() would return at once (body bytes came, the body is over, the peer closed), looking for at most
+     * `wait_ms`; false while nothing is there yet. Fails (and closes) once nothing came for the timeout since start()
+     * or the last read() that got bytes, as a read() waiting that long would. Not for a 200 still skipping up to a
+     * Range's `from_byte` (its read() may wait on).
+     */
+    std::expected<bool, Err> readable(uint32_t wait_ms);
     void close() override;
 
     /** The status code of the last start(); 0 when no status line came. */
@@ -59,6 +67,7 @@ private:
     uint32_t skip_ = 0;       // bytes to drop first (a 200 answering a Range request)
     size_t body_at_ = 0;      // body bytes that came with the head: head_[body_at_, body_end_)
     size_t body_end_ = 0;
+    int64_t data_ms_ = 0;     // when bytes last came (steady clock, ms): readable()'s stall
     char head_[kHeadMax];
 };
 

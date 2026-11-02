@@ -1,9 +1,15 @@
 # Core task, input slots, timers, fr_worker, L1 HAL contracts, L2 services, boot, the hub link wiring and
 # fr_app_desc (spec 03 §3.3-3.5, 06 §6.8, design c2 §5, c3 §3, c4 §2). src/services and src/display (the fr.display
 # backend contract and the mono renderer, design m2-c5-display D3) are IDF-free: the host suite (firmware/test/host)
-# builds the same files (the services and the node descriptor).
+# builds the same files (the services and the node descriptor). src/audio (design audio-a1 D5: the audio services' DSP,
+# rings and fr_audio/fr_stream engine) is IDF-free too; src/audio_rt_esp.cpp is its FreeRTOS layer (src/host/audio_rt.cpp
+# on the Mac). The audio services stream through fr_ota's src/http clients (HttpPost, HttpGet), hence fr_ota below.
 idf_component_register(SRCS "src/adc1.cpp"
                             "src/app_desc.cpp"
+                            "src/audio/dsp.cpp"
+                            "src/audio/engine.cpp"
+                            "src/audio/rings.cpp"
+                            "src/audio_rt_esp.cpp"
                             "src/core.cpp"
                             "src/display/crc32.cpp"
                             "src/display/font5x7.cpp"
@@ -14,6 +20,8 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/i2c_bus.cpp"
                             "src/input_slot_isr.cpp"
                             "src/services/analog_in_service.cpp"
+                            "src/services/audio_in_service.cpp"
+                            "src/services/audio_out_service.cpp"
                             "src/services/button_service.cpp"
                             "src/services/descriptor.cpp"
                             "src/services/display_service.cpp"

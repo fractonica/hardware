@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.audio_out.tone.args",
+  "title": "fr.audio_out.tone arguments",
+  "description": "A sine of freq_hz for ms, made on the node at config sample_hz; answers when it starts. volume overrides the current volume for this tone only.",
+  "type": "object",
+  "properties": {
+    "freq_hz": {
+      "anyOf": [
+        {
+          "const": 0
+        },
+        {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 20000
+        }
+      ],
+      "description": "(Hz; 20..20000)"
+    },
+    "ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 60000,
+      "description": "(ms; 1..60000)",
+      "default": 500
+    },
+    "volume": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "(%; 0..100)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "freq_hz": 1000,
+      "ms": 3000
+    },
+    {
+      "freq_hz": 440,
+      "ms": 500,
+      "volume": 30
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+profile: s3a-audio
+board: esp32s3-wroom1-cam-n16r8
+app: node
+net: { link_profile: default }
+# Design audio-a1 D7: the spare S3 with an INMP441-style I2S microphone and a MAX98357A amplifier, wired to free pins
+# (the modules are wired to the board, not part of it, so they are bare-pin binds). Mic L/R to GND (left slot); amp
+# GAIN and SD not connected. The mic and the amp each take one of the S3's two I2S controllers (D6).
+# PSRAM (D4, D5): the 2 s capture ring and the 1 s playback ring.
+psram: on
+caps:
+  boot:   { cap: fr.button,    driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,       driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 32 } }
+  mic:    { cap: fr.audio_in,  driver: i2s_mic,     bind: { bclk: gpio.41, ws: gpio.42, din: gpio.2 }, config: { slot: left } }
+  spk:    { cap: fr.audio_out, driver: i2s_amp,     bind: { bclk: gpio.39, ws: gpio.40, dout: gpio.38 } }

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.audio_out.stop.args",
+  "title": "fr.audio_out.stop arguments",
+  "description": "Stops the tone or play (play_done reason stopped); OK when nothing plays.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

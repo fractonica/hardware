@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.audio_in.level_get.args",
+  "title": "fr.audio_in.level_get arguments",
+  "description": "The level now, in dBFS x 10, and the clipped samples since the microphone started; starts the microphone for 200 ms when it is idle.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

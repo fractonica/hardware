@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.audio_out.set_volume.args",
+  "title": "fr.audio_out.set_volume arguments",
+  "description": "Sets the volume (property volume) for what plays now and later.",
+  "type": "object",
+  "properties": {
+    "volume": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "(%; 0..100)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "volume": 40
+    }
+  ]
+}

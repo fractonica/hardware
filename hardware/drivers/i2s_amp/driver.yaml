@@ -1,0 +1,25 @@
+# Driver manifest (design audio-a1 D6, D7; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::I2sAmp::Config from the instance's multi-pin bind, `bind: { bclk: gpio.<n>, ws: gpio.<n>, dout: gpio.<n> }`
+# plus an optional `sd`, (each in the board's pins.free), and resolves `port` to a controller. Stream F implements it (A1).
+schema: fractonica/driver@1
+id: i2s_amp
+summary: An I2S DAC / class-D amplifier (MAX98357A), mono 16-bit on an I2S TX channel, with an optional shutdown pin.
+implements: hal.AudioSink
+class: fr::drv::I2sAmp                  # header: include/fr/drv/i2s_amp.hpp
+targets: [esp32c3, esp32c6, esp32s3]
+binds: gpio                             # bare pins: bind { bclk: gpio.<n>, ws: gpio.<n>, dout: gpio.<n>, sd: gpio.<n> } (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as I2sAmp::Config
+  # bclk and ws are left out of the bind only by the follower of a share_with pair: codegen fills its partner's.
+  bclk: { type: gpio, from: bind.bclk, optional: true, doc: "the part's BCLK" }
+  ws:   { type: gpio, from: bind.ws, optional: true, doc: "word select (the MAX98357A's LRC)" }
+  dout: { type: gpio, from: bind.dout, doc: "data into the part (DIN)" }
+  sd:   { type: gpio, from: bind.sd, optional: true, doc: "shutdown (SD_MODE): high while playing, low between plays; absent: not wired (the part's pull-up keeps it on)" }
+  port: { type: i2s_port, default: auto, doc: "the I2S controller; auto: the lowest free one (codegen)" }
+  # Shared-clock duplex (design D6) for one-I2S chips: the other instance of the pair, by name in the profile, its
+  # capability port in the Config (0: none). Set on one side only; codegen fills the other side's.
+  share_with: { type: instance, doc: "an i2s_mic instance on the same controller, BCLK and WS shared" }
+# fr.audio_out traits its service reports (design D2): up to 48 kHz, 16-bit samples (both slots carry the mono sample).
+traits: { max_sample_hz: 48000, bits: 16 }
+resources: { gpio: 4, i2s: 1 }          # i2s: one controller (TX), or none of its own as a share_with follower
+dependencies: {}

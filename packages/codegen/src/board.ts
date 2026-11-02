@@ -12,6 +12,10 @@
 // the profile, a touch bound to its panel by port), pins a driver takes from its own board entry's reserved group,
 // optional driver pins (null: not wired), a board entry's display rotation, and the profile's `psram: on`; a panel's
 // renderer (its display::Backend) follows its driver's `traits: ui` (fr_ui's LvglBackend, else fr_core's MonoBackend).
+// A1 (design audio-a1 D1, D2, D6, D7) adds fr.audio_in and fr.audio_out (their services and rates), the multi-pin bare
+// bind (`bind: { bclk: gpio.41, ws: gpio.42, din: gpio.2 }`, each pin a driver field `from: bind.<key>`), and the I2S
+// controllers: a driver field of type i2s_port (auto or a number, resolved here), the board's `resources.i2s`, and
+// `share_with: <instance>` (type instance), which puts two instances on one controller with shared BCLK/WS.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -134,6 +138,11 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
   // Design m2-c5-display D4: one timer (long press and the release poll); width, height and display come from the
   // panel it is bound to (bindTouch).
   'fr.touch': { implements: 'hal.TouchSource', service: 'fr::TouchService', header: 'fr/services/touch_service.hpp', timers: 1 },
+  // Design audio-a1 D5: one timer each (fr.audio_in: the level reports and the stream's end; fr.audio_out: a tone's or
+  // play's end and play_done), the PCM itself on the fr_audio and fr_stream tasks. max_sample_hz and bits come from
+  // driver.yaml `traits:`.
+  'fr.audio_in': { implements: 'hal.AudioSource', service: 'fr::AudioInService', header: 'fr/services/audio_in_service.hpp', timers: 1 },
+  'fr.audio_out': { implements: 'hal.AudioSink', service: 'fr::AudioOutService', header: 'fr/services/audio_out_service.hpp', timers: 1 },
 };
 
 /** The HIL fixture's capability: its lines' `drive` decides the power-up glitch rule (design m2-c1-hil D5). */
@@ -262,6 +271,21 @@ function analogInProblems(config: Record<string, CapValue>): [key: 'max_mv' | 't
 }
 
 /** Board resource budgets drivers draw from (04 §4.3). `gpio` is checked pin by pin instead. */
+const AUDIO_IN_CAP = 'fr.audio_in';
+const AUDIO_OUT_CAP = 'fr.audio_out';
+
+/** The rates fr.audio_in and fr.audio_out take (design audio-a1 D1; fr::hal::kAudioRates). */
+export const AUDIO_RATES: readonly number[] = [8000, 16000, 22050, 32000, 44100, 48000];
+
+/** An I2S controller (design audio-a1 D6): the board's `resources.i2s`, drawn by drivers that declare `i2s` in theirs. */
+const I2S_RESOURCE = 'i2s';
+/** A driver field that names another instance (type instance) to share its I2S controller with (design audio-a1 D6). */
+const SHARE_FIELD = 'share_with';
+/** The HAL contracts of a share_with pair, sorted: its RX channel's microphone and its TX channel's amplifier. */
+const DUPLEX_PAIR = ['hal.AudioSink', 'hal.AudioSource'] as const;
+/** The clock pins a share_with follower takes from its partner: neither bound nor claimed by the follower. */
+const I2S_CLOCK_PINS = ['bclk', 'ws'] as const;
+
 const PIN_RESOURCE = 'gpio';
 
 /** The board "section" of a bare-pin bind, `gpio.<n>` (design m2-c1-hil D5): no board entry, just the pin. */
@@ -315,8 +339,13 @@ const RawProfile = z.strictObject({
     z.strictObject({
       cap: z.string(),
       driver: z.string(),
-      // A board entry, or a bare pin for a driver that binds `gpio` (design m2-c1-hil D5: the fixture lines).
-      bind: z.string().regex(/^([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|gpio\.\d{1,2})$/, 'expected <section>.<entry>, e.g. leds.status, or gpio.<n>'),
+      // A board entry, or a bare pin for a driver that binds `gpio` (design m2-c1-hil D5: the fixture lines), or
+      // several named bare pins (design audio-a1 D7: `{ bclk: gpio.41, ws: gpio.42, din: gpio.2 }`), one per driver
+      // field `from: bind.<key>`.
+      bind: z.union([
+        z.string().regex(/^([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|gpio\.\d{1,2})$/, 'expected <section>.<entry>, e.g. leds.status, or gpio.<n>'),
+        z.record(ident, z.string().regex(/^gpio\.\d{1,2}$/, 'expected gpio.<n>')).refine((m) => Object.keys(m).length > 0, 'expected at least one pin'),
+      ]),
       // A list of integers sets an array<T> capability config entry (design m2-c3-inputs D4).
       config: z.record(z.string(), z.union([jsonScalar, z.array(z.number())])).optional(),
     }),
@@ -394,12 +423,23 @@ const DRIVER_SCALARS = ['bool', 'u8', 'u16', 'u32', 'i8', 'i16', 'i32'] as const
  */
 const GPIO_MASK = 'gpio_mask';
 
+/**
+ * An I2S controller number (design audio-a1 D6): `auto` (the default) or 0..resources.i2s-1 in a profile; codegen
+ * resolves auto to the lowest free controller, so the Config holds a uint8_t.
+ */
+const I2S_PORT = 'i2s_port';
+/**
+ * Another instance of the profile, by name (design audio-a1 D6: share_with); the Config holds its capability port
+ * (uint8_t), 0 when absent.
+ */
+const INSTANCE_REF = 'instance';
+
 const RawDriverField = z.strictObject({
-  type: z.enum(['gpio', GPIO_MASK, 'enum', ...DRIVER_SCALARS] as const),
+  type: z.enum(['gpio', GPIO_MASK, I2S_PORT, INSTANCE_REF, 'enum', ...DRIVER_SCALARS] as const),
   values: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'enum values must be C++ identifiers')).optional(),
   // board.<key>: that field of the bound board entry. bind: the pin of a bare `gpio.<n>` bind (design
-  // m2-c1-hil D5: the fixture drivers).
-  from: z.string().regex(/^(board\.[a-z_][a-z0-9_]*|bind)$/, 'expected board.<key> or bind').optional(),
+  // m2-c1-hil D5: the fixture drivers). bind.<key>: that pin of a multi-pin bind (design audio-a1 D7).
+  from: z.string().regex(/^(board\.[a-z_][a-z0-9_]*|bind|bind\.[a-z][a-z0-9_]*)$/, 'expected board.<key>, bind or bind.<key>').optional(),
   /**
    * A gpio that may be absent (design m2-c5-display D7: a panel without a reset line): a null or missing board value
    * is -1 in the Config, and no pin is claimed. resources.gpio still counts the field.
@@ -809,6 +849,23 @@ function loadDriverInto(sourceDir: string, id: string, issues: Issues): DriverMa
     if (f.from === 'bind' && (d.binds !== PIN_SECTION || f.type !== 'gpio')) {
       bad(['config', name, 'from'], `from: bind is the pin of a gpio.<n> bind: it needs binds: ${PIN_SECTION} and type: gpio`);
     }
+    if (f.from?.startsWith('bind.') && (d.binds !== PIN_SECTION || f.type !== 'gpio')) {
+      bad(['config', name, 'from'], `from: ${f.from} is a pin of a multi-pin bind: it needs binds: ${PIN_SECTION} and type: gpio`);
+    }
+    if ((f.type === I2S_PORT || f.type === INSTANCE_REF) && f.from !== undefined) {
+      bad(['config', name, 'from'], `a ${f.type} field comes from the profile, not from ${f.from}`);
+    }
+    if (f.type === INSTANCE_REF && f.default !== undefined) {
+      bad(['config', name, 'default'], `an ${INSTANCE_REF} field has no default (absent: none)`);
+    }
+  }
+  const binds = Object.values(d.config ?? {}).filter((f) => f.from === 'bind' || f.from?.startsWith('bind.'));
+  if (binds.some((f) => f.from === 'bind') && binds.some((f) => f.from !== 'bind')) {
+    bad(['config'], 'from: bind (a gpio.<n> bind) and from: bind.<key> (a multi-pin bind) cannot be mixed');
+  }
+  const i2sPorts = Object.values(d.config ?? {}).filter((f) => f.type === I2S_PORT).length;
+  if (i2sPorts !== (d.resources?.[I2S_RESOURCE] ?? 0)) {
+    bad(['resources', I2S_RESOURCE], `declares ${d.resources?.[I2S_RESOURCE] ?? 0} ${I2S_RESOURCE} but has ${i2sPorts} config field(s) of type ${I2S_PORT}`);
   }
   const symbols = new Set<string>();
   for (const [n, line] of (d.sdkconfig ?? []).entries()) {
@@ -863,6 +920,12 @@ function checkDriverValue(f: RawDriverField, v: unknown): string | null {
   }
   if (f.type === 'enum') {
     return typeof v === 'string' && f.values?.includes(v) ? null : `expected one of ${(f.values ?? []).join(', ')}, got ${JSON.stringify(v)}`;
+  }
+  if (f.type === I2S_PORT) {
+    return v === 'auto' || (Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 7) ? null : `expected auto or an I2S controller number, got ${JSON.stringify(v)}`;
+  }
+  if (f.type === INSTANCE_REF) {
+    return typeof v === 'string' && /^[a-z][a-z0-9_]*$/.test(v) ? null : `expected an instance name, got ${JSON.stringify(v)}`;
   }
   if (f.type === 'bool') {
     return typeof v === 'boolean' ? null : `expected a boolean, got ${JSON.stringify(v)}`;
@@ -963,7 +1026,10 @@ function capLiteral(cap: Capability, e: ConfigEntry, v: CapValue): string {
 interface ResolvedInstance {
   name: string;
   port: number;
+  /** The profile's bind as text: `leds.rgb`, `gpio.3`, or `{bclk: gpio.41, ws: gpio.42, din: gpio.2}`. */
   bind: string;
+  /** A bare-pin bind (gpio.<n> or a multi-pin bind): pins.free only, never a strapping pin. */
+  bare: boolean;
   cap: Capability;
   service: (typeof SERVICES)[string];
   driver: DriverManifest;
@@ -1217,21 +1283,34 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       bad([...at, 'driver'], `driver ${driver.id} does not support ${board.idf_target} (targets: ${driver.targets.join(', ')})`);
     }
 
-    const [section, entryName] = c.bind.split('.');
+    // A multi-pin bind (design audio-a1 D7): named bare pins, each a driver field `from: bind.<key>`.
+    const bindMap = typeof c.bind === 'object' ? Object.fromEntries(Object.entries(c.bind).map(([k, v]) => [k, Number(v.slice(PIN_SECTION.length + 1))])) : null;
+    const bindText = bindMap ? `{${Object.entries(c.bind).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : (c.bind as string);
+    const [section, entryName] = bindMap ? [PIN_SECTION, ''] : bindText.split('.');
     if (section !== driver.binds) {
       bad([...at, 'bind'], `driver ${driver.id} binds board ${driver.binds} entries, not ${section}`);
     }
+    const keyed = Object.entries(driver.config ?? {}).flatMap(([, f]) => (f.from?.startsWith('bind.') ? [f.from.slice('bind.'.length)] : []));
+    if (bindMap) {
+      for (const key of Object.keys(bindMap)) {
+        if (!keyed.includes(key)) {
+          bad([...at, 'bind', key], `driver ${driver.id} takes no pin '${key}' (its bind takes: ${keyed.join(', ') || 'none: bind a gpio.<n> or a board entry'})`);
+        }
+      }
+    } else if (keyed.length > 0) {
+      bad([...at, 'bind'], `driver ${driver.id} takes its pins as a map, e.g. { ${keyed.map((k) => `${k}: gpio.<n>`).join(', ')} }`);
+    }
     // A bare pin (design m2-c1-hil D5) has no board entry: it is just its GPIO, checked with the pins below.
-    const pinBind = PIN_BIND.exec(c.bind);
+    const pinBind = bindMap ? null : PIN_BIND.exec(bindText);
     const bindPin = pinBind ? Number(pinBind[1]) : undefined;
-    const entry = bindPin !== undefined ? { gpio: bindPin } : lookupEntry(board, section, entryName);
+    const entry = bindMap ?? (bindPin !== undefined ? { gpio: bindPin } : lookupEntry(board, section, entryName));
     if (!entry) {
-      bad([...at, 'bind'], `board ${board.id} has no entry ${c.bind}`);
+      bad([...at, 'bind'], `board ${board.id} has no entry ${bindText}`);
       continue;
     }
     const kind = typeof entry.kind === 'string' ? entry.kind : DEFAULT_KIND;
     if (!driver.accepts_kinds.includes(kind)) {
-      bad([...at, 'driver'], `driver ${driver.id} does not accept ${c.bind} of kind '${kind}' (accepts: ${driver.accepts_kinds.join(', ')})`);
+      bad([...at, 'driver'], `driver ${driver.id} does not accept ${bindText} of kind '${kind}' (accepts: ${driver.accepts_kinds.join(', ')})`);
     }
 
     // Profile config keys go to the service config or, failing that, override a driver config field.
@@ -1258,12 +1337,28 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       // `from: bind` is the pin of the gpio.<n> bind, which the profile cannot override (design m2-c1-hil D5).
       if (field.from === 'bind') {
         if (settings[fname] !== undefined) {
-          bad([...at, 'config', fname], `'${fname}' is the pin of the bind (${c.bind}) and cannot be set`);
+          bad([...at, 'config', fname], `'${fname}' is the pin of the bind (${bindText}) and cannot be set`);
         } else if (bindPin === undefined) {
           bad([...at, 'bind'], `driver ${driver.id} takes '${fname}' from a gpio.<n> bind`);
         } else {
           driverConfig.push({ name: fname, field, value: bindPin });
           pins.push(bindPin);
+        }
+        continue;
+      }
+      // `from: bind.<key>`: that pin of a multi-pin bind (design audio-a1 D7); an optional one may be left out (-1).
+      if (field.from?.startsWith('bind.')) {
+        const key = field.from.slice('bind.'.length);
+        const pin = bindMap?.[key];
+        if (settings[fname] !== undefined) {
+          bad([...at, 'config', fname], `'${fname}' is pin '${key}' of the bind and cannot be set in config`);
+        } else if (pin !== undefined) {
+          driverConfig.push({ name: fname, field, value: pin });
+          pins.push(pin);
+        } else if (field.optional) {
+          driverConfig.push({ name: fname, field, value: -1 });
+        } else if (bindMap) {
+          bad([...at, 'bind'], `driver ${driver.id} needs pin '${key}' in the bind`);
         }
         continue;
       }
@@ -1277,6 +1372,11 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       if (value === undefined && field.type === GPIO_MASK) {
         value = [];
       }
+      // An instance reference left out is none; bindI2s resolves a named one to its port once ports are known.
+      if (value === undefined && field.type === INSTANCE_REF) {
+        driverConfig.push({ name: fname, field, value: '' });
+        continue;
+      }
       if (value === undefined) {
         value = field.default;
         origin = [df, ['config', fname, 'default']];
@@ -1287,7 +1387,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         continue;
       }
       if (value === undefined) {
-        bad([...at, 'bind'], fromKey ? `${c.bind} has no '${fromKey}', which driver ${driver.id} needs (no default)` : `driver ${driver.id} needs config '${fname}'`);
+        bad([...at, 'bind'], fromKey ? `${bindText} has no '${fromKey}', which driver ${driver.id} needs (no default)` : `driver ${driver.id} needs config '${fname}'`);
         continue;
       }
       const p = checkDriverValue(field, value);
@@ -1389,8 +1489,16 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       }
     }
 
+    // fr.audio_in and fr.audio_out take the rates of fr::hal::kAudioRates only (design audio-a1 D1, D2).
+    if ((c.cap === AUDIO_IN_CAP || c.cap === AUDIO_OUT_CAP) && cap) {
+      const rate = capConfig.find((x) => x.entry.name === 'sample_hz')?.value;
+      if (rate !== undefined && !AUDIO_RATES.includes(Number(rate))) {
+        issues.add(pf, settings.sample_hz !== undefined ? [...at, 'config', 'sample_hz'] : at, `sample_hz ${String(rate)} is not one of ${AUDIO_RATES.join(', ')}`);
+      }
+    }
+
     if (ok && cap && service) {
-      out.push({ name, port: 0, bind: c.bind, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins });
+      out.push({ name, port: 0, bind: bindText, bare: bindMap !== null || bindPin !== undefined, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins });
     }
   }
 
@@ -1412,7 +1520,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
   const glitch = new Set(board.pins.power_up_glitch ?? []);
   const claimed = new Map<number, string>();
   for (const inst of out) {
-    const bare = PIN_BIND.test(inst.bind);
+    const bare = inst.bare;
     const drive = inst.cap.name === FIXTURE_CAP ? inst.capConfig.find((c) => c.entry.name === 'drive')?.value : undefined;
     const ownGroup = ENTRY_GROUPS[inst.bind.split('.')[0]];
     for (const pin of inst.pins) {
@@ -1479,7 +1587,8 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       pwmLines.push(inst.name);
     }
     for (const [res, n] of Object.entries(uses)) {
-      if (res === PIN_RESOURCE || n === 0) {
+      // I2S controllers are counted by bindI2s, where a share_with pair takes one.
+      if (res === PIN_RESOURCE || res === I2S_RESOURCE || n === 0) {
         continue;
       }
       const r = need.get(res) ?? { total: 0, users: [] };
@@ -1535,6 +1644,121 @@ function bindTouch(profile: string, insts: ResolvedInstance[], issues: Issues): 
     t.traits.width = panel.traits.width;
     t.traits.height = panel.traits.height;
     panel.traits.touch = true;
+  }
+}
+
+/**
+ * The I2S controllers once ports are known (design audio-a1 D6). An `instance` field names another instance of the
+ * profile and becomes its port. `share_with` on an instance drawing an I2S controller (the follower) puts it on its
+ * partner's controller in shared-clock duplex: the follower binds no bclk or ws (it takes the partner's, unclaimed),
+ * both run one sample_hz, and the partner's own share_with (when its driver has one) gets the follower's port, so both
+ * drivers know their pair. Every other I2S instance binds bclk and ws. Controllers: a profile's number is kept, `auto`
+ * takes the lowest free one in port order, and the total is checked against the board's `resources.i2s`.
+ */
+function bindI2s(profile: string, board: RawBoard, insts: ResolvedInstance[], issues: Issues): void {
+  const pf = profileFile(profile);
+  const field = (i: ResolvedInstance, name: string) => i.driverConfig.find((f) => f.name === name);
+  // Instance references by name -> port.
+  for (const i of insts) {
+    for (const f of i.driverConfig.filter((x) => x.field.type === INSTANCE_REF)) {
+      if (f.value === '') {
+        f.value = 0;
+        continue;
+      }
+      const other = insts.find((x) => x.name === f.value);
+      if (!other || other === i) {
+        issues.add(pf, ['caps', i.name, 'config', f.name], other ? `${i.name} cannot name itself` : `no instance '${String(f.value)}' in this profile (instances: ${insts.map((x) => x.name).join(', ')})`);
+        f.value = 0;
+        continue;
+      }
+      f.value = other.port;
+    }
+  }
+  const i2s = insts.filter((i) => (i.driver.resources?.[I2S_RESOURCE] ?? 0) > 0);
+  // share_with pairs: follower -> partner.
+  const partnerOf = new Map<ResolvedInstance, ResolvedInstance>();
+  for (const f of i2s) {
+    const port = Number(field(f, SHARE_FIELD)?.value ?? 0);
+    if (port === 0) {
+      continue;
+    }
+    const at = ['caps', f.name, 'config', SHARE_FIELD];
+    const p = insts.find((x) => x.port === port)!;
+    if (!i2s.includes(p)) {
+      issues.add(pf, at, `${p.name} (driver ${p.driver.id}) draws no I2S controller to share`);
+    } else if ([f.driver.implements, p.driver.implements].sort().join() !== DUPLEX_PAIR.join()) {
+      // One controller in duplex has one RX and one TX channel: a microphone and an amplifier.
+      issues.add(pf, at, `${f.name} (${f.driver.implements}) and ${p.name} (${p.driver.implements}) cannot share a controller: a share_with pair is one ${DUPLEX_PAIR[1]} and one ${DUPLEX_PAIR[0]}`);
+    } else if (Number(field(p, SHARE_FIELD)?.value ?? 0) !== 0) {
+      issues.add(pf, at, `${p.name} sets share_with too: set it on one instance of the pair only`);
+    } else if ([...partnerOf.values()].includes(p)) {
+      issues.add(pf, at, `${p.name} already shares its controller with ${[...partnerOf.entries()].find(([, v]) => v === p)![0].name}`);
+    } else {
+      partnerOf.set(f, p);
+    }
+  }
+  for (const i of i2s) {
+    const partner = partnerOf.get(i);
+    for (const pin of I2S_CLOCK_PINS) {
+      const f = field(i, pin);
+      if (!f) {
+        continue;
+      }
+      if (partner) {
+        if (Number(f.value) >= 0) {
+          issues.add(pf, ['caps', i.name, 'bind', pin], `${i.name} shares ${partner.name}'s controller (share_with) and takes its ${pin}: leave ${pin} out of the bind`);
+        } else {
+          f.value = field(partner, pin)?.value ?? -1;
+        }
+      } else if (Number(f.value) < 0) {
+        issues.add(pf, ['caps', i.name, 'bind'], `driver ${i.driver.id} needs pin '${pin}' in the bind (only a share_with instance takes its partner's)`);
+      }
+    }
+    if (partner) {
+      const own = field(partner, SHARE_FIELD);
+      if (own) {
+        own.value = i.port;
+      }
+      const rate = (x: ResolvedInstance) => x.capConfig.find((c) => c.entry.name === 'sample_hz')?.value ?? x.cap.config.find((e) => e.name === 'sample_hz')?.default;
+      if (rate(i) !== rate(partner)) {
+        issues.add(pf, ['caps', i.name, 'config'], `${i.name} shares ${partner.name}'s clock (share_with), so both need one sample_hz, not ${String(rate(i))} and ${String(rate(partner))}`);
+      }
+    }
+  }
+  // Controllers: numbered ones first, then auto, in port order; a follower takes its partner's.
+  const have = board.resources?.[I2S_RESOURCE] ?? 0;
+  const owners = new Map<number, string>();
+  const leaders = i2s.filter((i) => !partnerOf.has(i));
+  const portField = (i: ResolvedInstance) => i.driverConfig.find((f) => f.field.type === I2S_PORT)!;
+  for (const i of leaders.filter((x) => portField(x).value !== 'auto')) {
+    const n = Number(portField(i).value);
+    const at = ['caps', i.name, 'config', portField(i).name];
+    if (n >= have) {
+      issues.add(pf, at, `I2S controller ${n} does not exist on ${board.id} (resources.i2s: ${have})`);
+    } else if (owners.has(n)) {
+      issues.add(pf, at, `I2S controller ${n} is already ${owners.get(n)}'s`);
+    }
+    owners.set(n, i.name);
+  }
+  const auto = leaders.filter((x) => portField(x).value === 'auto');
+  if (owners.size + auto.length > have) {
+    issues.add(pf, ['caps'], `${I2S_RESOURCE} budget exceeded: ${owners.size + auto.length} needed (${leaders.map((i) => i.name).join(', ')}), board ${board.id} has ${have}`);
+    return;
+  }
+  for (const i of auto) {
+    let n = 0;
+    while (owners.has(n)) {
+      n++;
+    }
+    owners.set(n, i.name);
+    portField(i).value = n;
+  }
+  for (const [f, p] of partnerOf) {
+    const own = portField(f);
+    if (own.value !== 'auto' && own.value !== portField(p).value) {
+      issues.add(pf, ['caps', f.name, 'config', own.name], `${f.name} shares ${p.name}'s controller ${String(portField(p).value)} (share_with), not ${String(own.value)}`);
+    }
+    own.value = portField(p).value;
   }
 }
 
@@ -1851,6 +2075,7 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
   }
   insts.sort((a, b) => a.port - b.port);
   bindTouch(opts.profile, insts, issues);
+  bindI2s(opts.profile, inp!.board, insts, issues);
   issues.throwIfAny();
 
   const driverIds = [...new Set(insts.map((i) => i.driver.id))].sort();

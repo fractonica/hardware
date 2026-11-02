@@ -3,10 +3,11 @@ standard:
   0x0001: fr.button
   0x0002: fr.led
   0x0003: fr.display
-  0x0004: fr.audio_out
+  0x0004: fr.audio_out     # 1.0 since audio-a1 (design audio-a1 D2)
   0x0005: fr.analog_in
   0x0006: fr.fixture       # test_only: the HIL fixture's lines (design m2-c1-hil D3)
-  0x0008: fr.touch         # design m2-c5-display D4; 0x0007 stays free for fr.haptic / fr.encoder
+  0x0007: fr.audio_in      # design audio-a1 D1
+  0x0008: fr.touch         # design m2-c5-display D4
 system:
   0x00F0: fr.node
   0x00F1: fr.ota

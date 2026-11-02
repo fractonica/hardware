@@ -13,8 +13,10 @@
 #include "button.hpp"
 #include "led.hpp"
 #include "display.hpp"
+#include "audio_out.hpp"
 #include "analog_in.hpp"
 #include "fixture.hpp"
+#include "audio_in.hpp"
 #include "touch.hpp"
 #include "node.hpp"
 #include "ota.hpp"
@@ -28,8 +30,10 @@ namespace {
 cJSON *to_json(const ButtonTraits &v);
 cJSON *to_json(const LedTraits &v);
 cJSON *to_json(const DisplayTraits &v);
+cJSON *to_json(const AudioOutTraits &v);
 cJSON *to_json(const AnalogInTraits &v);
 cJSON *to_json(const FixtureTraits &v);
+cJSON *to_json(const AudioInTraits &v);
 cJSON *to_json(const TouchTraits &v);
 #if FR_TEST_HOOKS
 cJSON *to_json(const ButtonInjectArgs &v);
@@ -53,6 +57,10 @@ cJSON *to_json(const DisplaySnapshotResult &v);
 cJSON *to_json(const DisplaySnapshotReadArgs &v);
 cJSON *to_json(const DisplaySnapshotReadResult &v);
 cJSON *to_json(const DisplayUi &v);
+cJSON *to_json(const AudioOutToneArgs &v);
+cJSON *to_json(const AudioOutPlayArgs &v);
+cJSON *to_json(const AudioOutSetVolumeArgs &v);
+cJSON *to_json(const AudioOutPlayDone &v);
 cJSON *to_json(const AnalogInInjectArgs &v);
 cJSON *to_json(const AnalogInReadResult &v);
 cJSON *to_json(const AnalogInCrossed &v);
@@ -63,6 +71,11 @@ cJSON *to_json(const FixtureSetDutyArgs &v);
 cJSON *to_json(const FixtureSetDutyResult &v);
 cJSON *to_json(const FixtureEdges &v);
 cJSON *to_json(const FixtureFrame &v);
+cJSON *to_json(const AudioInStreamStartArgs &v);
+cJSON *to_json(const AudioInStreamStartResult &v);
+cJSON *to_json(const AudioInStreamStopArgs &v);
+cJSON *to_json(const AudioInLevelGetResult &v);
+cJSON *to_json(const AudioInStreamEnded &v);
 cJSON *to_json(const TouchInjectArgs &v);
 cJSON *to_json(const TouchDown &v);
 cJSON *to_json(const TouchUp &v);
@@ -399,6 +412,15 @@ cJSON *to_json(const DisplayTraits &v)
     return finish(o, ok);
 }
 
+cJSON *to_json(const AudioOutTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "max_sample_hz", json_number(v.max_sample_hz));
+    ok = ok && add(o, "bits", json_number(v.bits));
+    return finish(o, ok);
+}
+
 cJSON *to_json(const AnalogInTraits &v)
 {
     cJSON *o = cJSON_CreateObject();
@@ -414,6 +436,15 @@ cJSON *to_json(const FixtureTraits &v)
     bool ok = o != nullptr;
     ok = ok && add(o, "drive", json_enum(v.drive));
     ok = ok && add(o, "decode", json_enum(v.decode));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioInTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "max_sample_hz", json_number(v.max_sample_hz));
+    ok = ok && add(o, "bits", json_number(v.bits));
     return finish(o, ok);
 }
 
@@ -641,6 +672,46 @@ cJSON *to_json(const DisplayUi &v)
     return finish(o, ok);
 }
 
+cJSON *to_json(const AudioOutToneArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "freq_hz", json_number(v.freq_hz));
+    ok = ok && add(o, "ms", json_number(v.ms));
+    if (v.has_volume) {
+        ok = ok && add(o, "volume", json_number(v.volume));
+    }
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioOutPlayArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "play_id", json_number(v.play_id));
+    ok = ok && add(o, "sample_hz", json_number(v.sample_hz));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioOutSetVolumeArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "volume", json_number(v.volume));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioOutPlayDone &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "play_id", json_number(v.play_id));
+    ok = ok && add(o, "reason", json_enum(v.reason));
+    ok = ok && add(o, "underruns", json_number(v.underruns));
+    ok = ok && add(o, "samples", json_number(v.samples));
+    return finish(o, ok);
+}
+
 cJSON *to_json(const AnalogInInjectArgs &v)
 {
     cJSON *o = cJSON_CreateObject();
@@ -732,6 +803,55 @@ cJSON *to_json(const FixtureFrame &v)
     bool ok = o != nullptr;
     ok = ok && add(o, "bits", json_number(v.bits));
     ok = ok && add(o, "grb", json_number(v.grb));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioInStreamStartArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    ok = ok && add(o, "seconds", json_number(v.seconds));
+    if (v.has_sample_hz) {
+        ok = ok && add(o, "sample_hz", json_number(v.sample_hz));
+    }
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioInStreamStartResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "sample_hz", json_number(v.sample_hz));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioInStreamStopArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioInLevelGetResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "dbfs_x10", json_number(v.dbfs_x10));
+    ok = ok && add(o, "peak_dbfs_x10", json_number(v.peak_dbfs_x10));
+    ok = ok && add(o, "clipping", json_number(v.clipping));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const AudioInStreamEnded &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    ok = ok && add(o, "reason", json_enum(v.reason));
+    ok = ok && add(o, "samples", json_number(v.samples));
+    ok = ok && add(o, "dropped_samples", json_number(v.dropped_samples));
     return finish(o, ok);
 }
 
@@ -1226,6 +1346,78 @@ Status args_display_snapshot_read(const cJSON *obj, fr::wire::Writer &w)
     return encoded(w);
 }
 
+Status args_audio_out_tone(const cJSON *obj, fr::wire::Writer &w)
+{
+    AudioOutToneArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "freq_hz") {
+            ok = from_json_uint(it, 0xFFFF, v.freq_hz);
+        } else if (key == "ms") {
+            ok = from_json_uint(it, 0xFFFF, v.ms);
+        } else if (key == "volume") {
+            v.has_volume = true;
+            ok = from_json_uint(it, 0xFF, v.volume);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_audio_out_play(const cJSON *obj, fr::wire::Writer &w)
+{
+    AudioOutPlayArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "play_id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.play_id);
+        } else if (key == "sample_hz") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.sample_hz);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_audio_out_stop(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_audio_out_set_volume(const cJSON *obj, fr::wire::Writer &w)
+{
+    AudioOutSetVolumeArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "volume") {
+            ok = from_json_uint(it, 0xFF, v.volume);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
 Status args_analog_in_inject(const cJSON *obj, fr::wire::Writer &w)
 {
     AnalogInInjectArgs v{};
@@ -1308,6 +1500,57 @@ Status args_fixture_set_duty(const cJSON *obj, fr::wire::Writer &w)
     }
     encode(v, w);
     return encoded(w);
+}
+
+Status args_audio_in_stream_start(const cJSON *obj, fr::wire::Writer &w)
+{
+    AudioInStreamStartArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "stream_id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.stream_id);
+        } else if (key == "seconds") {
+            ok = from_json_uint(it, 0xFFFF, v.seconds);
+        } else if (key == "sample_hz") {
+            v.has_sample_hz = true;
+            ok = from_json_uint(it, 0xFFFFFFFF, v.sample_hz);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_audio_in_stream_stop(const cJSON *obj, fr::wire::Writer &w)
+{
+    AudioInStreamStopArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "stream_id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.stream_id);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_audio_in_level_get(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
 }
 
 Status args_touch_inject(const cJSON *obj, fr::wire::Writer &w)
@@ -1726,6 +1969,65 @@ cJSON *display_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
     return nullptr;
 }
 
+cJSON *audio_out_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case AudioOut::kCmdTone:
+            return json_of(decode_audio_out_tone_args(body));
+        case AudioOut::kCmdPlay:
+            return json_of(decode_audio_out_play_args(body));
+        case AudioOut::kCmdStop:
+            return json_empty(body);
+        case AudioOut::kCmdSetVolume:
+            return json_of(decode_audio_out_set_volume_args(body));
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case AudioOut::kCmdTone:
+            return json_empty(body);
+        case AudioOut::kCmdPlay:
+            return json_empty(body);
+        case AudioOut::kCmdStop:
+            return json_empty(body);
+        case AudioOut::kCmdSetVolume:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case AudioOut::kEventPlayDone:
+            return json_of(decode_audio_out_play_done(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case AudioOut::kPropPlaying: {
+            const auto v = decode_audio_out_playing_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "playing", json_bool(*v)));
+        }
+        case AudioOut::kPropVolume: {
+            const auto v = decode_audio_out_volume_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "volume", json_number(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
 cJSON *analog_in_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
 {
     switch (cls) {
@@ -1813,6 +2115,61 @@ cJSON *fixture_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
             }
             cJSON *o = cJSON_CreateObject();
             return finish(o, o != nullptr && add(o, "level", json_bool(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
+cJSON *audio_in_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case AudioIn::kCmdStreamStart:
+            return json_of(decode_audio_in_stream_start_args(body));
+        case AudioIn::kCmdStreamStop:
+            return json_of(decode_audio_in_stream_stop_args(body));
+        case AudioIn::kCmdLevelGet:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case AudioIn::kCmdStreamStart:
+            return json_of(decode_audio_in_stream_start_result(body));
+        case AudioIn::kCmdStreamStop:
+            return json_empty(body);
+        case AudioIn::kCmdLevelGet:
+            return json_of(decode_audio_in_level_get_result(body));
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case AudioIn::kEventStreamEnded:
+            return json_of(decode_audio_in_stream_ended(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case AudioIn::kPropLevel: {
+            const auto v = decode_audio_in_level_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "level", json_number(*v)));
+        }
+        case AudioIn::kPropStreaming: {
+            const auto v = decode_audio_in_streaming_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "streaming", json_bool(*v)));
         }
         }
         break;
@@ -1978,10 +2335,14 @@ cJSON *traits_to_json(uint16_t cap_id, std::span<const uint8_t> traits)
         return json_of(decode_led_traits(traits));
     case Display::kId:
         return json_of(decode_display_traits(traits));
+    case AudioOut::kId:
+        return json_of(decode_audio_out_traits(traits));
     case AnalogIn::kId:
         return json_of(decode_analog_in_traits(traits));
     case Fixture::kId:
         return json_of(decode_fixture_traits(traits));
+    case AudioIn::kId:
+        return json_of(decode_audio_in_traits(traits));
     case Touch::kId:
         return json_of(decode_touch_traits(traits));
     case Node::kId:
@@ -2073,6 +2434,21 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_display_snapshot_read(obj, w);
         }
         break;
+    case AudioOut::kId:
+        if (name == "tone") {
+            id = AudioOut::kCmdTone;
+            s = args_audio_out_tone(obj, w);
+        } else if (name == "play") {
+            id = AudioOut::kCmdPlay;
+            s = args_audio_out_play(obj, w);
+        } else if (name == "stop") {
+            id = AudioOut::kCmdStop;
+            s = args_audio_out_stop(obj);
+        } else if (name == "set_volume") {
+            id = AudioOut::kCmdSetVolume;
+            s = args_audio_out_set_volume(obj, w);
+        }
+        break;
     case AnalogIn::kId:
         if (name == "inject") {
             id = AnalogIn::kCmdInject;
@@ -2095,6 +2471,18 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
         } else if (name == "set_duty") {
             id = Fixture::kCmdSetDuty;
             s = args_fixture_set_duty(obj, w);
+        }
+        break;
+    case AudioIn::kId:
+        if (name == "stream_start") {
+            id = AudioIn::kCmdStreamStart;
+            s = args_audio_in_stream_start(obj, w);
+        } else if (name == "stream_stop") {
+            id = AudioIn::kCmdStreamStop;
+            s = args_audio_in_stream_stop(obj, w);
+        } else if (name == "level_get") {
+            id = AudioIn::kCmdLevelGet;
+            s = args_audio_in_level_get(obj);
         }
         break;
     case Touch::kId:
@@ -2162,10 +2550,14 @@ cJSON *decode_to_json(uint16_t cap_id, uint8_t cls, uint8_t member_id, std::span
         return led_to_json(cls, member_id, body);
     case Display::kId:
         return display_to_json(cls, member_id, body);
+    case AudioOut::kId:
+        return audio_out_to_json(cls, member_id, body);
     case AnalogIn::kId:
         return analog_in_to_json(cls, member_id, body);
     case Fixture::kId:
         return fixture_to_json(cls, member_id, body);
+    case AudioIn::kId:
+        return audio_in_to_json(cls, member_id, body);
     case Touch::kId:
         return touch_to_json(cls, member_id, body);
     case Node::kId:

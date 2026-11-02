@@ -20,7 +20,7 @@ const PLUGIN = join(REPO, 'plugin');
 const OP_NAMES = OPS.map((o) => o.name as string);
 
 /** Commands with an action that are not ops (09 §9.5): local, hub-less or hand-written (design c6 §3.3). */
-const CLI_ONLY = ['doctor', 'gen', 'gen firmware', 'hub start', 'hub stop', 'hub restart', 'mcp', 'serial monitor', 'display window'];  // display window: the Mac preview with SDL, no hub (M2-C5)
+const CLI_ONLY = ['doctor', 'gen', 'gen firmware', 'hub start', 'hub stop', 'hub restart', 'mcp', 'serial monitor', 'display window', 'audio tone'];  // display window: the Mac preview with SDL, no hub (M2-C5); audio tone: audio_play's tone (A1)
 
 /** The 09 §9.3 remediation tools of M1 (confirm.resolved is M2). */
 const REMEDIATION_TOOLS_9_3 = [
@@ -165,7 +165,7 @@ describe('MCP limits (09 §9.4, §9.6)', () => {
 
 describe('the plugin (09 §9.8)', () => {
   const read = (p: string) => readFileSync(join(PLUGIN, p), 'utf8');
-  const skills = ['build-deploy', 'e2e-verify', 'fleet-ops', 'hil-rig'];
+  const skills = ['audio', 'build-deploy', 'e2e-verify', 'fleet-ops', 'hil-rig'];
   const docs = () => [...skills.map((s) => `skills/${s}/SKILL.md`), 'AGENTS.md'].map((p) => ({ p, text: read(p) }));
 
   it('defines one MCP server, the fr shim, and nothing in .mcp.json or bin/', () => {
@@ -178,7 +178,7 @@ describe('the plugin (09 §9.8)', () => {
     expect(market.plugins).toEqual([expect.objectContaining({ name: manifest.name, source: './plugin' })]);
   });
 
-  it('has the four skills, with only name and description in their frontmatter', () => {
+  it('has the five skills, with only name and description in their frontmatter', () => {
     expect(readdirSync(join(PLUGIN, 'skills')).sort()).toEqual(skills);
     for (const s of skills) {
       const m = /^---\n([\s\S]*?)\n---\n/.exec(read(`skills/${s}/SKILL.md`));

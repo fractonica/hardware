@@ -6,13 +6,15 @@
 // ops/registry.ts (inventory), ops/net.ts (probe), ops/ports.ts, ops/logs.ts, ops/apps.ts and
 // ops/tests.ts, all spread in at the end of OPS. M2-C1 (design m2-c1-hil §3 item 7) adds ops/bench.ts
 // (bench_get), test_report in ops/tests.ts and input_simulate's layer. M2-C5 (design m2-c5-display D10) adds
-// ops/display.ts (display_snapshot, display_render) and input_simulate's touch point.
+// ops/display.ts (display_snapshot, display_render) and input_simulate's touch point. A1 (design audio-a1 D8) adds
+// ops/audio.ts (audio_record, audio_play, audio_level).
 // This module loads no Node builtin: the browser entry (browser.ts) exports it, and REGISTRY_HASH,
 // which hashes it with node:crypto, lives in registry-hash.ts.
 
 import { z } from 'zod';
 
 import { APPS_OPS } from './ops/apps.ts';
+import { AUDIO_OPS } from './ops/audio.ts';
 import { BENCH_OPS } from './ops/bench.ts';
 import { DISPLAY_OPS } from './ops/display.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
@@ -27,6 +29,22 @@ import { TESTS_OPS } from './ops/tests.ts';
 import { JOB_ORIGINS, JobSchema, PortInfoSchema } from './types.ts';
 
 export { GeneratedFileSchema, type AppsOpName, type GeneratedFile } from './ops/apps.ts';
+export {
+  AUDIO_IN_END_REASONS,
+  AUDIO_OUT_END_REASONS,
+  AUDIO_RATES,
+  AUDIO_RECORD_MAX_S,
+  AudioLevelSchema,
+  AudioPlaySchema,
+  AudioRecordSchema,
+  type AudioInEndReason,
+  type AudioLevel,
+  type AudioOpName,
+  type AudioOutEndReason,
+  type AudioPlay,
+  type AudioRate,
+  type AudioRecord,
+} from './ops/audio.ts';
 export { BenchStatusSchema, type BenchOpName, type BenchStatus } from './ops/bench.ts';
 export { cliFlag, MAX_WAIT_S, type OpDef, type OpKind, type OpTier } from './ops/common.ts';
 export {
@@ -272,6 +290,8 @@ export const OPS = [
   ...BENCH_OPS,
   // M2-C5 (design m2-c5-display D10): the panel read back as a PNG, and the desktop renderer.
   ...DISPLAY_OPS,
+  // A1 (design audio-a1 D8): a board's microphone to a WAV on the Mac, a WAV or a tone on its speaker, its level.
+  ...AUDIO_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

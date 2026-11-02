@@ -27,6 +27,7 @@ import type {
 } from '@fractonica/protocol';
 import type { OtaState, PresenceHeartbeat } from '@fractonica/protocol/gen';
 
+import type { AudioStreams } from './audio/streams.ts';
 import type { Db } from './db.ts';
 import type { JobRunner } from './jobs.ts';
 import type { LogStore } from './logstore.ts';
@@ -349,6 +350,8 @@ export interface OtaService extends Lifecycle {
   httpPort(): number | null;
   /** Why the node HTTP listener could not bind (OTA over Wi-Fi fails meanwhile), or null. */
   listenError(): string | null;
+  /** The audio streams on the same listener (design audio-a1 D3): the ids audio_record and audio_play issue. */
+  audio?(): AudioStreams;
 }
 
 /** A part main.ts starts once the API listens and stops before the db closes. */

@@ -169,7 +169,7 @@ describe('hub events (D9)', () => {
   const fields = (type: keyof typeof HUB_EVENT_FIELDS, f: unknown) => HUB_EVENT_FIELDS[type].safeParse(f).success;
 
   it('adds op.called, hil.edge and hil.frame, with fields schemas', () => {
-    expect(HUB_EVENT_TYPES.slice(-3)).toEqual(['op.called', 'hil.edge', 'hil.frame']);
+    expect(HUB_EVENT_TYPES.slice(-5, -2)).toEqual(['op.called', 'hil.edge', 'hil.frame']); // A1 adds two after them
     expect(fields('op.called', { op: 'input_simulate', client: 'mcp', instance: 'boot', gesture: 'click', layer: 'gpio' })).toBe(true);
     expect(fields('op.called', { op: 'binding_set', client: null })).toBe(true);
     expect(fields('op.called', { op: 'device_reset', client: 'cli' })).toBe(false);
@@ -197,8 +197,8 @@ describe('REGISTRY_HASH (§3)', () => {
 
   it('covers the M2-C1 ops and their inputs', () => {
     expect(OP_NAMES).toEqual(expect.arrayContaining(['bench_get', 'test_report']));
-    // 46 at M2-C1; M2-C5 adds display_snapshot and display_render (protocol-m2c5.test.ts).
-    expect(OPS.filter((o) => !o.name.startsWith('display_'))).toHaveLength(46);
+    // 46 at M2-C1; M2-C5 adds display_snapshot and display_render (protocol-m2c5.test.ts), A1 the audio_ ops.
+    expect(OPS.filter((o) => !/^(display|audio)_/.test(o.name))).toHaveLength(46);
     expect(hashOf(OPS)).toBe(REGISTRY_HASH);
     expect(REGISTRY_HASH).not.toBe('8805351bae42'); // M1's
     for (const name of ['bench_get', 'test_report']) {

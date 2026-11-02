@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.audio_out.play.args",
+  "title": "fr.audio_out.play arguments",
+  "description": "Plays PCM the hub serves at GET /v1/audio/out/<play_id> (design D3). Dispatch never blocks: OK once the fr_stream task has the play, INVALID_ARGS for a rate the driver does not take. A GET that fails ends it with play_done net_lost (samples 0).",
+  "type": "object",
+  "properties": {
+    "play_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "issued by the hub; the GET path names it"
+    },
+    "sample_hz": {
+      "anyOf": [
+        {
+          "const": 0
+        },
+        {
+          "type": "integer",
+          "minimum": 8000,
+          "maximum": 48000
+        }
+      ],
+      "description": "the PCM's rate, one of the config's rates (Hz; 8000..48000)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "play_id": 1,
+      "sample_hz": 16000
+    }
+  ]
+}

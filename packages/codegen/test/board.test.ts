@@ -413,7 +413,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: adc_oneshot, button_gpio, cst816_i2c, fixture_gpio, fixture_ws2812_rx, led_gpio, led_ws2812, ssd1306_i2c, st7789_spi)",
+      "unknown driver 'button_touch' (known: adc_oneshot, button_gpio, cst816_i2c, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, ssd1306_i2c, st7789_spi)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -441,7 +441,7 @@ describe('validation', () => {
     expect(messages(dir)).toEqual([
       "instance name 'node' is reserved (spec 03 §3.6)",
       "instance name 'Status' must be snake_case, at most 31 characters",
-      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch)',
+      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out)',
       'board esp32c6-supermini has no entry leds.nope',
     ]);
   });
@@ -551,8 +551,8 @@ describe('validation', () => {
 describe('driver manifests', () => {
   const drivers = listDrivers(ROOT);
 
-  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot and the M2-C5 panel and touch drivers', () => {
-    expect(drivers).toEqual(['adc_oneshot', 'button_gpio', 'cst816_i2c', 'fixture_gpio', 'fixture_ws2812_rx', 'led_gpio', 'led_ws2812', 'ssd1306_i2c', 'st7789_spi']);
+  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers and A1\'s I2S ones', () => {
+    expect(drivers).toEqual(['adc_oneshot', 'button_gpio', 'cst816_i2c', 'fixture_gpio', 'fixture_ws2812_rx', 'i2s_amp', 'i2s_mic', 'led_gpio', 'led_ws2812', 'ssd1306_i2c', 'st7789_spi']);
   });
 
   it.each(drivers)('%s: driver.yaml matches its header and idf_component.yml', (id) => {
@@ -1517,5 +1517,186 @@ describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => 
       y.config.spi_mhz.optional = true;
     });
     expect(issuesOf(() => loadDriver(dir, 'st7789_spi')).map((i) => `${i.path}: ${i.message}`)).toEqual(['config.spi_mhz.optional: optional applies only to gpio fields (an absent pin is -1)']);
+  });
+});
+
+// ---- A1: audio (design audio-a1 D1, D2, D6, D7) ----
+
+const S3A = 's3a-audio';
+const S3A_BOARD = 'hardware/boards/esp32s3-wroom1-cam-n16r8.board.yaml';
+
+describe('audio: multi-pin binds, I2S controllers and the audio board (design audio-a1 D6, D7)', () => {
+  const messages = (dir: string, profile: string) => issuesOf(() => gen(dir, profile, false)).map((i) => i.message);
+  const committed = (p: string) => generateFirmware({ sourceDir: ROOT, profile: p, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+  /** c6-pad plus a microphone (and, with `spk`, an amplifier) on the C6's one I2S controller. */
+  const c6Audio = (dir: string, spk?: Yaml) =>
+    edit(dir, PROFILE('c6-pad'), (y) => {
+      y.caps.mic = { cap: 'fr.audio_in', driver: 'i2s_mic', bind: { bclk: 'gpio.18', ws: 'gpio.19', din: 'gpio.21' } };
+      if (spk) {
+        y.caps.spk = { cap: 'fr.audio_out', driver: 'i2s_amp', ...spk };
+      }
+    });
+
+  it('the board manifest: the DevKitC-1 clone with the LED on 48 and GPIO38 free, detected like the fixture board', () => {
+    const b = loadBoardManifest(ROOT, 'esp32s3-wroom1-cam-n16r8') as Yaml;
+    const fix = loadBoardManifest(ROOT, 'esp32s3-devkitc1-n16r8') as Yaml;
+    expect(b.leds.rgb).toMatchObject({ gpio: 48, kind: 'ws2812', confidence: 'H' });
+    expect(b.pins.reserved).not.toHaveProperty('rgb_alt');
+    expect(b.pins.free).toEqual([...fix.pins.free, 38].sort((x: number, y: number) => x - y));
+    expect(b.detection).toEqual(fix.detection);
+    expect(b.resources.i2s).toBe(2);
+    expect(fix.resources.i2s).toBe(2);
+    expect((loadBoardManifest(ROOT, 'esp32c6-supermini') as Yaml).resources.i2s).toBe(1);
+  });
+
+  it('s3a-audio generates against the committed slots.lock: the mic on I2S0, the amp on I2S1, PSRAM on', () => {
+    const r = committed(S3A);
+    expect(r.slotsLockChanged).toBe(false);
+    expect(r.manifest.caps.map((c) => [c.name, c.port, c.cap, c.driver])).toEqual([
+      ['boot', 1, 'fr.button', 'button_gpio'],
+      ['status', 2, 'fr.led', 'led_ws2812'],
+      ['mic', 3, 'fr.audio_in', 'i2s_mic'],
+      ['spk', 4, 'fr.audio_out', 'i2s_amp'],
+    ]);
+    expect(r.manifest.caps[2]).toMatchObject({ cap_id: 0x0007, config: { sample_hz: 16000, gain_db: 12, hpf_hz: 20, level_hz: 5 }, traits: { max_sample_hz: 48000, bits: 24 } });
+    expect(r.manifest.caps[3]).toMatchObject({ cap_id: 0x0004, config: { volume: 60, sample_hz: 16000 }, traits: { max_sample_hz: 48000, bits: 16 } });
+    expect(r.instances.mic).toEqual({
+      bind: '{bclk: gpio.41, ws: gpio.42, din: gpio.2}',
+      pins: [41, 42, 2],
+      driverConfig: { bclk: 41, ws: 42, din: 2, slot: 'left', format: 'philips', port: 0, share_with: 0 },
+    });
+    expect(r.instances.spk).toEqual({
+      bind: '{bclk: gpio.39, ws: gpio.40, dout: gpio.38}',
+      pins: [39, 40, 38],
+      driverConfig: { bclk: 39, ws: 40, dout: 38, sd: -1, port: 1, share_with: 0 },
+    });
+    const cpp = file(r, 'fr_board/fr_board.cpp');
+    expect(cpp).toContain('    c.slot = fr::drv::I2sMic::Slot::left;\n');
+    expect(cpp).toContain('fr::AudioInService service{driver, kConfig};');
+    expect(cpp).toContain('fr::AudioOutService service{driver, kConfig};');
+    expect(file(r, 'fr_board/include/fr/board.hpp')).toContain('#include "fr/services/audio_in_service.hpp"');
+    expect(file(r, 'sdkconfig.board')).toContain('CONFIG_SPIRAM_MODE_OCT=y');
+  });
+
+  it('checks a multi-pin bind: its keys, its required pins, and each pin as a bare pin', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.mic.bind = { bclk: 'gpio.41', ws: 'gpio.42', data: 'gpio.2' };
+      y.caps.spk.bind = 'gpio.38';
+    });
+    expect(messages(dir, S3A)).toEqual([
+      "driver i2s_mic takes no pin 'data' (its bind takes: bclk, ws, din)",
+      "driver i2s_mic needs pin 'din' in the bind",
+      'driver i2s_amp takes its pins as a map, e.g. { bclk: gpio.<n>, ws: gpio.<n>, dout: gpio.<n>, sd: gpio.<n> }',
+    ]);
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.mic.bind = { bclk: 'gpio.41', ws: 'gpio.45', din: 'gpio.33' };
+      y.caps.spk.bind = { bclk: 'gpio.39', ws: 'gpio.40', dout: 'gpio.48' };
+    });
+    expect(messages(dir, S3A)).toEqual([
+      'GPIO45 ({bclk: gpio.41, ws: gpio.45, din: gpio.33}) is a strapping pin; a gpio.<n> bind may not use one',
+      'GPIO33 ({bclk: gpio.41, ws: gpio.45, din: gpio.33}) is reserved for psram on esp32s3-wroom1-cam-n16r8',
+      'GPIO48 ({bclk: gpio.39, ws: gpio.40, dout: gpio.48}) is already claimed by \'status\'',
+      'GPIO48 ({bclk: gpio.39, ws: gpio.40, dout: gpio.48}) is not in pins.free of esp32s3-wroom1-cam-n16r8',
+    ]);
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.mic.bind = { bclk: 'gpio.41', ws: 'gpio.42', din: 'gpio.2' };
+      y.caps.spk.bind = { bclk: 'gpio.39', ws: 'gpio.40', dout: 'gpio.38' };
+      y.caps.mic.config = { din: 5, sample_hz: 12000 };
+    });
+    expect(messages(dir, S3A)).toEqual(["'din' is pin 'din' of the bind and cannot be set in config", 'sample_hz 12000 is not one of 8000, 16000, 22050, 32000, 44100, 48000']);
+  });
+
+  it('allocates I2S controllers: a profile number is kept, auto takes the lowest free, and the board has resources.i2s', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.mic.config = { port: 1 };
+    });
+    const r = gen(dir, S3A, false);
+    expect([r.instances.mic.driverConfig.port, r.instances.spk.driverConfig.port]).toEqual([1, 0]);
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.mic.config = { port: 2 };
+      y.caps.spk.config = { port: 'left' };
+    });
+    expect(messages(dir, S3A)).toEqual(['expected auto or an I2S controller number, got "left"']);
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.spk.config = {};
+    });
+    expect(messages(dir, S3A)).toEqual(['I2S controller 2 does not exist on esp32s3-wroom1-cam-n16r8 (resources.i2s: 2)']);
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.mic.config = {};
+      y.caps.mic2 = { cap: 'fr.audio_in', driver: 'i2s_mic', bind: { bclk: 'gpio.4', ws: 'gpio.5', din: 'gpio.6' } };
+    });
+    expect(messages(dir, S3A)).toEqual(['i2s budget exceeded: 3 needed (mic, spk, mic2), board esp32s3-wroom1-cam-n16r8 has 2']);
+  });
+
+  it('share_with puts two instances on one controller with shared BCLK and WS (the C3/C6 duplex mode)', () => {
+    const dir = fixture();
+    c6Audio(dir, { bind: { bclk: 'gpio.0', ws: 'gpio.1', dout: 'gpio.23' } });
+    expect(messages(dir, 'c6-pad')).toEqual(['i2s budget exceeded: 2 needed (mic, spk), board esp32c6-supermini has 1']);
+    c6Audio(dir, { bind: { dout: 'gpio.23', sd: 'gpio.14' }, config: { share_with: 'mic' } });
+    const r = gen(dir, 'c6-pad', false);
+    expect(r.instances.mic).toMatchObject({ pins: [18, 19, 21], driverConfig: { bclk: 18, ws: 19, din: 21, port: 0, share_with: 4 } });
+    expect(r.instances.spk).toMatchObject({ pins: [23, 14], driverConfig: { bclk: 18, ws: 19, dout: 23, sd: 14, port: 0, share_with: 3 } });
+    c6Audio(dir, { bind: { bclk: 'gpio.0', dout: 'gpio.23' }, config: { share_with: 'mic', sample_hz: 48000 } });
+    expect(messages(dir, 'c6-pad')).toEqual([
+      "spk shares mic's controller (share_with) and takes its bclk: leave bclk out of the bind",
+      'spk shares mic\'s clock (share_with), so both need one sample_hz, not 48000 and 16000',
+    ]);
+    c6Audio(dir, { bind: { dout: 'gpio.23' }, config: { share_with: 'boot' } });
+    expect(messages(dir, 'c6-pad')).toEqual([
+      'boot (driver button_gpio) draws no I2S controller to share',
+      "driver i2s_amp needs pin 'bclk' in the bind (only a share_with instance takes its partner's)",
+      "driver i2s_amp needs pin 'ws' in the bind (only a share_with instance takes its partner's)",
+      'i2s budget exceeded: 2 needed (mic, spk), board esp32c6-supermini has 1',
+    ]);
+    c6Audio(dir, { bind: { dout: 'gpio.23' }, config: { share_with: 'nope' } });
+    expect(messages(dir, 'c6-pad')[0]).toBe("no instance 'nope' in this profile (instances: boot, status, mic, spk)");
+  });
+
+  it('share_with pairs one microphone with one amplifier, never two of a kind', () => {
+    const dir = fixture();
+    // Two microphones: one controller has one RX channel.
+    edit(dir, PROFILE('c6-pad'), (y) => {
+      y.caps.mic = { cap: 'fr.audio_in', driver: 'i2s_mic', bind: { bclk: 'gpio.18', ws: 'gpio.19', din: 'gpio.21' } };
+      y.caps.mic2 = { cap: 'fr.audio_in', driver: 'i2s_mic', bind: { din: 'gpio.23' }, config: { share_with: 'mic' } };
+    });
+    expect(messages(dir, 'c6-pad')).toContain(
+      'mic2 (hal.AudioSource) and mic (hal.AudioSource) cannot share a controller: a share_with pair is one hal.AudioSource and one hal.AudioSink',
+    );
+    // Two amplifiers: one TX channel.
+    edit(dir, PROFILE('c6-pad'), (y) => {
+      delete y.caps.mic;
+      delete y.caps.mic2;
+      y.caps.spk = { cap: 'fr.audio_out', driver: 'i2s_amp', bind: { bclk: 'gpio.18', ws: 'gpio.19', dout: 'gpio.21' } };
+      y.caps.spk2 = { cap: 'fr.audio_out', driver: 'i2s_amp', bind: { dout: 'gpio.23' }, config: { share_with: 'spk' } };
+    });
+    expect(messages(dir, 'c6-pad')).toContain(
+      'spk2 (hal.AudioSink) and spk (hal.AudioSink) cannot share a controller: a share_with pair is one hal.AudioSource and one hal.AudioSink',
+    );
+    // A microphone and an amplifier, either one the follower: accepted.
+    edit(dir, PROFILE('c6-pad'), (y) => {
+      delete y.caps.spk2;
+      y.caps.mic = { cap: 'fr.audio_in', driver: 'i2s_mic', bind: { din: 'gpio.23' }, config: { share_with: 'spk' } };
+    });
+    const r = gen(dir, 'c6-pad', false);
+    expect(r.instances.mic).toMatchObject({ driverConfig: { bclk: 18, ws: 19, din: 23, port: 0, share_with: 3 } });
+    expect(r.instances.spk).toMatchObject({ driverConfig: { bclk: 18, ws: 19, dout: 21, port: 0, share_with: 4 } });
+  });
+
+  it('checks the driver.yaml rules of the new field types', () => {
+    const dir = fixture();
+    edit(dir, 'hardware/drivers/i2s_mic/driver.yaml', (y) => {
+      y.resources.i2s = 2;
+      y.config.share_with.default = 'spk';
+      y.config.port.from = 'board.port';
+      y.config.din.from = 'bind';
+    });
+    expect(issuesOf(() => loadDriver(dir, 'i2s_mic')).map((i) => `${i.path}: ${i.message}`)).toEqual([
+      'config.port.from: a i2s_port field comes from the profile, not from board.port',
+      'config.share_with.default: an instance field has no default (absent: none)',
+      'config: from: bind (a gpio.<n> bind) and from: bind.<key> (a multi-pin bind) cannot be mixed',
+      'resources.i2s: declares 2 i2s but has 1 config field(s) of type i2s_port',
+    ]);
   });
 });

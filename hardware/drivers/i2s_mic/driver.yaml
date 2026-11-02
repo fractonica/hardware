@@ -1,0 +1,26 @@
+# Driver manifest (design audio-a1 D6, D7; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::I2sMic::Config from the instance's multi-pin bind, `bind: { bclk: gpio.<n>, ws: gpio.<n>, din: gpio.<n> }`
+# (each in the board's pins.free), and resolves `port` to a controller. Stream F implements it (A1).
+schema: fractonica/driver@1
+id: i2s_mic
+summary: An I2S standard-mode MEMS microphone (INMP441, ICS-43434; SPH0645 with format msb), mono, 32-bit slots, on an I2S RX channel.
+implements: hal.AudioSource
+class: fr::drv::I2sMic                  # header: include/fr/drv/i2s_mic.hpp
+targets: [esp32c3, esp32c6, esp32s3]
+binds: gpio                             # bare pins: bind { bclk: gpio.<n>, ws: gpio.<n>, din: gpio.<n> } (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as I2sMic::Config
+  # bclk and ws are left out of the bind only by the follower of a share_with pair: codegen fills its partner's.
+  bclk:   { type: gpio, from: bind.bclk, optional: true, doc: "the part's SCK" }
+  ws:     { type: gpio, from: bind.ws, optional: true, doc: "word select (LRCLK)" }
+  din:    { type: gpio, from: bind.din, doc: "the part's SD (data out of the microphone)" }
+  slot:   { type: enum, values: [left, right], default: left, doc: "the slot the part drives: INMP441 L/R to GND = left" }
+  format: { type: enum, values: [philips, msb], default: philips, doc: "philips: data one BCLK after WS (INMP441, ICS-43434); msb: aligned (SPH0645, inferred)" }
+  port:   { type: i2s_port, default: auto, doc: "the I2S controller; auto: the lowest free one (codegen)" }
+  # Shared-clock duplex (design D6) for one-I2S chips: the other instance of the pair, by name in the profile, its
+  # capability port in the Config (0: none). Set on one side only; codegen fills the other side's.
+  share_with: { type: instance, doc: "an i2s_amp instance on the same controller, BCLK and WS shared" }
+# fr.audio_in traits its service reports (design D1): the IDF standard mode clocks up to 48 kHz here; INMP441 data is 24 bits.
+traits: { max_sample_hz: 48000, bits: 24 }
+resources: { gpio: 3, i2s: 1 }          # i2s: one controller (RX), or none of its own as a share_with follower
+dependencies: {}

@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0x9b63c6b7;
+export const CATALOG_HASH = 0xd75bdaa2;
 
 // ---- fr.button ----
 
@@ -236,6 +236,74 @@ export interface DisplayProps {
   brightness: number;
 }
 
+// ---- fr.audio_out ----
+
+export type AudioOutPlayEndReason = 'done' | 'stopped' | 'net_lost' | 'underrun' | 'error';
+
+/** fr.audio_out.tone arguments (all optional: the device applies the defaults). */
+export interface AudioOutToneArgs {
+  /** (Hz; 20..20000) */
+  freqHz?: number;
+  /** (ms; 1..60000; default 500) */
+  ms?: number;
+  /** (%; 0..100) */
+  volume?: number;
+}
+
+/** fr.audio_out.play arguments (all optional: the device applies the defaults). */
+export interface AudioOutPlayArgs {
+  /** issued by the hub; the GET path names it */
+  playId?: number;
+  /** the PCM's rate, one of the config's rates (Hz; 8000..48000) */
+  sampleHz?: number;
+}
+
+/** fr.audio_out.set_volume arguments (all optional: the device applies the defaults). */
+export interface AudioOutSetVolumeArgs {
+  /** (%; 0..100) */
+  volume?: number;
+}
+
+/** fr.audio_out commands, as methods of an instance. */
+export interface AudioOutClient {
+  /** A sine of freq_hz for ms, made on the node at config sample_hz; answers when it starts. volume overrides the current volume for this tone only. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  tone(args?: AudioOutToneArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Plays PCM the hub serves at GET /v1/audio/out/<play_id> (design D3). Dispatch never blocks: OK once the fr_stream task has the play, INVALID_ARGS for a rate the driver does not take. A GET that fails ends it with play_done net_lost (samples 0). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  play(args?: AudioOutPlayArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Stops the tone or play (play_done reason stopped); OK when nothing plays. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  stop(opts?: CallOptions): Promise<CmdResult>;
+  /** Sets the volume (property volume) for what plays now and later. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  setVolume(args?: AudioOutSetVolumeArgs, opts?: CallOptions): Promise<CmdResult>;
+}
+
+/** fr.audio_out.play_done event fields (normal). A tone or play ended: done, stopped (stop, or replaced), net_lost, underrun (the stream starved for good), error. underruns counts the silent gaps played. */
+export interface AudioOutPlayDoneFields {
+  /** 0 for a tone */
+  playId: number;
+  reason: AudioOutPlayEndReason | number;
+  underruns: number;
+  /** samples played */
+  samples: number;
+}
+
+/** fr.audio_out events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface AudioOutEvents {
+  play_done: AudioOutPlayDoneFields;
+}
+
+/** fr.audio_out properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface AudioOutState {
+  playing: boolean;
+  /** (%) */
+  volume: number;
+}
+
+/** fr.audio_out property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface AudioOutProps {
+  playing: boolean;
+  volume: number;
+}
+
 // ---- fr.analog_in ----
 
 export type AnalogInFilter = 'none' | 'ema' | 'median3';
@@ -277,6 +345,76 @@ export interface AnalogInState {
 /** fr.analog_in property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
 export interface AnalogInProps {
   value: number;
+}
+
+// ---- fr.audio_in ----
+
+export type AudioInStreamEndReason = 'stopped' | 'done' | 'net_lost' | 'overflow' | 'error';
+
+/** fr.audio_in.stream_start arguments (all optional: the device applies the defaults). */
+export interface AudioInStreamStartArgs {
+  /** issued by the hub; the POST path names it */
+  streamId?: number;
+  /** 0: until stream_stop (s) */
+  seconds?: number;
+  /** absent: config sample_hz; one of the config's rates (Hz) */
+  sampleHz?: number;
+}
+
+/** fr.audio_in.stream_start RESULT fields. */
+export interface AudioInStreamStartResult {
+  /** the rate of the stream (Hz) */
+  sampleHz: number;
+}
+
+/** fr.audio_in.stream_stop arguments (all optional: the device applies the defaults). */
+export interface AudioInStreamStopArgs {
+  streamId?: number;
+}
+
+/** fr.audio_in.level_get RESULT fields. */
+export interface AudioInLevelGetResult {
+  dbfsX10: number;
+  peakDbfsX10: number;
+  clipping: number;
+}
+
+/** fr.audio_in commands, as methods of an instance. */
+export interface AudioInClient {
+  /** Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  streamStart(args?: AudioInStreamStartArgs, opts?: CallOptions): Promise<CmdResult<AudioInStreamStartResult>>;
+  /** Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  streamStop(args?: AudioInStreamStopArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** The level now, in dBFS x 10, and the clipped samples since the microphone started; starts the microphone for 200 ms when it is idle. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  levelGet(opts?: CallOptions): Promise<CmdResult<AudioInLevelGetResult>>;
+}
+
+/** fr.audio_in.stream_ended event fields (normal). A stream ended: stopped (stream_stop), done (`seconds` reached), net_lost (a send stalled 3 s or the connection dropped), overflow, error. */
+export interface AudioInStreamEndedFields {
+  streamId: number;
+  reason: AudioInStreamEndReason | number;
+  /** samples covered by the stream, dropped ones included */
+  samples: number;
+  /** samples lost to ring overflows (the hub writes silence for them) */
+  droppedSamples: number;
+}
+
+/** fr.audio_in events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface AudioInEvents {
+  stream_ended: AudioInStreamEndedFields;
+}
+
+/** fr.audio_in properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface AudioInState {
+  /** RMS over the last 1/level_hz s, dBFS x 10 (-900 is silence) (dBFS/10) */
+  level: number;
+  streaming: boolean;
+}
+
+/** fr.audio_in property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface AudioInProps {
+  level: number;
+  streaming: boolean;
 }
 
 // ---- fr.touch ----
@@ -515,7 +653,9 @@ export interface CapClients {
   'fr.button': ButtonClient;
   'fr.led': LedClient;
   'fr.display': DisplayClient;
+  'fr.audio_out': AudioOutClient;
   'fr.analog_in': AnalogInClient;
+  'fr.audio_in': AudioInClient;
   'fr.touch': TouchClient;
   'fr.node': NodeClient;
   'fr.ota': OtaClient;
@@ -527,7 +667,9 @@ export interface CapEvents {
   'fr.button': ButtonEvents;
   'fr.led': LedEvents;
   'fr.display': DisplayEvents;
+  'fr.audio_out': AudioOutEvents;
   'fr.analog_in': AnalogInEvents;
+  'fr.audio_in': AudioInEvents;
   'fr.touch': TouchEvents;
   'fr.node': NodeEvents;
   'fr.ota': OtaEvents;
@@ -539,7 +681,9 @@ export interface CapState {
   'fr.button': ButtonState;
   'fr.led': LedState;
   'fr.display': DisplayState;
+  'fr.audio_out': AudioOutState;
   'fr.analog_in': AnalogInState;
+  'fr.audio_in': AudioInState;
   'fr.touch': TouchState;
   'fr.node': NodeState;
   'fr.ota': OtaState;
@@ -551,7 +695,9 @@ export interface CapProps {
   'fr.button': ButtonProps;
   'fr.led': LedProps;
   'fr.display': DisplayProps;
+  'fr.audio_out': AudioOutProps;
   'fr.analog_in': AnalogInProps;
+  'fr.audio_in': AudioInProps;
   'fr.touch': TouchProps;
   'fr.node': NodeProps;
   'fr.ota': OtaProps;
@@ -566,7 +712,9 @@ export const CAP_META: Readonly<Record<string, CapMeta>> = {
   'fr.button': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['down', 'up', 'click', 'long_press'], props: ['pressed'] },
   'fr.led': { commands: { set: { method: 'set', delivery: 'fast', args: true }, toggle: { method: 'toggle', delivery: 'reliable' }, blink: { method: 'blink', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' } }, events: ['effect_done'], props: ['on', 'brightness', 'color'] },
   'fr.display': { commands: { clear: { method: 'clear', delivery: 'reliable', args: true }, text: { method: 'text', delivery: 'reliable', args: true }, fill_rect: { method: 'fillRect', delivery: 'reliable', args: true }, set_brightness: { method: 'setBrightness', delivery: 'reliable', args: true }, ui_load: { method: 'uiLoad', delivery: 'reliable', args: true }, ui_set: { method: 'uiSet', delivery: 'reliable', args: true }, snapshot: { method: 'snapshot', delivery: 'reliable', test: true }, snapshot_read: { method: 'snapshotRead', delivery: 'reliable', args: true, test: true } }, events: ['ui'], props: ['brightness'] },
+  'fr.audio_out': { commands: { tone: { method: 'tone', delivery: 'reliable', args: true }, play: { method: 'play', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' }, set_volume: { method: 'setVolume', delivery: 'reliable', args: true } }, events: ['play_done'], props: ['playing', 'volume'] },
   'fr.analog_in': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true }, read: { method: 'read', delivery: 'reliable' } }, events: ['crossed'], props: ['value'] },
+  'fr.audio_in': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, level_get: { method: 'levelGet', delivery: 'reliable' } }, events: ['stream_ended'], props: ['level', 'streaming'] },
   'fr.touch': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['down', 'up', 'gesture'], props: ['pressed'] },
   'fr.node': { commands: { identify: { method: 'identify', delivery: 'reliable', args: true }, describe: { method: 'describe', delivery: 'reliable' }, reboot: { method: 'reboot', delivery: 'reliable', args: true }, set_alias: { method: 'setAlias', delivery: 'reliable', args: true }, set_groups: { method: 'setGroups', delivery: 'reliable', args: true }, net_set: { method: 'netSet', delivery: 'reliable', args: true }, get_state: { method: 'getState', delivery: 'reliable' }, bind_set: { method: 'bindSet', delivery: 'reliable', args: true }, bind_clear: { method: 'bindClear', delivery: 'reliable', args: true }, bind_list: { method: 'bindList', delivery: 'reliable' } }, events: ['boot', 'binding_fired'], props: [] },
   'fr.ota': { commands: {}, events: [], props: [] },

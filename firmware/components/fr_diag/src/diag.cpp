@@ -536,7 +536,7 @@ bool fits(cJSON *json, size_t room)
  * `omitted`, so a Wi-Fi-only node always answers; the dropped ones are a `stats <section>` away.
  */
 constexpr std::string_view kStatSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs",
-                                              "net_logs", "gateway", "gw"};
+                                              "net_logs", "gateway", "gw", "audio"};
 constexpr size_t kStatSectionCount = sizeof(kStatSections) / sizeof(kStatSections[0]);
 
 /** The index of `name` in kStatSections, or kStatSectionCount. */
@@ -643,6 +643,19 @@ void add_stat_section(cJSON *res, size_t i, const NetStatus &n)
         for (const auto &[key, v] : fields) {
             cJSON_AddNumberToObject(o, key, v);
         }
+    } else if (name == "audio") {  // per instance (design audio-a1 §11), since boot
+        for (size_t k = 0; k < n.audio_count && k < kAudioMax; ++k) {
+            const AudioStatus &a = n.audio[k];
+            cJSON *ao = cJSON_AddObjectToObject(o, a.name);
+            if (a.input) {
+                cJSON_AddNumberToObject(ao, "rx_overflows", a.rx_overflows);
+                cJSON_AddNumberToObject(ao, "dropped_samples", a.dropped_samples);
+                cJSON_AddNumberToObject(ao, "clipping", a.clipping);
+            } else {
+                cJSON_AddNumberToObject(ao, "underruns", a.underruns);
+                cJSON_AddNumberToObject(ao, "ring_dry", a.ring_dry);
+            }
+        }
     } else {  // msgs: per topic, the first kMsgTopics seen, then `other`
         for (const MsgTopicCount &t : n.msgs) {
             if (t.name[0] != '\0') {
@@ -672,7 +685,7 @@ void fit_stats(cJSON *res, const NetStatus &n, size_t room)
             omitted = cJSON_AddArrayToObject(res, "omitted");
         }
         if (cJSON_GetObjectItem(res, kStatSections[i].data()) == nullptr) {
-            continue;  // a section the full answer leaves out (gw off a gateway)
+            continue;  // a section the full answer leaves out (gw off a gateway, audio without instances)
         }
         if (kStatSections[i] == "msgs") {
             cJSON_DeleteItemFromObject(res, "msgs_folded");
@@ -687,7 +700,7 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t room)
     std::string_view opt = next_word(args);
     const size_t section = stat_section(opt);
     if (!args.empty() || (!opt.empty() && opt != "reset" && section == kStatSectionCount)) {
-        return fail("invalid_args", "usage: stats [reset|links|bcast|relay|espnow|bindings|nodes|msgs|net_logs|gateway|gw]");
+        return fail("invalid_args", "usage: stats [reset|links|bcast|relay|espnow|bindings|nodes|msgs|net_logs|gateway|gw|audio]");
     }
     NetStatus n = host.net_status();
     if (section != kStatSectionCount) {
@@ -745,6 +758,9 @@ Fail cmd_stats(std::string_view args, Host &host, cJSON *res, size_t room)
     for (size_t i = 1; i < kStatSectionCount; ++i) {
         if (kStatSections[i] == "gw" && !n.gw.on) {
             continue;  // only a gateway has a bridge; `stats gw` still answers {"on":false}
+        }
+        if (kStatSections[i] == "audio" && n.audio_count == 0) {
+            continue;  // no fr.audio_in / fr.audio_out instance; `stats audio` still answers {}
         }
         add_stat_section(res, i, n);
     }
@@ -1244,6 +1260,34 @@ Fail cmd_pin_pulse(std::string_view args, Host &host, cJSON *res, size_t)
 #endif
 }
 
+/** `audio stall <ms>` (design audio-a1 T-AUDIO 1): TestHooks::audio_stall. */
+Fail cmd_audio(std::string_view args, Host &host, cJSON *res, size_t)
+{
+#if FR_TEST_HOOKS
+    TestHooks *t = host.test_hooks();
+    if (t == nullptr) {
+        return fail("unsupported", kNoHooks);
+    }
+    const std::string_view what = next_word(args);
+    uint32_t ms = 0;
+    if (what != "stall" || !parse_uint(next_word(args), 1, 60000, ms) || !args.empty()) {
+        return fail("invalid_args", "usage: audio stall <ms 1-60000>");
+    }
+    Status st = t->audio_stall(ms);
+    if (!st) {
+        return fail(err_name(st.error()), st.error() == Err::not_found ? "no record stream runs" : nullptr);
+    }
+    cJSON_AddStringToObject(res, "hook", "audio_stall");
+    cJSON_AddNumberToObject(res, "ms", ms);
+    return ok;
+#else
+    (void)args;
+    (void)host;
+    (void)res;
+    return fail("unsupported", "test hooks are off in this build");
+#endif
+}
+
 struct Command {
     const char *name;
     /** `room`: characters the response JSON may take (after any `#<id> `), for commands that page. */
@@ -1255,6 +1299,7 @@ constexpr Command kCommands[] = {
     {"selftest", cmd_selftest}, {"mark", cmd_mark}, {"log", cmd_log},     {"stats", cmd_stats},
     {"reboot", cmd_reboot},     {"net", cmd_net},   {"neighbors", cmd_neighbors},
     {"pin_pulse", cmd_pin_pulse}, {"air", cmd_air},   {"wifi", cmd_wifi},     {"cpu", cmd_cpu},
+    {"audio", cmd_audio},
 };
 
 /** `#<id> ` prefix: 1-8 decimal digits. Returns the id text (empty when absent); false if malformed. */

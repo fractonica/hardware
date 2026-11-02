@@ -88,8 +88,10 @@ describe('loading the committed schema', () => {
       [0x0001, 'fr.button', 'Button', 'standard'],
       [0x0002, 'fr.led', 'Led', 'standard'],
       [0x0003, 'fr.display', 'Display', 'standard'],
+      [0x0004, 'fr.audio_out', 'AudioOut', 'standard'],
       [0x0005, 'fr.analog_in', 'AnalogIn', 'standard'],
       [0x0006, 'fr.fixture', 'Fixture', 'standard'],
+      [0x0007, 'fr.audio_in', 'AudioIn', 'standard'],
       [0x0008, 'fr.touch', 'Touch', 'standard'],
       [0x00f0, 'fr.node', 'Node', 'system'],
       [0x00f1, 'fr.ota', 'Ota', 'system'],
@@ -572,11 +574,10 @@ describe('capability message types and bulk commands (design m2-c5-display D1, D
     expect(model().capabilities.filter((c) => c.name !== 'fr.display').flatMap((c) => c.commands.filter((x) => x.bulk))).toEqual([]);
   });
 
-  it('fr.touch is 0x0008, 0x0007 stays free; its down and up are realtime', () => {
+  it('fr.touch is 0x0008; its down and up are realtime', () => {
     const m = model();
     const t = cap(m, 'fr.touch');
     expect(t).toMatchObject({ id: 0x0008, section: 'standard' });
-    expect(m.registry.entries.some((e) => e.id === 0x0007)).toBe(false);
     expect(t.events.map((e) => [e.name, e.priority])).toEqual([
       ['down', 'realtime'],
       ['up', 'realtime'],
@@ -643,5 +644,52 @@ describe('capability message types and bulk commands (design m2-c5-display D1, D
     expect(d.commands.find((x: Yaml) => x.name === 'clear').bulk).toBeUndefined();
     // A capability without message types has no `messages` key, so its catalog entry is as before.
     expect(c.find((x) => x.name === 'fr.led')!.messages).toBeUndefined();
+  });
+});
+
+describe('audio (design audio-a1 D1, D2)', () => {
+  it('fr.audio_in is 0x0007 1.0: level and streaming, stream_ended, three reliable commands', () => {
+    const a = cap(model(), 'fr.audio_in');
+    expect(a).toMatchObject({ id: 0x0007, section: 'standard', version: { major: 1, minor: 0 }, testOnly: false });
+    expect(a.traits.map((t) => [t.name, t.typeName])).toEqual([
+      ['max_sample_hz', 'u32'],
+      ['bits', 'u8'],
+    ]);
+    expect(a.config.map((e) => [e.name, e.default])).toEqual([
+      ['sample_hz', 16000],
+      ['gain_db', 12],
+      ['hpf_hz', 20],
+      ['level_hz', 5],
+    ]);
+    expect(a.properties.map((p) => [p.name, p.typeName])).toEqual([
+      ['level', 'i16'],
+      ['streaming', 'bool'],
+    ]);
+    expect(a.events.map((e) => [e.name, e.priority, e.fields.map((f) => f.name)])).toEqual([['stream_ended', 'normal', ['stream_id', 'reason', 'samples', 'dropped_samples']]]);
+    expect(a.commands.map((c) => [c.name, c.id, c.delivery, c.bulk])).toEqual([
+      ['stream_start', 1, 'reliable', false],
+      ['stream_stop', 2, 'reliable', false],
+      ['level_get', 3, 'reliable', false],
+    ]);
+    expect(a.enums[0].members.map((x) => x.name)).toEqual(['stopped', 'done', 'net_lost', 'overflow', 'error']);
+  });
+
+  it('fr.audio_out is 0x0004 1.0: tone, play, stop, set_volume and play_done', () => {
+    const a = cap(model(), 'fr.audio_out');
+    expect(a).toMatchObject({ id: 0x0004, section: 'standard', version: { major: 1, minor: 0 } });
+    expect(a.config.map((e) => [e.name, e.default])).toEqual([
+      ['volume', 60],
+      ['sample_hz', 16000],
+    ]);
+    expect(a.properties.map((p) => p.name)).toEqual(['playing', 'volume']);
+    expect(a.events.map((e) => [e.name, e.priority])).toEqual([['play_done', 'normal']]);
+    expect(a.commands.map((c) => [c.name, c.id, c.delivery, c.idempotent])).toEqual([
+      ['tone', 1, 'reliable', false],
+      ['play', 2, 'reliable', false],
+      ['stop', 3, 'reliable', true],
+      ['set_volume', 4, 'reliable', true],
+    ]);
+    // Every audio command fits the realtime budget: PCM never travels on the hub link (D3).
+    expect(a.commands.every((c) => c.maxArgs <= 200)).toBe(true);
   });
 });

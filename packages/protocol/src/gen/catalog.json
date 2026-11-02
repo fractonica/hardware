@@ -923,6 +923,226 @@
       ]
     },
     {
+      "id": 4,
+      "name": "fr.audio_out",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "A speaker or line output that plays a tone made on the node, or PCM it pulls from the hub over HTTP.",
+      "doc": "Design audio-a1 D2-D5. `tone` needs no network. `play` makes the node GET raw PCM (s16le mono at `sample_hz`) from the\nhub's HTTP listener (`GET /v1/audio/out/<play_id>`), which converted the source to that rate; PCM never travels on\nthe hub link. One sound at a time: a new tone or play replaces the one playing (play_done reason stopped).\nplay_done reports how each ended; a tone's play_id is 0.\n",
+      "types": {
+        "PlayEndReason": {
+          "done": 0,
+          "stopped": 1,
+          "net_lost": 2,
+          "underrun": 3,
+          "error": 4
+        }
+      },
+      "traits": [
+        {
+          "name": "max_sample_hz",
+          "id": 1,
+          "type": "u32"
+        },
+        {
+          "name": "bits",
+          "id": 2,
+          "type": "u8"
+        }
+      ],
+      "config": [
+        {
+          "name": "volume",
+          "type": "u8",
+          "default": 60,
+          "range": [
+            0,
+            100
+          ],
+          "unit": "%",
+          "doc": "volume at boot"
+        },
+        {
+          "name": "sample_hz",
+          "type": "u32",
+          "default": 16000,
+          "range": [
+            8000,
+            48000
+          ],
+          "unit": "Hz",
+          "doc": "one of 8000, 16000, 22050, 32000, 44100, 48000; the rate tones are made at"
+        }
+      ],
+      "properties": [
+        {
+          "name": "playing",
+          "id": 1,
+          "type": "bool"
+        },
+        {
+          "name": "volume",
+          "id": 2,
+          "type": "u8",
+          "unit": "%"
+        }
+      ],
+      "commands": [
+        {
+          "name": "tone",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "A sine of freq_hz for ms, made on the node at config sample_hz; answers when it starts. volume overrides the current volume for this tone only.",
+          "fields": [
+            {
+              "name": "freq_hz",
+              "id": 1,
+              "type": "u16",
+              "range": [
+                20,
+                20000
+              ],
+              "unit": "Hz"
+            },
+            {
+              "name": "ms",
+              "id": 2,
+              "type": "u16",
+              "default": 500,
+              "range": [
+                1,
+                60000
+              ],
+              "unit": "ms"
+            },
+            {
+              "name": "volume",
+              "id": 3,
+              "type": "u8",
+              "optional": true,
+              "range": [
+                0,
+                100
+              ],
+              "unit": "%"
+            }
+          ],
+          "examples": [
+            {
+              "freq_hz": 1000,
+              "ms": 3000
+            },
+            {
+              "freq_hz": 440,
+              "ms": 500,
+              "volume": 30
+            }
+          ]
+        },
+        {
+          "name": "play",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Plays PCM the hub serves at GET /v1/audio/out/<play_id> (design D3). Dispatch never blocks: OK once the fr_stream task has the play, INVALID_ARGS for a rate the driver does not take. A GET that fails ends it with play_done net_lost (samples 0).",
+          "fields": [
+            {
+              "name": "play_id",
+              "id": 1,
+              "type": "u32",
+              "doc": "issued by the hub; the GET path names it"
+            },
+            {
+              "name": "sample_hz",
+              "id": 2,
+              "type": "u32",
+              "range": [
+                8000,
+                48000
+              ],
+              "unit": "Hz",
+              "doc": "the PCM's rate, one of the config's rates"
+            }
+          ],
+          "examples": [
+            {
+              "play_id": 1,
+              "sample_hz": 16000
+            }
+          ]
+        },
+        {
+          "name": "stop",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Stops the tone or play (play_done reason stopped); OK when nothing plays.",
+          "fields": []
+        },
+        {
+          "name": "set_volume",
+          "id": 4,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Sets the volume (property volume) for what plays now and later.",
+          "fields": [
+            {
+              "name": "volume",
+              "id": 1,
+              "type": "u8",
+              "range": [
+                0,
+                100
+              ],
+              "unit": "%"
+            }
+          ],
+          "examples": [
+            {
+              "volume": 40
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "name": "play_done",
+          "id": 1,
+          "priority": "normal",
+          "doc": "A tone or play ended: done, stopped (stop, or replaced), net_lost, underrun (the stream starved for good), error. underruns counts the silent gaps played.",
+          "fields": [
+            {
+              "name": "play_id",
+              "id": 1,
+              "type": "u32",
+              "doc": "0 for a tone"
+            },
+            {
+              "name": "reason",
+              "id": 2,
+              "type": "PlayEndReason"
+            },
+            {
+              "name": "underruns",
+              "id": 3,
+              "type": "u32"
+            },
+            {
+              "name": "samples",
+              "id": 4,
+              "type": "u32",
+              "doc": "samples played"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": 5,
       "name": "fr.analog_in",
       "version": "1.0",
@@ -1111,6 +1331,226 @@
               "name": "value",
               "id": 3,
               "type": "u16"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "name": "fr.audio_in",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "A microphone sampled on the node, its level reported and its PCM streamed to the hub over a separate HTTP connection.",
+      "doc": "Design audio-a1 D1, D3-D5. PCM never travels on the hub link: stream_start makes the node POST it to the hub's HTTP\nlistener (`POST /v1/audio/in/<stream_id>`, chunked, s16le mono at the stream's rate), and stream_ended reports how\nit ended. A stream id is one the hub issued; one stream at a time (BUSY otherwise). Samples lost to a Wi-Fi stall\nare counted in dropped_samples and the hub writes silence for them, so a recording keeps its length.\n`level` is a LATEST property (RMS over the last 1/level_hz s, in dBFS x 10) while the microphone runs.\n",
+      "types": {
+        "StreamEndReason": {
+          "stopped": 0,
+          "done": 1,
+          "net_lost": 2,
+          "overflow": 3,
+          "error": 4
+        }
+      },
+      "traits": [
+        {
+          "name": "max_sample_hz",
+          "id": 1,
+          "type": "u32"
+        },
+        {
+          "name": "bits",
+          "id": 2,
+          "type": "u8"
+        }
+      ],
+      "config": [
+        {
+          "name": "sample_hz",
+          "type": "u32",
+          "default": 16000,
+          "range": [
+            8000,
+            48000
+          ],
+          "unit": "Hz",
+          "doc": "one of 8000, 16000, 22050, 32000, 44100, 48000; a stream may ask for another"
+        },
+        {
+          "name": "gain_db",
+          "type": "u8",
+          "default": 12,
+          "range": [
+            0,
+            36
+          ],
+          "unit": "dB",
+          "doc": "digital gain applied in the 32 -> 16-bit conversion"
+        },
+        {
+          "name": "hpf_hz",
+          "type": "u16",
+          "default": 20,
+          "range": [
+            0,
+            500
+          ],
+          "unit": "Hz",
+          "doc": "DC blocker corner; 0: off"
+        },
+        {
+          "name": "level_hz",
+          "type": "u8",
+          "default": 5,
+          "range": [
+            0,
+            20
+          ],
+          "unit": "Hz",
+          "doc": "`level` reports per second while the microphone runs; 0: none"
+        }
+      ],
+      "properties": [
+        {
+          "name": "level",
+          "id": 1,
+          "type": "i16",
+          "unit": "dBFS/10",
+          "doc": "RMS over the last 1/level_hz s, dBFS x 10 (-900 is silence)"
+        },
+        {
+          "name": "streaming",
+          "id": 2,
+          "type": "bool"
+        }
+      ],
+      "commands": [
+        {
+          "name": "stream_start",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0).",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32",
+              "doc": "issued by the hub; the POST path names it"
+            },
+            {
+              "name": "seconds",
+              "id": 2,
+              "type": "u16",
+              "unit": "s",
+              "doc": "0: until stream_stop"
+            },
+            {
+              "name": "sample_hz",
+              "id": 3,
+              "type": "u32",
+              "optional": true,
+              "unit": "Hz",
+              "doc": "absent: config sample_hz; one of the config's rates"
+            }
+          ],
+          "result": [
+            {
+              "name": "sample_hz",
+              "id": 1,
+              "type": "u32",
+              "unit": "Hz",
+              "doc": "the rate of the stream"
+            }
+          ],
+          "examples": [
+            {
+              "stream_id": 1,
+              "seconds": 10
+            },
+            {
+              "stream_id": 2,
+              "seconds": 5,
+              "sample_hz": 48000
+            }
+          ]
+        },
+        {
+          "name": "stream_stop",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream.",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32"
+            }
+          ],
+          "examples": [
+            {
+              "stream_id": 1
+            }
+          ]
+        },
+        {
+          "name": "level_get",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The level now, in dBFS x 10, and the clipped samples since the microphone started; starts the microphone for 200 ms when it is idle.",
+          "fields": [],
+          "result": [
+            {
+              "name": "dbfs_x10",
+              "id": 1,
+              "type": "i16"
+            },
+            {
+              "name": "peak_dbfs_x10",
+              "id": 2,
+              "type": "i16"
+            },
+            {
+              "name": "clipping",
+              "id": 3,
+              "type": "u32"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "name": "stream_ended",
+          "id": 1,
+          "priority": "normal",
+          "doc": "A stream ended: stopped (stream_stop), done (`seconds` reached), net_lost (a send stalled 3 s or the connection dropped), overflow, error.",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "reason",
+              "id": 2,
+              "type": "StreamEndReason"
+            },
+            {
+              "name": "samples",
+              "id": 3,
+              "type": "u32",
+              "doc": "samples covered by the stream, dropped ones included"
+            },
+            {
+              "name": "dropped_samples",
+              "id": 4,
+              "type": "u32",
+              "doc": "samples lost to ring overflows (the hub writes silence for them)"
             }
           ]
         }

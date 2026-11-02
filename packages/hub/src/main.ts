@@ -10,6 +10,7 @@ import { idfStatus, paths, pytoolsStatus, readIdfLock, type IdfStatus, type Pyto
 import { HUB_API_PORT, HUB_VERSION, REGISTRY_HASH } from '@fractonica/protocol';
 
 import { createAppServer } from './apps/server.ts';
+import { sweepAudioTempsAtStart } from './audio/ops.ts';
 import { createBindings } from './bindings/index.ts';
 import type { HubContext, HubRunOptions } from './context.ts';
 import { nextHubEpoch, nextHubRun, openDb } from './db.ts';
@@ -91,6 +92,11 @@ async function main(): Promise<void> {
   const swept = sweepIdentAtStart();
   if (swept.length) {
     console.log(JSON.stringify({ event: 'ident_renders_removed', count: swept.length }));
+  }
+  // WAV temp files of recordings a killed hub left beside their `out` (audio-a1): nobody's now either.
+  const audioTemps = sweepAudioTempsAtStart();
+  if (audioTemps.length) {
+    console.log(JSON.stringify({ event: 'audio_temps_removed', count: audioTemps.length }));
   }
 
   const hubSourceDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');

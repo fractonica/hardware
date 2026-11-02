@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -31,6 +32,13 @@ constexpr int kSendFlags = MSG_NOSIGNAL;
 #else
 constexpr int kSendFlags = 0;
 #endif
+
+/** A monotonic clock in ms (as http_post.cpp's). */
+int64_t now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 /** ASCII case-insensitive comparison: header names, `bytes`, `identity`. */
 bool iequals(std::string_view a, std::string_view b)
@@ -181,6 +189,7 @@ Status HttpGet::start(const char *url, uint32_t from_byte)
     if (!read_head(head_len)) {
         return fail_start(error_);
     }
+    data_ms_ = now_ms();
     return parse_head(head_len, from_byte);
 }
 
@@ -301,6 +310,7 @@ std::expected<size_t, Err> HttpGet::read(std::span<uint8_t> out)
                 return fail_read(timed_out() ? "timeout" : "recv");
             }
             n = static_cast<size_t>(r);
+            data_ms_ = now_ms();
         }
         if (remaining_ > 0) {
             remaining_ -= static_cast<int64_t>(n);
@@ -316,6 +326,34 @@ std::expected<size_t, Err> HttpGet::read(std::span<uint8_t> out)
         }
         return n;
     }
+}
+
+std::expected<bool, Err> HttpGet::readable(uint32_t wait_ms)
+{
+    if (fd_ < 0) {
+        static_cast<void>(fail_read("not open"));
+        return std::unexpected(Err::failed);
+    }
+    if (remaining_ == 0 || body_at_ < body_end_) {
+        return true;
+    }
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(fd_, &rd);
+    timeval wait = timeval_of(wait_ms);
+    const int k = ::select(fd_ + 1, &rd, nullptr, nullptr, &wait);
+    if (k > 0) {
+        return true;  // bytes, the close or an error: read() tells which, without waiting
+    }
+    if (k < 0 && errno != EINTR) {
+        static_cast<void>(fail_read("recv"));
+        return std::unexpected(Err::failed);
+    }
+    if (now_ms() - data_ms_ >= static_cast<int64_t>(timeout_ms_)) {
+        static_cast<void>(fail_read("timeout"));
+        return std::unexpected(Err::failed);
+    }
+    return false;
 }
 
 void HttpGet::close()

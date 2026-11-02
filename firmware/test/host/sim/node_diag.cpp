@@ -8,12 +8,15 @@
 // shapes: `air bench tx|rx`, `air rate` and `air churn` over SimAir, `net stream`; `air txpower`, `wifi proto` and `cpu`
 // answer unsupported (the medium has no TX power, protocols or CPU). D18: a gateway node's `stats gw` (its bridge's
 // counters, fr_diag's shape; {"on":false} on any other node, and left out of a full `stats` there, as on target).
+// A1 (design audio-a1 T-AUDIO 1): `audio stall <ms>` on the process's audio Engine (fr_net_node's audio instances), and
+// `stats audio` (§11): its instances' DMA, ring and clipping counters, fr_diag's shape.
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 
 #include "cJSON.h"
 #include "diag_json.hpp"  // generated JSON <-> wire codecs of `call` (FR_TEST_HOOKS)
+#include "fr/audio/engine.hpp"
 #include "fr/gw/bridge.hpp"
 #include "sim/node.hpp"
 
@@ -56,6 +59,8 @@ std::expected<fr::cap::DiagExecResult, fr::Err> NodeDiag::exec(const fr::cap::Di
         n = fail("unsupported", "no Wi-Fi protocols in the kit");
     } else if (cmd == "cpu") {
         n = fail("unsupported", "no CPU in the kit");
+    } else if (cmd == "audio") {
+        n = audio(line);
     } else {
         n = std::snprintf(out_buf_, sizeof(out_buf_), R"({"ok":false,"error":"unknown_command"})");
     }
@@ -96,6 +101,21 @@ int NodeDiag::info()
         ser.up ? b : f, ser.session ? b : f, ser.time_synced ? b : f, tcp.up ? b : f, tcp.session ? b : f,
         tcp.time_synced ? b : f, udp.up ? b : f, udp.udp_ok ? b : f, air.up ? b : f, unsigned{spec_.radio.channel},
         gw.up ? b : f, gw.session ? b : f, gw.time_synced ? b : f, st.hub_link() ? b : f, unsigned{st.hub_epoch}, wifi.wifi_up ? b : f, unsigned{wifi.channel}, bssid, int{wifi.rssi});
+}
+
+int NodeDiag::audio(std::string_view args)
+{
+    // fr_diag's cmd_audio (design audio-a1 T-AUDIO 1): the process's audio Engine (fr_net_node's --audio-in).
+    uint32_t ms = 0;
+    if (next_word(args) != "stall" || !parse_u32(next_word(args), 1, 60000, ms) || !args.empty()) {
+        return fail("invalid_args", "usage: audio stall <ms 1-60000>");
+    }
+    if (const fr::Status st = fr::audio::engine().stall(ms); !st) {
+        return st.error() == fr::Err::not_found ? fail("not_found", "no record stream runs")
+                                                 : std::snprintf(out_buf_, sizeof(out_buf_), R"({"ok":false,"error":"%s"})",
+                                                                 fr::err_name(st.error()));
+    }
+    return std::snprintf(out_buf_, sizeof(out_buf_), R"({"ok":true,"hook":"audio_stall","ms":%u})", ms);
 }
 
 int NodeDiag::fail(const char *error, const char *detail)
@@ -276,6 +296,19 @@ std::string NodeDiag::section(std::string_view name) const
         }
         return out + "}";
     }
+    if (name == "audio") {  // the process's audio instances (design audio-a1 §11; fr_net_node's), since start
+        std::array<fr::audio::WorkerStats, 4> as{};
+        const size_t n = fr::audio::engine().stats(as);
+        std::string out = "{";
+        for (size_t i = 0; i < n; ++i) {
+            const fr::audio::WorkerStats &a = as[i];
+            out += sformat(R"(%s"%s":)", i > 0 ? "," : "", json_text(a.name).c_str()) +
+                   (a.input ? sformat(R"({"rx_overflows":%u,"dropped_samples":%u,"clipping":%u})", a.rx_overflows,
+                                      a.dropped_samples, a.clipping)
+                            : sformat(R"({"underruns":%u,"ring_dry":%u})", a.underruns, a.ring_dry));
+        }
+        return out + "}";
+    }
     if (name == "net_logs") {  // LOG frames over TCP (design m2-c2 D20)
         return sformat(R"({"sent":%u,"ring_drop":%u,"age_drop":%u,"rate_drop":%u,"cut":%u})", s.logs.sent, s.logs.ring_drop,
                        s.logs.age_drop, s.logs.rate_drop, s.logs.cut);
@@ -298,7 +331,7 @@ int NodeDiag::stats(std::string_view args)
     const std::string_view opt = next_word(args);
     const auto *it = std::find(std::begin(kSections), std::end(kSections), opt);
     if (!args.empty() || (!opt.empty() && it == std::end(kSections))) {
-        return fail("invalid_args", "usage: stats [links|bcast|relay|espnow|bindings|nodes|msgs|net_logs|gateway|gw]");
+        return fail("invalid_args", "usage: stats [links|bcast|relay|espnow|bindings|nodes|msgs|net_logs|gateway|gw|audio]");
     }
     std::string out;
     if (!opt.empty()) {
@@ -318,6 +351,9 @@ int NodeDiag::stats(std::string_view args)
         for (const std::string_view name : kSections) {
             if (name == "gw" && gw_ == nullptr) {
                 continue;  // only a gateway has a bridge; `stats gw` still answers {"on":false}
+            }
+            if (name == "audio" && section(name) == "{}") {
+                continue;  // no audio instance; `stats audio` still answers {}
             }
             parts.push_back(sformat(R"("%.*s":)", static_cast<int>(name.size()), name.data()) + section(name));
             names.push_back(name);

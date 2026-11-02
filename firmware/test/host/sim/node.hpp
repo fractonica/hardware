@@ -397,7 +397,7 @@ public:
 
     /** fr_diag's `stats` sections, in its order (diag.cpp kStatSections). */
     static constexpr std::string_view kSections[] = {"links", "bcast", "relay", "espnow", "bindings", "nodes", "msgs",
-                                                     "net_logs", "gateway", "gw"};
+                                                     "net_logs", "gateway", "gw", "audio"};
 
 private:
     int info();
@@ -412,6 +412,8 @@ private:
     int air(std::string_view args);
     int bench_rx(std::string_view args);
     int net_stream(std::string_view args);
+    /** A1: `audio stall <ms>` (fr_diag's cmd_audio). */
+    int audio(std::string_view args);
     int put(std::string_view json);
 
     fr::Core &core_;

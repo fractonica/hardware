@@ -74,6 +74,12 @@ const inside = (p: string, base: string) => {
   return r === '' || (r !== '..' && !r.startsWith(`..${sep}`) && !isAbsolute(r));
 };
 
+/** Whether absolute `o` lies under FR_HOME, symlinks resolved (a link out of FR_HOME is outside). */
+export function underHome(o: string): boolean {
+  const home = resolve(paths.home());
+  return inside(o, home) && inside(realish(o), realish(home));
+}
+
 /**
  * `out` checked: absolute, and under FR_HOME (symlinks resolved). The display ops are tier read (an agent may run
  * them unasked), so the files they write stay in the hub's own directory.
@@ -84,7 +90,7 @@ function checkOut(out: string): string {
   }
   const home = resolve(paths.home());
   const o = resolve(out);
-  if (!inside(o, home) || !inside(realish(o), realish(home))) {
+  if (!underHome(o)) {
     throw new FrError('INVALID_ARGS', `out ${out} is outside FR_HOME (${home}): the display ops are tier read and write files only under FR_HOME`, {
       hint: `give a path under ${home} (e.g. ${join(home, 'renders', 'ui.png')}), or leave out out and copy the PNG from the path returned`,
     });

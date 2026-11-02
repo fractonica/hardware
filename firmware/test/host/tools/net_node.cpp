@@ -20,6 +20,7 @@
 //               [--pin-listen <udp port>] [--role node|gateway|fixture] [--board <b>] [--profile <p>] [--chip <n>]
 //               [--led-kind mono|gpio_low|ws2812] [--led-tap <udp port>] [--test-pin-tap <udp port>]
 //               [--fixture 1 [--line <ch>=<udp port>]...] [--net-log 1]
+//               [--audio-in sine:<hz>|wav:<file>] [--audio-out <file.raw>] [--audio-gain <dB>]
 //   fr_net_node --make-image <path> [--version <label>] [--size <n>] [--board <b>] [--profile <p>]
 //               [--part <pp>] [--chip <n>] [--min-rev <n>] [--max-rev <n>] [--fault 0|1] [--seed <n>]
 //
@@ -107,6 +108,16 @@
 // id=…` banner at boot and `alive fw=…` every 10 s, fr_ota's `slot … open` line, and stdin `log <E|W|I|D|V> <tag>
 // <text>`; Net drains them as LOG frames over TCP, and with --serial each also goes out on the USB line (stdout) as
 // fr_serial prints it. Without it a `log` line goes only to the USB line.
+//
+// A1 (design audio-a1 D10): --audio-in adds fr.audio_in `mic` (AudioInService on HostMic: `sine:<hz>`, a sine at -18 dBFS
+// in the 32-bit slot, -6 dBFS after the default 12 dB gain, or `wav:<file>`, a 16-bit PCM WAV's first channel, then
+// silence), --audio-out fr.audio_out `spk` (AudioOutService on HostSpeaker: each sound truncates <file.raw> and
+// leaves its samples there as raw s16le mono at the sound's rate; volume 100 is bit-exact), on the next ports (3 and 4
+// with both); --audio-gain is the microphone's gain_db (default 12). Both run in real time on the board's fr_audio and
+// fr_stream code (threads here), streaming to the hub's --hub-http port at --host while the TCP session is up, with the
+// MAC as X-Fr-Device. Lines `audio_in` {state started|stopped, sample_hz} and `audio_out` {state started|stopped,
+// sample_hz, path | samples} follow the host microphone and speaker. fr.diag `audio stall <ms>` drops that much of the
+// running record stream (AudioInService::stall).
 // Test code: it may allocate.
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -122,7 +133,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <cstdarg>
 #include <chrono>
 #include <cstdio>
@@ -134,14 +147,18 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include "fr/audio/engine.hpp"
 #include "fr/core/core.hpp"
 #include "fr/core/node_net.hpp"
 #include "fr/core/port.hpp"
 #include "fr/net/net.hpp"
 #include "fr/serial_line.hpp"
+#include "fr/services/audio_in_service.hpp"
+#include "fr/services/audio_out_service.hpp"
 #include "fr/services/button_service.hpp"
 #include "fr/services/fixture_service.hpp"
 #include "fr/services/led_service.hpp"
@@ -819,6 +836,246 @@ private:
     sockaddr_in to_{};
 };
 
+/**
+ * D10 (design audio-a1): the host microphone behind --audio-in, an hal::AudioSource as i2s_mic is one, so AudioInService
+ * and its stream run the board's code. `sine:<hz>` is a sine at -18 dBFS in the 32-bit slot (-6 dBFS once the config's
+ * default 12 dB gain is applied); `wav:<file>` a PCM WAV's first channel (16-bit), whatever its own rate, then silence.
+ * read() keeps real time: it returns frames as the wall clock makes them due since start(), waiting up to its timeout,
+ * as the I2S DMA would. Called from the fr_audio thread only; started()/stopped() are read by the main loop.
+ */
+class HostMic final : public fr::hal::AudioSource
+{
+public:
+    explicit HostMic(uint32_t sine_hz) : sine_hz_(sine_hz) {}
+    explicit HostMic(std::vector<int16_t> wav) : wav_(std::move(wav)) {}
+
+    fr::Status init(fr::Core &) override { return {}; }
+    fr::Status start(uint32_t sample_hz) override
+    {
+        if (!fr::hal::is_audio_rate(sample_hz) || sample_hz > max_sample_hz()) {
+            return std::unexpected(fr::Err::invalid_args);
+        }
+        if (rate_.load() != 0) {
+            return std::unexpected(fr::Err::busy);
+        }
+        t0_ = std::chrono::steady_clock::now();
+        made_ = 0;
+        rate_.store(sample_hz);
+        starts.fetch_add(1);
+        return {};
+    }
+    std::expected<size_t, fr::Err> read(std::span<int32_t> frames, uint32_t timeout_ms) override
+    {
+        const uint32_t rate = rate_.load();
+        if (rate == 0) {
+            return std::unexpected(fr::Err::failed);
+        }
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        uint64_t due = 0;
+        for (;;) {
+            const auto now = std::chrono::steady_clock::now();
+            due = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now - t0_).count()) * rate /
+                  1'000'000;
+            if (due - made_ >= frames.size() || now >= until) {
+                break;
+            }
+            const uint64_t short_by = frames.size() - (due - made_);
+            std::this_thread::sleep_for(std::min<std::chrono::microseconds>(
+                std::chrono::microseconds(short_by * 1'000'000 / rate + 1), std::chrono::duration_cast<std::chrono::microseconds>(until - now)));
+        }
+        const size_t n = static_cast<size_t>(std::min<uint64_t>(frames.size(), due - made_));
+        constexpr double kAmp = 0.12589254 * 2147483648.0;  // -18 dBFS
+        for (size_t i = 0; i < n; ++i, ++made_) {
+            if (sine_hz_ != 0) {
+                const double ph = 2.0 * 3.14159265358979323846 * static_cast<double>(sine_hz_) * static_cast<double>(made_) / rate;
+                frames[i] = static_cast<int32_t>(std::lround(kAmp * std::sin(ph))) & ~0xFF;  // 24 significant bits
+            } else {
+                frames[i] = made_ < wav_.size() ? static_cast<int32_t>(static_cast<uint32_t>(static_cast<uint16_t>(wav_[made_])) << 16) : 0;
+            }
+        }
+        return n;
+    }
+    fr::Status stop() override
+    {
+        if (rate_.exchange(0) != 0) {
+            stops.fetch_add(1);
+        }
+        return {};
+    }
+    uint32_t sample_hz() const override { return rate_.load(); }
+    uint32_t max_sample_hz() const override { return 48000; }
+    uint8_t bits() const override { return 24; }
+    fr::hal::Selftest selftest() override { return {true, "host microphone"}; }
+
+    std::atomic<uint32_t> starts{0};
+    std::atomic<uint32_t> stops{0};
+
+private:
+    uint32_t sine_hz_ = 0;
+    std::vector<int16_t> wav_;
+    std::atomic<uint32_t> rate_{0};
+    std::chrono::steady_clock::time_point t0_{};
+    uint64_t made_ = 0;
+};
+
+/**
+ * D10: the host speaker behind --audio-out <file.raw>, an hal::AudioSink as i2s_amp is one. Each start() truncates the
+ * file; every sample AudioOutService writes goes into it as raw s16le mono at the sound's rate (silence it writes on an
+ * underrun included; what a starved DMA would play is not). write() keeps real time: its "DMA" holds 6 x 240 samples
+ * and drains at the rate on the wall clock. fr_audio thread only; the counters are read by the main loop.
+ */
+class HostSpeaker final : public fr::hal::AudioSink
+{
+public:
+    static constexpr uint64_t kQueue = 6 * 240;
+
+    explicit HostSpeaker(std::string path) : path_(std::move(path)) {}
+    ~HostSpeaker()
+    {
+        if (f_ != nullptr) {
+            std::fclose(f_);
+        }
+    }
+
+    fr::Status init(fr::Core &) override { return {}; }
+    fr::Status start(uint32_t sample_hz) override
+    {
+        if (!fr::hal::is_audio_rate(sample_hz) || sample_hz > max_sample_hz()) {
+            return std::unexpected(fr::Err::invalid_args);
+        }
+        if (rate_.load() != 0) {
+            return std::unexpected(fr::Err::busy);
+        }
+        f_ = std::fopen(path_.c_str(), "wb");
+        if (f_ == nullptr) {
+            return std::unexpected(fr::Err::failed);
+        }
+        last_ = std::chrono::steady_clock::now();
+        written_ = 0;
+        play_ = 0;
+        starved_ = true;  // nothing written yet: the first write is no underrun
+        samples.store(0);
+        rate_.store(sample_hz);
+        starts.fetch_add(1);
+        return {};
+    }
+    std::expected<size_t, fr::Err> write(std::span<const int16_t> in, uint32_t timeout_ms) override
+    {
+        if (rate_.load() == 0 || f_ == nullptr) {
+            return std::unexpected(fr::Err::failed);
+        }
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        double room = 0;
+        for (;;) {
+            advance();
+            room = static_cast<double>(kQueue) - (static_cast<double>(written_) - play_);
+            if (room >= 1 || std::chrono::steady_clock::now() >= until) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const size_t n = static_cast<size_t>(std::min<double>(std::max(room, 0.0), static_cast<double>(in.size())));
+        if (n > 0 && std::fwrite(in.data(), sizeof(int16_t), n, f_) != n) {
+            return std::unexpected(fr::Err::failed);
+        }
+        if (n > 0) {
+            starved_ = false;
+        }
+        written_ += n;
+        samples.fetch_add(static_cast<uint32_t>(n));
+        return n;
+    }
+    fr::Status stop(uint32_t timeout_ms) override
+    {
+        if (rate_.load() == 0) {
+            return {};
+        }
+        // What the queue holds plays out (up to timeout_ms).
+        const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        for (advance(); play_ < static_cast<double>(written_) && std::chrono::steady_clock::now() < until; advance()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::fclose(f_);
+        f_ = nullptr;
+        rate_.store(0);
+        stops.fetch_add(1);
+        return {};
+    }
+    uint32_t sample_hz() const override { return rate_.load(); }
+    uint32_t max_sample_hz() const override { return 48000; }
+    uint8_t bits() const override { return 16; }
+    uint32_t underruns() const override { return underruns_; }
+    fr::hal::Selftest selftest() override { return {true, "host speaker"}; }
+
+    const std::string &path() const { return path_; }
+    std::atomic<uint32_t> starts{0};
+    std::atomic<uint32_t> stops{0};
+    std::atomic<uint32_t> samples{0};  // written since the last start()
+
+private:
+    /** The "DMA" plays on at the rate on the wall clock; never past what was written (a dry spell counts once). */
+    void advance()
+    {
+        const auto now = std::chrono::steady_clock::now();
+        play_ += std::chrono::duration<double>(now - last_).count() * rate_.load();
+        last_ = now;
+        if (play_ > static_cast<double>(written_)) {
+            if (!starved_ && written_ > 0) {
+                ++underruns_;
+            }
+            starved_ = true;
+            play_ = static_cast<double>(written_);
+        }
+    }
+
+    std::string path_;
+    std::FILE *f_ = nullptr;
+    std::atomic<uint32_t> rate_{0};
+    std::chrono::steady_clock::time_point last_{};
+    uint64_t written_ = 0;
+    double play_ = 0;
+    bool starved_ = false;
+    uint32_t underruns_ = 0;
+};
+
+/** The first channel of a 16-bit PCM WAV; nullopt when the file is not one. */
+std::optional<std::vector<int16_t>> read_wav(const std::string &path)
+{
+    const std::optional<std::string> f = ota_fake::read_file(path);
+    if (!f || f->size() < 12 || f->compare(0, 4, "RIFF") != 0 || f->compare(8, 4, "WAVE") != 0) {
+        return std::nullopt;
+    }
+    const auto u16 = [&f](size_t at) { return static_cast<uint32_t>(static_cast<uint8_t>((*f)[at]) | static_cast<uint8_t>((*f)[at + 1]) << 8); };
+    const auto u32 = [&u16](size_t at) { return u16(at) | u16(at + 2) << 16; };
+    uint32_t channels = 0;
+    uint32_t bits = 0;
+    uint32_t format = 0;
+    for (size_t at = 12; at + 8 <= f->size();) {
+        const std::string id = f->substr(at, 4);
+        const uint32_t len = u32(at + 4);
+        const size_t body = at + 8;
+        if (body + len > f->size()) {
+            return std::nullopt;
+        }
+        if (id == "fmt " && len >= 16) {
+            format = u16(body);
+            channels = u16(body + 2);
+            bits = u16(body + 14);
+        } else if (id == "data") {
+            if (format != 1 || bits != 16 || channels == 0) {
+                return std::nullopt;
+            }
+            std::vector<int16_t> out;
+            for (size_t i = body; i + 2 * channels <= body + len; i += 2 * channels) {
+                out.push_back(static_cast<int16_t>(u16(i)));
+            }
+            return out;
+        }
+        at = body + len + (len & 1);
+    }
+    return std::nullopt;
+}
+
 struct Options {
     std::string host = "127.0.0.1";
     uint16_t hub_tcp = 0;
@@ -867,6 +1124,10 @@ struct Options {
     bool fixture = false;
     std::vector<std::pair<std::string, uint16_t>> lines;  // --line <ch>=<port>
     bool net_log = false;  // M2-C2: LOG frames over TCP (design m2-c2 D20)
+    // A1 (design audio-a1 D10).
+    std::string audio_in;   // `sine:<hz>` or `wav:<file>`; empty: no fr.audio_in
+    std::string audio_out;  // a raw s16le file; empty: no fr.audio_out
+    uint8_t audio_gain = 12;  // fr.audio_in config gain_db
 
     /** TCP and UDP to the hub; without them the node is serial only (a radio-off build). */
     bool ip() const { return hub_tcp != 0; }
@@ -1466,7 +1727,8 @@ constexpr std::array<FixtureChannel, 14> kFixtureChannels{{{"ch0", kBootLine},
                          "[--fault health] [--air-dir D [--air-loss PCT] [--air-seed N] [--air-rssi DBM] [--air-channel N] "
                          "[--air-ack-ms N]] [--pin-target UDPPORT] [--pin-listen UDPPORT] [--role node|gateway|fixture] "
                          "[--board B] [--profile P] [--chip N] [--led-kind mono|gpio_low|ws2812] [--led-tap UDPPORT] "
-                         "[--test-pin-tap UDPPORT] [--fixture 1 [--line CH=UDPPORT]...] [--net-log 1]\n"
+                         "[--test-pin-tap UDPPORT] [--fixture 1 [--line CH=UDPPORT]...] [--net-log 1] "
+                         "[--audio-in sine:HZ|wav:FILE] [--audio-out FILE.raw] [--audio-gain DB]\n"
                          "       fr_net_node --make-image PATH [--version V] [--size N] [--board B] [--profile P] "
                          "[--part X] [--chip N] [--min-rev N] [--max-rev N] [--fault 0|1] [--seed N]\n", why);
     std::exit(64);
@@ -1583,6 +1845,19 @@ Options parse(int argc, char **argv)
             o.fixture = n != 0;
         } else if (k == "--net-log") {
             o.net_log = n != 0;
+        } else if (k == "--audio-in") {
+            const std::string_view a = v;
+            if (!(a.starts_with("sine:") && std::strtoul(v + 5, nullptr, 10) > 0) && !(a.starts_with("wav:") && a.size() > 4)) {
+                usage("--audio-in takes sine:<hz> or wav:<file>");
+            }
+            o.audio_in = v;
+        } else if (k == "--audio-out") {
+            o.audio_out = v;
+        } else if (k == "--audio-gain") {
+            if (n > 36) {
+                usage("--audio-gain takes 0-36 (dB)");
+            }
+            o.audio_gain = static_cast<uint8_t>(n);
         } else if (k == "--line") {
             const std::string_view spec = v;
             const size_t eq = spec.find('=');
@@ -1613,6 +1888,9 @@ Options parse(int argc, char **argv)
         o.chip = o.chip_set ? o.chip : 9;
         if (o.pin_listen || o.pin_target != 0 || o.test_pin_tap != 0 || o.led_tap != 0) {
             usage("--fixture has no boot button, test pin or LED tap of its own");
+        }
+        if (!o.audio_in.empty() || !o.audio_out.empty()) {
+            usage("--fixture has no audio");
         }
     } else if (!o.lines.empty()) {
         usage("--line needs --fixture 1");
@@ -1819,6 +2097,36 @@ int make_image_main(int argc, char **argv)
 /** The process's node, for fr::core::link_info(). */
 frsim::Device *g_node = nullptr;
 
+/**
+ * D10: where this node's audio streams go, as fr_core's AudioStreamHost on target: the hub's address while the TCP
+ * session is up (--host, a dotted IPv4) and its node HTTP port (--hub-http), and the MAC as the device id. Core task.
+ */
+class NodeStreamHost final : public fr::audio::StreamHost
+{
+public:
+    NodeStreamHost(const Options &o, fr::net::Net &net) : o_(o), net_(net), id_(ota_fake::hex(o.mac)) {}
+
+    bool endpoint(fr::audio::Endpoint &out) override
+    {
+        if (!net_.state().link(LinkKind::tcp).session || !fr::audio::parse_ipv4(o_.host.c_str(), out.ipv4)) {
+            return false;
+        }
+        out.port = o_.hub_http;
+        return true;
+    }
+    const char *device_id() const override { return id_.c_str(); }
+
+private:
+    const Options &o_;
+    fr::net::Net &net_;
+    std::string id_;
+};
+
+/** Ends fr_audio and fr_stream (threads here) before the services they run go out of scope. */
+struct AudioTasksGuard {
+    ~AudioTasksGuard() { fr::audio::engine().stop(); }
+};
+
 }  // namespace
 
 // fr_core's runtime answers these on target (fr/core/node_net.hpp), and FixtureService reads them: here the Device.
@@ -1888,6 +2196,34 @@ int main(int argc, char **argv)
         ports.push_back({1, "boot", &button, true});
         ports.push_back({2, "status", &led, true});
     }
+    // D10 (design audio-a1): fr.audio_in `mic` and fr.audio_out `spk` on the next ports (3 and 4 with both, as
+    // s3a-audio), on the host microphone and speaker; the board's services and stream code.
+    std::unique_ptr<HostMic> mic_src;
+    std::unique_ptr<HostSpeaker> spk_sink;
+    std::unique_ptr<fr::AudioInService> mic;
+    std::unique_ptr<fr::AudioOutService> spk;
+    if (o.audio_in.starts_with("sine:")) {
+        mic_src = std::make_unique<HostMic>(static_cast<uint32_t>(std::strtoul(o.audio_in.c_str() + 5, nullptr, 10)));
+    } else if (o.audio_in.starts_with("wav:")) {
+        std::optional<std::vector<int16_t>> wav = read_wav(o.audio_in.substr(4));
+        if (!wav) {
+            std::fprintf(stderr, "fr_net_node: --audio-in %s: not a 16-bit PCM WAV\n", o.audio_in.c_str());
+            return 64;
+        }
+        mic_src = std::make_unique<HostMic>(std::move(*wav));
+    }
+    uint8_t next_port = static_cast<uint8_t>(ports.back().port + 1);
+    if (mic_src) {
+        fr::cap::AudioInConfig mc{};
+        mc.gain_db = o.audio_gain;
+        mic = std::make_unique<fr::AudioInService>(*mic_src, mc);
+        ports.push_back({next_port++, "mic", mic.get(), true});
+    }
+    if (!o.audio_out.empty()) {
+        spk_sink = std::make_unique<HostSpeaker>(o.audio_out);
+        spk = std::make_unique<fr::AudioOutService>(*spk_sink, fr::cap::AudioOutConfig{});
+        ports.push_back({next_port++, "spk", spk.get(), true});
+    }
     // fr.diag on 241 is a system port, outside the descriptor, as on target.
     ports.push_back({241, "diag", &diag, true});
     frsim::Device node(core, spec, ports, g_out);
@@ -1906,7 +2242,11 @@ int main(int argc, char **argv)
     for (fr::PortEntry &p : ports) {
         p.cap->attach(p.port, p.name, net);
     }
+    NodeStreamHost stream_host(o, net);
+    fr::audio::set_stream_host(&stream_host);
     bool services_ok = static_cast<bool>(led.init(core)) && (o.fixture || static_cast<bool>(button.init(core)));
+    services_ok = services_ok && (!mic || static_cast<bool>(mic->init(core))) && (!spk || static_cast<bool>(spk->init(core)));
+    AudioTasksGuard audio_tasks;  // the audio inits started them
     for (const std::unique_ptr<fr::FixtureService> &f : fixture) {
         services_ok = services_ok && static_cast<bool>(f->init(core));
     }
@@ -2042,6 +2382,32 @@ int main(int argc, char **argv)
                        .button = o.fixture ? nullptr : &button,
                        .logs = &logs};
 
+    // D10: `audio_in` and `audio_out` {state started|stopped} as the host microphone and speaker start and stop (their
+    // threads count, this loop prints): a test knows when the --audio-out file is complete.
+    uint32_t mic_starts = 0;
+    uint32_t mic_stops = 0;
+    uint32_t spk_starts = 0;
+    uint32_t spk_stops = 0;
+    auto audio_lines = [&] {
+        if (mic_src) {
+            for (; mic_starts < mic_src->starts.load(); ++mic_starts) {
+                emit(R"({"ev":"audio_in","state":"started","sample_hz":%u})", mic_src->sample_hz());
+            }
+            for (; mic_stops < mic_src->stops.load(); ++mic_stops) {
+                emit(R"({"ev":"audio_in","state":"stopped"})");
+            }
+        }
+        if (spk_sink) {
+            for (; spk_starts < spk_sink->starts.load(); ++spk_starts) {
+                emit(R"({"ev":"audio_out","state":"started","sample_hz":%u,"path":"%s"})", spk_sink->sample_hz(),
+                     spk_sink->path().c_str());
+            }
+            for (; spk_stops < spk_sink->stops.load(); ++spk_stops) {
+                emit(R"({"ev":"audio_out","state":"stopped","samples":%u})", spk_sink->samples.load());
+            }
+        }
+    };
+
     std::string line;
     bool quit = false;
     bool udp_ok = false;
@@ -2059,6 +2425,7 @@ int main(int argc, char **argv)
         stores.retry();
         light.tap(core.now());
         light.log_sent();
+        audio_lines();
         links.poll(core.now());
         if (!net_up && tcp && tcp->fd() >= 0) {
             net_up = true;

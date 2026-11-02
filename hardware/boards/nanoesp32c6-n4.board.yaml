@@ -29,7 +29,7 @@ boot_uart_tx: 16              # U0TXD, to the CH343
 en_access: null
 rf: { max_tx_power_qdbm: null, antenna: pcb }
 test_pin: null                # the gateway drives no T-LAT line
-resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1, adc1_channel: 7 }   # ADC1: GPIO0-6
+resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1, adc1_channel: 7, i2s: 1 }   # ADC1: GPIO0-6
 defaults:
   boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb }
