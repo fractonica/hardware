@@ -259,6 +259,7 @@ extern "C" esp_err_t fr_id_load_net(fr_net_config_t *out)
     read_str(h, "hub_host", c.hub_host);
     read_str(h, "country", out->country);
     read_str(h, "hub_ip", out->hub_ip);
+    nvs_get_u8(h, "band", &out->band);  // absent (identities before csi-c1): 0, auto
     nvs_close(h);
     if (nvs_open_from_partition(PARTITION, NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
         nvs_get_u32(h, "prov_ts", &out->prov_ts);

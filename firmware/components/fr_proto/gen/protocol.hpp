@@ -149,7 +149,7 @@ static_assert(fr::wire::kSerialLinkPing == 0x16);
 static_assert(fr::wire::kSerialLinkPong == 0x17);
 
 // Enums.
-enum class ChipId : uint8_t { esp32c3 = 5, esp32s3 = 9, esp32c6 = 13 };
+enum class ChipId : uint8_t { esp32c3 = 5, esp32s3 = 9, esp32c6 = 13, esp32c5 = 23 };
 /** The YAML member name; nullptr for a value this build does not know. */
 const char *to_name(ChipId v);
 bool from_name(std::string_view s, ChipId &out);
@@ -159,6 +159,7 @@ constexpr bool is_known(ChipId v)
     case ChipId::esp32c3:
     case ChipId::esp32s3:
     case ChipId::esp32c6:
+    case ChipId::esp32c5:
         return true;
     }
     return false;

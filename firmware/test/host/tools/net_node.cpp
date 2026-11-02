@@ -118,6 +118,18 @@
 // MAC as X-Fr-Device. Lines `audio_in` {state started|stopped, sample_hz} and `audio_out` {state started|stopped,
 // sample_hz, path | samples} follow the host microphone and speaker. fr.diag `audio stall <ms>` drops that much of the
 // running record stream (AudioInService::stall).
+//
+// CSI-1 (design csi-c1 D7-D11): `--csi sine[:<bpm>]` adds fr.csi `csi` (CsiService, the board's ring, features and
+// csi1 stream code, on HostCsi) on the next port: synthetic HT20 records (57 subcarriers, 114 B) at the capture's
+// rate_hz (default 100) in real time, from a fake AP 02:fc:51:00:00:01 (source router; peer: from the stream's or
+// config's peer_mac; any: alternating with a second sender), each subcarrier's amplitude a fixed multipath shape
+// modulated by a "breathing" sine (default 15 breaths/min, 0.25 Hz; depth 2-8 % by subcarrier, phase by subcarrier),
+// plus noise: `motion` reads low, the stream shows the breathing. `--csi walk` swings the amplitudes by up to ~40 % at
+// about 1.3 Hz with more noise instead: `motion` reads high. Both stream to the hub's --hub-http port as the board does
+// (POST /v1/stream/in/<id>, X-Fr-Kind csi, X-Fr-Format csi1). Lines `csi` {state capturing, source, rate_hz} at each
+// capture and {state stopped}. `--radio-tx 1` adds fr.radio_tx `tx` (RadioTxService on HostTx: nothing goes on any air,
+// lines `radio_tx` {state started, peer, rate_hz, len} and {state stopped}). Pass --board doit-espc5-32 --profile
+// c5d-csi --chip 23 for a C5's HELLO.
 // Test code: it may allocate.
 #include <arpa/inet.h>
 #include <dirent.h>
@@ -144,7 +156,9 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <numbers>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -160,8 +174,10 @@
 #include "fr/services/audio_in_service.hpp"
 #include "fr/services/audio_out_service.hpp"
 #include "fr/services/button_service.hpp"
+#include "fr/services/csi_service.hpp"
 #include "fr/services/fixture_service.hpp"
 #include "fr/services/led_service.hpp"
+#include "fr/services/radio_tx_service.hpp"
 #include "sim/commands.hpp"
 #include "sim/node.hpp"
 #include "sim/out.hpp"
@@ -1128,6 +1144,9 @@ struct Options {
     std::string audio_in;   // `sine:<hz>` or `wav:<file>`; empty: no fr.audio_in
     std::string audio_out;  // a raw s16le file; empty: no fr.audio_out
     uint8_t audio_gain = 12;  // fr.audio_in config gain_db
+    // CSI-1 (design csi-c1).
+    std::string csi;        // `sine`, `sine:<bpm>` or `walk`; empty: no fr.csi
+    bool radio_tx = false;  // fr.radio_tx `tx` on HostTx
 
     /** TCP and UDP to the hub; without them the node is serial only (a radio-off build). */
     bool ip() const { return hub_tcp != 0; }
@@ -1728,7 +1747,8 @@ constexpr std::array<FixtureChannel, 14> kFixtureChannels{{{"ch0", kBootLine},
                          "[--air-ack-ms N]] [--pin-target UDPPORT] [--pin-listen UDPPORT] [--role node|gateway|fixture] "
                          "[--board B] [--profile P] [--chip N] [--led-kind mono|gpio_low|ws2812] [--led-tap UDPPORT] "
                          "[--test-pin-tap UDPPORT] [--fixture 1 [--line CH=UDPPORT]...] [--net-log 1] "
-                         "[--audio-in sine:HZ|wav:FILE] [--audio-out FILE.raw] [--audio-gain DB]\n"
+                         "[--audio-in sine:HZ|wav:FILE] [--audio-out FILE.raw] [--audio-gain DB] [--csi sine[:BPM]|walk] "
+                         "[--radio-tx 1]\n"
                          "       fr_net_node --make-image PATH [--version V] [--size N] [--board B] [--profile P] "
                          "[--part X] [--chip N] [--min-rev N] [--max-rev N] [--fault 0|1] [--seed N]\n", why);
     std::exit(64);
@@ -1851,6 +1871,14 @@ Options parse(int argc, char **argv)
                 usage("--audio-in takes sine:<hz> or wav:<file>");
             }
             o.audio_in = v;
+        } else if (k == "--csi") {
+            const std::string_view a = v;
+            if (a != "sine" && a != "walk" && !(a.starts_with("sine:") && std::strtod(v + 5, nullptr) > 0)) {
+                usage("--csi takes sine, sine:<breaths per minute> or walk");
+            }
+            o.csi = v;
+        } else if (k == "--radio-tx") {
+            o.radio_tx = n != 0;
         } else if (k == "--audio-out") {
             o.audio_out = v;
         } else if (k == "--audio-gain") {
@@ -1891,6 +1919,9 @@ Options parse(int argc, char **argv)
         }
         if (!o.audio_in.empty() || !o.audio_out.empty()) {
             usage("--fixture has no audio");
+        }
+        if (!o.csi.empty() || o.radio_tx) {
+            usage("--fixture has no radio capabilities");
         }
     } else if (!o.lines.empty()) {
         usage("--line needs --fixture 1");
@@ -2094,6 +2125,133 @@ int make_image_main(int argc, char **argv)
     return 0;
 }
 
+/**
+ * CSI-1: the fake CSI source behind --csi (hal::CsiSource, as wifi_csi is one). capture() (core task) sets what a
+ * thread produces: HT20 records at rate_hz in real time, handed to the sink as the Wi-Fi task's callback would (the
+ * ring is the only thing it touches). The amplitudes: subcarrier k has 30 + 8 sin(0.4 k) (the room's multipath),
+ * times 1 + depth_k sin(2 pi f t + 0.3 k) with depth_k 2-8 % (breathing, f = bpm / 60) or, walking, 1 + 0.4 sin(2 pi
+ * 1.3 t + 0.7 k) sin(0.37 t + k), plus Gaussian noise (0.4, walking 2.5); the phase turns 0.25 rad a subcarrier.
+ */
+class HostCsi final : public fr::hal::CsiSource
+{
+public:
+    HostCsi(bool walk, double bpm) : walk_(walk), hz_(bpm / 60.0) {}
+    ~HostCsi() { halt(); }
+
+    fr::Status init(fr::Core &, fr::hal::CsiSink &sink) override
+    {
+        sink_ = &sink;
+        return {};
+    }
+    fr::Status capture(const fr::hal::CsiCapture &c) override
+    {
+        if ((c.mode == fr::hal::CsiMode::peer && !c.has_peer) || c.rate_hz < 10 || c.rate_hz > 200) {
+            return std::unexpected(fr::Err::invalid_args);
+        }
+        halt();
+        cap_ = c;
+        stop_.store(false);
+        thread_ = std::thread([this] { produce(); });
+        emit(R"({"ev":"csi","state":"capturing","source":"%s","rate_hz":%u})",
+             c.mode == fr::hal::CsiMode::router ? "router" : c.mode == fr::hal::CsiMode::peer ? "peer" : "any",
+             unsigned{c.rate_hz});
+        return {};
+    }
+    fr::Status stop() override
+    {
+        if (thread_.joinable()) {
+            halt();
+            emit(R"({"ev":"csi","state":"stopped"})");
+        }
+        return {};
+    }
+    fr::hal::Selftest selftest() override { return {true, "host CSI source"}; }
+
+private:
+    static constexpr int kSub = 57;
+
+    void halt()
+    {
+        stop_.store(true);
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+    void produce()
+    {
+        const fr::hal::CsiCapture c = cap_;
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto period = std::chrono::microseconds(1'000'000 / c.rate_hz);
+        std::minstd_rand rng(0xC51);
+        std::normal_distribution<double> noise(0.0, walk_ ? 2.5 : 0.4);
+        const std::array<uint8_t, 6> ap{0x02, 0xFC, 0x51, 0x00, 0x00, 0x01};
+        const std::array<uint8_t, 6> other{0x02, 0xFC, 0x51, 0x00, 0x00, 0x02};
+        std::array<int8_t, 2 * kSub> data{};
+        for (int64_t n = 0; !stop_.load(); ++n) {
+            std::this_thread::sleep_until(t0 + period * n);  // signed: an unsigned time_point never wakes on libc++
+            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            for (int k = 0; k < kSub; ++k) {
+                double gain = 1.0;
+                if (walk_) {
+                    gain += 0.4 * std::sin(2 * std::numbers::pi * 1.3 * t + 0.7 * k) * std::sin(0.37 * t + k);
+                } else {
+                    const double depth = 0.02 + 0.06 * (0.5 + 0.5 * std::sin(0.21 * k));
+                    gain += depth * std::sin(2 * std::numbers::pi * hz_ * t + 0.3 * k);
+                }
+                const double amp = std::max(0.0, (30.0 + 8.0 * std::sin(0.4 * k)) * gain + noise(rng));
+                const double ph = 0.25 * k;
+                data[2 * k] = static_cast<int8_t>(std::clamp(std::lround(amp * std::sin(ph)), -127L, 127L));
+                data[2 * k + 1] = static_cast<int8_t>(std::clamp(std::lround(amp * std::cos(ph)), -127L, 127L));
+            }
+            fr::hal::CsiRecord r{};
+            r.t_us = static_cast<uint32_t>(t * 1e6);
+            r.rssi = static_cast<int8_t>(-48 + static_cast<int>(rng() % 3) - 1);
+            r.noise = -95;
+            r.channel = 36;
+            r.bb_format = fr::hal::CsiBbFormat::ht;
+            const bool second = c.mode == fr::hal::CsiMode::any && (n & 1) != 0;
+            r.mac = c.mode == fr::hal::CsiMode::peer ? c.peer : second ? other : ap;
+            r.flags = c.mode == fr::hal::CsiMode::any ? 0 : fr::hal::kCsiFlagMatched;
+            r.data = data;
+            sink_->on_csi(r);
+        }
+    }
+
+    bool walk_;
+    double hz_;
+    fr::hal::CsiSink *sink_ = nullptr;
+    fr::hal::CsiCapture cap_{};
+    std::atomic<bool> stop_{true};
+    std::thread thread_;
+};
+
+/** CSI-1: the transmitter behind --radio-tx (hal::RadioTx, as espnow_tx is one): it only says what it would send. */
+class HostTx final : public fr::hal::RadioTx
+{
+public:
+    fr::Status init(fr::Core &) override { return {}; }
+    fr::Status start(const std::array<uint8_t, 6> &peer, uint16_t rate_hz, uint16_t len) override
+    {
+        on_ = true;
+        emit(R"({"ev":"radio_tx","state":"started","peer":"%s","rate_hz":%u,"len":%u})", ota_fake::hex(peer).c_str(),
+             unsigned{rate_hz}, unsigned{len});
+        return {};
+    }
+    fr::Status stop() override
+    {
+        if (on_) {
+            on_ = false;
+            emit(R"({"ev":"radio_tx","state":"stopped"})");
+        }
+        return {};
+    }
+    bool running() const override { return on_; }
+    fr::hal::Selftest selftest() override { return {true, "host transmitter"}; }
+
+private:
+    bool on_ = false;
+};
+
 /** The process's node, for fr::core::link_info(). */
 frsim::Device *g_node = nullptr;
 
@@ -2224,6 +2382,22 @@ int main(int argc, char **argv)
         spk = std::make_unique<fr::AudioOutService>(*spk_sink, fr::cap::AudioOutConfig{});
         ports.push_back({next_port++, "spk", spk.get(), true});
     }
+    // CSI-1: fr.csi `csi` and fr.radio_tx `tx` on the next ports (c5d-csi has them on 3 and 4).
+    std::unique_ptr<fr::CsiService> csi;
+    std::unique_ptr<HostCsi> csi_src;  // after csi: its thread is joined before the service goes
+    std::unique_ptr<HostTx> tx_dev;
+    std::unique_ptr<fr::RadioTxService> tx;
+    if (!o.csi.empty()) {
+        const double bpm = o.csi.starts_with("sine:") ? std::strtod(o.csi.c_str() + 5, nullptr) : 15.0;
+        csi_src = std::make_unique<HostCsi>(o.csi == "walk", bpm);
+        csi = std::make_unique<fr::CsiService>(*csi_src, fr::cap::CsiConfig{});
+        ports.push_back({next_port++, "csi", csi.get(), true});
+    }
+    if (o.radio_tx) {
+        tx_dev = std::make_unique<HostTx>();
+        tx = std::make_unique<fr::RadioTxService>(*tx_dev);
+        ports.push_back({next_port++, "tx", tx.get(), true});
+    }
     // fr.diag on 241 is a system port, outside the descriptor, as on target.
     ports.push_back({241, "diag", &diag, true});
     frsim::Device node(core, spec, ports, g_out);
@@ -2246,6 +2420,7 @@ int main(int argc, char **argv)
     fr::audio::set_stream_host(&stream_host);
     bool services_ok = static_cast<bool>(led.init(core)) && (o.fixture || static_cast<bool>(button.init(core)));
     services_ok = services_ok && (!mic || static_cast<bool>(mic->init(core))) && (!spk || static_cast<bool>(spk->init(core)));
+    services_ok = services_ok && (!csi || static_cast<bool>(csi->init(core))) && (!tx || static_cast<bool>(tx->init(core)));
     AudioTasksGuard audio_tasks;  // the audio inits started them
     for (const std::unique_ptr<fr::FixtureService> &f : fixture) {
         services_ok = services_ok && static_cast<bool>(f->init(core));

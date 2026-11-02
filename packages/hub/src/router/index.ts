@@ -102,7 +102,7 @@ import type { Endpoint, GatewayView, LinkSink, NodeLinksStatus, Source } from '.
 import { fitsAir, Framed, GATEWAY_MAX_IN_FLIGHT, NodeLinks, queuedOn, SERIAL_MAX_QUEUED, sendFramed } from '../links/index.ts';
 import type { LogIngest } from '../logs/ingest.ts';
 import type { LogStore } from '../logstore.ts';
-import { readNetwork } from '../network.ts';
+import { fleetNetId } from '../network.ts';
 import { hubIpv4 } from '../registry/ident.ts';
 import { nowUs } from '../ring.ts';
 import type { SerialPortManager } from '../serial.ts';
@@ -1699,7 +1699,7 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
   #currentNetId(): number | null {
     if (this.#netId === null) {
       try {
-        this.#netId = readNetwork(this.#deps.db)?.net_id ?? null;
+        this.#netId = fleetNetId(this.#deps.db);
       } catch {
         this.#netId = null;
       }

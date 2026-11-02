@@ -1,11 +1,10 @@
 // Handlers for the operation registry (packages/protocol/src/ops.ts).
 
 import { randomInt } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readdirSync } from 'node:fs';
 
-import { checkSourceDir, paths, pytoolsSource } from '@fractonica/host';
-import { type FaultKind, formatCursor, FrError, HUB_VERSION, type JobOrigin, MAX_WAIT_S, parseCursor, REGISTRY_HASH, type LogLine, type OpName } from '@fractonica/protocol';
+import { checkSourceDir, pytoolsSource } from '@fractonica/host';
+import { DEFAULT_NETWORK, type FaultKind, formatCursor, FrError, HUB_VERSION, type JobOrigin, MAX_WAIT_S, type NetworkBand, parseCursor, REGISTRY_HASH, type LogLine, type OpName } from '@fractonica/protocol';
 
 import { APPS_HANDLERS } from './apps/ops.ts';
 import { buildVariant, listArtifacts } from './artifacts.ts';
@@ -13,6 +12,7 @@ import { AUDIO_HANDLERS } from './audio/ops.ts';
 import { NET_HANDLERS } from './bindings/ops.ts';
 import { profileApp, runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
+import { CSI_HANDLERS } from './csi/ops.ts';
 import { DISPLAY_HANDLERS } from './display/ops.ts';
 import { HUB_HANDLERS } from './doctor/ops.ts';
 import { mintCursor, mintTimeUs } from './events/index.ts';
@@ -23,7 +23,7 @@ import { PROBE_HANDLERS } from './latency/ops.ts';
 import { LOGS_HANDLERS } from './logs/ops.ts';
 import { TCP_LOG_LIMITS, tcpOnlyDevices } from './logs/source.ts';
 import { staleNetLine, type StoredLine, toLogLine } from './logstore.ts';
-import { readNetwork, writeNetwork } from './network.ts';
+import { CHIPS_5G, devicesWithout5g, listNetworks, type NetworkRecord, networkDevices, passwordNames, readNetwork, writeNetwork, writeWifiPassword } from './network.ts';
 import { assertPortFree, listPorts, nameBusyHolder } from './ports/holders.ts';
 import { PORTS_HANDLERS } from './ports/ops.ts';
 import { INVENTORY_HANDLERS } from './registry/catalog-ops.ts';
@@ -68,31 +68,23 @@ function processView(): ProcessView {
   return { rss: process.memoryUsage.rss(), cpu_ms: Math.round((cpu.user + cpu.system) / 1000), fds };
 }
 
+/** A stored network as network_get and network_list answer it (NetworkSchema): never the password, only whether one is set. */
+function networkView(hub: HubContext, n: NetworkRecord, pw: Set<string> = passwordNames()) {
+  return {
+    name: n.name,
+    ssid: n.ssid,
+    bssid: n.bssid,
+    country: n.country,
+    band: n.band,
+    net_id: n.net_id,
+    hub_host: n.hub_host,
+    password_set: pw.has(n.name),
+    devices: networkDevices(hub.db, n.name),
+  };
+}
+
 async function startedJob(hub: HubContext, jobId: string, waitS: number | undefined) {
   return hub.jobs.wait(jobId, Math.min(waitS ?? 0, MAX_WAIT_S));
-}
-
-function readSecrets(): Record<string, unknown> {
-  if (!existsSync(paths.secrets())) {
-    return {};
-  }
-  try {
-    return JSON.parse(readFileSync(paths.secrets(), 'utf8')) as Record<string, unknown>;
-  } catch {
-    // Never pass the parse error on: V8 quotes the input, which would put secret bytes in the result.
-    throw new FrError('ENV_MISSING', `${paths.secrets()} is not valid JSON`, {
-      remediation: [{ human: `fix or delete ${paths.secrets()}, then set the network again`, cli: 'fr net set --ssid <ssid> --password-stdin' }],
-    });
-  }
-}
-
-function writeSecrets(secrets: Record<string, unknown>): void {
-  // Written to a 0600 temp file and renamed, so a crash never leaves a half-written secrets.json.
-  const tmp = `${paths.secrets()}.tmp`;
-  mkdirSync(dirname(tmp), { recursive: true });
-  writeFileSync(tmp, JSON.stringify(secrets, null, 2), { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, paths.secrets());
 }
 
 /**
@@ -310,31 +302,43 @@ export const HANDLERS: Record<OpName, Handler> = {
   // With `external`: other programs that have a port open too, from lsof at most every 2 s (design c6 D5).
   port_list: (_input, hub) => listPorts(hub),
 
-  network_set: (input: { ssid: string; password?: string; bssid?: string; country?: string }, hub) => {
-    // net_id is created with the record and kept by later changes; hub_host follows the Mac's name.
-    const net = writeNetwork(hub.db, { ssid: input.ssid, bssid: input.bssid ?? null, country: input.country ?? null });
+  // Design csi-c1 D4: named networks, each with its band, all under the fleet's net_id; the password write-only.
+  network_set: (input: { name: string; ssid: string; password?: string; bssid?: string; country?: string; band: NetworkBand }, hub) => {
+    if (input.band === '5g') {
+      // D6: a network that 2.4 GHz-only boards use stays reachable for them.
+      const stranded = devicesWithout5g(hub.db, input.name);
+      if (stranded.length) {
+        const who = stranded.map((d) => `${d.alias} (${d.chip})`).join(', ');
+        throw new FrError('INCOMPATIBLE_PROFILE', `network ${input.name} cannot be band 5g: ${who} use${stranded.length === 1 ? 's' : ''} it and ha${stranded.length === 1 ? 's' : 've'} no 5 GHz radio (only ${[...CHIPS_5G].join(', ')} has)`, {
+          hint: `keep ${input.name} on band auto or 2g, or give the 5 GHz-only network another name (fr net set --name <name> --band 5g)`,
+          remediation: [{ tool: 'network_list', cli: 'fr net ls' }],
+        });
+      }
+    }
+    // net_id is the fleet's (created with the first record and kept); hub_host follows the Mac's name.
+    const net = writeNetwork(hub.db, { name: input.name, ssid: input.ssid, bssid: input.bssid ?? null, country: input.country ?? null, band: input.band });
     if (input.password !== undefined) {
       // Secrets never go into SQLite, results or logs (spec 08 §8.8).
-      const secrets = readSecrets();
-      secrets.wifi_password = input.password;
-      writeSecrets(secrets);
+      writeWifiPassword(net.name, input.password);
     }
-    return {
-      ssid: net.ssid,
-      bssid: net.bssid,
-      country: net.country,
-      net_id: net.net_id,
-      hub_host: net.hub_host,
-      password_set: readSecrets().wifi_password !== undefined,
-    };
+    return networkView(hub, net);
   },
 
-  network_get: (_input, hub) => {
-    const net = readNetwork(hub.db);
+  network_get: (input: { name: string }, hub) => {
+    const name = input.name ?? DEFAULT_NETWORK;
+    const net = readNetwork(hub.db, name);
     if (!net) {
-      throw new FrError('NOT_FOUND', 'no network stored', { remediation: [{ tool: 'network_set', cli: 'fr net set --ssid <ssid> --password-stdin' }] });
+      const known = listNetworks(hub.db).map((n) => n.name);
+      throw new FrError('NOT_FOUND', known.length ? `no network ${name} (stored: ${known.join(', ')})` : 'no network stored', {
+        remediation: [{ tool: 'network_set', args: { name }, cli: `fr net set${name === DEFAULT_NETWORK ? '' : ` --name ${name}`} --ssid <ssid> --password-stdin` }],
+      });
     }
-    return { ...net, password_set: readSecrets().wifi_password !== undefined };
+    return networkView(hub, net);
+  },
+
+  network_list: (_input, hub) => {
+    const pw = passwordNames();
+    return { networks: listNetworks(hub.db).map((n) => networkView(hub, n, pw)) };
   },
 
   build_start: async (
@@ -547,4 +551,6 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...DISPLAY_HANDLERS,
   // A1 (design audio-a1 D8): audio_record, audio_play, audio_level; A2 (design audio-a2 D5): audio_monitor.
   ...AUDIO_HANDLERS,
+  // CSI-1 (design csi-c1 D13): csi_stream, csi_status (stream C's stubs until H).
+  ...CSI_HANDLERS,
 };

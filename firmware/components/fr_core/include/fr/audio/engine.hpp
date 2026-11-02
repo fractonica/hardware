@@ -7,6 +7,10 @@
 // publish (level, ends) and emits it on the core task. The services register with the one Engine at init(), which
 // starts the two tasks once (Rt::spawn). The host suite drives the Engine by hand instead (set_manual,
 // audio_once, stream_once); fr_net_node runs the real tasks as threads.
+//
+// CSI-1 (design csi-c1 D11): the stream side is neutral now (fr/stream/stream.hpp: Endpoint, StreamHost, the fr_stream
+// Worker), aliased here under their old names. fr_stream also runs plain stream workers (fr.csi's CsiService:
+// add_stream, start_stream), which have no fr_audio half; a node without audio services runs fr_stream alone.
 #pragma once
 
 #include <array>
@@ -17,39 +21,17 @@
 #include <span>
 
 #include "fr/base.hpp"
+#include "fr/stream/stream.hpp"
 
 namespace fr::audio {
 
-/** The hub's node HTTP port (spec 08 §8.10; fr_ota's kHttpPort): the stream routes are beside the OTA ones. */
-inline constexpr uint16_t kHubHttpPort = 7422;
-
-/** Where a stream connects (design D3): the hub's IPv4 of the node's TCP session, as OTA uses, and its HTTP port. */
-struct Endpoint {
-    uint32_t ipv4 = 0;  // a.b.c.d as a << 24 | b << 16 | c << 8 | d
-    uint16_t port = kHubHttpPort;
-};
-
-/** "a.b.c.d" into `out` (at least 16 bytes). */
-void format_ipv4(uint32_t ipv4, char *out, size_t len);
-/** A dotted IPv4; false for anything else. */
-bool parse_ipv4(const char *text, uint32_t &out);
-
-/** What the streams need from the runtime: fr_core's on target, fr_net_node's on the host, a fake in tests. */
-class StreamHost
-{
-public:
-    /** The hub endpoint of the current TCP session; false without one (the stream then ends net_lost). Core task. */
-    virtual bool endpoint(Endpoint &out) = 0;
-    /** The node's device id, 12 lowercase hex digits (fr_ident's device_id): the streams' X-Fr-Device. */
-    virtual const char *device_id() const = 0;
-
-protected:
-    ~StreamHost() = default;
-};
-
-/** The runtime's StreamHost (nullptr: none, every stream ends net_lost). Before any stream; core task. */
-void set_stream_host(StreamHost *host);
-StreamHost *stream_host();
+using stream::Endpoint;
+using stream::format_ipv4;
+using stream::kHubHttpPort;
+using stream::parse_ipv4;
+using stream::set_stream_host;
+using stream::stream_host;
+using stream::StreamHost;
 
 /**
  * A service's counters for diag `stats audio` (since init), so a bench run tells DMA loss from Wi-Fi loss and from
@@ -103,8 +85,8 @@ protected:
     ~MonitorSink() = default;
 };
 
-/** One service's halves on the two tasks. */
-class Worker
+/** One audio service's halves on the two tasks (its fr_stream half: stream::Worker::stream_pass). */
+class Worker : public stream::Worker
 {
 public:
     /** The service's capability port (Capability::port()), so an input finds an output by it; 0xFF: none. */
@@ -118,8 +100,6 @@ public:
      * nothing to do, so the task may sleep until woken.
      */
     virtual bool audio_pass(uint32_t wait_ms) = 0;
-    /** fr_stream: one pass; it may block on its socket (up to the stream's stall limit). False when idle. */
-    virtual bool stream_pass() = 0;
     /** Any task: the service's counters (atomics only); false when it keeps none. */
     virtual bool stats(WorkerStats &out) const
     {
@@ -156,10 +136,16 @@ public:
      * the count first (acquire), so they never see a slot half made.
      */
     bool add(Worker &w);
+    /** A plain stream worker (fr.csi): fr_stream passes it, fr_audio never sees it. Core task; false when full. */
+    bool add_stream(stream::Worker &w);
     /** A service going away (host only: the board's live as long as the node), with the tasks stopped or manual. */
     void remove(Worker &w);
+    void remove_stream(stream::Worker &w);
     /** Starts fr_audio and fr_stream once (nothing in manual mode); false when a task cannot be made. */
     bool start();
+    /** Starts fr_stream alone once (a plain stream worker's init; start() adds fr_audio later if an audio service
+     * comes). */
+    bool start_stream();
     /** Any task: there is work for that task (a command, a block published, room in the play ring). */
     void wake_audio();
     void wake_stream();
@@ -192,7 +178,11 @@ private:
 
     std::array<Worker *, kWorkersMax> workers_{};
     std::atomic<size_t> count_{0};  // workers_[0, count_) are made (add() publishes, the tasks acquire)
-    bool started_ = false;
+    // fr_stream's: the audio workers and the plain ones, in the order they were added (published as workers_).
+    std::array<stream::Worker *, 2 * kWorkersMax> streams_{};
+    std::atomic<size_t> stream_count_{0};
+    bool started_ = false;  // fr_audio
+    bool stream_started_ = false;
     bool manual_ = false;
     std::atomic<bool> stopping_{false};
     void *audio_sig_ = nullptr;

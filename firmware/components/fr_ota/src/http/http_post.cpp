@@ -107,22 +107,26 @@ size_t HttpPost::format_chunk_size(std::span<char> out, size_t len)
     return n > 0 && static_cast<size_t>(n) < out.size() ? static_cast<size_t>(n) : 0;
 }
 
-Status HttpPost::start(const char *host, uint16_t port, std::string_view path, std::string_view headers)
+Status HttpPost::open_socket(const char *host, uint16_t port, std::string_view path, std::string_view headers,
+                             size_t &head_len)
 {
     close();
     status_ = 0;
     error_ = "";
     sent_ = 0;
     body_len_ = 0;
+    connecting_ = false;
+    head_out_ = false;
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (host == nullptr || port == 0 || ::inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
         return fail("host", Err::invalid_args);
     }
-    char req[kRequestMax];
-    const size_t n = format_head(req, host, port, path, headers);
-    if (n == 0) {
+    // The request head goes out of head_, which the answer only needs once it has gone.
+    static_assert(kRequestMax <= kHeadMax);
+    head_len = format_head({head_, kRequestMax}, host, port, path, headers);
+    if (head_len == 0) {
         return fail("head", Err::invalid_args);
     }
 
@@ -147,26 +151,82 @@ Status HttpPost::start(const char *host, uint16_t port, std::string_view path, s
     if (flags < 0 || ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) != 0) {
         return fail("socket");
     }
-    if (::connect(fd_, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr)) != 0) {
-        if (errno != EINPROGRESS) {
+    // Begun without waiting; the socket is blocking again after (a pending connect goes on, select() tells its end).
+    const int rc = ::connect(fd_, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr));
+    const int err = errno;
+    ::fcntl(fd_, F_SETFL, flags);
+    if (rc != 0) {
+        if (err != EINPROGRESS) {
             return fail("connect");
         }
-        fd_set wr;
-        FD_ZERO(&wr);
-        FD_SET(fd_, &wr);
-        timeval wait = timeval_of(timeout_ms_);
-        int err = 0;
-        socklen_t len = sizeof(err);
-        if (::select(fd_ + 1, nullptr, &wr, nullptr, &wait) != 1 ||
-            ::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
+        connecting_ = true;
+    }
+    return {};
+}
+
+Status HttpPost::start(const char *host, uint16_t port, std::string_view path, std::string_view headers)
+{
+    size_t n = 0;
+    if (auto st = open_socket(host, port, path, headers, n); !st) {
+        return st;
+    }
+    if (connecting_) {
+        deadline_ms_ = now_ms() + timeout_ms_;
+        if (const auto up = connected(deadline_ms_); !up || !*up) {
             return fail("connect");
         }
     }
-    ::fcntl(fd_, F_SETFL, flags);
-    if (!send_all(req, n)) {
+    if (!send_all(head_, n)) {
         return fail(error_);
     }
     return {};
+}
+
+Status HttpPost::begin_start(const char *host, uint16_t port, std::string_view path, std::string_view headers)
+{
+    size_t n = 0;
+    if (auto st = open_socket(host, port, path, headers, n); !st) {
+        return st;
+    }
+    nsegs_ = 0;
+    segs_[nsegs_++] = {reinterpret_cast<const uint8_t *>(head_), n};
+    seg_ = 0;
+    off_ = 0;
+    chunk_len_ = 0;  // not body bytes (sent())
+    head_out_ = true;
+    deadline_ms_ = now_ms() + timeout_ms_;
+    return {};
+}
+
+std::expected<bool, Err> HttpPost::connected(int64_t until)
+{
+    for (;;) {
+        const int64_t t = now_ms();
+        const int64_t left = std::max<int64_t>(0, std::min(until, deadline_ms_) - t);
+        fd_set wr;
+        FD_ZERO(&wr);
+        FD_SET(fd_, &wr);
+        timeval wait = timeval_of(static_cast<uint32_t>(left));
+        const int k = ::select(fd_ + 1, nullptr, &wr, nullptr, &wait);
+        if (k < 0 && errno == EINTR) {
+            continue;
+        }
+        if (k == 1) {
+            int err = 0;
+            socklen_t len = sizeof(err);
+            if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
+                fail("connect");
+                return std::unexpected(Err::failed);
+            }
+            connecting_ = false;
+            return true;
+        }
+        if (k < 0 || now_ms() >= deadline_ms_) {
+            fail("connect");  // refused, or not up within the timeout
+            return std::unexpected(Err::failed);
+        }
+        return false;  // not yet: this slice is over
+    }
 }
 
 bool HttpPost::send_all(const void *data, size_t len)
@@ -237,6 +297,21 @@ Status HttpPost::begin_chunk(std::span<const uint8_t> a, std::span<const uint8_t
     return {};
 }
 
+template <class F>
+std::expected<bool, Err> HttpPost::nonblocking(F &&fn)
+{
+    // The socket is non-blocking while it pumps: not every stack's send() honours MSG_DONTWAIT (Darwin's waits out
+    // SO_SNDTIMEO for a large piece anyway), and a send that waits would overrun the slice. Blocking again after,
+    // for finish() and the answer.
+    const int flags = ::fcntl(fd_, F_GETFL, 0);
+    const bool nb = flags >= 0 && (flags & O_NONBLOCK) == 0 && ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) == 0;
+    const auto r = fn();
+    if (nb && fd_ >= 0) {
+        ::fcntl(fd_, F_SETFL, flags);
+    }
+    return r;
+}
+
 std::expected<bool, Err> HttpPost::pump(uint32_t wait_ms)
 {
     if (fd_ < 0) {
@@ -246,21 +321,18 @@ std::expected<bool, Err> HttpPost::pump(uint32_t wait_ms)
     if (!pending()) {
         return true;  // nothing begun, or all of it went already
     }
-    // The socket is non-blocking while it pumps: not every stack's send() honours MSG_DONTWAIT (Darwin's waits out
-    // SO_SNDTIMEO for a large piece anyway), and a send that waits would overrun the slice. Blocking again after,
-    // for finish() and the answer.
-    const int flags = ::fcntl(fd_, F_GETFL, 0);
-    const bool nb = flags >= 0 && (flags & O_NONBLOCK) == 0 && ::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) == 0;
-    const auto r = pump_slice(wait_ms);
-    if (nb && fd_ >= 0) {
-        ::fcntl(fd_, F_SETFL, flags);
-    }
-    return r;
+    return nonblocking([this, wait_ms] { return pump_slice(wait_ms); });
 }
 
 std::expected<bool, Err> HttpPost::pump_slice(uint32_t wait_ms)
 {
     const int64_t until = std::min(deadline_ms_, now_ms() + wait_ms);
+    if (connecting_) {
+        // begin_start()'s connect first: the head goes once it is up.
+        if (const auto up = connected(until); !up || !*up) {
+            return up;
+        }
+    }
     while (seg_ < nsegs_) {
         const std::span<const uint8_t> piece = segs_[seg_];
         if (off_ == piece.size()) {
@@ -297,6 +369,7 @@ std::expected<bool, Err> HttpPost::pump_slice(uint32_t wait_ms)
         return std::unexpected(Err::failed);
     }
     sent_ += chunk_len_;
+    head_out_ = false;
     return true;
 }
 
@@ -304,6 +377,9 @@ bool HttpPost::answered()
 {
     if (fd_ < 0) {
         return status_ != 0;
+    }
+    if (connecting_ || head_out_) {
+        return false;  // the head is still in head_, on its way out
     }
     char c = 0;
 #ifdef MSG_DONTWAIT
@@ -338,40 +414,151 @@ Status HttpPost::finish()
     return read_answer(0);
 }
 
-Status HttpPost::read_answer(size_t got)
+Status HttpPost::begin_finish()
 {
-    size_t head_len = 0;
-    size_t body_at = 0;
-    for (;;) {
-        if (got == sizeof(head_)) {
-            return fail("head too large");
+    if (fd_ < 0) {
+        return fail("not open");
+    }
+    if (pending()) {
+        return fail("chunk pending");
+    }
+    nsegs_ = 0;
+    segs_[nsegs_++] = {reinterpret_cast<const uint8_t *>(kLastChunk.data()), kLastChunk.size()};
+    seg_ = 0;
+    off_ = 0;
+    chunk_len_ = 0;
+    got_ = 0;
+    head_done_ = false;
+    deadline_ms_ = now_ms() + timeout_ms_;
+    return {};
+}
+
+std::expected<bool, Err> HttpPost::pump_answer(uint32_t wait_ms)
+{
+    if (fd_ < 0) {
+        if (status_ != 0) {
+            return true;  // read already
         }
-        const ssize_t k = ::recv(fd_, head_ + got, sizeof(head_) - got, 0);
-        if (k < 0 && errno == EINTR) {
-            continue;
-        }
-        if (k <= 0) {
-            return fail(k == 0 ? "closed" : timed_out() ? "timeout" : "recv");
-        }
-        const size_t from = got >= 3 ? got - 3 : 0;
-        got += static_cast<size_t>(k);
-        const size_t end = std::string_view(head_, got).find("\r\n\r\n", from);
-        if (end != std::string_view::npos) {
-            head_len = end + kCrlf.size();
-            body_at = end + 2 * kCrlf.size();
-            break;
+        fail("not open");
+        return std::unexpected(Err::failed);
+    }
+    return nonblocking([this, wait_ms] { return answer_slice(wait_ms); });
+}
+
+std::expected<bool, Err> HttpPost::answer_slice(uint32_t wait_ms)
+{
+    const int64_t until = std::min(deadline_ms_, now_ms() + wait_ms);
+    if (pending()) {
+        // The last chunk first, in what is left of this slice.
+        const int64_t t = now_ms();
+        if (const auto went = pump_slice(static_cast<uint32_t>(std::max<int64_t>(0, until - t))); !went || !*went) {
+            return went;
         }
     }
-    std::string_view head(head_, head_len);
+#ifdef MSG_DONTWAIT
+    constexpr int kFlags = MSG_DONTWAIT;
+#else
+    constexpr int kFlags = 0;  // the socket is non-blocking here anyway
+#endif
+    for (;;) {
+        switch (answer_step(kFlags)) {
+        case Step::more:
+            continue;
+        case Step::done:
+            return true;
+        case Step::failed:
+            return std::unexpected(Err::failed);
+        case Step::wait:
+            break;
+        }
+        const int64_t t = now_ms();
+        if (t >= deadline_ms_) {
+            if (head_done_) {
+                status_ = code_;  // the body is late: the status is what matters (as read_answer)
+                close();
+                return true;
+            }
+            fail("timeout");
+            return std::unexpected(Err::failed);
+        }
+        if (t >= until) {
+            return false;
+        }
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(fd_, &rd);
+        timeval wait = timeval_of(static_cast<uint32_t>(until - t));
+        static_cast<void>(::select(fd_ + 1, &rd, nullptr, nullptr, &wait));
+    }
+}
+
+HttpPost::Step HttpPost::answer_step(int flags)
+{
+    char buf[64];
+    char *into = head_done_ ? buf : head_ + got_;
+    const size_t room = head_done_ ? sizeof(buf) : sizeof(head_) - got_;
+    if (room == 0) {
+        fail("head too large");
+        return Step::failed;
+    }
+    const ssize_t k = ::recv(fd_, into, room, flags);
+    if (k < 0 && errno == EINTR) {
+        return Step::more;
+    }
+    if (k < 0 && timed_out() && flags != 0) {
+        return Step::wait;  // nothing yet (a blocking socket's EAGAIN is its timeout: below)
+    }
+    if (head_done_) {
+        if (k > 0) {
+            keep(buf, static_cast<size_t>(k));
+            if (remaining_ != 0) {
+                return Step::more;
+            }
+        }
+        // The close (or a timeout) ends the body: the status is what matters.
+        status_ = code_;
+        close();
+        return Step::done;
+    }
+    if (k <= 0) {
+        fail(k == 0 ? "closed" : timed_out() ? "timeout" : "recv");
+        return Step::failed;
+    }
+    const size_t from = got_ >= 3 ? got_ - 3 : 0;
+    got_ += static_cast<size_t>(k);
+    const size_t end = std::string_view(head_, got_).find("\r\n\r\n", from);
+    if (end == std::string_view::npos) {
+        return Step::more;
+    }
+    if (!parse_head(end + kCrlf.size())) {
+        fail("status");
+        return Step::failed;
+    }
+    head_done_ = true;
+    body_len_ = 0;
+    const size_t body_at = end + 2 * kCrlf.size();
+    keep(head_ + body_at, got_ - body_at);  // the body's start, which came with the head
+    if (remaining_ == 0) {
+        status_ = code_;
+        close();
+        return Step::done;
+    }
+    return Step::more;
+}
+
+bool HttpPost::parse_head(size_t len)
+{
+    std::string_view head(head_, len);
     const size_t eol = head.find(kCrlf);
     const std::string_view line = head.substr(0, eol);
     const auto code = line.size() >= 12 && line.starts_with("HTTP/1.") && line[8] == ' ' ? number(line.substr(9, 3))
                                                                                          : std::nullopt;
     if (!code || (line.size() > 12 && line[12] != ' ')) {
-        return fail("status");
+        return false;
     }
+    code_ = static_cast<int>(*code);
     head.remove_prefix(eol + kCrlf.size());
-    int64_t remaining = -1;  // until the close
+    remaining_ = -1;  // until the close
     while (!head.empty()) {
         const size_t end = head.find(kCrlf);
         const std::string_view h = head.substr(0, end);
@@ -379,36 +566,40 @@ Status HttpPost::read_answer(size_t got)
         const size_t colon = h.find(':');
         if (colon != std::string_view::npos && iequals(trim(h.substr(0, colon)), "Content-Length")) {
             if (const auto v = number(trim(h.substr(colon + 1)))) {
-                remaining = static_cast<int64_t>(*v);
+                remaining_ = static_cast<int64_t>(*v);
             }
         }
     }
-    // The body: what came with the head, then until Content-Length or the close; kept up to kBodyMax.
-    body_len_ = 0;
-    auto keep = [this, &remaining](const char *p, size_t n) {
-        if (remaining >= 0) {
-            n = static_cast<size_t>(std::min<int64_t>(static_cast<int64_t>(n), remaining));
-            remaining -= static_cast<int64_t>(n);
-        }
-        const size_t k = std::min(n, sizeof(body_) - body_len_);
-        std::memcpy(body_ + body_len_, p, k);
-        body_len_ += k;
-    };
-    keep(head_ + body_at, got - body_at);
-    while (remaining != 0) {
-        char buf[64];
-        const ssize_t k = ::recv(fd_, buf, sizeof(buf), 0);
-        if (k < 0 && errno == EINTR) {
-            continue;
-        }
-        if (k <= 0) {
-            break;  // the close (or a timeout) ends it: the status is what matters
-        }
-        keep(buf, static_cast<size_t>(k));
+    return true;
+}
+
+void HttpPost::keep(const char *p, size_t n)
+{
+    // Up to Content-Length (or the close); kept up to kBodyMax.
+    if (remaining_ >= 0) {
+        n = static_cast<size_t>(std::min<int64_t>(static_cast<int64_t>(n), remaining_));
+        remaining_ -= static_cast<int64_t>(n);
     }
-    status_ = static_cast<int>(*code);
-    close();
-    return {};
+    const size_t k = std::min(n, sizeof(body_) - body_len_);
+    std::memcpy(body_ + body_len_, p, k);
+    body_len_ += k;
+}
+
+Status HttpPost::read_answer(size_t got)
+{
+    got_ = got;
+    head_done_ = false;
+    for (;;) {
+        switch (answer_step(0)) {
+        case Step::more:
+        case Step::wait:
+            continue;
+        case Step::done:
+            return {};
+        case Step::failed:
+            return std::unexpected(Err::failed);
+        }
+    }
 }
 
 void HttpPost::close()
@@ -418,6 +609,7 @@ void HttpPost::close()
         fd_ = -1;
     }
     seg_ = nsegs_ = 0;  // a pending chunk goes with the connection
+    connecting_ = head_out_ = false;
 }
 
 Status HttpPost::fail(const char *why, Err e)

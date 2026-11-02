@@ -12,6 +12,7 @@ import { cliFlag, findOp, MAX_WAIT_S, OPS, REGISTRY_HASH, type ErrorCode, type O
 
 import { callTimeoutMs, hubCall, hubHealth } from './client.ts';
 import { addAudioCommands, AUDIO_CLI_OPS } from './audio.ts';
+import { addCsiCommands, CSI_CLI_OPS } from './csi.ts';
 import { addCodegenClientCommand, CODEGEN_CLIENT_OPS } from './codegen-client.ts';
 import { addDisplayWindowCommand } from './display.ts';
 import { genAll, genFirmware } from './gen.ts';
@@ -89,7 +90,49 @@ function parseNumber(v: string): number {
   return n;
 }
 
+/**
+ * The password from a terminal: prompted on stderr, read with echo off (raw mode), up to Enter; Ctrl-C aborts.
+ * Piped stdin (`--password-stdin < file`, `printf … |`) is read as before.
+ */
+async function readSecretTty(prompt: string): Promise<string> {
+  const stdin = process.stdin;
+  process.stderr.write(prompt);
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.setEncoding('utf8');
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      let s = '';
+      const onData = (chunk: string) => {
+        for (const ch of chunk) {
+          if (ch === '\r' || ch === '\n' || ch === '\u0004') {
+            stdin.off('data', onData);
+            return resolve(s);
+          }
+          if (ch === '\u0003') {
+            stdin.off('data', onData);
+            return reject(new Error('cancelled'));
+          }
+          if (ch === '\u007f' || ch === '\b') {
+            s = [...s].slice(0, -1).join('');
+          } else if (ch >= ' ') {
+            s += ch;
+          }
+        }
+      };
+      stdin.on('data', onData);
+    });
+  } finally {
+    stdin.setRawMode(false);
+    stdin.pause();
+    process.stderr.write('\n');
+  }
+}
+
 async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) {
+    return readSecretTty('Wi-Fi password (not shown): ');
+  }
   let s = '';
   for await (const chunk of process.stdin) {
     s += chunk;
@@ -288,7 +331,7 @@ hub
   .action(async (opts: { force?: boolean }) => emit(await restartHub(Boolean(opts.force)), 'hub_restart'));
 
 // Ops whose commands are hand-written (design c6 §3.3) get none generated.
-const handWritten = new Set<string>([...SERIAL_OPS, ...CODEGEN_CLIENT_OPS, ...AUDIO_CLI_OPS]);
+const handWritten = new Set<string>([...SERIAL_OPS, ...CODEGEN_CLIENT_OPS, ...AUDIO_CLI_OPS, ...CSI_CLI_OPS]);
 for (const op of OPS) {
   if (!handWritten.has(op.name)) {
     addOp(op as unknown as OpDef);
@@ -306,6 +349,7 @@ addSerialCommands(group(['serial']), kit);
 addCodegenClientCommand(group(['codegen']), kit);
 addDisplayWindowCommand(group(['display']), kit);
 addAudioCommands(group(['audio']), kit);
+addCsiCommands(group(['csi']), kit);
 addMcpCommand(program, kit);
 
 try {

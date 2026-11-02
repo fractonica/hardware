@@ -12,6 +12,8 @@ import { ANALOG_IN_CAP } from './analog_in.ts';
 import { FIXTURE_CAP } from './fixture.ts';
 import { AUDIO_IN_CAP } from './audio_in.ts';
 import { TOUCH_CAP } from './touch.ts';
+import { CSI_CAP } from './csi.ts';
+import { RADIO_TX_CAP } from './radio_tx.ts';
 import { NODE_CAP } from './node.ts';
 import { OTA_CAP } from './ota.ts';
 import { DIAG_CAP } from './diag.ts';
@@ -24,12 +26,14 @@ export * from './analog_in.ts';
 export * from './fixture.ts';
 export * from './audio_in.ts';
 export * from './touch.ts';
+export * from './csi.ts';
+export * from './radio_tx.ts';
 export * from './node.ts';
 export * from './ota.ts';
 export * from './diag.ts';
 
 /** Every capability, by id: the catalog's (CATALOG) and the test_only ones it leaves out (testOnly). */
-export const CAPS: readonly $.CapInfo[] = [BUTTON_CAP, LED_CAP, DISPLAY_CAP, AUDIO_OUT_CAP, ANALOG_IN_CAP, FIXTURE_CAP, AUDIO_IN_CAP, TOUCH_CAP, NODE_CAP, OTA_CAP, DIAG_CAP];
+export const CAPS: readonly $.CapInfo[] = [BUTTON_CAP, LED_CAP, DISPLAY_CAP, AUDIO_OUT_CAP, ANALOG_IN_CAP, FIXTURE_CAP, AUDIO_IN_CAP, TOUCH_CAP, CSI_CAP, RADIO_TX_CAP, NODE_CAP, OTA_CAP, DIAG_CAP];
 
 /** By id (0x0002) or name ('fr.led'). */
 export function findCap(cap: number | string): $.CapInfo | undefined {

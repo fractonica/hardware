@@ -20,9 +20,12 @@
 // their receive stamp, and the S2 hooks `air rate` and `air churn` run here (air_set_rate, air_churn).
 #include <atomic>
 #include <cstring>
+#include <memory>
+#include <new>
 
 #include "air_detail.hpp"
 #include "air_sched.hpp"
+#include "band_rules.hpp"
 #include "esp_log.h"
 #include "esp_now.h"
 #include "esp_timer.h"
@@ -34,9 +37,9 @@ namespace fr::net::esp {
 namespace {
 
 constexpr const char *TAG = "fr_net";
-// Received frames between the Wi-Fi task and the core task (16 x 250 B): a flood burst from a few
-// neighbours fits while the core task handles an input.
-constexpr size_t kRxSlots = 16;
+// Received frames between the Wi-Fi task and the core task (16 x 250 B, or the memory class's): a flood burst
+// from a few neighbours fits while the core task handles an input.
+constexpr size_t kRxSlots = limits::kAirRxSlots;
 // Frames handed to Net per service; then the other posted work gets its turn and the service comes again.
 constexpr size_t kRxPerService = 4;
 constexpr uint64_t kPostRetryUs = 1'000;
@@ -70,6 +73,7 @@ std::atomic<uint32_t> s_rx_tail{0};
 std::atomic<uint32_t> s_verdicts{0};
 std::atomic<bool> s_timer_due{false};
 std::atomic<bool> s_up_changed{false};
+std::atomic<bool> s_rerate{false};  // channel C changed band: every peer's rate again (core task)
 std::atomic<bool> s_posted{false};
 
 std::atomic<uint32_t> s_rx_ok{0};
@@ -77,6 +81,9 @@ std::atomic<uint32_t> s_rx_bad{0};
 std::atomic<uint32_t> s_rx_lost{0};
 std::atomic<uint32_t> s_rate_fail{0};
 uint32_t s_refused_down = 0;  // core task
+// Design csi-c1 D9: espnow_tx's plain frames end here (core task; one client).
+PlainDone s_plain_done = nullptr;
+void *s_plain_ctx = nullptr;
 
 void service();
 
@@ -106,16 +113,19 @@ void update_up()
 
 /**
  * 05 §5.3: the robust profile (11b 1 Mbps long preamble), set after every add_peer (the rate belongs to the peer entry,
- * the broadcast peer's included); `fast` is 11g 6 Mbps OFDM (design m2-c4-gateway D19 (c)). Never a zero phymode: 0 is
+ * the broadcast peer's included); `fast` is 11g 6 Mbps OFDM (design m2-c4-gateway D19 (c)). On a 5 GHz channel C both
+ * are 11a 6 Mbps: 11b does not exist there (design csi-c1 D6; band_rules.hpp peer_rate). Never a zero phymode: 0 is
  * WIFI_PHY_MODE_LR, which receivers outside LR cannot hear. False on error: the peer keeps the rate it had.
  */
 bool config_rate(const uint8_t *mac, AirRate rate)
 {
-    const bool fast = rate == AirRate::fast;
+    const detail::PeerRate pr = detail::peer_rate(rate, s_channel.load(std::memory_order_relaxed));
     esp_now_rate_config_t rc;
     std::memset(&rc, 0, sizeof(rc));
-    rc.phymode = fast ? WIFI_PHY_MODE_11G : WIFI_PHY_MODE_11B;
-    rc.rate = fast ? WIFI_PHY_RATE_6M : WIFI_PHY_RATE_1M_L;
+    rc.phymode = pr.phy == detail::Phy::a11   ? WIFI_PHY_MODE_11A
+                 : pr.phy == detail::Phy::g11 ? WIFI_PHY_MODE_11G
+                                              : WIFI_PHY_MODE_11B;
+    rc.rate = pr.ofdm_6m ? WIFI_PHY_RATE_6M : WIFI_PHY_RATE_1M_L;
     rc.ersu = false;
     rc.dcm = false;
     return esp_now_set_peer_rate_config(mac, &rc) == ESP_OK;
@@ -169,6 +179,12 @@ public:
             s_hooks.sent(token, ok);
         }
     }
+    void done_plain(uint32_t token, bool ok) override
+    {
+        if (s_plain_done != nullptr) {
+            s_plain_done(s_plain_ctx, token, ok);
+        }
+    }
     bool set_rate(const Mac &mac, AirRate rate) override { return config_rate(mac.data(), rate); }
 };
 
@@ -211,6 +227,14 @@ void service()
     const TimeUs now = esp_timer_get_time();
     if (s_up_changed.exchange(false, std::memory_order_acq_rel) && s_hooks.changed != nullptr) {
         s_hooks.changed();
+    }
+    if (s_rerate.exchange(false, std::memory_order_acq_rel)) {
+        // Before the verdicts and the timer, whose next send would go at the old band's rate.
+        const air::RateChange r = s_sched.reapply_rates();
+        const uint8_t ch = s_channel.load(std::memory_order_relaxed);
+        ESP_LOGI(TAG, "espnow: channel %u: %u peer rates set for %s (%u refused)", static_cast<unsigned>(ch),
+                 static_cast<unsigned>(r.peers), detail::is_5g_channel(ch) ? "5 GHz" : "2.4 GHz",
+                 static_cast<unsigned>(r.failed));
     }
     // The verdicts before the timer: a stale timer then finds the frame's state moved on and is ignored.
     if (const uint32_t v = s_verdicts.exchange(0, std::memory_order_acq_rel); v != 0) {
@@ -319,7 +343,15 @@ namespace detail {
 
 void air_set_channel(uint8_t channel)
 {
-    s_channel.store(channel, std::memory_order_release);
+    const uint8_t was = s_channel.exchange(channel, std::memory_order_acq_rel);
+    if (channel != 0 && s_started.load(std::memory_order_acquire) &&
+        detail::is_5g_channel(was) != detail::is_5g_channel(channel)) {
+        // Design csi-c1 D6: every peer entry (the broadcast one, set before channel C was known, the LRU's, the pinned
+        // gateway's) has the old band's rate config; it must be one the new band has (11a 6 Mbps on 5 GHz). The
+        // scheduler is the core task's: service() sets them all again (Scheduler::reapply_rates).
+        s_rerate.store(true, std::memory_order_release);
+        request_service();
+    }
     update_up();
 }
 
@@ -369,9 +401,26 @@ bool start_air(const AirSettings &settings, const AirHooks &hooks)
     esp_now_get_version(&version);
     s_started.store(true, std::memory_order_release);
     update_up();
-    ESP_LOGI(TAG, "espnow: started (v%u, net %u, channel %u, 11b 1 Mbps)", static_cast<unsigned>(version),
-             static_cast<unsigned>(settings.net), static_cast<unsigned>(s_channel.load(std::memory_order_relaxed)));
+    const uint8_t ch = s_channel.load(std::memory_order_relaxed);
+    ESP_LOGI(TAG, "espnow: started (v%u, net %u, channel %u, %s)", static_cast<unsigned>(version),
+             static_cast<unsigned>(settings.net), static_cast<unsigned>(ch),
+             detail::is_5g_channel(ch) ? "11a 6 Mbps" : "11b 1 Mbps");
     return true;
+}
+
+fr::Status air_send_plain(const Mac &dst, std::span<const uint8_t> bytes, uint32_t token, PlainDone done, void *ctx)
+{
+    if (!s_air.up()) {
+        ++s_refused_down;
+        return std::unexpected(Err::failed);
+    }
+    if (air::is_broadcast(dst) || (dst[0] & 0x01) != 0) {
+        return std::unexpected(Err::invalid_args);
+    }
+    s_plain_done = done;
+    s_plain_ctx = ctx;
+    // BULK: never ahead of Net's frames. The robust rate of the band (config_rate: 11a 6 Mbps on 5 GHz).
+    return s_sched.send(dst, bytes, AirPrio::bulk, token, esp_timer_get_time(), AirRate::robust, true);
 }
 
 AirStatus air_status()
@@ -417,16 +466,20 @@ std::expected<AirChurn, Err> air_churn(uint32_t n)
     if (!s_started.load(std::memory_order_acquire)) {
         return std::unexpected(Err::failed);
     }
-    static air::ChurnStats st;  // 2 KB: not on the core task's stack
-    air::churn(s_radio, n, [] { return esp_timer_get_time(); }, st);
-    return AirChurn{.n = st.n,
-                    .failed = st.failed,
-                    .add_p50_us = st.add.percentile(500),
-                    .add_p99_us = st.add.percentile(990),
-                    .add_max_us = st.add.max(),
-                    .del_p50_us = st.del.percentile(500),
-                    .del_p99_us = st.del.percentile(990),
-                    .del_max_us = st.del.max()};
+    // 2 KB, for this call only: not on the core task's stack, and not in .bss for a hook that rarely runs.
+    const std::unique_ptr<air::ChurnStats> st(new (std::nothrow) air::ChurnStats{});
+    if (!st) {
+        return std::unexpected(Err::failed);
+    }
+    air::churn(s_radio, n, [] { return esp_timer_get_time(); }, *st);
+    return AirChurn{.n = st->n,
+                    .failed = st->failed,
+                    .add_p50_us = st->add.percentile(500),
+                    .add_p99_us = st->add.percentile(990),
+                    .add_max_us = st->add.max(),
+                    .del_p50_us = st->del.percentile(500),
+                    .del_p99_us = st->del.percentile(990),
+                    .del_max_us = st->del.max()};
 }
 
 }  // namespace fr::net::esp

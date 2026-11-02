@@ -74,7 +74,7 @@ uint16_t AdcOneshot::full_scale_mv() const
 #if CONFIG_IDF_TARGET_ESP32C3
     return 2500;
 #else
-    return 3300;  // esp32c6, esp32s3
+    return 3300;  // esp32c5 (inferred, design csi-c1 D1), esp32c6, esp32s3
 #endif
 }
 

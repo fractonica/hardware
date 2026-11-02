@@ -93,6 +93,8 @@ describe('loading the committed schema', () => {
       [0x0006, 'fr.fixture', 'Fixture', 'standard'],
       [0x0007, 'fr.audio_in', 'AudioIn', 'standard'],
       [0x0008, 'fr.touch', 'Touch', 'standard'],
+      [0x0009, 'fr.csi', 'Csi', 'standard'],
+      [0x000a, 'fr.radio_tx', 'RadioTx', 'standard'],
       [0x00f0, 'fr.node', 'Node', 'system'],
       [0x00f1, 'fr.ota', 'Ota', 'system'],
       [0x00f2, 'fr.diag', 'Diag', 'system'],
@@ -256,7 +258,7 @@ describe('validation errors name the file and path', () => {
   });
 
   it('capability ids missing from the registry or allocated to another name', () => {
-    expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x0009))), BUTTON, 'id', /0x0009 is not allocated in schema\/registry\.yaml/);
+    expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x000b))), BUTTON, 'id', /0x000B is not allocated in schema\/registry\.yaml/);
     expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x0002))), BUTTON, 'id', /allocates 0x0002 to fr\.led, not fr\.button/);
   });
 

@@ -80,7 +80,7 @@ export const PORT = { NODE: 0, OTA: 240, DIAG: 241, CAP_FIRST: 1, CAP_LAST: 239 
 export const ADDR = { HUB: 0x0000, NODE_FIRST: 0x0001, NODE_LAST: 0xefff, GROUP_FIRST: 0xf000, GROUP_LAST: 0xfeff, ALL_GATEWAYS: 0xff01, UNASSIGNED: 0xfffe, BROADCAST: 0xffff } as const;
 export const MTU = { REALTIME: 250, BULK: 1470, REALTIME_PAYLOAD_BUDGET: 200 } as const;
 
-export const ChipId = { esp32c3: 5, esp32s3: 9, esp32c6: 13 } as const;
+export const ChipId = { esp32c3: 5, esp32s3: 9, esp32c6: 13, esp32c5: 23 } as const;
 export type ChipId = keyof typeof ChipId;
 
 export const Role = { node: 0, gateway: 1, fixture: 2 } as const;

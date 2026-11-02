@@ -656,6 +656,87 @@ describe('flash_start plans with fr_ident', () => {
   });
 });
 
+describe('several networks and bands (design csi-c1 D4-D6)', () => {
+  const C5_PROBE = { ...C6_PROBE, chip: 'ESP32-C5', description: 'ESP32-C5HF4 (revision v1.0)', features: ['Wi-Fi 6', 'BT 5', 'Embedded Flash 4MB'] };
+  const OTHER = 'other-pw-55aa';
+
+  /** The default network with another password, and `lab-5g` (band 5g) holding SECRET. */
+  function twoNetworks(r: Rig): void {
+    HANDLERS.network_set({ name: 'default', ssid: 'LabNet', password: OTHER, band: 'auto' }, r.hub);
+    HANDLERS.network_set({ name: '5g', ssid: 'lab-5g', password: SECRET, band: '5g', country: 'LV' }, r.hub);
+  }
+
+  it('provisions a C5 onto the 5g network: its SSID, its password, band 2 in fr_net, devices.network 5g, the fleet net_id', async () => {
+    const r = rig();
+    twoNetworks(r);
+    sidecar({ probe: C5_PROBE });
+    artifact(r.db, 'c5d-csi', 'esp32c5', 23, 'c5aaaaaaaaaa');
+    nodeBoots(r, { serial: 'frame', tcp: true });
+    const job = await provision(r, { profile: 'c5d-csi', network: '5g' });
+    expect(job.error).toBeUndefined();
+    expect(job.result).toMatchObject({ chip: 'esp32c5', network: '5g', ssid: 'lab-5g', net: readNetwork(r.db)!.net_id });
+    const nvs = calls().find((c) => c.cmd === 'nvs_gen')!;
+    expect(nvs.has_secret).toBe(true); // the 5g network's password, not default's
+    expect(nvs.csv).not.toContain(OTHER);
+    expect(nvs.csv).toContain('ssid,data,string,lab-5g');
+    expect(nvs.csv).toContain('band,data,u8,2');
+    expect(nvs.csv).toContain('country,data,string,LV');
+    expect(r.hub.registry.get(DEV)!.network).toBe('5g');
+    expect(provisionOf(r.db, DEV)).toMatchObject({ network: '5g', ssid: 'lab-5g' });
+    expect(jobLogs(r, job.job_id).join('\n')).toContain('network 5g (band 5g)');
+    const list = (await HANDLERS.network_list({}, r.hub)) as { networks: Record<string, unknown>[] };
+    expect(list.networks.map((n) => [n.name, n.band, n.devices, n.password_set])).toEqual([
+      ['default', 'auto', 0, true],
+      ['5g', '5g', 1, true],
+    ]);
+    expectNoSecret(r, job, list, jobLogs(r, job.job_id), calls().map((c) => ({ ...c, csv: undefined })));
+  });
+
+  it('refuses a 5g network for a chip without 5 GHz, after the probe and before anything is written', async () => {
+    const r = rig();
+    twoNetworks(r);
+    artifact(r.db, 'c6-pad', 'esp32c6', 13, 'c6aaaaaaaaaa');
+    const job = await provision(r, { profile: 'c6-pad', network: '5g' });
+    expect(job.status).toBe('failed');
+    expect(job.error).toMatchObject({ code: 'INCOMPATIBLE_PROFILE', message: expect.stringContaining('no 5 GHz radio') });
+    expect(calls().map((c) => c.cmd)).toEqual(['probe']);
+    expect(r.hub.registry.get(DEV)).toBeNull();
+    expectNoSecret(r, job, jobLogs(r, job.job_id));
+  });
+
+  it('refuses before the job a network that is not stored, and a 5g one for a registered 2.4 GHz chip', async () => {
+    const r = rig();
+    twoNetworks(r);
+    artifact(r.db, 'c6-pad', 'esp32c6', 13, 'c6aaaaaaaaaa');
+    await expect(provision(r, { profile: 'c6-pad', network: 'nope' })).rejects.toMatchObject({ code: 'NOT_FOUND', message: expect.stringContaining('stored: default, 5g') });
+    nodeBoots(r, { serial: 'frame', tcp: true });
+    expect((await provision(r, { profile: 'c6-pad' })).status).toBe('completed');
+    expect(r.hub.registry.get(DEV)!.network).toBe('default');
+    await expect(provision(r, { profile: 'c6-pad', network: '5g' })).rejects.toMatchObject({ code: 'INCOMPATIBLE_PROFILE' });
+    // flash_start's fr_ident plans take the same network and the same refusal.
+    await expect(HANDLERS.flash_start({ device: `id:${DEV}`, plan: 'identity', network: '5g', dry_run: true }, r.hub)).rejects.toMatchObject({ code: 'INCOMPATIBLE_PROFILE' });
+    await expect(HANDLERS.flash_start({ device: `id:${DEV}`, plan: 'app', network: 'default', dry_run: true }, r.hub)).rejects.toMatchObject({ code: 'INVALID_ARGS' });
+    const plan = (await HANDLERS.flash_start({ device: `id:${DEV}`, plan: 'identity', dry_run: true }, r.hub)) as { identity: Record<string, unknown> };
+    expect(plan.identity).toMatchObject({ network: 'default', band: 'auto' });
+  });
+
+  it('a device keeps its network across fr_ident writes: identity on a C5 provisioned onto 5g renders 5g again', async () => {
+    const r = rig();
+    twoNetworks(r);
+    sidecar({ probe: C5_PROBE });
+    artifact(r.db, 'c5d-csi', 'esp32c5', 23, 'c5aaaaaaaaaa');
+    nodeBoots(r, { serial: 'frame', tcp: true });
+    expect((await provision(r, { profile: 'c5d-csi', network: '5g' })).status).toBe('completed');
+    sidecar({ probe: C5_PROBE });
+    const job = (await HANDLERS.flash_start({ device: `id:${DEV}`, plan: 'identity', dry_run: false, wait_s: 30 }, r.hub)) as Job;
+    expect(job.error).toBeUndefined();
+    const nvs = calls().find((c) => c.cmd === 'nvs_gen')!;
+    expect(nvs.csv).toContain('ssid,data,string,lab-5g');
+    expect(nvs.csv).toContain('band,data,u8,2');
+    expect(job.result).toMatchObject({ identity: { network: '5g' } });
+  });
+});
+
 describe('fr_ident temp dirs (design c3 §8)', () => {
   const ID = { device_id: DEV, addr: 7, net: 41235, alias: 'pad-red-1', alias_rev: 1, epoch_floor: 1, board: 'esp32c6-supermini', profile: 'c6-pad', part_profile: 'fr-4mb-v1', prov_ts: 1 };
   const NET = { ssid: 'LabNet', pass: SECRET, hub_host: 'h.local' };

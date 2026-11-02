@@ -37,6 +37,7 @@
 #include "fr/core/core.hpp"
 #include "fr/envelope.hpp"
 #include "fr/net/air.hpp"
+#include "fr/net/limits.hpp"
 #include "fr/net/link.hpp"
 #include "fr/net/log_source.hpp"
 #include "fr/net/stores.hpp"
@@ -90,8 +91,8 @@ struct Neighbor {
     uint32_t ack_fail = 0;   // unicasts to it that failed after the link retries
 };
 
-/** Neighbours a node keeps (design c5 §3), least recently heard evicted first. */
-inline constexpr size_t kNeighborsMax = 20;
+/** Neighbours a node keeps (design c5 §3; 20, or the memory class's), least recently heard evicted first. */
+inline constexpr size_t kNeighborsMax = limits::kNeighbors;
 
 /** The neighbour table (diag `neighbors`): `count` entries. */
 struct Neighbors {
@@ -406,8 +407,10 @@ struct BenchRx {
     uint32_t age_ms = 0;  // since its newest frame
 };
 
-/** Bench sources kept (the least recently heard is forgotten). */
+/** Bench sources a report holds; Net keeps limits::kBenchSources of them (4, or the memory class's), the least
+ * recently heard forgotten first. */
 inline constexpr size_t kBenchSources = 4;
+static_assert(limits::kBenchSources <= kBenchSources);
 
 struct BenchReport {
     BenchTx tx;
@@ -471,10 +474,10 @@ class Net final : public cap::Sink
 public:
     /** Node windows on the hub's spaces (05 §5.17 FR_WINDOW_BITS_NODE). */
     static constexpr size_t kWindowBits = 128;
-    /** Responses kept for DUP requests (05 §5.8), keyed (src, epoch, req_seq). */
-    static constexpr size_t kCacheEntries = 8;
-    /** Q1 frames awaiting the hub's ACK, and STATE second copies, at once. */
-    static constexpr size_t kOutboxEntries = 8;
+    /** Responses kept for DUP requests (05 §5.8), keyed (src, epoch, req_seq); 8, or the memory class's. */
+    static constexpr size_t kCacheEntries = limits::kRespCache;
+    /** Q1 frames awaiting the hub's ACK, and STATE second copies, at once (8, or the memory class's). */
+    static constexpr size_t kOutboxEntries = limits::kOutbox;
     /** Hub LATEST (port, kind) pairs tracked. */
     static constexpr size_t kLatestPairs = 8;
     /** Delay of an on-change STATE's second copy (05 §5.8 "Double send"). */
@@ -487,8 +490,8 @@ public:
     /** A USB node whose TCP session heard nothing from the hub for more than this many tenths of an interval
      * sends over serial instead, as the hub does to it (05 §5.10; the hub's wifiSilentX10). */
     static constexpr uint32_t kWifiSilentX10 = 20;
-    /** Hub CMDs scheduled by exec_at at once (05 §5.17, design c6 D22); another answers BUSY. */
-    static constexpr size_t kExecSlots = 8;
+    /** Hub CMDs scheduled by exec_at at once (05 §5.17, design c6 D22; 8, or the memory class's); another answers BUSY. */
+    static constexpr size_t kExecSlots = limits::kExecSlots;
     /** exec_at runs a CMD at most this far ahead of its arrival (05 §5.6); further, or past, answers LATE. */
     static constexpr uint32_t kExecWindowUs = 2'000'000;
 
@@ -982,12 +985,15 @@ private:
 
     // ---- ESP-NOW and node <-> node (design c5 §3): air.cpp, peer.cpp, bindings.cpp ----
 
-    /** FR_WINDOW_SOURCES_NODE: node sources with a window (05 §5.17), least recently heard evicted first. */
-    static constexpr size_t kSourcesMax = 64;
-    /** Relays waiting for their delay at once; a frame beyond that is not relayed (relay.dropped). */
-    static constexpr size_t kRelayEntries = 8;
-    /** Node -> node frames in flight (requests awaiting a path or an answer, answers awaiting a path). */
-    static constexpr size_t kNodeOutEntries = 8;
+    /** FR_WINDOW_SOURCES_NODE: node sources with a window (05 §5.17; 64, or the memory class's), least recently
+     * heard evicted first. */
+    static constexpr size_t kSourcesMax = limits::kWindowSources;
+    /** Relays waiting for their delay at once (8, or the memory class's); a frame beyond that is not relayed
+     * (relay.dropped). */
+    static constexpr size_t kRelayEntries = limits::kRelayQueue;
+    /** Node -> node frames in flight (requests awaiting a path or an answer, answers awaiting a path; 8, or the
+     * memory class's). */
+    static constexpr size_t kNodeOutEntries = limits::kNodeOut;
     /** Sources whose flood rate is metered; the least recently metered one is forgotten first. */
     static constexpr size_t kRateSources = 8;
     /** 05 §5.9: floods per source and second at the robust rate; a full bucket allows one second's burst. */
@@ -1445,7 +1451,7 @@ private:
     uint32_t bench_open_ = 0;    // frames sent, not ended yet
     uint8_t bench_run_ = 0;      // in the bench tokens: ends of an earlier run are not this one's
     UsHistogram bench_rtt_;
-    std::array<BenchSource, kBenchSources> bench_src_{};
+    std::array<BenchSource, limits::kBenchSources> bench_src_{};  // a report holds up to kBenchSources
     TimeUs stream_due_ = kNever;
     TimeUs stream_until_ = 0;
     uint32_t stream_period_us_ = 0;

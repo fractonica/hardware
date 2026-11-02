@@ -298,6 +298,9 @@ function renderJob(job: Job): string {
       return [head, ...(err ? errorLines(err) : []), renderGateReport(report, job.job_id)].join('\n');
     }
   }
+  if (job.kind === 'csi' && job.result && typeof job.result === 'object') {
+    return [head, renderCsiStream(job.result as Row)].join('\n'); // fr csi stream (design csi-c1 D13)
+  }
   if (job.kind === 'audio' && job.result && typeof job.result === 'object' && 'from' in job.result && 'to' in job.result) {
     return [head, renderMonitor(job.result as Row)].join('\n'); // fr audio monitor (design audio-a2 D5)
   }
@@ -308,6 +311,41 @@ function renderJob(job: Job): string {
     parts.push(yamlish({ error: job.error }, '  ').replace(/^\n/, ''));
   }
   return parts.join('\n');
+}
+
+/** csi_stream's result as one summary line: records, rate, drops, how it ended, where it went. */
+function renderCsiStream(r: Row): string {
+  const n = (v: unknown) => (typeof v === 'number' ? v : 0);
+  const where = [r.path ? `file ${String(r.path)}` : null, r.live ? 'live' : null].filter(Boolean).join(', ');
+  return (
+    `${String(r.alias ?? r.device)} ${String(r.instance)} stream ${String(r.stream_id)} (${String(r.source)}${r.peer_mac ? ` from ${String(r.peer_mac)}` : ''}): ` +
+    `${n(r.records)} records in ${n(r.seconds).toFixed(1)} s (${n(r.rate_hz).toFixed(1)}/s), ${n(r.dropped)} dropped, ${n(r.blocks)} blocks, ${String(r.reason)}` +
+    (where ? `; ${where}` : '')
+  );
+}
+
+/** csi_status as two lines: the properties, then the stream's counters (or none). */
+function renderCsiStatus(r: Row): string {
+  const v = (x: unknown) => (x === null || x === undefined ? '-' : String(x));
+  const s = r.stream as Row | null;
+  return [
+    `${v(r.alias)} ${v(r.instance)}: motion ${v(r.motion)}, rssi ${v(r.rssi)} dBm, rate ${v(r.rate)}/s, source ${v(r.source)}`,
+    s
+      ? `stream ${v(s.stream_id)} (${v(s.source)}${s.job_id ? `, job ${v(s.job_id)}` : ''}): ${v(s.records)} records, ${v(s.dropped)} dropped, ${v(s.blocks)} blocks, ${v(s.subscribers)} subscribers, ${v(s.gaps)} gaps${s.path ? `, file ${v(s.path)}` : ''}`
+      : 'no stream',
+  ].join('\n');
+}
+
+/** network_list as a table (never a password: only whether one is set). */
+function renderNetworks(rows: Row[]): string {
+  if (!rows.length) {
+    return 'no network stored (fr net set --ssid <ssid> --password-stdin)';
+  }
+  const v = (x: unknown) => (x === null || x === undefined ? '-' : String(x));
+  return aligned(
+    ['NAME', 'SSID', 'BAND', 'COUNTRY', 'PASSWORD', 'DEVICES', 'NET_ID'],
+    rows.map((r) => [v(r.name), v(r.ssid), v(r.band), v(r.country), r.password_set ? 'set' : 'none', v(r.devices), v(r.net_id)]),
+  ).join('\n');
 }
 
 /** audio_monitor's result as one line (the counters it could read), and its feedback warning on the next. */
@@ -421,6 +459,12 @@ export function renderResult(op: string, r: Result): { out: string; err: string 
   }
   if (op === 'binding_clear') {
     return { out: renderBindingClear(data), err: '' };
+  }
+  if (op === 'csi_status') {
+    return { out: renderCsiStatus(data), err: '' };
+  }
+  if (op === 'network_list' && Array.isArray((data as { networks?: unknown }).networks)) {
+    return { out: renderNetworks((data as { networks: Row[] }).networks), err: '' };
   }
   if (op === 'latency_stats') {
     return { out: renderLatency(data), err: '' };

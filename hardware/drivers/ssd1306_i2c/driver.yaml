@@ -5,7 +5,7 @@ id: ssd1306_i2c
 summary: SSD1306 / SSD1306B 1-bit OLED on I2C (the hwprobe init), page-mode flush of dirty pages; the built-in mono renderer.
 implements: hal.Display
 class: fr::drv::Ssd1306I2c              # header: include/fr/drv/ssd1306_i2c.hpp
-targets: [esp32c3, esp32c6, esp32s3]
+targets: [esp32c3, esp32c5, esp32c6, esp32s3]
 binds: displays
 accepts_kinds: [ssd1306, ssd1306b]
 config:                                 # same order as Ssd1306I2c::Config

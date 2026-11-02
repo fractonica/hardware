@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parse, stringify } from 'yaml';
 
 import {
+  ADC1_FULL_SCALE_MV,
+  ADC_CONVERSIONS_HZ,
   generateFirmware,
   GLITCH_EXEMPT_DRIVES,
   headerPositions,
@@ -17,6 +19,7 @@ import {
   PROFILE_ROLES,
   resolveProfile,
   slotsLockFile,
+  SMALL_MEMORY,
   type FirmwareResult,
 } from '../src/board.ts';
 import { formatIssue, loadModel, SchemaError, type SchemaIssue } from '../src/model.ts';
@@ -85,19 +88,31 @@ function file(r: FirmwareResult, path: string): string {
   return f.content;
 }
 
+/** c6-pad as it was before CSI-1 (boot and status only): the fixture the slots.lock and validation tests edit. */
+function withoutTx(dir: string): string {
+  edit(dir, PROFILE('c6-pad'), (y) => {
+    delete y.caps.tx;
+  });
+  return dir;
+}
+
 function locked(dir: string, profile: string): Record<string, number> {
   return parse(readFileSync(join(dir, slotsLockFile(profile)), 'utf8')) as Record<string, number>;
 }
 
 /** M2-C5 (design m2-c5-display D9): the C3 OLED and S3 LCD pads gained their panel on port 3. */
 const PANELS: Readonly<Record<string, [string, number][]>> = { 'c3o-pad': [['oled', 3]], 's3l-pad': [['lcd', 3]] };
+/** CSI-1 (design csi-c1 D9): the pads gained fr.radio_tx `tx` after their other ports (c6-pad-mono did not). */
+const TX: Readonly<Record<string, [string, number][]>> = { 'c3o-pad': [['tx', 4]], 'c6-pad': [['tx', 3]], 's3l-pad': [['tx', 4]] };
+/** c6-pad's tx instance as the manifest has it (design csi-c1 D9: no bind, no config, no traits). */
+const C6_TX = { name: 'tx', port: 3, cap: 'fr.radio_tx', cap_id: 10, version: '1.0', driver: 'espnow_tx', config: {}, traits: {} };
 
 describe('the M1 profiles', () => {
   it.each(PROFILES)('%s generates against the committed slots.lock without changing it', (p) => {
     const r = generateFirmware({ sourceDir: ROOT, profile: p, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
     expect(r.slotsLockChanged).toBe(false);
     expect(r.slotsLock.content).toBe(readFileSync(join(ROOT, slotsLockFile(p)), 'utf8'));
-    expect(r.manifest.caps.map((c) => [c.name, c.port])).toEqual([['boot', 1], ['status', 2], ...(PANELS[p] ?? [])]);
+    expect(r.manifest.caps.map((c) => [c.name, c.port])).toEqual([['boot', 1], ['status', 2], ...(PANELS[p] ?? []), ...(TX[p] ?? [])]);
     expect(r.files.map((f) => f.path)).toEqual([
       'fr_board/CMakeLists.txt',
       'fr_board/include/fr/board.hpp',
@@ -139,6 +154,7 @@ describe('the M1 profiles', () => {
           config: { max_brightness: 64 },
           traits: { color: 'rgb', dimmable: true },
         },
+        C6_TX,
       ],
     });
     expect(JSON.parse(file(r, 'fr_manifest.json'))).toEqual(r.manifest);
@@ -147,15 +163,18 @@ describe('the M1 profiles', () => {
     expect(cpp).toContain('c.color_order = fr::drv::LedWs2812::ColorOrder::GRB;');
     expect(cpp).toContain('c.max_brightness = 64;');
     expect(cpp).toContain('{1, "boot", &inst_boot::service, &s_init[0], [] { return inst_boot::service.selftest(); }},');
-    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio led_ws2812)');
+    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio espnow_tx led_ws2812)');
+    // A driver that binds nothing and a capability without config (design csi-c1 D9): the service takes the driver only.
+    expect(cpp).toContain('// tx: fr.radio_tx on port 3, driver espnow_tx (no bind)\n');
+    expect(cpp).toContain('fr::drv::EspnowTx driver{kDriverConfig};\nfr::RadioTxService service{driver};\n');
     const hpp = file(r, 'fr_board/include/fr/board.hpp');
     for (const decl of ['std::span<const Instance> instances();', 'void attach(cap::Sink &sink);', 'Status init(Core &core);', 'hal::Selftest selftest(const char *name);']) {
       expect(hpp).toContain(decl);
     }
-    expect(hpp).toContain('#include "fr/services/button_service.hpp"\n#include "fr/services/led_service.hpp"');
+    expect(hpp).toContain('#include "fr/services/button_service.hpp"\n#include "fr/services/led_service.hpp"\n#include "fr/services/radio_tx_service.hpp"');
     const cmake = file(r, 'components.cmake');
     expect(cmake).toContain('"${CMAKE_CURRENT_LIST_DIR}"');
-    expect(cmake).toMatch(/hardware\/drivers\/button_gpio"\n.*hardware\/drivers\/led_ws2812"\n\)/);
+    expect(cmake).toMatch(/hardware\/drivers\/button_gpio"\n.*hardware\/drivers\/espnow_tx"\n.*hardware\/drivers\/led_ws2812"\n\)/);
     expect(cmake).not.toContain('led_gpio');
     expect(cmake).toContain('\nset(FR_PROFILE "c6-pad")\n');
   });
@@ -239,7 +258,7 @@ describe('writing', () => {
     const out = join(dir, 'build', 'c6-pad', 'fr_gen');
     const first = gen(dir, 'c6-pad');
     expect(first.slotsLockChanged).toBe(true);
-    expect(locked(dir, 'c6-pad')).toEqual({ boot: 1, status: 2 });
+    expect(locked(dir, 'c6-pad')).toEqual({ boot: 1, status: 2, tx: 3 });
     for (const f of first.files) {
       expect(readFileSync(join(out, f.path), 'utf8')).toBe(f.content);
     }
@@ -272,7 +291,7 @@ describe('slots.lock', () => {
   });
 
   it('ports survive reordering, additions and removals, and are never reused', () => {
-    const dir = fixture();
+    const dir = withoutTx(fixture());
     gen(dir, 'c6-pad');
     expect(locked(dir, 'c6-pad')).toEqual({ boot: 1, status: 2 });
 
@@ -323,7 +342,7 @@ describe('slots.lock', () => {
   });
 
   it('a hand-edited lock wins over profile order', () => {
-    const dir = fixture();
+    const dir = withoutTx(fixture());
     writeFileSync(join(dir, slotsLockFile('c6-pad')), 'status: 7\nboot: 9\n');
     const r = gen(dir, 'c6-pad');
     expect(r.slotsLockChanged).toBe(false);
@@ -385,7 +404,7 @@ describe('validation', () => {
   });
 
   it("rejects a profile that needs more of fr_core's timers or input slots than it has", () => {
-    const dir = fixture();
+    const dir = withoutTx(fixture());
     const pins = [0, 1, 2, 3, 14, 18, 19, 21]; // free pins but the test_pin (20)
     const addButtons = (n: number) =>
       edit(dir, PROFILE('c6-pad'), (y) => {
@@ -413,7 +432,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, ssd1306_i2c, st7789_spi)",
+      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, espnow_tx, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, ssd1306_i2c, st7789_spi, wifi_csi)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -441,7 +460,7 @@ describe('validation', () => {
     expect(messages(dir)).toEqual([
       "instance name 'node' is reserved (spec 03 §3.6)",
       "instance name 'Status' must be snake_case, at most 31 characters",
-      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out)',
+      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx)',
       'board esp32c6-supermini has no entry leds.nope',
     ]);
   });
@@ -476,6 +495,7 @@ describe('validation', () => {
     expect(gen(dir, 'c6-pad').manifest.caps.map((c) => c.traits)).toEqual([
       { long_press: false, multi_press_max: 3 },
       { color: 'rgb', dimmable: true },
+      {},
     ]);
     // A driver that declares nothing leaves the capability's defaults.
     edit(dir, 'hardware/drivers/led_ws2812/driver.yaml', (y) => {
@@ -551,8 +571,23 @@ describe('validation', () => {
 describe('driver manifests', () => {
   const drivers = listDrivers(ROOT);
 
-  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones and A2\'s adc_audio', () => {
-    expect(drivers).toEqual(['adc_audio', 'adc_oneshot', 'button_gpio', 'cst816_i2c', 'fixture_gpio', 'fixture_ws2812_rx', 'i2s_amp', 'i2s_mic', 'led_gpio', 'led_ws2812', 'ssd1306_i2c', 'st7789_spi']);
+  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones, A2\'s adc_audio and CSI-1\'s radio drivers', () => {
+    expect(drivers).toEqual([
+      'adc_audio',
+      'adc_oneshot',
+      'button_gpio',
+      'cst816_i2c',
+      'espnow_tx',
+      'fixture_gpio',
+      'fixture_ws2812_rx',
+      'i2s_amp',
+      'i2s_mic',
+      'led_gpio',
+      'led_ws2812',
+      'ssd1306_i2c',
+      'st7789_spi',
+      'wifi_csi',
+    ]);
   });
 
   it.each(drivers)('%s: driver.yaml matches its header and idf_component.yml', (id) => {
@@ -1319,6 +1354,7 @@ describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => 
       ['boot', 1, 'fr.button', 'button_gpio'],
       ['lcd', 2, 'fr.display', 'st7789_spi'],
       ['touch', 3, 'fr.touch', 'cst816_i2c'],
+      ['tx', 4, 'fr.radio_tx', 'espnow_tx'],
     ]);
     expect(r.manifest.test_pin).toBeNull();
     expect(r.manifest.caps[1]).toMatchObject({ config: { rotation: 'r0', brightness: 255, flush_ms: 20 }, traits: { width: 240, height: 320, color: 'rgb565', ui: true, touch: true } });
@@ -1340,7 +1376,7 @@ describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => 
     // A panel raises the core task's stack: ui_load decodes there (design m2-c5-display D3).
     expect(sdk).toContain('CONFIG_FR_CORE_TASK_STACK=16384\n');
     const hpp = file(r, 'fr_board/include/fr/board.hpp');
-    expect(hpp).toContain('#include "fr/services/display_service.hpp"\n#include "fr/services/touch_service.hpp"');
+    expect(hpp).toContain('#include "fr/services/display_service.hpp"\n#include "fr/services/radio_tx_service.hpp"\n#include "fr/services/touch_service.hpp"');
     expect(hpp).toContain('inline constexpr size_t kPanelCount = 1;\ninline constexpr Panel kPanels[] = {\n    {2, "lcd", 240, 320, 0, true, true, 3},\n};');
     expect(hpp).toContain('inline constexpr Battery kBattery{5, 3000, 3400};');
     const cpp = file(r, 'fr_board/fr_board.cpp');
@@ -1355,7 +1391,7 @@ describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => 
     expect(cpp).toContain('fr::drv::Cst816I2c driver{kDriverConfig};\nfr::TouchService service{driver, kConfig};');
     expect(cpp).toContain('    c.display = 2;\n');
     expect(cpp).toContain('{\n    inst_lcd::service.bind_touch(inst_touch::service);\n    s_init[0] = inst_boot::service.init(core);');
-    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio cst816_i2c st7789_spi fr_ui)');
+    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio cst816_i2c espnow_tx st7789_spi fr_ui)');
   });
 
   it('s3l-pad and c3o-pad: the LCD-1.9 in rgb565 with LVGL and PSRAM, the C3 OLED mono without', () => {
@@ -1378,7 +1414,7 @@ describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => 
     expect(c3cpp).toContain('fr::drv::Ssd1306I2c driver{kDriverConfig};\nfr::display::MonoBackend backend;\nfr::DisplayService service{driver, backend, kConfig};');
     expect(c3cpp).toContain('#include "fr/display/mono_backend.hpp"\n');
     expect(c3cpp).not.toContain('fr_ui');
-    expect(file(c3, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio led_gpio ssd1306_i2c)');
+    expect(file(c3, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio espnow_tx led_gpio ssd1306_i2c)');
     expect(file(s3l, 'fr_board/CMakeLists.txt')).toMatch(/PRIV_REQUIRES .*st7789_spi fr_ui\)/);
     // Other services keep their two-argument construction.
     expect(c3cpp).toContain('fr::drv::ButtonGpio driver{kDriverConfig};\nfr::ButtonService service{driver, kConfig};');
@@ -1453,6 +1489,7 @@ describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => 
       ['boot', { long_press: true, multi_press_max: 2 }],
       ['lcd', { width: 240, height: 320, color: 'rgb565', ui: true, touch: false }],
       ['touch', { width: 0, height: 0, display: 0 }],
+      ['tx', {}],
     ]);
     expect(file(r, 'fr_board/fr_board.cpp')).not.toContain('bind_touch');
   });
@@ -1643,7 +1680,7 @@ describe('audio: multi-pin binds, I2S controllers and the audio board (design au
   });
 
   it('share_with puts two instances on one controller with shared BCLK and WS (the C3/C6 duplex mode)', () => {
-    const dir = fixture();
+    const dir = withoutTx(fixture());
     c6Audio(dir, { bind: { bclk: 'gpio.0', ws: 'gpio.1', dout: 'gpio.23' } });
     expect(messages(dir, 'c6-pad')).toEqual(['i2s budget exceeded: 2 needed (mic, spk), board esp32c6-supermini has 1']);
     c6Audio(dir, { bind: { dout: 'gpio.23', sd: 'gpio.14' }, config: { share_with: 'mic' } });
@@ -1667,7 +1704,7 @@ describe('audio: multi-pin binds, I2S controllers and the audio board (design au
   });
 
   it('share_with pairs one microphone with one amplifier, never two of a kind', () => {
-    const dir = fixture();
+    const dir = withoutTx(fixture());
     // Two microphones: one controller has one RX channel.
     edit(dir, PROFILE('c6-pad'), (y) => {
       y.caps.mic = { cap: 'fr.audio_in', driver: 'i2s_mic', bind: { bclk: 'gpio.18', ws: 'gpio.19', din: 'gpio.21' } };
@@ -1838,5 +1875,133 @@ describe('A2: adc_audio, the ADC1 unit in continuous mode, and the RF detector o
       y.config.oversample.default = 12;
     });
     expect(issuesOf(() => loadDriver(dir, 'adc_audio')).map((i) => `${i.path}: ${i.message}`)).toEqual(['config.oversample.default: expected an integer in 1..8 (u8), got 12']);
+  });
+});
+
+// ---- CSI-1: the ESP32-C5, the DOIT board, fr.csi and fr.radio_tx (design csi-c1 D1, D3, D7, D9) ----
+
+describe('CSI-1: the C5 target, doit-espc5-32 and c5d-csi (design csi-c1 D1, D3, D7, D9)', () => {
+  const C5D = 'c5d-csi';
+  const C5_BOARD = 'hardware/boards/doit-espc5-32.board.yaml';
+  const messages = (dir: string, profile = C5D) => issuesOf(() => gen(dir, profile, false)).map((i) => i.message);
+
+  it('knows esp32c5 in the per-chip tables and the drivers whose peripherals it has', () => {
+    expect(ADC1_FULL_SCALE_MV.esp32c5).toBe(3300);
+    expect(ADC_CONVERSIONS_HZ.esp32c5).toBe(83_333);
+    for (const id of ['led_ws2812', 'led_gpio', 'button_gpio', 'adc_oneshot', 'adc_audio', 'i2s_mic', 'i2s_amp', 'ssd1306_i2c', 'cst816_i2c', 'wifi_csi', 'espnow_tx']) {
+      expect(loadDriver(ROOT, id).targets, id).toContain('esp32c5');
+    }
+    for (const id of ['st7789_spi', 'fixture_gpio', 'fixture_ws2812_rx']) {
+      expect(loadDriver(ROOT, id).targets, id).not.toContain('esp32c5');
+    }
+  });
+
+  it('the board manifest: esptool facts, the C5 pin map, every GPIO in one place', () => {
+    const b = loadBoardManifest(ROOT, 'doit-espc5-32') as Yaml;
+    expect(b.idf_target).toBe('esp32c5');
+    expect(b.flash).toEqual({ size: '4MB', mode: 'dio', part_profile: 'fr-4mb-v1' });
+    expect(b.psram).toBeNull();
+    expect(b.usb).toMatchObject({ kind: 'usb_serial_jtag', vid: 0x303a, pid: 0x1001, serial_is_mac: true, pins: [13, 14] });
+    expect(b.leds.rgb).toMatchObject({ gpio: 27, kind: 'ws2812', strapping: true, confidence: 'H' });
+    expect(b.buttons.boot).toMatchObject({ gpio: 28, active_level: 'low', strapping: true, confidence: 'M' });
+    expect(b.pins.reserved).toEqual({ usb: [13, 14], uart0_bridge: [11, 12], flash: [16, 17, 18, 19, 20, 21, 22] });
+    expect(b.pins.strapping).toEqual([2, 7, 25, 27, 28]);
+    expect(b.pins.adc1).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(b.resources).toEqual({ rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1, adc1_channel: 6, i2s: 1 });
+    expect(b.detection.esptool).toMatchObject({ chip_type: '^ESP32-C5', flash_size: '4MB' });
+    expect(new RegExp(b.detection.esptool.chip_type).test('ESP32-C5HF4 (revision v1.0)')).toBe(true);
+    // GPIO0-28 (SOC_GPIO_PIN_COUNT 29), each exactly once: reserved, strapping or free.
+    const all = [...Object.values(b.pins.reserved as Record<string, number[]>).flat(), ...b.pins.strapping, ...b.pins.free].sort((x, y) => x - y);
+    expect(all).toEqual([...Array(29).keys()]);
+  });
+
+  it('c5d-csi generates against the committed slots.lock: csi and tx bind nothing, CSI is turned on', () => {
+    const r = generateFirmware({ sourceDir: ROOT, profile: C5D, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+    expect(r.slotsLockChanged).toBe(false);
+    expect(r.manifest).toMatchObject({ board: 'doit-espc5-32', target: 'esp32c5', test_pin: null });
+    expect(r.manifest.caps.map((c) => [c.name, c.port, c.cap, c.cap_id, c.driver])).toEqual([
+      ['boot', 1, 'fr.button', 1, 'button_gpio'],
+      ['status', 2, 'fr.led', 2, 'led_ws2812'],
+      ['csi', 3, 'fr.csi', 9, 'wifi_csi'],
+      ['tx', 4, 'fr.radio_tx', 10, 'espnow_tx'],
+    ]);
+    expect(r.manifest.caps[1].config).toEqual({ max_brightness: 32 });
+    expect(r.manifest.caps[2].config).toEqual({ source: 'router', rate_hz: 100, format: 'auto', features_hz: 10 });
+    expect(r.instances.csi).toEqual({ bind: 'none', pins: [], driverConfig: {} });
+    const sdk = file(r, 'sdkconfig.board');
+    expect(sdk).toContain('CONFIG_IDF_TARGET="esp32c5"\n');
+    expect(sdk).toContain("# From the bound drivers' driver.yaml `sdkconfig` (design m2-c1-hil D5).\nCONFIG_ESP_WIFI_CSI_ENABLED=y\n");
+    const cpp = file(r, 'fr_board/fr_board.cpp');
+    expect(cpp).toContain('// csi: fr.csi on port 3, driver wifi_csi (no bind)\n');
+    expect(cpp).toContain('fr::drv::WifiCsi driver{kDriverConfig};\nfr::CsiService service{driver, kConfig};');
+    expect(cpp).toContain('    c.source = fr::cap::CsiSourceMode::router;\n');
+    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES button_gpio espnow_tx led_ws2812 wifi_csi)');
+    // GPIO27 (the LED) and 28 (BOOT) are strapping pins, as GPIO8/9 on the C6: warned, not refused.
+    expect(r.warnings).toEqual([expect.stringMatching(/^boot: GPIO28 \(buttons\.boot\) is a strapping pin/), expect.stringMatching(/^status: GPIO27 \(leds\.rgb\) is a strapping pin/)]);
+  });
+
+  it('a driver that binds none takes no bind, and a driver that binds something needs one', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, PROFILE(C5D), (y) => {
+      y.caps.csi.bind = 'leds.rgb';
+      delete y.caps.status.bind;
+    });
+    expect(messages(dir)).toEqual(['driver led_ws2812 needs a bind (board leds entries)', 'driver wifi_csi binds nothing: leave bind out']);
+  });
+
+  it('refuses pins, board fields and a gpio budget on a driver that binds none, and a C5-less driver on the C5', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, 'hardware/drivers/wifi_csi/driver.yaml', (y) => {
+      y.config = { gpio: { type: 'gpio', from: 'board.gpio' } };
+      y.resources = { gpio: 1 };
+      y.accepts_kinds = ['gpio'];
+    });
+    expect(issuesOf(() => loadDriver(dir, 'wifi_csi')).map((i) => `${i.path}: ${i.message}`)).toEqual([
+      'config.gpio: a driver that binds none has no pins and no board fields',
+      'resources.gpio: a driver that binds none claims no gpio',
+      'accepts_kinds: a driver that binds none accepts [none]',
+    ]);
+    const other = fixture({ locks: true });
+    edit(other, 'hardware/drivers/espnow_tx/driver.yaml', (y) => {
+      y.targets = ['esp32c3', 'esp32c6', 'esp32s3'];
+    });
+    expect(messages(other)).toEqual(['driver espnow_tx does not support esp32c5 (targets: esp32c3, esp32c6, esp32s3)']);
+  });
+
+  it('memory: small renders the sensor sizes and the IRAM options; every other profile keeps the Kconfig defaults', () => {
+    const r = generateFirmware({ sourceDir: ROOT, profile: C5D, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+    const sdk = file(r, 'sdkconfig.board');
+    expect(sdk).toContain('# memory: small (no PSRAM, one SRAM for code, data and Wi-Fi)');
+    for (const [sym, value] of SMALL_MEMORY) {
+      expect(sdk).toContain(`\n${sym}=${value}\n`);
+    }
+    expect(sdk).toContain('CONFIG_FR_WINDOW_SOURCES_NODE=16\nCONFIG_FR_DIRECTORY_MAX=16\n');
+    expect(sdk).toContain('CONFIG_ESP_WIFI_SLP_IRAM_OPT=n\n');
+    // Before the drivers' lines: wifi_csi's Wi-Fi options stay its own.
+    expect(sdk.indexOf('CONFIG_FR_CSI_BLOCK_BYTES=')).toBeLessThan(sdk.indexOf('CONFIG_ESP_WIFI_CSI_ENABLED=y'));
+    for (const p of ['c3o-pad', 'c6-pad', 's3l-pad', 's3t-pad', 's3a-audio', 's3k-fixture', 'c6g-gateway']) {
+      expect(resolveProfile(ROOT, p).fragment, p).not.toMatch(/memory: small|CONFIG_FR_WINDOW_SOURCES_NODE|CONFIG_FR_SERIAL_|IRAM_OPT/);
+    }
+    const dir = fixture({ locks: true });
+    edit(dir, PROFILE('c3o-pad'), (y) => {
+      y.memory = 'default';
+    });
+    expect(file(gen(dir, 'c3o-pad', false), 'sdkconfig.board')).not.toContain('memory: small');
+    edit(dir, PROFILE('c6g-gateway'), (y) => {
+      y.memory = 'small';
+    });
+    expect(messages(dir, 'c6g-gateway')).toEqual(["memory: small is a sensor node's class; a gateway bridges the whole fleet and keeps the full tables"]);
+    edit(dir, PROFILE('c3o-pad'), (y) => {
+      y.memory = 'tiny';
+    });
+    expect(issuesOf(() => gen(dir, 'c3o-pad', false)).map((i) => `${i.path}: ${i.message}`)).toEqual(['memory: Invalid option: expected one of "default"|"small"']);
+  });
+
+  it('every pad profile gained fr.radio_tx tx after its other ports', () => {
+    for (const [p, port] of [['c3o-pad', 4], ['c6-pad', 3], ['s3l-pad', 4], ['s3t-pad', 4]] as const) {
+      const r = generateFirmware({ sourceDir: ROOT, profile: p, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+      expect(r.slotsLockChanged, p).toBe(false);
+      expect(r.manifest.caps.at(-1), p).toEqual({ name: 'tx', port, cap: 'fr.radio_tx', cap_id: 10, version: '1.0', driver: 'espnow_tx', config: {}, traits: {} });
+    }
   });
 });

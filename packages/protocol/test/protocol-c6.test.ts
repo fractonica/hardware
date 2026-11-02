@@ -209,8 +209,9 @@ describe('codes, kinds and events (D19)', () => {
   it('names the new hub event types, with fields schemas', () => {
     const added = ['port.attached', 'port.detached', 'port.state', 'port.leased', 'port.released', 'job.state', 'hub.prompt', 'hub.prompt_done'];
     expect(HUB_EVENT_TYPES).toEqual(expect.arrayContaining(added));
-    // 17 through M1; M2-C1 adds op.called, hil.edge and hil.frame (design m2-c1-hil D9); A1 the two audio.stream_*.
-    expect(HUB_EVENT_TYPES).toHaveLength(22);
+    // 17 through M1; M2-C1 adds op.called, hil.edge and hil.frame (design m2-c1-hil D9); A1 the two audio.stream_*;
+    // CSI-1 stream.started and stream.ended.
+    expect(HUB_EVENT_TYPES).toHaveLength(24);
     expect(Object.keys(HUB_EVENT_FIELDS)).toEqual(expect.arrayContaining(added));
     const fields = (type: keyof typeof HUB_EVENT_FIELDS, f: unknown) => HUB_EVENT_FIELDS[type].safeParse(f).success;
     expect(fields('hub.prompt', { prompt_id: 'p_0a1b2c3d', text: 'Press BOOT on pad-c6', types: ['boot.down'], expires_at: '2026-10-22T12:00:30.000Z' })).toBe(true);

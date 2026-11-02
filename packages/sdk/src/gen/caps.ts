@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0x0fcffa34;
+export const CATALOG_HASH = 0xbdb52e7a;
 
 // ---- fr.button ----
 
@@ -487,6 +487,109 @@ export interface TouchProps {
   pressed: boolean;
 }
 
+// ---- fr.csi ----
+
+export type CsiSourceMode = 'router' | 'peer' | 'any';
+
+export type CsiFormat = 'auto' | 'lltf' | 'ht' | 'he';
+
+export type CsiStreamEndReason = 'stopped' | 'done' | 'net_lost' | 'overflow' | 'error';
+
+/** fr.csi.stream_start arguments (all optional: the device applies the defaults). */
+export interface CsiStreamStartArgs {
+  /** issued by the hub; the POST path names it */
+  streamId?: number;
+  /** 0: until stream_stop (s) */
+  seconds?: number;
+  /** absent: config source; for this stream only */
+  source?: CsiSourceMode;
+  /** absent: config peer_mac; for this stream only (hex, <= 6 bytes) */
+  peerMac?: string;
+}
+
+/** fr.csi.stream_stop arguments (all optional: the device applies the defaults). */
+export interface CsiStreamStopArgs {
+  streamId?: number;
+}
+
+/** fr.csi commands, as methods of an instance. */
+export interface CsiClient {
+  /** Starts streaming records to the hub over HTTP (design csi-c1 D11). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for source peer without a 6-byte peer_mac (here or in config). A connection that cannot be opened ends the stream with stream_ended net_lost (records 0). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  streamStart(args?: CsiStreamStartArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  streamStop(args?: CsiStreamStopArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** `motion`'s baseline becomes the amplitudes now (after someone left the room, or the board was moved). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  baselineReset(opts?: CallOptions): Promise<CmdResult>;
+}
+
+/** fr.csi.stream_ended event fields (normal). A stream ended: stopped (stream_stop), done (`seconds` reached), net_lost (a send stalled 3 s or the connection dropped), error (capture failed). */
+export interface CsiStreamEndedFields {
+  streamId: number;
+  reason: CsiStreamEndReason | number;
+  /** records covered by the stream, dropped ones included */
+  records: number;
+  /** records lost to ring overflows (a jump of a block's first_index) */
+  dropped: number;
+}
+
+/** fr.csi events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface CsiEvents {
+  stream_ended: CsiStreamEndedFields;
+}
+
+/** fr.csi properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface CsiState {
+  /** 0..65535: the mean absolute amplitude change against the ~2 s baseline, normalised; a still room reads low */
+  motion: number;
+  /** mean RSSI of the kept frames over the last report window (dBm) */
+  rssi: number;
+  /** CSI records kept per second over the last report window (Hz) */
+  rate: number;
+}
+
+/** fr.csi property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface CsiProps {
+  motion: number;
+  rssi: number;
+  rate: number;
+}
+
+// ---- fr.radio_tx ----
+
+/** fr.radio_tx.start arguments (all optional: the device applies the defaults). */
+export interface RadioTxStartArgs {
+  /** the receiver's station MAC (hex, <= 6 bytes) */
+  peerMac?: string;
+  /** (Hz; 1..200; default 100) */
+  rateHz?: number;
+  /** payload bytes per frame (ESP-NOW v1's limit is 250) (B; 8..250; default 32) */
+  len?: number;
+  /** 0: until stop (s) */
+  seconds?: number;
+}
+
+/** fr.radio_tx commands, as methods of an instance. */
+export interface RadioTxClient {
+  /** Starts sending (replacing a running start). INVALID_ARGS: peer_mac is not 6 bytes, or is a group address; BUSY: the station is not connected (no channel to send on). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  start(args?: RadioTxStartArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Stops sending; OK when nothing is sent. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  stop(opts?: CallOptions): Promise<CmdResult>;
+}
+
+/** fr.radio_tx events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface RadioTxEvents {}
+
+/** fr.radio_tx properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface RadioTxState {
+  /** a start runs: start to its seconds, a stop, or the station leaving its channel */
+  sending: boolean;
+}
+
+/** fr.radio_tx property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface RadioTxProps {
+  sending: boolean;
+}
+
 // ---- fr.node ----
 
 /** fr.node.identify arguments (all optional: the device applies the defaults). */
@@ -686,6 +789,8 @@ export interface CapClients {
   'fr.analog_in': AnalogInClient;
   'fr.audio_in': AudioInClient;
   'fr.touch': TouchClient;
+  'fr.csi': CsiClient;
+  'fr.radio_tx': RadioTxClient;
   'fr.node': NodeClient;
   'fr.ota': OtaClient;
   'fr.diag': DiagClient;
@@ -700,6 +805,8 @@ export interface CapEvents {
   'fr.analog_in': AnalogInEvents;
   'fr.audio_in': AudioInEvents;
   'fr.touch': TouchEvents;
+  'fr.csi': CsiEvents;
+  'fr.radio_tx': RadioTxEvents;
   'fr.node': NodeEvents;
   'fr.ota': OtaEvents;
   'fr.diag': DiagEvents;
@@ -714,6 +821,8 @@ export interface CapState {
   'fr.analog_in': AnalogInState;
   'fr.audio_in': AudioInState;
   'fr.touch': TouchState;
+  'fr.csi': CsiState;
+  'fr.radio_tx': RadioTxState;
   'fr.node': NodeState;
   'fr.ota': OtaState;
   'fr.diag': DiagState;
@@ -728,6 +837,8 @@ export interface CapProps {
   'fr.analog_in': AnalogInProps;
   'fr.audio_in': AudioInProps;
   'fr.touch': TouchProps;
+  'fr.csi': CsiProps;
+  'fr.radio_tx': RadioTxProps;
   'fr.node': NodeProps;
   'fr.ota': OtaProps;
   'fr.diag': DiagProps;
@@ -745,6 +856,8 @@ export const CAP_META: Readonly<Record<string, CapMeta>> = {
   'fr.analog_in': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true }, read: { method: 'read', delivery: 'reliable' } }, events: ['crossed'], props: ['value'] },
   'fr.audio_in': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, level_get: { method: 'levelGet', delivery: 'reliable' }, monitor_start: { method: 'monitorStart', delivery: 'reliable', args: true }, monitor_stop: { method: 'monitorStop', delivery: 'reliable' } }, events: ['stream_ended', 'monitor_ended'], props: ['level', 'streaming', 'monitoring'] },
   'fr.touch': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['down', 'up', 'gesture'], props: ['pressed'] },
+  'fr.csi': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, baseline_reset: { method: 'baselineReset', delivery: 'reliable' } }, events: ['stream_ended'], props: ['motion', 'rssi', 'rate'] },
+  'fr.radio_tx': { commands: { start: { method: 'start', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' } }, events: [], props: ['sending'] },
   'fr.node': { commands: { identify: { method: 'identify', delivery: 'reliable', args: true }, describe: { method: 'describe', delivery: 'reliable' }, reboot: { method: 'reboot', delivery: 'reliable', args: true }, set_alias: { method: 'setAlias', delivery: 'reliable', args: true }, set_groups: { method: 'setGroups', delivery: 'reliable', args: true }, net_set: { method: 'netSet', delivery: 'reliable', args: true }, get_state: { method: 'getState', delivery: 'reliable' }, bind_set: { method: 'bindSet', delivery: 'reliable', args: true }, bind_clear: { method: 'bindClear', delivery: 'reliable', args: true }, bind_list: { method: 'bindList', delivery: 'reliable' } }, events: ['boot', 'binding_fired'], props: [] },
   'fr.ota': { commands: {}, events: [], props: [] },
   'fr.diag': { commands: { exec: { method: 'exec', delivery: 'reliable', args: true } }, events: ['mark'], props: [] },

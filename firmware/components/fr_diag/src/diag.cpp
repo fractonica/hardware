@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <utility>
 
 #include "cJSON.h"
@@ -522,11 +524,15 @@ Fail cmd_log(std::string_view args, Host &, cJSON *res, size_t)
     return ok;
 }
 
-/** True when `json` prints within `room` characters (render()'s limit for the answer). Core task only. */
+/** True when `json` prints within `room` characters (render()'s limit for the answer). The scratch comes from the
+ * heap for the call (cJSON's is in use anyway): `stats` runs now and then, its 2 KB need not sit in .bss. */
 bool fits(cJSON *json, size_t room)
 {
-    static char scratch[wire::kMaxLine];
-    return room + 1 <= sizeof(scratch) && cJSON_PrintPreallocated(json, scratch, static_cast<int>(room + 1), false);
+    if (room + 1 > wire::kMaxLine) {
+        return false;
+    }
+    const std::unique_ptr<char[]> scratch(new (std::nothrow) char[room + 1]);
+    return scratch && cJSON_PrintPreallocated(json, scratch.get(), static_cast<int>(room + 1), false);
 }
 
 /**
@@ -1420,8 +1426,8 @@ size_t execute(std::string_view line, Host &host, std::span<char> out)
 
 bool can_enter_bootloader()
 {
-#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C6
-    return true;
+#if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C5
+    return true;  // restart.cpp sets each one's force-download field (C5: design csi-c1 D2)
 #else
     return false;
 #endif

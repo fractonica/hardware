@@ -11,7 +11,7 @@
 // The Wi-Fi password goes into the temp CSV and fr_ident.bin only (ident.ts); every log line, stage,
 // result and error here is built from registry and network fields that never include it.
 
-import { type DeviceRole, FrError, MAX_WAIT_S, type ProvisionWifi } from '@fractonica/protocol';
+import { DEFAULT_NETWORK, type DeviceRole, FrError, MAX_WAIT_S, type ProvisionWifi } from '@fractonica/protocol';
 import { decodePresenceHello } from '@fractonica/protocol/gen';
 import { z } from 'zod';
 
@@ -20,7 +20,7 @@ import type { HubContext } from '../context.ts';
 import { assertFixtureImage, isFixtureBuild } from '../fixture/fence.ts';
 import { flashPlan, hardResetCapturing, runPytools } from '../flash.ts';
 import type { JobCtx } from '../jobs.ts';
-import { readNetwork } from '../network.ts';
+import { checkBand, listNetworks, requireNetwork } from '../network.ts';
 import { assertPortFree, nameBusyHolder } from '../ports/holders.ts';
 import { nowUs } from '../ring.ts';
 import { helloRole, routerInfo } from '../router/index.ts';
@@ -69,6 +69,8 @@ export interface ProvisionInput {
   profile?: string;
   build?: string;
   alias?: string;
+  /** The stored network it joins (design csi-c1 D5); default: the registry row's, else `default`. */
+  network?: string;
   wait_s?: number;
 }
 
@@ -164,13 +166,23 @@ function gatewayJoin(look: () => GatewayApStatus | null, sinceMs: number, ms: nu
 export async function startProvision(input: ProvisionInput, hub: HubContext, deps: ProvisionDeps = { pytools: runPytools }): Promise<unknown> {
   // Everything that can fail without touching the board fails before the job starts.
   const alias = input.alias === undefined ? undefined : checkAlias(input.alias);
-  identNet(readNetwork(hub.db)); // ENV_MISSING, hint `fr net set` (06 §6.4 step 5)
+  // ENV_MISSING with the hint `fr net set` when no network is stored (06 §6.4 step 5); NOT_FOUND for a named one that is not.
+  identNet(input.network !== undefined ? requireNetwork(hub.db, input.network) : (listNetworks(hub.db)[0] ?? null));
   if (input.build) {
     loadManifest(hub.db, input.build);
   } else if (input.profile) {
     pickArtifact(hub, { profile: input.profile });
   }
   const entry = await hub.serial.resolveWait(input.port);
+  {
+    // The network the job will use, as far as it is known before the probe: a missing one fails now.
+    const known = isDeviceId(entry.key) ? registryOf(hub).get(entry.key) : null;
+    const net = requireNetwork(hub.db, input.network ?? known?.network ?? DEFAULT_NETWORK);
+    identNet(net);
+    if (known?.chip) {
+      checkBand(net, known.chip, known.alias); // design csi-c1 D6: refused before the job (the probe checks again)
+    }
+  }
   if (alias !== undefined) {
     const holder = registryOf(hub).byAlias(alias);
     if (holder && holder.device_id !== entry.key) {
@@ -340,6 +352,9 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
     ctx.stage('select');
     const registry = registryOf(hub);
     const known = registry.get(deviceId);
+    // Design csi-c1 D5, D6: the network it joins, and a 5 GHz-only one only for a chip with 5 GHz, before anything is written.
+    const netRecord = requireNetwork(hub.db, input.network ?? known?.network ?? DEFAULT_NETWORK);
+    checkBand(netRecord, chip, `the board on ${lease.path}`);
     const art = selectArtifact(hub, input, chip, known?.profile ?? null);
     const m = art.manifest;
     if (m.target !== chip) {
@@ -359,13 +374,12 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
     ctx.log(`artifact ${art.buildId} (${art.from})`, 'event');
 
     ctx.stage('registry');
-    const netRecord = readNetwork(hub.db);
     const net = identNet(netRecord);
     // A fixture build's row is a fixture from here, not from its first HELLO: apps and registry_rev never count it (D6).
     const role = isFixtureBuild(hub, { profile: m.profile }) ? ('fixture' as const) : undefined;
-    const prep = prepareIdentity(hub.db, { deviceId, alias: input.alias, profile: m.profile, board: m.board, chip, net: netRecord!.net_id, role });
+    const prep = prepareIdentity(hub.db, { deviceId, alias: input.alias, profile: m.profile, board: m.board, chip, net: netRecord.net_id, network: netRecord.name, role });
     const d = prep.device;
-    ctx.log(`registry: ${d.alias} addr ${d.addr} net ${d.net} alias_rev ${d.alias_rev} epoch_floor ${prep.epoch_floor}`, 'event');
+    ctx.log(`registry: ${d.alias} addr ${d.addr} net ${d.net} network ${netRecord.name} (band ${netRecord.band}) alias_rev ${d.alias_rev} epoch_floor ${prep.epoch_floor}`, 'event');
 
     ctx.stage('render');
     const prov_ts = Math.floor(Date.now() / 1000);
@@ -422,6 +436,7 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
       net: d.net!,
       hub_host: net.hub_host,
       ssid: net.ssid,
+      network: netRecord.name,
       prov_ts,
       probe: { chip: probe.chip, description: probe.description, features: probe.features, flash_size: probe.flash_size, mac: deviceId },
     };
@@ -509,6 +524,7 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
       epoch_floor: record.epoch_floor,
       hub_host: record.hub_host,
       ssid: record.ssid,
+      network: record.network ?? DEFAULT_NETWORK,
       reset,
       hello: 'serial',
       wifi,

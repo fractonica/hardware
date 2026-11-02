@@ -168,6 +168,8 @@ TEST(node_net_bindings_and_directory_persist_through_the_worker)
     const fr::net::DirEntry *e = net.directory().find(0x0034);
     REQUIRE(e != nullptr);
     CHECK_EQ(e->mac[5], 0xf5);
+    CHECK(!stores.directory_writer().holding());  // the boot's read buffers went back to the heap
+    CHECK(!stores.bindings_writer().holding());
     // The same directory again (a DIRECTORY after WELCOME): flash already holds it.
     stores.save(net.directory());
     stores.save(net.bindings());
@@ -188,10 +190,12 @@ TEST(node_net_blob_writer_newest_table_wins_while_a_write_runs)
             return size_t{1};
         };
     };
+    CHECK(!w.holding());  // no buffers before a save
     w.save(table(1));
     w.save(table(2));  // the worker has not run yet: buffer 1 is its, this goes to the other
     w.save(table(3));  // replaces 2
     CHECK_EQ(worker.pending(), 1u);
+    CHECK(w.holding());
     worker.run_all();
     core.run_ready();  // verdict of 1; 3 goes to the worker
     worker.run_all();
@@ -201,10 +205,12 @@ TEST(node_net_blob_writer_newest_table_wins_while_a_write_runs)
     CHECK_EQ(blob.history[1][0], 3);
     CHECK(!w.busy());
     CHECK_EQ(w.writes(), 2u);
+    CHECK(!w.holding());  // back to the heap once nothing is queued
     // The table flash holds already: no write (DIRECTORY repeats on every registry change).
     w.save(table(3));
     CHECK_EQ(worker.pending(), 0u);
     CHECK_EQ(w.skipped(), 1u);
+    CHECK(!w.holding());
     // An encoder that cannot fit the table writes nothing.
     w.save([](std::span<uint8_t>) { return size_t{0}; });
     CHECK_EQ(worker.pending(), 0u);

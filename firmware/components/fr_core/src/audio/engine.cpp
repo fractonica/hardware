@@ -6,62 +6,6 @@
 #include "fr/audio/rt.hpp"
 
 namespace fr::audio {
-namespace {
-
-StreamHost *s_host = nullptr;
-
-}  // namespace
-
-void format_ipv4(uint32_t ipv4, char *out, size_t len)
-{
-    std::snprintf(out, len, "%u.%u.%u.%u", static_cast<unsigned>(ipv4 >> 24), static_cast<unsigned>((ipv4 >> 16) & 0xFF),
-                  static_cast<unsigned>((ipv4 >> 8) & 0xFF), static_cast<unsigned>(ipv4 & 0xFF));
-}
-
-bool parse_ipv4(const char *text, uint32_t &out)
-{
-    if (text == nullptr) {
-        return false;
-    }
-    uint32_t v = 0;
-    const char *p = text;
-    for (int part = 0; part < 4; ++part) {
-        if (*p < '0' || *p > '9') {
-            return false;
-        }
-        uint32_t octet = 0;
-        int digits = 0;
-        while (*p >= '0' && *p <= '9') {
-            octet = octet * 10 + static_cast<uint32_t>(*p - '0');
-            if (++digits > 3 || octet > 255) {
-                return false;
-            }
-            ++p;
-        }
-        v = v << 8 | octet;
-        if (part < 3) {
-            if (*p != '.') {
-                return false;
-            }
-            ++p;
-        }
-    }
-    if (*p != '\0') {
-        return false;
-    }
-    out = v;
-    return true;
-}
-
-void set_stream_host(StreamHost *host)
-{
-    s_host = host;
-}
-
-StreamHost *stream_host()
-{
-    return s_host;
-}
 
 Engine &engine()
 {
@@ -80,30 +24,87 @@ bool Engine::make_signals()
     return audio_sig_ != nullptr && stream_sig_ != nullptr;
 }
 
+namespace {
+
+/** Adds `w` to the table [0, count) of `slots` (core task): the slot first, then the count the tasks look at. */
+template <class T, size_t N>
+bool add_to(std::array<T *, N> &slots, std::atomic<size_t> &count, T *w)
+{
+    const size_t n = count.load(std::memory_order_relaxed);  // only the core task adds
+    if (std::find(slots.begin(), slots.begin() + n, w) != slots.begin() + n) {
+        return true;
+    }
+    if (n == slots.size()) {
+        return false;
+    }
+    slots[n] = w;
+    count.store(n + 1, std::memory_order_release);
+    return true;
+}
+
+template <class T, size_t N>
+void remove_from(std::array<T *, N> &slots, std::atomic<size_t> &count, T *w)
+{
+    const size_t n = count.load(std::memory_order_relaxed);
+    auto *end = slots.begin() + n;
+    auto *it = std::find(slots.begin(), end, w);
+    if (it != end) {
+        std::copy(it + 1, end, it);
+        slots[n - 1] = nullptr;
+        count.store(n - 1, std::memory_order_release);
+    }
+}
+
+}  // namespace
+
 bool Engine::add(Worker &w)
 {
-    const size_t n = count_.load(std::memory_order_relaxed);  // only the core task adds
+    if (!make_signals()) {
+        return false;
+    }
+    const size_t n = count_.load(std::memory_order_relaxed);
     if (std::find(workers_.begin(), workers_.begin() + n, &w) != workers_.begin() + n) {
         return true;
     }
-    if (n == workers_.size() || !make_signals()) {
+    if (n == workers_.size() || stream_count_.load(std::memory_order_relaxed) == streams_.size()) {
         return false;
     }
-    workers_[n] = &w;
-    count_.store(n + 1, std::memory_order_release);  // the slot first, then the count the tasks look at
-    return true;
+    add_to(streams_, stream_count_, static_cast<stream::Worker *>(&w));
+    return add_to(workers_, count_, &w);
+}
+
+bool Engine::add_stream(stream::Worker &w)
+{
+    return make_signals() && add_to(streams_, stream_count_, &w);
 }
 
 void Engine::remove(Worker &w)
 {
-    const size_t n = count_.load(std::memory_order_relaxed);
-    auto *end = workers_.begin() + n;
-    auto *it = std::find(workers_.begin(), end, &w);
-    if (it != end) {
-        std::copy(it + 1, end, it);
-        workers_[n - 1] = nullptr;
-        count_.store(n - 1, std::memory_order_release);
+    remove_from(workers_, count_, &w);
+    remove_from(streams_, stream_count_, static_cast<stream::Worker *>(&w));
+}
+
+void Engine::remove_stream(stream::Worker &w)
+{
+    remove_from(streams_, stream_count_, &w);
+}
+
+bool Engine::start_stream()
+{
+    if (manual_ || stream_started_) {
+        return true;
     }
+    if (!make_signals()) {
+        return false;
+    }
+    stopping_.store(false, std::memory_order_relaxed);
+    // fr_stream unpinned (network-bound, below fr_audio and fr_net).
+    const Rt::TaskSpec stream{.name = "fr_stream", .priority = kStreamPriority, .stack_bytes = kStackBytes, .core0 = false};
+    if (!Rt::spawn(stream, &Engine::stream_main, this)) {
+        return false;
+    }
+    stream_started_ = true;
+    return true;
 }
 
 bool Engine::start()
@@ -111,14 +112,12 @@ bool Engine::start()
     if (manual_ || started_) {
         return true;
     }
-    if (!make_signals()) {
+    if (!make_signals() || !start_stream()) {
         return false;
     }
-    stopping_.store(false, std::memory_order_relaxed);
-    // fr_audio with Wi-Fi on core 0 (design D5), as fr_net; fr_stream unpinned (network-bound, below both).
+    // fr_audio with Wi-Fi on core 0 (design D5), as fr_net.
     const Rt::TaskSpec audio{.name = "fr_audio", .priority = kAudioPriority, .stack_bytes = kStackBytes, .core0 = true};
-    const Rt::TaskSpec stream{.name = "fr_stream", .priority = kStreamPriority, .stack_bytes = kStackBytes, .core0 = false};
-    if (!Rt::spawn(audio, &Engine::audio_main, this) || !Rt::spawn(stream, &Engine::stream_main, this)) {
+    if (!Rt::spawn(audio, &Engine::audio_main, this)) {
         return false;
     }
     started_ = true;
@@ -127,7 +126,7 @@ bool Engine::start()
 
 void Engine::stop()
 {
-    if (!started_) {
+    if (!started_ && !stream_started_) {
         return;
     }
     stopping_.store(true, std::memory_order_release);
@@ -135,6 +134,7 @@ void Engine::stop()
     wake_stream();
     Rt::join_all();
     started_ = false;
+    stream_started_ = false;
 }
 
 void Engine::wake_audio()
@@ -174,10 +174,10 @@ bool Engine::audio_once()
 
 bool Engine::stream_once()
 {
-    const size_t n = count_.load(std::memory_order_acquire);
+    const size_t n = stream_count_.load(std::memory_order_acquire);
     bool any = false;
     for (size_t i = 0; i < n; ++i) {
-        any = workers_[i]->stream_pass() || any;
+        any = streams_[i]->stream_pass() || any;
     }
     return any;
 }

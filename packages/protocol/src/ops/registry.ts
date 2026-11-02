@@ -8,12 +8,13 @@ import { z } from 'zod';
 
 import { DeviceViewSchema, PRESENCES } from '../types.ts';
 import { deviceSel, op, portSel, waitS } from './common.ts';
+import { networkName } from './network.ts';
 
 export { deviceSel } from './common.ts';
 
 /** The 09 §9.2 selector grammar, as agents read it in a field description, with the fixture rule of design m2-c1-hil D6. */
 export const SELECTOR_HELP =
-  'device selector: alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3> | profile:<p> | role:<node|gateway|fixture> | online | offline | all; "," combines (alternatives within one kind, narrowing across kinds), "!" excludes; the HIL fixture is picked only by its alias, id:, mac: or role:fixture, never by all or a "!"-only selector';
+  'device selector: alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c5|esp32c6|esp32s3> | profile:<p> | role:<node|gateway|fixture> | online | offline | all; "," combines (alternatives within one kind, narrowing across kinds), "!" excludes; the HIL fixture is picked only by its alias, id:, mac: or role:fixture, never by all or a "!"-only selector';
 
 /**
  * A gateway's bridge as this hub run sees it (design m2-c4-gateway D15, D17): hub_status `links.gateways[G]` and the
@@ -116,6 +117,7 @@ export const REGISTRY_OPS = [
       profile: z.string().optional().describe('profile to flash; default: the registry profile, else the only one built for the probed chip'),
       build: z.string().optional().describe('build_id; default: newest debug artifact of the profile'),
       alias: z.string().min(1).max(63).optional().describe('alias; default: the registry alias, else <profile>-<last 6 hex of the MAC>'),
+      network: networkName.optional().describe('the stored network it joins (network_list); default: the registry row\'s, else default'),
       wait_s: waitS,
     }),
     cli: { path: ['devices', 'provision'] },

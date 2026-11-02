@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "fr/ota/check.hpp"
 #include "fr/wire.hpp"
@@ -561,14 +562,20 @@ bool Ota::run_step()
 bool Ota::prepare()
 {
     Download &w = dl_;
+    if (!buf_) {
+        buf_.reset(new (std::nothrow) uint8_t[kChunk]);
+        if (!buf_) {
+            return fail(FailReason::download);  // no 4 KB of heap: the hub may offer it again
+        }
+    }
     Record stored;
     const bool resumable = d_.store->load(stored) && stored.state == RecState::download && stored.fw_id == w.fw &&
                            stored.size == w.size && stored.slot == info_.slot_addr && stored.off >= kCheckBytes &&
                            stored.off < w.size && stored.off % kChunk == 0;
-    if (resumable && d_.flash->read(0, std::span<uint8_t>(buf_, kCheckBytes))) {
+    if (resumable && d_.flash->read(0, std::span<uint8_t>(buf_.get(), kCheckBytes))) {
         // 06 §6.6: esp_ota_resume skips the checks esp_ota_begin makes, so CHECK runs again on the
         // descriptors the earlier download left in the slot.
-        if (auto r = check_image(std::span<const uint8_t>(buf_, kCheckBytes), w.flags, info_, d_.ident)) {
+        if (auto r = check_image(std::span<const uint8_t>(buf_.get(), kCheckBytes), w.flags, info_, d_.ident)) {
             return reject(*r);
         }
         if (d_.flash->begin(w.size, stored.off)) {
@@ -620,7 +627,7 @@ bool Ota::retry()
 bool Ota::head()
 {
     Download &w = dl_;
-    auto n = d_.fetch->read(std::span<uint8_t>(buf_ + w.buf_len, kCheckBytes - w.buf_len));
+    auto n = d_.fetch->read(std::span<uint8_t>(buf_.get() + w.buf_len, kCheckBytes - w.buf_len));
     if (!n || *n == 0) {
         return retry();  // an image is never shorter than kCheckBytes (check_offer): the body was cut
     }
@@ -629,7 +636,7 @@ bool Ota::head()
     if (w.buf_len < kCheckBytes) {
         return true;
     }
-    if (auto r = check_image(std::span<const uint8_t>(buf_, kCheckBytes), w.flags, info_, d_.ident)) {
+    if (auto r = check_image(std::span<const uint8_t>(buf_.get(), kCheckBytes), w.flags, info_, d_.ident)) {
         return reject(*r);
     }
     if (!d_.flash->begin(w.size, 0)) {
@@ -649,7 +656,7 @@ bool Ota::body()
     Download &w = dl_;
     if (w.received < w.size) {
         const size_t want = std::min<size_t>(kChunk - w.buf_len, w.size - w.received);
-        auto n = d_.fetch->read(std::span<uint8_t>(buf_ + w.buf_len, want));
+        auto n = d_.fetch->read(std::span<uint8_t>(buf_.get() + w.buf_len, want));
         if (!n || *n == 0) {
             return retry();
         }
@@ -658,7 +665,7 @@ bool Ota::body()
         w_bytes_.store(w.received, std::memory_order_relaxed);
     }
     if (w.buf_len == kChunk || (w.received == w.size && w.buf_len > 0)) {
-        if (!d_.flash->write(std::span<const uint8_t>(buf_, w.buf_len))) {
+        if (!d_.flash->write(std::span<const uint8_t>(buf_.get(), w.buf_len))) {
             return fail(FailReason::flash);
         }
         w.flashed += static_cast<uint32_t>(w.buf_len);
@@ -777,6 +784,7 @@ void Ota::close_all()
 
 void Ota::end(uint8_t what)
 {
+    buf_.reset();  // a deferred commit's install() needs no buffer
     // The last touch of dl_ by this job: the core task may start the next job as soon as it reads this.
     w_end_.store(what, std::memory_order_release);
     poke();

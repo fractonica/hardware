@@ -10,3 +10,4 @@ caps:
   lcd:   { cap: fr.display, driver: st7789_spi,  bind: displays.lcd }
   # config display: the lcd instance's port (s3t-pad.slots.lock), so touches are in its coordinates.
   touch: { cap: fr.touch,   driver: cst816_i2c,  bind: touch.tp, config: { display: 2 } }
+  tx:    { cap: fr.radio_tx, driver: espnow_tx }   # design csi-c1 D9: the peer source of a CSI receiver (no bind)

@@ -18,6 +18,8 @@
 #include "fixture.hpp"
 #include "audio_in.hpp"
 #include "touch.hpp"
+#include "csi.hpp"
+#include "radio_tx.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -82,6 +84,10 @@ cJSON *to_json(const TouchInjectArgs &v);
 cJSON *to_json(const TouchDown &v);
 cJSON *to_json(const TouchUp &v);
 cJSON *to_json(const TouchGesture &v);
+cJSON *to_json(const CsiStreamStartArgs &v);
+cJSON *to_json(const CsiStreamStopArgs &v);
+cJSON *to_json(const CsiStreamEnded &v);
+cJSON *to_json(const RadioTxStartArgs &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
 cJSON *to_json(const NodeDescribeResult &v);
 cJSON *to_json(const NodeRebootArgs &v);
@@ -913,6 +919,51 @@ cJSON *to_json(const TouchGesture &v)
     return finish(o, ok);
 }
 
+cJSON *to_json(const CsiStreamStartArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    ok = ok && add(o, "seconds", json_number(v.seconds));
+    if (v.has_source) {
+        ok = ok && add(o, "source", json_enum(v.source));
+    }
+    if (v.has_peer_mac) {
+        ok = ok && add(o, "peer_mac", json_bytes(v.peer_mac));
+    }
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CsiStreamStopArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CsiStreamEnded &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    ok = ok && add(o, "reason", json_enum(v.reason));
+    ok = ok && add(o, "records", json_number(v.records));
+    ok = ok && add(o, "dropped", json_number(v.dropped));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const RadioTxStartArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "peer_mac", json_bytes(v.peer_mac));
+    ok = ok && add(o, "rate_hz", json_number(v.rate_hz));
+    ok = ok && add(o, "len", json_number(v.len));
+    ok = ok && add(o, "seconds", json_number(v.seconds));
+    return finish(o, ok);
+}
+
 cJSON *to_json(const NodeIdentifyArgs &v)
 {
     cJSON *o = cJSON_CreateObject();
@@ -1629,6 +1680,95 @@ Status args_touch_inject(const cJSON *obj, fr::wire::Writer &w)
     return encoded(w);
 }
 
+Status args_csi_stream_start(const cJSON *obj, fr::wire::Writer &w)
+{
+    CsiStreamStartArgs v{};
+    uint8_t peer_mac_buf[6];
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "stream_id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.stream_id);
+        } else if (key == "seconds") {
+            ok = from_json_uint(it, 0xFFFF, v.seconds);
+        } else if (key == "source") {
+            v.has_source = true;
+            ok = from_json_enum(it, v.source);
+        } else if (key == "peer_mac") {
+            v.has_peer_mac = true;
+            ok = from_json_bytes(it, peer_mac_buf, v.peer_mac);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_csi_stream_stop(const cJSON *obj, fr::wire::Writer &w)
+{
+    CsiStreamStopArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "stream_id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.stream_id);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_csi_baseline_reset(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_radio_tx_start(const cJSON *obj, fr::wire::Writer &w)
+{
+    RadioTxStartArgs v{};
+    uint8_t peer_mac_buf[6];
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "peer_mac") {
+            ok = from_json_bytes(it, peer_mac_buf, v.peer_mac);
+        } else if (key == "rate_hz") {
+            ok = from_json_uint(it, 0xFFFF, v.rate_hz);
+        } else if (key == "len") {
+            ok = from_json_uint(it, 0xFFFF, v.len);
+        } else if (key == "seconds") {
+            ok = from_json_uint(it, 0xFFFF, v.seconds);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_radio_tx_stop(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
 Status args_node_identify(const cJSON *obj, fr::wire::Writer &w)
 {
     NodeIdentifyArgs v{};
@@ -2293,6 +2433,106 @@ cJSON *touch_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
     return nullptr;
 }
 
+cJSON *csi_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Csi::kCmdStreamStart:
+            return json_of(decode_csi_stream_start_args(body));
+        case Csi::kCmdStreamStop:
+            return json_of(decode_csi_stream_stop_args(body));
+        case Csi::kCmdBaselineReset:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Csi::kCmdStreamStart:
+            return json_empty(body);
+        case Csi::kCmdStreamStop:
+            return json_empty(body);
+        case Csi::kCmdBaselineReset:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Csi::kEventStreamEnded:
+            return json_of(decode_csi_stream_ended(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Csi::kPropMotion: {
+            const auto v = decode_csi_motion_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "motion", json_number(*v)));
+        }
+        case Csi::kPropRssi: {
+            const auto v = decode_csi_rssi_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "rssi", json_number(*v)));
+        }
+        case Csi::kPropRate: {
+            const auto v = decode_csi_rate_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "rate", json_number(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
+cJSON *radio_tx_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case RadioTx::kCmdStart:
+            return json_of(decode_radio_tx_start_args(body));
+        case RadioTx::kCmdStop:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case RadioTx::kCmdStart:
+            return json_empty(body);
+        case RadioTx::kCmdStop:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case RadioTx::kPropSending: {
+            const auto v = decode_radio_tx_sending_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "sending", json_bool(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
 cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
 {
     switch (cls) {
@@ -2416,6 +2656,10 @@ cJSON *traits_to_json(uint16_t cap_id, std::span<const uint8_t> traits)
         return json_of(decode_audio_in_traits(traits));
     case Touch::kId:
         return json_of(decode_touch_traits(traits));
+    case Csi::kId:
+        return json_empty(traits);
+    case RadioTx::kId:
+        return json_empty(traits);
     case Node::kId:
         return json_empty(traits);
     case Ota::kId:
@@ -2568,6 +2812,27 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_touch_inject(obj, w);
         }
         break;
+    case Csi::kId:
+        if (name == "stream_start") {
+            id = Csi::kCmdStreamStart;
+            s = args_csi_stream_start(obj, w);
+        } else if (name == "stream_stop") {
+            id = Csi::kCmdStreamStop;
+            s = args_csi_stream_stop(obj, w);
+        } else if (name == "baseline_reset") {
+            id = Csi::kCmdBaselineReset;
+            s = args_csi_baseline_reset(obj);
+        }
+        break;
+    case RadioTx::kId:
+        if (name == "start") {
+            id = RadioTx::kCmdStart;
+            s = args_radio_tx_start(obj, w);
+        } else if (name == "stop") {
+            id = RadioTx::kCmdStop;
+            s = args_radio_tx_stop(obj);
+        }
+        break;
     case Node::kId:
         if (name == "identify") {
             id = Node::kCmdIdentify;
@@ -2637,6 +2902,10 @@ cJSON *decode_to_json(uint16_t cap_id, uint8_t cls, uint8_t member_id, std::span
         return audio_in_to_json(cls, member_id, body);
     case Touch::kId:
         return touch_to_json(cls, member_id, body);
+    case Csi::kId:
+        return csi_to_json(cls, member_id, body);
+    case RadioTx::kId:
+        return radio_tx_to_json(cls, member_id, body);
     case Node::kId:
         return node_to_json(cls, member_id, body);
     case Ota::kId:

@@ -6,3 +6,4 @@ caps:
   boot:   { cap: fr.button,  driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,     driver: led_gpio,    bind: leds.status }
   oled:   { cap: fr.display, driver: ssd1306_i2c, bind: displays.oled }   # M2-C5: primitives only (design D9)
+  tx:     { cap: fr.radio_tx, driver: espnow_tx }   # design csi-c1 D9: the peer source of a CSI receiver (no bind)

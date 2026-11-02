@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const JOB_STATUSES = ['queued', 'working', 'completed', 'failed', 'cancelled'] as const;
 // msg: a repeated message_send (design c5 §4); test: test_run, latency: latency_probe (design c6 D19).
 // audio: audio_record and audio_play (design audio-a1 D8).
-export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg', 'test', 'latency', 'audio'] as const;
+export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg', 'test', 'latency', 'audio', 'csi'] as const;
 
 /**
  * Who started a job (design c6 D18): the `X-Fr-Client` request header (CLIENT_HEADER) of the call that

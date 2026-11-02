@@ -66,6 +66,7 @@ export const REGISTRY_HANDLERS: Record<RegistryOpName, Handler> = {
     return { ...v, ...(renamed ? { previous_alias: before.alias, alias_pushed: v.presence === 'online' || v.presence === 'suspect' } : {}) };
   },
 
-  device_provision: (input: { port: string; profile?: string; build?: string; alias?: string; wait_s?: number }, hub: HubContext) =>
+  // Design csi-c1 D5: onto the named network (default: the registry row's, else default); a 5g one only for a 5 GHz chip.
+  device_provision: (input: { port: string; profile?: string; build?: string; alias?: string; network?: string; wait_s?: number }, hub: HubContext) =>
     startProvision(input, hub),
 };

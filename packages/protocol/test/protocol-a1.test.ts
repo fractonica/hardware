@@ -16,8 +16,9 @@ const hashOf = (ops: readonly { name: string; input: z.ZodType }[]) =>
 
 describe('A1 ops (design audio-a1 D8)', () => {
   it('adds audio_record and audio_play as mutate jobs and audio_level as a read query, and moves REGISTRY_HASH once', () => {
-    // A2 (design audio-a2 D5) adds audio_monitor: protocol-a2.test.ts.
-    const a1 = OPS.filter((o) => o.name !== 'audio_monitor');
+    // A2 (design audio-a2 D5) adds audio_monitor: protocol-a2.test.ts; CSI-1 network_list and the csi_ ops
+    // (protocol-csi.test.ts).
+    const a1 = OPS.filter((o) => o.name !== 'audio_monitor' && o.name !== 'network_list' && !o.name.startsWith('csi_'));
     expect(a1).toHaveLength(51);
     expect(findOp('audio_record')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['audio', 'record'], positional: ['device', 'out'] } });
     expect(findOp('audio_play')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['audio', 'play'], positional: ['device', 'file'] } });
@@ -26,8 +27,9 @@ describe('A1 ops (design audio-a1 D8)', () => {
       expect(findOp(name)!.summary.length, name).toBeLessThan(1000);
       expect(hashOf(a1.filter((o) => o.name !== name)), name).not.toBe('445e6697686c');
     }
-    expect(hashOf(a1)).toBe('445e6697686c'); // A1's
-    expect(hashOf(OPS.filter((o) => !o.name.startsWith('audio_')))).toBe('afc13588b596'); // M2-C5's
+    // A1's REGISTRY_HASH was 445e6697686c and M2-C5's afc13588b596; CSI-1 changed network_set, flash_start,
+    // device_provision and the selector grammar in place, so neither can be recomputed from today's OPS.
+    expect(hashOf(a1)).not.toBe('445e6697686c');
     expect(JOB_KINDS).toContain('audio');
   });
 
@@ -62,7 +64,7 @@ describe('A1 ops (design audio-a1 D8)', () => {
   });
 
   it('adds the hub events audio.stream_started and audio.stream_ended, with fields schemas', () => {
-    expect(HUB_EVENT_TYPES.slice(-2)).toEqual(['audio.stream_started', 'audio.stream_ended']);
+    expect(HUB_EVENT_TYPES.slice(-4, -2)).toEqual(['audio.stream_started', 'audio.stream_ended']); // CSI-1 adds two after them
     const fields = (type: keyof typeof HUB_EVENT_FIELDS, f: unknown) => HUB_EVENT_FIELDS[type].safeParse(f).success;
     expect(fields('audio.stream_started', { instance: 'mic', direction: 'in', stream_id: 7, sample_hz: 16000, seconds: 10, path: '/fr/a.wav' })).toBe(true);
     expect(fields('audio.stream_ended', { instance: 'mic', direction: 'in', stream_id: 7, reason: 'net_lost', sample_hz: 16000, samples: 1600, dropped_samples: 3200 })).toBe(true);

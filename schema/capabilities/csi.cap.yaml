@@ -1,0 +1,66 @@
+capability: fr.csi
+id: 0x0009
+version: "1.0"
+summary: Wi-Fi channel state information (CSI) captured on the node, its motion and RSSI reported, its raw records streamed to the hub over a separate HTTP connection.
+doc: |
+  Design csi-c1 D7, D8, D10, D11, §12. The node keeps the CSI of the frames its source names: `router` pings the
+  default gateway rate_hz times a second and keeps the frames from the AP's BSSID; `peer` keeps the frames from
+  peer_mac (a board running fr.radio_tx); `any` keeps every frame's, its sender's MAC in the record. Capture runs from
+  the moment the station has an IP until reboot, so the properties are live without a stream; `motion` is the mean
+  absolute change of the subcarrier amplitudes against an exponential baseline (about 2 s), normalised to 0..65535,
+  reported at features_hz. Records never travel on the hub link: stream_start makes the node POST them to the hub's
+  HTTP listener (`POST /v1/stream/in/<stream_id>`, chunked, X-Fr-Kind csi, X-Fr-Format csi1; the block and record
+  layout in design csi-c1 §12), and stream_ended reports how it ended. A stream id is one the hub issued; one stream
+  at a time (BUSY otherwise). Records lost to a Wi-Fi stall are counted in `dropped`, never filled in.
+  A stream may name its own source and peer for its length (a live view switching router and peer); capture and the
+  features follow it, and return to the config's at its end.
+types:
+  SourceMode: { enum: { router: 0, peer: 1, any: 2 } }
+  # The frame formats whose CSI is asked for (wifi_csi_acquire_config_t on MAC v3 chips, wifi_csi_config_t before);
+  # auto: whatever the frames carry, LLTF always on (proposed).
+  Format: { enum: { auto: 0, lltf: 1, ht: 2, he: 3 } }
+  # As fr.audio_in's; overflow is not used (drops are counted, never fatal).
+  StreamEndReason: { enum: { stopped: 0, done: 1, net_lost: 2, overflow: 3, error: 4 } }
+config:
+  source:      { type: SourceMode, default: router, doc: "router: pings to the default gateway; peer: frames from peer_mac; any: every frame" }
+  rate_hz:     { type: u16, default: 100, range: [10, 200], unit: Hz, doc: "router: pings per second (a router may answer fewer; `rate` shows what came)" }
+  peer_mac:    { type: "array<u8>", max: 6, doc: "peer: the transmitter's station MAC, 6 bytes; empty: none (source peer then needs a stream's peer_mac)" }
+  format:      { type: Format, default: auto, doc: "the CSI asked of the hardware; auto keeps every format the frames carry" }
+  features_hz: { type: u8, default: 10, range: [1, 20], unit: Hz, doc: "`motion`, `rssi` and `rate` reports per second" }
+properties:
+  motion: { id: 1, type: u16, doc: "0..65535: the mean absolute amplitude change against the ~2 s baseline, normalised; a still room reads low" }
+  rssi:   { id: 2, type: i8, unit: dBm, doc: "mean RSSI of the kept frames over the last report window" }
+  rate:   { id: 3, type: u16, unit: Hz, doc: "CSI records kept per second over the last report window" }
+events:
+  stream_ended:
+    id: 1
+    priority: normal
+    doc: "A stream ended: stopped (stream_stop), done (`seconds` reached), net_lost (a send stalled 3 s or the connection dropped), error (capture failed)."
+    fields:
+      stream_id: { id: 1, type: u32 }
+      reason:    { id: 2, type: StreamEndReason }
+      records:   { id: 3, type: u32, doc: "records covered by the stream, dropped ones included" }
+      dropped:   { id: 4, type: u32, doc: "records lost to ring overflows (a jump of a block's first_index)" }
+commands:
+  stream_start:
+    id: 1
+    delivery: reliable
+    doc: "Starts streaming records to the hub over HTTP (design csi-c1 D11). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for source peer without a 6-byte peer_mac (here or in config). A connection that cannot be opened ends the stream with stream_ended net_lost (records 0)."
+    fields:
+      stream_id: { id: 1, type: u32, doc: "issued by the hub; the POST path names it" }
+      seconds:   { id: 2, type: u16, unit: s, doc: "0: until stream_stop" }
+      source:    { id: 3, type: SourceMode, optional: true, doc: "absent: config source; for this stream only" }
+      peer_mac:  { id: 4, type: bytes, max: 6, optional: true, doc: "absent: config peer_mac; for this stream only" }
+    examples: [ { stream_id: 1, seconds: 60 }, { stream_id: 2, seconds: 0, source: peer, peer_mac: "aabbccddeeff" } ]
+  stream_stop:
+    id: 2
+    delivery: reliable
+    idempotent: true
+    doc: Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream.
+    fields: { stream_id: { id: 1, type: u32 } }
+    examples: [ { stream_id: 1 } ]
+  baseline_reset:
+    id: 3
+    delivery: reliable
+    idempotent: true
+    doc: "`motion`'s baseline becomes the amplitudes now (after someone left the room, or the board was moved)."

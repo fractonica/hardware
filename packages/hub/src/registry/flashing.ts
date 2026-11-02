@@ -5,14 +5,14 @@
 // port: a device_provision queued ahead of it may have registered the board since the request. M2-C1
 // (design m2-c1-hil D15; stream S4): once the port's device id is known, the fixture fence's image rules.
 
-import { type ArtifactManifest, FrError, MAX_WAIT_S } from '@fractonica/protocol';
+import { type ArtifactManifest, DEFAULT_NETWORK, FrError, MAX_WAIT_S } from '@fractonica/protocol';
 
 import { loadManifest, newestBuildId } from '../artifacts.ts';
 import { profileApp } from '../build.ts';
 import type { Device, HubContext } from '../context.ts';
 import { assertFixtureImage } from '../fixture/fence.ts';
 import { type FlashPlan, flashPlan, hardResetCapturing, type IdentRegion, identRegion, type PlanName, runPytools } from '../flash.ts';
-import { readNetwork } from '../network.ts';
+import { checkBand, type NetworkRecord, requireNetwork } from '../network.ts';
 import { assertPortFree, nameBusyHolder } from '../ports/holders.ts';
 import { identNet, renderIdent, type RenderedIdent } from './ident.ts';
 import { attachedPort, isDeviceId, registryOf, resolveOne } from './hub.ts';
@@ -118,8 +118,17 @@ export interface FlashStartInput {
   build?: string;
   profile?: string;
   plan: PlanName;
+  /** The stored network fr_ident names (design csi-c1 D5); default: the device's registry network, which it then becomes. */
+  network?: string;
   dry_run: boolean;
   wait_s?: number;
+}
+
+/** The network a write of `dev`'s fr_ident names: `requested`, else its registry row's, else default; checked for its chip (D6). */
+function identNetwork(hub: Pick<HubContext, 'db'>, dev: Device | null, requested: string | undefined): NetworkRecord {
+  const net = requireNetwork(hub.db, requested ?? dev?.network ?? DEFAULT_NETWORK);
+  checkBand(net, dev?.chip, dev ? `${dev.alias} (${dev.device_id})` : 'the board');
+  return net;
 }
 
 export async function startFlash(input: FlashStartInput, hub: HubContext): Promise<unknown> {
@@ -161,12 +170,16 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
   }
   // At request time for the dry run and to fail early; the job decides again once it holds the port.
   const { writesIdent, plan } = decideIdent(hub, input.plan, dev, entry.key, art);
-  // Checked before the job: without a network record a written fr_ident could not reach the hub.
-  const network = writesIdent ? readNetwork(hub.db) : null;
-  if (writesIdent) {
-    identNet(network); // ENV_MISSING now rather than after the lease
+  if (input.network !== undefined && !writesIdent) {
+    throw new FrError('INVALID_ARGS', `plan ${input.plan} writes no fr_ident here, so --network has nothing to name (plans full for a provisioned device, identity, recover)`);
   }
-  const identity = writesIdent && dev ? { device_id: dev.device_id, addr: dev.addr, alias: dev.alias, net: network!.net_id, hub_host: network!.hub_host } : undefined;
+  // Checked before the job: without a network record a written fr_ident could not reach the hub.
+  const network = writesIdent ? identNetwork(hub, dev, input.network) : null;
+  if (network) {
+    identNet(network); // ENV_MISSING (an unreadable secrets.json) now rather than after the lease
+  }
+  const identity =
+    writesIdent && dev ? { device_id: dev.device_id, addr: dev.addr, alias: dev.alias, net: network!.net_id, network: network!.name, band: network!.band, hub_host: network!.hub_host } : undefined;
   if (input.dry_run) {
     return {
       dry_run: true,
@@ -197,7 +210,7 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
       const files = plan.files.map((f) => ({ offset: f.offset, path: f.path }));
       if (writesIdent && cur) {
         ctx.stage('identity');
-        const netRecord = readNetwork(hub.db);
+        const netRecord = identNetwork(hub, cur, input.network);
         const net = identNet(netRecord);
         // identity rewrites fr_ident only: the profile and board stay those of the firmware the device runs.
         const imageWritten = input.plan !== 'identity';
@@ -207,7 +220,8 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
           profile: imageWritten ? manifest!.profile : null,
           board: imageWritten ? manifest!.board : null,
           chip: cur.chip,
-          net: netRecord!.net_id,
+          net: netRecord.net_id,
+          network: netRecord.name,
         });
         const d = prep.device;
         const profile = imageWritten ? manifest!.profile : (d.profile ?? manifest?.profile ?? null);
@@ -223,7 +237,7 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
           region!.size,
           ctx,
         );
-        ctx.log(`fr_ident for ${d.alias}: addr ${d.addr} net ${d.net} alias_rev ${d.alias_rev} epoch_floor ${prep.epoch_floor} (${rendered.size} B)`, 'event');
+        ctx.log(`fr_ident for ${d.alias}: addr ${d.addr} net ${d.net} network ${netRecord.name} (band ${netRecord.band}) alias_rev ${d.alias_rev} epoch_floor ${prep.epoch_floor} (${rendered.size} B)`, 'event');
         files.push({ offset: plan.ident!.offset, path: rendered.path });
         record = {
           at: new Date().toISOString(),
@@ -241,6 +255,7 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
           net: d.net!,
           hub_host: net.hub_host,
           ssid: net.ssid,
+          network: netRecord.name,
           prov_ts,
         };
       }
@@ -279,7 +294,9 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
         port: lease.path,
         ...(art && input.plan !== 'identity' ? { build_id: art.buildId, fw_id: art.manifest.fw_id } : {}),
         plan: plan.plan,
-        ...(record ? { identity: { addr: record.addr, alias: record.alias, alias_rev: record.alias_rev, net: record.net, epoch_floor: record.epoch_floor } } : {}),
+        ...(record
+          ? { identity: { addr: record.addr, alias: record.alias, alias_rev: record.alias_rev, net: record.net, network: record.network ?? DEFAULT_NETWORK, epoch_floor: record.epoch_floor } }
+          : {}),
         duration_ms: Date.now() - t0,
         reset,
         sidecar: res,

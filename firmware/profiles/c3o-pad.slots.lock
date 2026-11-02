@@ -3,3 +3,4 @@
 boot: 1
 status: 2
 oled: 3
+tx: 4

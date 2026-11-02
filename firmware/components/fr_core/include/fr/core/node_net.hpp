@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <memory>
+#include <new>
 #include <span>
 #include <string_view>
 
@@ -304,7 +306,8 @@ inline bool decode_directory_blob(std::span<const uint8_t> in, net::Directory &o
  * hands the newer buffer to the worker. Only the core task touches the buffers' ownership; the worker's
  * verdict comes back through an atomic and a post (and retry(), should that post be refused). A table the
  * same as the newest one stored or on its way is not written again: the hub repeats DIRECTORY on every
- * registry change and WELCOME, and flash wears.
+ * registry change and WELCOME, and flash wears. The two buffers come from the heap for a save (or the boot's load)
+ * and go back once no write is queued or running: between writes, which are rare, the writer holds no RAM.
  */
 template <size_t N>
 class BlobWriter
@@ -318,15 +321,21 @@ public:
     template <class Encode>
     void save(Encode &&encode)
     {
-        const int b = busy_ ? 1 - writing_ : writing_;
-        const size_t len = encode(std::span<uint8_t>(bufs_[b], N));
-        if (len == 0) {
-            ++failures_;
+        if (!hold()) {
+            ++failures_;  // no heap for the buffers: the table is not stored (the hub sends it again)
             return;
         }
-        const uint32_t hash = wire::fnv1a32({bufs_[b], len});
+        const int b = busy_ ? 1 - writing_ : writing_;
+        const size_t len = encode(std::span<uint8_t>(buf(b), N));
+        if (len == 0) {
+            ++failures_;
+            release();
+            return;
+        }
+        const uint32_t hash = wire::fnv1a32({buf(b), len});
         if (have_newest_ && hash == newest_hash_ && len == newest_len_) {
             ++skipped_;
+            release();
             return;
         }
         have_newest_ = true;
@@ -350,8 +359,23 @@ public:
         }
     }
 
-    /** Before any save (boot): the idle buffer, to read the stored blob into. */
-    std::span<uint8_t> scratch() { return {bufs_[busy_ ? 1 - writing_ : writing_], N}; }
+    /** Before any save (boot): the idle buffer, to read the stored blob into (empty without heap); release() after. */
+    std::span<uint8_t> scratch()
+    {
+        if (!hold()) {
+            return {};
+        }
+        return {buf(busy_ ? 1 - writing_ : writing_), N};
+    }
+    /** The buffers go back to the heap unless a write is queued or running. */
+    void release()
+    {
+        if (!busy_) {
+            mem_.reset();
+        }
+    }
+    /** The buffers are allocated now. */
+    bool holding() const { return mem_ != nullptr; }
     /** Boot: what flash holds, so saving that same table again writes nothing. */
     void stored(std::span<const uint8_t> blob)
     {
@@ -370,7 +394,7 @@ private:
     {
         unposted_ = !worker_.post([this] {
             // fr_worker: the flash write, then the verdict to the core task.
-            const bool ok = blob_.write({bufs_[writing_], lens_[writing_]});
+            const bool ok = blob_.write({buf(writing_), lens_[writing_]});
             verdict_.store(ok ? 1 : 2, std::memory_order_release);
             core_.post([this] { collect(); });  // refused: retry() collects it
         });
@@ -392,13 +416,24 @@ private:
             writing_ = 1 - writing_;
             busy_ = true;
             post_write();
+            return;
         }
+        release();
     }
+
+    bool hold()
+    {
+        if (!mem_) {
+            mem_.reset(new (std::nothrow) uint8_t[2 * N]);
+        }
+        return mem_ != nullptr;
+    }
+    uint8_t *buf(int b) { return mem_.get() + static_cast<size_t>(b) * N; }
 
     Core &core_;
     Worker &worker_;
     Blob &blob_;
-    uint8_t bufs_[2][N] = {};
+    std::unique_ptr<uint8_t[]> mem_;  // 2 x N while held: buf(0), buf(1)
     size_t lens_[2] = {};
     int writing_ = 0;         // the buffer the worker writes (or will)
     bool busy_ = false;       // a write is queued or running
@@ -426,12 +461,13 @@ public:
     bool load(net::Directory &out) override
     {
         const std::span<uint8_t> buf = dir_.scratch();
-        const size_t n = dir_blob_.read(buf);
-        if (n == 0 || !decode_directory_blob(buf.first(n), out)) {
-            return false;
+        const size_t n = buf.empty() ? 0 : dir_blob_.read(buf);
+        const bool ok = n != 0 && decode_directory_blob(buf.first(n), out);
+        if (ok) {
+            dir_.stored(buf.first(n));
         }
-        dir_.stored(buf.first(n));
-        return true;
+        dir_.release();
+        return ok;
     }
     void save(const net::Directory &d) override
     {
@@ -440,12 +476,13 @@ public:
     bool load(net::BindingTable &out) override
     {
         const std::span<uint8_t> buf = bind_.scratch();
-        const size_t n = bind_blob_.read(buf);
-        if (n == 0 || !decode_bindings_blob(buf.first(n), out)) {
-            return false;
+        const size_t n = buf.empty() ? 0 : bind_blob_.read(buf);
+        const bool ok = n != 0 && decode_bindings_blob(buf.first(n), out);
+        if (ok) {
+            bind_.stored(buf.first(n));
         }
-        bind_.stored(buf.first(n));
-        return true;
+        bind_.release();
+        return ok;
     }
     void save(const net::BindingTable &t) override
     {

@@ -4,6 +4,7 @@
 // types its firmware has (`pad.on('boot.dwn')` does not compile). A device the registry does not type
 // (an alias devices.ts lacks, devices.on('added')) takes any instance and type.
 
+import type { Streams } from './streams.ts';
 import type { CapClients, CapEvents, CapName, CapProps, CapState } from './gen/caps.ts';
 import type { AppPresence } from './wire.ts';
 
@@ -290,6 +291,11 @@ export interface HubStats {
 
 export interface Hub<R extends Registry = Registry> {
   readonly devices: Devices<R>;
+  /**
+   * `/app/stream` (design csi-c1 D12): `subscribe(device, instance, onBlock, opts?)` gets each block of an fr.csi
+   * stream, `onBlock(block, bytes)` (parseCsiBlock's result and the exact bytes); returns the unsubscribe.
+   */
+  readonly streams: Streams;
   readonly broadcast: {
     /** A MSG to every node: the hub's fan-out plus the ESP-NOW flood (05 §5.9). */
     msg(topic: string, data?: unknown): Promise<BroadcastResult>;

@@ -74,7 +74,7 @@ BenchReport Net::bench_report() const
     if (bench_.count != 0) {
         r.tx.elapsed_ms = static_cast<uint32_t>(((bench_.running ? now : bench_end_) - bench_t0_) / 1000);
     }
-    std::array<const BenchSource *, kBenchSources> order{};
+    std::array<const BenchSource *, limits::kBenchSources> order{};
     for (const BenchSource &b : bench_src_) {
         if (b.used) {
             order[r.rx_count++] = &b;

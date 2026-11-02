@@ -7,7 +7,9 @@
 // ops/tests.ts, all spread in at the end of OPS. M2-C1 (design m2-c1-hil §3 item 7) adds ops/bench.ts
 // (bench_get), test_report in ops/tests.ts and input_simulate's layer. M2-C5 (design m2-c5-display D10) adds
 // ops/display.ts (display_snapshot, display_render) and input_simulate's touch point. A1 (design audio-a1 D8) adds
-// ops/audio.ts (audio_record, audio_play, audio_level).
+// ops/audio.ts (audio_record, audio_play, audio_level). CSI-1 (design csi-c1 D4, D5, D13) adds ops/csi.ts (csi_stream,
+// csi_status), network_list, and network names and bands (ops/network.ts) on network_set, network_get,
+// device_provision and flash_start.
 // This module loads no Node builtin: the browser entry (browser.ts) exports it, and REGISTRY_HASH,
 // which hashes it with node:crypto, lives in registry-hash.ts.
 
@@ -16,12 +18,14 @@ import { z } from 'zod';
 import { APPS_OPS } from './ops/apps.ts';
 import { AUDIO_OPS } from './ops/audio.ts';
 import { BENCH_OPS } from './ops/bench.ts';
+import { CSI_OPS } from './ops/csi.ts';
 import { DISPLAY_OPS } from './ops/display.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
 import { HUB_OPS, HubStatusSchema } from './ops/hub.ts';
 import { LINKS_OPS } from './ops/links.ts';
 import { LOGS_OPS } from './ops/logs.ts';
 import { NET_OPS, PROBE_OPS } from './ops/net.ts';
+import { DEFAULT_NETWORK, NETWORK_BANDS, NetworkSchema, networkName } from './ops/network.ts';
 import { OTA_OPS } from './ops/ota.ts';
 import { PORTS_OPS } from './ops/ports.ts';
 import { INVENTORY_OPS, REGISTRY_OPS } from './ops/registry.ts';
@@ -52,6 +56,19 @@ export {
   type AudioRecord,
 } from './ops/audio.ts';
 export { BenchStatusSchema, type BenchOpName, type BenchStatus } from './ops/bench.ts';
+export {
+  CSI_END_REASONS,
+  CSI_SOURCES,
+  CSI_STREAM_MAX_S,
+  CsiStatusSchema,
+  CsiStreamSchema,
+  type CsiEndReason,
+  type CsiOpName,
+  type CsiSourceName,
+  type CsiStatus,
+  type CsiStream,
+} from './ops/csi.ts';
+export { DEFAULT_NETWORK, NETWORK_BAND_IDENT, NETWORK_BANDS, NetworkSchema, networkName, type Network, type NetworkBand } from './ops/network.ts';
 export { cliFlag, MAX_WAIT_S, type OpDef, type OpKind, type OpTier } from './ops/common.ts';
 export {
   DISPLAY_FORMATS,
@@ -99,22 +116,36 @@ export const OPS = [
     name: 'network_set',
     kind: 'command',
     tier: 'mutate',
-    summary: 'Store the Wi-Fi network nodes join. The password is write-only (the CLI reads it from stdin with --password-stdin).',
+    summary:
+      'Store a Wi-Fi network nodes join, by name (default: the one every device joins unless provisioned with --network), with its band (2g, 5g or auto; a 5g network is for 5 GHz chips only, the ESP32-C5). Every network shares the fleet\'s net_id. The password is write-only (the CLI reads it from stdin with --password-stdin) and kept per network.',
     input: z.object({
+      name: networkName.default(DEFAULT_NETWORK),
       ssid: z.string().min(1).max(32),
       password: z.string().max(64).optional(),
       bssid: z.string().regex(/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/).optional(),
       country: z.string().length(2).optional(),
+      band: z.enum(NETWORK_BANDS).default('auto').describe('auto | 2g | 5g: the band the node joins on (esp_wifi_set_band_mode on a dual-band chip)'),
     }),
+    output: NetworkSchema,
     cli: { path: ['net', 'set'] },
   }),
   op({
     name: 'network_get',
     kind: 'query',
     tier: 'read',
-    summary: 'The stored Wi-Fi network (the password is never returned).',
-    input: z.object({}),
+    summary: 'One stored Wi-Fi network, default unless named (the password is never returned).',
+    input: z.object({ name: networkName.default(DEFAULT_NETWORK) }),
+    output: NetworkSchema,
     cli: { path: ['net', 'get'] },
+  }),
+  op({
+    name: 'network_list',
+    kind: 'query',
+    tier: 'read',
+    summary: 'Every stored Wi-Fi network with its band and how many devices join it (passwords are never returned).',
+    input: z.object({}),
+    output: z.looseObject({ networks: z.array(NetworkSchema) }),
+    cli: { path: ['net', 'ls'] },
   }),
   op({
     name: 'build_start',
@@ -159,6 +190,7 @@ export const OPS = [
       build: z.string().optional().describe('build_id; default: newest debug artifact of --profile'),
       profile: z.string().optional().describe("profile; default: the device's registry profile"),
       plan: z.enum(['app', 'full', 'identity', 'recover']).default('app'),
+      network: networkName.optional().describe("the network fr_ident names (plans full, identity, recover); default: the device's registry network, which it then becomes"),
       dry_run: z.boolean().default(false),
       wait_s: waitS,
     }),
@@ -298,6 +330,8 @@ export const OPS = [
   ...DISPLAY_OPS,
   // A1 (design audio-a1 D8): a board's microphone to a WAV on the Mac, a WAV or a tone on its speaker, its level.
   ...AUDIO_OPS,
+  // CSI-1 (design csi-c1 D13): a board's CSI records to a file and live to apps, and its features now.
+  ...CSI_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.radio_tx.start.args",
+  "title": "fr.radio_tx.start arguments",
+  "description": "Starts sending (replacing a running start). INVALID_ARGS: peer_mac is not 6 bytes, or is a group address; BUSY: the station is not connected (no channel to send on).",
+  "type": "object",
+  "properties": {
+    "peer_mac": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{2}){0,6}$",
+      "contentEncoding": "base16",
+      "description": "the receiver's station MAC (<= 6 bytes)"
+    },
+    "rate_hz": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200,
+      "description": "(Hz; 1..200)",
+      "default": 100
+    },
+    "len": {
+      "type": "integer",
+      "minimum": 8,
+      "maximum": 250,
+      "description": "payload bytes per frame (ESP-NOW v1's limit is 250) (B; 8..250)",
+      "default": 32
+    },
+    "seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "0: until stop (s)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "peer_mac": "aabbccddeeff",
+      "rate_hz": 100,
+      "seconds": 60
+    },
+    {
+      "peer_mac": "aabbccddeeff",
+      "rate_hz": 50,
+      "len": 64,
+      "seconds": 0
+    }
+  ]
+}

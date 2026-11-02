@@ -31,6 +31,26 @@ menu "Fractonica core"
             1.7 KB per copy) in nested copies before the service sees it, on any panel (a mono one answers
             UNSUPPORTED only after the decode).
 
+    # fr.csi (design csi-c1 D10, §12): CsiService's buffers, internal RAM. A profile's `memory: small` has
+    # `fr gen firmware` lower them in sdkconfig.board.
+
+    config FR_CSI_RING_BYTES
+        int "CSI record ring (bytes, a power of two)"
+        range 2048 32768
+        default 8192
+        help
+            Records on their way from the Wi-Fi task to fr_stream, allocated at init: 8 KB holds about 60 LLTF or
+            16 HE20 records (0.15-0.6 s at 100 Hz). A power of two (2048, 4096, 8192, 16384, 32768; CsiService
+            static_asserts it): the ring's byte counters run free and wrap at 2^32.
+
+    config FR_CSI_BLOCK_BYTES
+        int "CSI stream block buffer (bytes, each of two)"
+        range 2048 8192
+        default 8192
+        help
+            A stream block's buffer, at most csi::kBlockMaxBytes (the hub takes any size up to it). Both come from
+            the heap while a stream runs and go back at its end.
+
     config FR_CORE_TASK_WDT
         bool "Watch the core task with the task watchdog"
         depends on ESP_TASK_WDT_INIT

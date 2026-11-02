@@ -3,3 +3,4 @@
 boot: 1
 lcd: 2
 touch: 3
+tx: 4

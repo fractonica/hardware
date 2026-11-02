@@ -1,0 +1,14 @@
+profile: c5d-csi
+board: doit-espc5-32
+app: node
+net: { link_profile: default }
+# No PSRAM, one 384 KB SRAM for code, data and Wi-Fi (CSI-1 bench: 15 KB of heap left, Wi-Fi's management frames
+# failed): the memory class shrinks the fleet tables, the serial rings and the CSI buffers, and moves IDF code to flash.
+memory: small
+# Design csi-c1 D3, D7, D9: the CSI sensor on 5 GHz (provisioned with `--network` naming the 5 GHz network). csi takes
+# the router source by default; a stream may switch it to a peer. tx makes it a transmitter for another receiver.
+caps:
+  boot:   { cap: fr.button,   driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,      driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 32 } }
+  csi:    { cap: fr.csi,      driver: wifi_csi }    # no bind: the chip's own radio
+  tx:     { cap: fr.radio_tx, driver: espnow_tx }

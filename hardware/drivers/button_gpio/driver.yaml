@@ -5,7 +5,7 @@ id: button_gpio
 summary: Push button on one GPIO; an any-edge interrupt feeds the core input slot, ButtonService debounces.
 implements: hal.ButtonSource
 class: fr::drv::ButtonGpio              # header: include/fr/drv/button_gpio.hpp
-targets: [esp32c3, esp32c6, esp32s3]
+targets: [esp32c3, esp32c5, esp32c6, esp32s3]
 binds: buttons
 accepts_kinds: [gpio]                   # a board entry without `kind` is a plain GPIO
 config:                                 # same order as ButtonGpio::Config

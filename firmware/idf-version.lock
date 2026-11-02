@@ -5,5 +5,5 @@
     "commit": "fff9895c82d744c7237be8847347bdd1b07c6643",
     "install_hint": "~/esp/v6.1/esp-idf"
   },
-  "targets": ["esp32c3", "esp32c6", "esp32s3"]
+  "targets": ["esp32c3", "esp32c5", "esp32c6", "esp32s3"]
 }

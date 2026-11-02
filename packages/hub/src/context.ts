@@ -27,6 +27,7 @@ import type {
 } from '@fractonica/protocol';
 import type { OtaState, PresenceHeartbeat } from '@fractonica/protocol/gen';
 
+import type { StreamRoutes } from './streams/route.ts';
 import type { AudioStreams } from './audio/streams.ts';
 import type { Db } from './db.ts';
 import type { JobRunner } from './jobs.ts';
@@ -54,7 +55,7 @@ export interface Device {
   net: number | null;
   board: string | null;
   profile: string | null;
-  /** `esp32c3`, `esp32c6`, `esp32s3`. */
+  /** `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. */
   chip: string | null;
   tags: string[];
   /** HELLO role (protocol DEVICE_ROLES); `fixture` is the HIL fixture node (design m2-c1-hil D6). */
@@ -67,6 +68,11 @@ export interface Device {
   last_seen: string | null;
   last_epoch: number | null;
   created_at: string;
+  /**
+   * The stored network its fr_ident names (devices.network, design csi-c1 D5; `default` unless provisioned onto
+   * another). Always set by the registry; optional for test doubles built before csi-c1.
+   */
+  network?: string;
 }
 
 /**
@@ -352,6 +358,8 @@ export interface OtaService extends Lifecycle {
   listenError(): string | null;
   /** The audio streams on the same listener (design audio-a1 D3): the ids audio_record and audio_play issue. */
   audio?(): AudioStreams;
+  /** The generic stream route on the same listener (design csi-c1 D11): the ids csi_stream and /app/stream issue. */
+  streams?(): StreamRoutes;
 }
 
 /** A part main.ts starts once the API listens and stops before the db closes. */

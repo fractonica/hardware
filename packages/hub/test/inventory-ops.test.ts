@@ -94,7 +94,7 @@ describe('board_list and profile_list (D14)', () => {
       board: 'esp32c6-supermini',
       chip: 'esp32c6',
       app: 'node',
-      instances: { boot: { cap: 'fr.button', driver: 'button_gpio' }, status: { cap: 'fr.led', driver: 'led_ws2812' } },
+      instances: { boot: { cap: 'fr.button', driver: 'button_gpio' }, status: { cap: 'fr.led', driver: 'led_ws2812' }, tx: { cap: 'fr.radio_tx', driver: 'espnow_tx' } },
       newest_debug: { build_id: newest, fw_id: 'bb'.repeat(32), built_at: '2026-10-02T10:00:00.000Z' },
     });
     expect(out.profiles.find((p) => p.profile === 'c3o-pad')).toMatchObject({ chip: 'esp32c3' });

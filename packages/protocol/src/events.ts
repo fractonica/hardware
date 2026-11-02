@@ -7,6 +7,7 @@
 import { z } from 'zod';
 
 import { AUDIO_IN_END_REASONS, AUDIO_OUT_END_REASONS } from './ops/audio.ts';
+import { CSI_END_REASONS, CSI_SOURCES } from './ops/csi.ts';
 import { INPUT_LAYERS } from './ops/links.ts';
 import { JOB_KINDS, JOB_ORIGINS, JOB_STATUSES, PORT_STATES } from './types.ts';
 
@@ -69,6 +70,10 @@ export const HUB_EVENT_TYPES = [
   // A1 (design audio-a1 D8): a device's audio stream over the hub's node HTTP port began and ended.
   'audio.stream_started',
   'audio.stream_ended',
+  // CSI-1 (design csi-c1 D11, §12): a device's stream on the generic route (POST /v1/stream/in/<id>) began and ended.
+  // Not `csi.*`: that is the capability event space of an instance named csi (c5d-csi's).
+  'stream.started',
+  'stream.ended',
 ] as const;
 export type HubEventType = (typeof HUB_EVENT_TYPES)[number];
 
@@ -258,7 +263,40 @@ export const AudioStreamEndedFields = z.looseObject({
   job_id: z.string().optional(),
 });
 
-/** The fields schema of each hub event type C6, M2-C1 and A1 define, plus hub.warning. */
+/** The kinds of stream the generic route carries (design csi-c1 D11): the POST's X-Fr-Kind. */
+export const STREAM_KINDS = ['csi'] as const;
+export type StreamKind = (typeof STREAM_KINDS)[number];
+
+/** stream.started (design csi-c1 D11): the hub issued a stream (csi_stream, or an /app/stream subscriber) and the board's first block arrived. */
+export const StreamStartedFields = z.looseObject({
+  kind: z.enum(STREAM_KINDS),
+  instance: z.string(),
+  stream_id: z.number().int(),
+  /** The POST's X-Fr-Format: csi1. */
+  format: z.string(),
+  source: z.enum(CSI_SOURCES).optional(),
+  /** 0: until stopped. */
+  seconds: z.number().int(),
+  path: z.string().optional(),
+  live: z.boolean(),
+  job_id: z.string().optional(),
+});
+
+/** stream.ended (design csi-c1 D11): its end with the figures (the board's stream_ended, and the hub's own count); `timeout` when that never came. */
+export const StreamEndedFields = z.looseObject({
+  kind: z.enum(STREAM_KINDS),
+  instance: z.string(),
+  stream_id: z.number().int(),
+  reason: z.enum(CSI_END_REASONS),
+  records: z.number().int(),
+  dropped: z.number().int(),
+  blocks: z.number().int(),
+  seconds: z.number(),
+  path: z.string().optional(),
+  job_id: z.string().optional(),
+});
+
+/** The fields schema of each hub event type C6, M2-C1, A1 and CSI-1 define, plus hub.warning. */
 export const HUB_EVENT_FIELDS = {
   'port.attached': PortAttachedFields,
   'port.detached': PortDetachedFields,
@@ -274,4 +312,6 @@ export const HUB_EVENT_FIELDS = {
   'hil.frame': HilFrameFields,
   'audio.stream_started': AudioStreamStartedFields,
   'audio.stream_ended': AudioStreamEndedFields,
+  'stream.started': StreamStartedFields,
+  'stream.ended': StreamEndedFields,
 } as const satisfies Partial<Record<HubEventType, z.ZodType>>;

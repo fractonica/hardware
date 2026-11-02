@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.csi.stream_stop.args",
+  "title": "fr.csi.stream_stop arguments",
+  "description": "Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream.",
+  "type": "object",
+  "properties": {
+    "stream_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "stream_id": 1
+    }
+  ]
+}

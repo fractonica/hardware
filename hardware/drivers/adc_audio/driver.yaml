@@ -7,7 +7,7 @@ id: adc_audio
 summary: Any analog signal at audio rate (an RF envelope detector, a line in) on one ADC1 channel through IDF adc_continuous, oversampled and averaged down to sample_hz.
 implements: hal.AudioSource
 class: fr::drv::AdcAudio                # header: include/fr/drv/adc_audio.hpp
-targets: [esp32c3, esp32c6, esp32s3]    # all three: SOC_ADC_DMA_SUPPORTED, 83,333 conversions/s, 4-byte results (IDF v6.1 soc_caps.h); benched on the S3 only
+targets: [esp32c3, esp32c5, esp32c6, esp32s3]    # all four (the C5 since csi-c1 D1): SOC_ADC_DMA_SUPPORTED, 83,333 conversions/s, 4-byte results (IDF v6.1 soc_caps.h); benched on the S3 only
 binds: gpio                             # a bare pin: bind gpio.<n> (no board section)
 accepts_kinds: [gpio]
 config:                                 # same order as AdcAudio::Config

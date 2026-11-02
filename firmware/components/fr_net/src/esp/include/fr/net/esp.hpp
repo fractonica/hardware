@@ -33,6 +33,7 @@ struct Settings {
     fr_net_creds_t creds{};
     char country[4] = {};   // fr_ident `country`; empty: the driver default
     char hub_ip[16] = {};   // fr_ident `hub_ip`: fallback when hub_host does not resolve
+    uint8_t band = 0;       // fr_ident `band` (design csi-c1 D6): 0 auto, 1 2g, 2 5g; esp_wifi_set_band_mode after start
     uint32_t prov_ts = 0;   // fr_ident `prov_ts`: an override pushed under another provisioning is dropped
     char hostname[32] = {}; // DHCP host name (the alias)
     uint8_t mac[6] = {};    // device_id: the STA MAC must equal it (spec 06 §6.3)
@@ -173,6 +174,18 @@ bool start_air(const AirSettings &settings, const AirHooks &hooks);
 
 /** Core task. */
 AirStatus air_status();
+
+/** The end of an air_send_plain frame (core task): `ok` when the peer MAC-ACKed it. */
+using PlainDone = void (*)(void *ctx, uint32_t token, bool ok);
+
+/**
+ * Design csi-c1 D9 (espnow_tx, fr.radio_tx): `bytes` (up to 250, not an envelope) to the unicast `dst` through the
+ * scheduler: BULK (behind every Net frame), one in flight like the rest, at the band's robust rate (11b 1 Mbps on
+ * 2.4 GHz, 11a 6 Mbps on 5 GHz), with no link retry. Accepted, `done(ctx, token, ok)` follows once on the core task
+ * (the newest done/ctx given is used: one client). Refused, none follows: failed while ESP-NOW is down (no channel C),
+ * invalid_args for a group address, empty or too long, busy for a full queue or no free peer slot. Core task.
+ */
+fr::Status air_send_plain(const Mac &dst, std::span<const uint8_t> bytes, uint32_t token, PlainDone done, void *ctx);
 
 // ---- spike S2's radio hooks (design m2-c4-gateway D19; diag `air ...`, `wifi proto`), core task ----
 

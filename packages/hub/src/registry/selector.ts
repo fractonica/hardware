@@ -1,6 +1,6 @@
 // Device selectors (spec 09 §9.2):
 //   selector := term ("," term)*      term := ["!"] atom
-//   atom := <alias> | id:<12hex> | mac:<..> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3>
+//   atom := <alias> | id:<12hex> | mac:<..> | tag:<t> | board:<b> | chip:<esp32c3|esp32c5|esp32c6|esp32s3>
 //         | profile:<p> | role:<node|gateway|fixture> | online | offline | all
 // The grammar leaves how terms combine open; the registry decides it the way faceted filters work, so
 // every example in the spec reads as meant: positive atoms of one facet are alternatives (union), facets
@@ -20,7 +20,7 @@ import { DEVICE_ROLES, FrError } from '@fractonica/protocol';
 
 import type { Device, Presence } from '../context.ts';
 
-export const CHIPS = ['esp32c3', 'esp32c6', 'esp32s3'] as const;
+export const CHIPS = ['esp32c3', 'esp32c5', 'esp32c6', 'esp32s3'] as const;
 /** The `role:` values: 05 §5.7 Role, as protocol DEVICE_ROLES lists them (`fixture`: design m2-c1-hil D6). */
 const ROLES: readonly string[] = DEVICE_ROLES;
 
@@ -43,7 +43,7 @@ const HEX12 = /^[0-9a-f]{12}$/;
 
 function bad(term: string, why: string): FrError {
   return new FrError('INVALID_ARGS', `bad selector term ${JSON.stringify(term)}: ${why}`, {
-    hint: `selector := term ("," term)*, term := ["!"] alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c6|esp32s3> | profile:<p> | role:<${ROLES.join('|')}> | online | offline | all; ${FIXTURE_RULE}`,
+    hint: `selector := term ("," term)*, term := ["!"] alias | id:<12hex> | mac:<mac> | tag:<t> | board:<b> | chip:<esp32c3|esp32c5|esp32c6|esp32s3> | profile:<p> | role:<${ROLES.join('|')}> | online | offline | all; ${FIXTURE_RULE}`,
   });
 }
 

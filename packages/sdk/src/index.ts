@@ -28,6 +28,23 @@ export type * from './gen/caps.ts';
 export { camel, snake } from './case.ts';
 export { CommandError, FractonicaError, type FractonicaErrorCode } from './errors.ts';
 export { DEFAULT_URL } from './hub.ts';
+export {
+  CSI_FILE_HEAD_BYTES,
+  CSI_FILE_MAGIC,
+  CSI_FILE_VERSION,
+  csiAmplitudes,
+  csiFileHead,
+  csiFileRecord,
+  csiPhases,
+  encodeCsiBlock,
+  encodeCsiFile,
+  parseCsiBlock,
+  parseCsiFile,
+  CsiParseError,
+  type CsiBlock,
+  type CsiRecord,
+} from './csi.ts';
+export { StreamClient, streamUrl, type StreamBlockHandler, type StreamDescription, type StreamEvent, type Streams, type StreamSource, type StreamSubscribeOptions } from './streams.ts';
 export type {
   AnyDevice,
   AnyEvent,

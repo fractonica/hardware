@@ -1,0 +1,29 @@
+menu "Fractonica serial"
+
+    # The USB-Serial/JTAG rings (spec 03 §3.4, 05 §5.12.3). The defaults are every profile's; a profile's
+    # `memory: small` has `fr gen firmware` lower them in sdkconfig.board.
+
+    config FR_SERIAL_FRAME_RING
+        int "Frame ring (bytes)"
+        range 4096 8192
+        default 8192
+        help
+            Frames, diag responses and bulk ENV frames on their way to the host. It holds at least one full
+            2048-character line, plus its length.
+
+    config FR_SERIAL_LOG_RING
+        int "Log ring (bytes)"
+        range 1024 4096
+        default 4096
+        help
+            ESP_LOG lines on their way to the host; a line that does not fit is dropped and counted.
+
+    config FR_SERIAL_NET_LOG_RING
+        int "Net log ring (bytes)"
+        range 1024 4096
+        default 4096
+        help
+            Router mode (design m2-c2 D20): ESP_LOG lines on their way to the hub as LOG frames over TCP. A
+            radio-off image keeps a token one whatever this says.
+
+endmenu

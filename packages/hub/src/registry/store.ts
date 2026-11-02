@@ -10,10 +10,11 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 
-import { ArtifactManifestSchema, boardHash, type DeviceRole, FrError } from '@fractonica/protocol';
+import { ArtifactManifestSchema, boardHash, DEFAULT_NETWORK, type DeviceRole, FrError } from '@fractonica/protocol';
 
 import type { Device, HelloSeen, Presence, Registry } from '../context.ts';
 import { type Db, kvGet, kvSet } from '../db.ts';
+import { fleetNetId } from '../network.ts';
 import { aliasProblem, checkAlias, defaultAlias } from './names.ts';
 import { selectDevices } from './selector.ts';
 
@@ -22,7 +23,7 @@ export const ADDR_MIN = 0x0001;
 export const ADDR_MAX = 0xefff;
 
 /** Image header chip ids (HELLO `chip`, manifest `chip_id`) and the registry's chip names. */
-export const CHIP_IDS: Readonly<Record<string, number>> = { esp32c3: 5, esp32s3: 9, esp32c6: 13 };
+export const CHIP_IDS: Readonly<Record<string, number>> = { esp32c3: 5, esp32s3: 9, esp32c6: 13, esp32c5: 23 };
 
 export function chipName(chipId: number): string | null {
   return Object.entries(CHIP_IDS).find(([, id]) => id === chipId)?.[0] ?? null;
@@ -51,6 +52,8 @@ export interface ProvisionRecord {
   net: number;
   hub_host: string;
   ssid: string;
+  /** The stored network it names (design csi-c1 D5); absent in records from before csi-c1 (default). */
+  network?: string;
   /** fr_ident `prov_ts`: Unix seconds. */
   prov_ts: number;
   /** What the esptool probe reported (device_provision only). */
@@ -74,6 +77,8 @@ interface Row {
   last_epoch: number | null;
   created_at: string;
   provision: string | null;
+  /** Absent in a row read from a table older than csi-c1 (never after openDb). */
+  network?: string;
 }
 
 function toDevice(r: Row): Device {
@@ -100,6 +105,7 @@ function toDevice(r: Row): Device {
     last_seen: r.last_seen,
     last_epoch: r.last_epoch,
     created_at: r.created_at,
+    network: r.network ?? DEFAULT_NETWORK,
   };
 }
 
@@ -183,8 +189,8 @@ function retireHelloAddr(db: Db, hello: HelloSeen): void {
   if (hello.addr < ADDR_MIN || hello.addr > ADDR_MAX) {
     return; // 0xFFFE: UNASSIGNED
   }
-  const net = db.prepare('SELECT net_id FROM networks WHERE id = 1').get() as { net_id: number | null } | undefined;
-  if (net?.net_id == null || net.net_id !== hello.net || hello.addr <= addrHwm(db)) {
+  const netId = fleetNetId(db);
+  if (netId === null || netId !== hello.net || hello.addr <= addrHwm(db)) {
     return;
   }
   kvSet(db, 'registry.addr_hwm', String(hello.addr));
@@ -353,6 +359,8 @@ export function prepareIdentity(
     board: string | null;
     chip: string | null;
     net: number;
+    /** The stored network its fr_ident names (devices.network, design csi-c1 D5); omitted: kept (a new row: default). */
+    network?: string;
     /**
      * The role the image will HELLO with, when provisioning knows it before that HELLO (a fixture build, design
      * m2-c1-hil D6): set now, so the row is never a provisioned `node` that apps and registry_rev would count.
@@ -383,13 +391,13 @@ export function prepareIdentity(
     floor = ((r?.last_epoch ?? 0) + 1) & 0xffff || 1;
     if (!r) {
       db.prepare(
-        `INSERT INTO devices (device_id, addr, alias, alias_rev, net, board, profile, chip, role, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(p.deviceId, addr, alias, rev, p.net, p.board, p.profile, p.chip, p.role ?? 'node', new Date().toISOString());
+        `INSERT INTO devices (device_id, addr, alias, alias_rev, net, board, profile, chip, role, created_at, network) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(p.deviceId, addr, alias, rev, p.net, p.board, p.profile, p.chip, p.role ?? 'node', new Date().toISOString(), p.network ?? DEFAULT_NETWORK);
     } else {
       db.prepare(
         `UPDATE devices SET addr = ?, alias = ?, alias_rev = ?, net = ?, profile = COALESCE(?, profile), board = COALESCE(?, board),
-           chip = COALESCE(?, chip), role = COALESCE(?, role) WHERE device_id = ?`,
-      ).run(addr, alias, rev, p.net, p.profile, p.board, p.chip, p.role ?? null, p.deviceId);
+           chip = COALESCE(?, chip), role = COALESCE(?, role), network = COALESCE(?, network) WHERE device_id = ?`,
+      ).run(addr, alias, rev, p.net, p.profile, p.board, p.chip, p.role ?? null, p.network ?? null, p.deviceId);
     }
   })();
   return { device: toDevice(mustRow(db, p.deviceId)), epoch_floor: floor };

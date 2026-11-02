@@ -27,5 +27,7 @@ typedef struct {
 
 esp_err_t esp_timer_create(const esp_timer_create_args_t *args, esp_timer_handle_t *out_handle);
 esp_err_t esp_timer_start_once_at(esp_timer_handle_t timer, uint64_t alarm_us);
+/** wifi_csi's poll (design csi-c1): every `period` µs from now until stopped; INVALID_STATE while armed, as IDF's. */
+esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer, uint64_t period);
 esp_err_t esp_timer_stop(esp_timer_handle_t timer);
 int64_t esp_timer_get_time(void);

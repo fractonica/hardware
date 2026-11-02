@@ -11,6 +11,7 @@ import { HUB_API_PORT, HUB_VERSION, REGISTRY_HASH } from '@fractonica/protocol';
 
 import { createAppServer } from './apps/server.ts';
 import { sweepAudioTempsAtStart } from './audio/ops.ts';
+import { sweepCsiTempsAtStart } from './csi/ops.ts';
 import { createBindings } from './bindings/index.ts';
 import type { HubContext, HubRunOptions } from './context.ts';
 import { nextHubEpoch, nextHubRun, openDb } from './db.ts';
@@ -97,6 +98,11 @@ async function main(): Promise<void> {
   const audioTemps = sweepAudioTempsAtStart();
   if (audioTemps.length) {
     console.log(JSON.stringify({ event: 'audio_temps_removed', count: audioTemps.length }));
+  }
+  // .csi temp files of streams a killed hub left beside their `out` (csi-c1 D11).
+  const csiTemps = sweepCsiTempsAtStart();
+  if (csiTemps.length) {
+    console.log(JSON.stringify({ event: 'csi_temps_removed', count: csiTemps.length }));
   }
 
   const hubSourceDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');

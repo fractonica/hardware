@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": { "@fractonica/source": "./src/index.ts", "default": "./dist/index.js" },
-    "./wire": { "@fractonica/source": "./src/wire.ts", "default": "./dist/wire.js" }
+    "./wire": { "@fractonica/source": "./src/wire.ts", "default": "./dist/wire.js" },
+    "./csi": { "@fractonica/source": "./src/csi.ts", "default": "./dist/csi.js" }
   },
   "files": ["dist"],
   "scripts": {

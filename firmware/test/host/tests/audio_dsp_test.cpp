@@ -1,7 +1,7 @@
 // The audio services' pieces alone (design audio-a1 D1-D5): the 32 -> 16-bit conversion (gain, DC blocker and its
 // start-up glide, clipping), the level meter, the volume curve, the tone generator, the record ring's drop accounting,
 // the play ring, and fr_ota's HttpPost: the exact bytes of a chunked stream on the wire, one deadline per chunk against
-// a trickling hub, an early refusal, a refused connection.
+// a trickling hub, an early refusal, a refused connection, the connect and the answer in slices (fr.csi's).
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -552,4 +552,61 @@ TEST(http_post_early_refusal_and_refused_connect)
     CHECK_EQ(std::string(lone.error()), "connect");
     CHECK(!lone.start("hub.local", 7422, "/x", ""));
     CHECK_EQ(std::string(lone.error()), "host");
+}
+
+TEST(http_post_connect_and_answer_in_slices)
+{
+    // fr.csi's use (design csi-c1 D11): begin_start() sends nothing, pump() connects and sends the head; begin_finish()
+    // and pump_answer() end it. The same bytes on the wire as start() ... finish().
+    PostServer srv;
+    srv.serve("HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"records\":3}");
+    fr::ota::HttpPost post(3000);
+    REQUIRE(post.begin_start("127.0.0.1", srv.port, "/v1/stream/in/2", "X-Fr-Kind: csi\r\n"));
+    CHECK(post.pending());   // the head
+    CHECK(!post.answered());  // nothing read into the head's buffer while it goes
+    std::expected<bool, fr::Err> r = false;
+    for (int i = 0; i < 100 && r && !*r; ++i) {
+        r = post.pump(20);
+    }
+    REQUIRE(r && *r);
+    CHECK_EQ(post.sent(), 0u);  // the head is not body
+    REQUIRE(post.chunk(bytes("abc"), {}));
+    REQUIRE(post.begin_finish());
+    r = false;
+    int slices = 0;
+    for (; slices < 200 && r && !*r; ++slices) {
+        r = post.pump_answer(20);
+    }
+    REQUIRE(r && *r);
+    srv.join();
+    CHECK_EQ(post.status(), 200);
+    CHECK_EQ(std::string(post.body()), "{\"records\":3}");
+    CHECK(!post.open());
+    CHECK_EQ(post.sent(), 3u);
+    const std::string want = "POST /v1/stream/in/2 HTTP/1.1\r\n"
+                             "Host: 127.0.0.1:" + std::to_string(srv.port) + "\r\n"
+                             "Transfer-Encoding: chunked\r\n"
+                             "Connection: close\r\n"
+                             "X-Fr-Kind: csi\r\n"
+                             "\r\n"
+                             "3\r\nabc\r\n"
+                             "0\r\n\r\n";
+    CHECK_BYTES(bytes(srv.got), bytes(want));
+
+    // Nobody listens: the connect fails, at begin_start() or in the pump after it.
+    uint16_t port = 0;
+    {
+        PostServer gone;
+        port = gone.port;
+    }
+    fr::ota::HttpPost lone(500);
+    r = false;
+    if (lone.begin_start("127.0.0.1", port, "/v1/stream/in/1", "")) {
+        for (int i = 0; i < 100 && r && !*r; ++i) {
+            r = lone.pump(20);
+        }
+        CHECK(!r);
+    }
+    CHECK_EQ(std::string(lone.error()), "connect");
+    CHECK(!lone.open());
 }

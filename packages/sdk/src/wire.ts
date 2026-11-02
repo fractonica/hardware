@@ -298,3 +298,104 @@ export const APP_CMD_TIMEOUT_MAX_MS = 30_000;
 
 /** Reliable commands in flight per socket; beyond, the hub answers `busy` at once. */
 export const APP_MAX_IN_FLIGHT = 64;
+
+// ---- `/app/stream` (design csi-c1 D11, D12, §12): one stream's blocks to one app ----
+//
+// A second WebSocket beside `/app`, token-checked the same way: its first text frame is a StreamHelloFrame (within
+// APP_HELLO_TIMEOUT_MS, the token only there), the hub answers StreamWelcomeFrame, then sends every block of the
+// instance's stream as one binary message (exactly the bytes of one HTTP chunk of the node's POST: the block head and
+// whole records below), and text frames for the stream's life. One subscription per socket; `ping`/`pong` and the
+// close codes as on `/app` (4429: the socket's queue overflowed, which the hub avoids by dropping blocks first, see
+// StreamGapFrame). Stream H implements the hub side and the SDK's `client.streams.subscribe(device, instance, onBlock)`
+// and `parseCsiBlock()`, stream W reads it in web/csi.
+
+/** The path, beside APP_PATH. */
+export const APP_STREAM_PATH = '/app/stream';
+
+/** The first frame on `/app/stream`. */
+export interface StreamHelloFrame {
+  t: 'stream.hello';
+  v: 1;
+  token: string;
+  /** The device (alias or id) and its fr.csi instance (default: its only one). */
+  device: string;
+  instance?: string;
+  /**
+   * Start a live stream when none runs on the instance (seconds 0, ended when its last such subscriber leaves); a
+   * running stream (csi_stream's, or another app's) is joined as it is, whatever `start` says. Without `start` the
+   * socket waits for a stream to begin.
+   */
+  start?: { source?: 'router' | 'peer' | 'any'; /** For source peer: the transmitter's device (alias or id) or MAC. */ peer?: string };
+}
+
+/** A stream as `/app/stream` describes it. */
+export interface StreamInfo {
+  stream_id: number;
+  /** X-Fr-Kind and X-Fr-Format of the node's POST: csi, csi1. */
+  kind: 'csi';
+  format: 'csi1';
+  source: 'router' | 'peer' | 'any';
+  /** The peer's MAC (12 lowercase hex) for source peer. */
+  peer_mac?: string;
+  /** 0: until stopped. */
+  seconds: number;
+}
+
+export interface StreamWelcomeFrame {
+  t: 'stream.welcome';
+  v: 1;
+  device: string;
+  alias: string;
+  instance: string;
+  /** The stream running now (or the one `start` began), null while none runs. */
+  stream: StreamInfo | null;
+}
+
+/** A stream began on the instance (one the socket waited for, or the next after an end). */
+export interface StreamStartedFrame {
+  t: 'stream.started';
+  stream: StreamInfo;
+}
+
+/** The stream ended: the board's stream_ended reason and counts (`timeout` when it never came). */
+export interface StreamEndedFrame {
+  t: 'stream.ended';
+  stream_id: number;
+  reason: 'stopped' | 'done' | 'net_lost' | 'overflow' | 'error' | 'timeout';
+  records: number;
+  dropped: number;
+}
+
+/**
+ * Blocks the hub did not send to this socket (its queue was over APP_LIMITS.highWater), since the last gap frame; sent
+ * before the next block that goes out. The board's own drops show in the blocks' first_index instead.
+ */
+export interface StreamGapFrame {
+  t: 'stream.gap';
+  stream_id: number;
+  blocks: number;
+}
+
+export type StreamHubFrame = StreamWelcomeFrame | StreamStartedFrame | StreamEndedFrame | StreamGapFrame | PingFrame | PongFrame | ErrorFrame;
+
+// ---- csi1 (design csi-c1 D11, §12): the blocks of an fr.csi stream, all integers little-endian ----
+//
+// block  := seq u32 | first_index u32 | record*            (one HTTP chunk; one /app/stream binary message)
+// record := len u16 | t_us u32 | rssi i8 | noise i8 | channel u8 | bb_format u8 | flags u8 | reserved u8 (0)
+//           | mac 6 B | data i8[len]                      (data: (imaginary, real) per subcarrier, as IDF orders them)
+// seq counts the chunks of the stream from 0 without gaps (a /app/stream gap is a jump of seq); first_index is the index
+// of the block's first record since the stream began, dropped ones included (a board drop is a jump of first_index
+// past the previous block's first_index + its record count). A .csi file is the blocks as received, back to back.
+
+/** X-Fr-Format of an fr.csi stream, and its file extension's content. */
+export const CSI_FORMAT = 'csi1';
+export const CSI_BLOCK_HEAD_BYTES = 8;
+export const CSI_RECORD_HEAD_BYTES = 18;
+/** A record's longest data (kCsiDataMax in fr/hal/csi.hpp: the C5's HE20 is 490 bytes). */
+export const CSI_DATA_MAX = 512;
+/** flags bits; the others are zero. */
+export const CSI_FLAG_FIRST_WORD_INVALID = 0x01;
+export const CSI_FLAG_GROUP = 0x02;
+export const CSI_FLAG_MATCHED = 0x04;
+/** bb_format: IDF wifi_rx_bb_format_t (fr::hal::CsiBbFormat). */
+export const CSI_BB_FORMATS = { b11: 0, legacy: 1, ht: 2, vht: 3, he_su: 4, he_mu: 5, he_ersu: 6, he_tb: 7, vht_mu: 11 } as const;

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.csi.baseline_reset.args",
+  "title": "fr.csi.baseline_reset arguments",
+  "description": "`motion`'s baseline becomes the amplitudes now (after someone left the room, or the board was moved).",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

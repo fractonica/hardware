@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CSI live</title>
+  </head>
+  <body data-connected="false" data-streaming="false">
+    <header class="bar">
+      <h1>CSI live <small>Wi-Fi channel state, fr.csi</small></h1>
+      <div class="status">
+        <span id="conn" class="conn">connecting…</span>
+        <span id="stream-state" class="pill">idle</span>
+        <button id="theme" type="button" class="ghost" title="Theme: auto / light / dark">auto</button>
+      </div>
+    </header>
+    <p id="error" class="error" hidden></p>
+
+    <section class="controls" aria-label="Stream controls">
+      <label class="field">
+        <span>Sensor</span>
+        <select id="device"></select>
+      </label>
+      <fieldset class="field seg" id="source">
+        <legend>Source</legend>
+        <label><input type="radio" name="source" value="router" checked /> router</label>
+        <label><input type="radio" name="source" value="peer" /> peer</label>
+      </fieldset>
+      <button id="start" type="button" class="primary" disabled>Start</button>
+      <button id="baseline" type="button" disabled title="fr.csi baseline_reset: the board's motion reference becomes now">Reset baseline</button>
+      <div id="tx" class="tx" hidden>
+        <label class="field">
+          <span>Transmitter</span>
+          <select id="tx-device"></select>
+        </label>
+        <label class="field narrow">
+          <span>Rate (Hz)</span>
+          <input id="tx-rate" type="number" min="1" max="200" step="1" value="100" />
+        </label>
+        <button id="tx-toggle" type="button">Start transmitter</button>
+        <span id="tx-state" class="pill">off</span>
+      </div>
+      <p id="hint" class="hint wide"></p>
+    </section>
+
+    <main>
+      <section class="card heat" aria-labelledby="heat-h">
+        <div class="card-head">
+          <h2 id="heat-h">Subcarriers <small>last 10 s</small></h2>
+          <span id="kind" class="pill" data-kind="">no records</span>
+          <div class="seg small" role="group" aria-label="Heatmap values">
+            <button type="button" data-mode="amplitude" aria-pressed="true">amplitude</button>
+            <button type="button" data-mode="deviation" aria-pressed="false">deviation</button>
+          </div>
+        </div>
+        <div class="heat-wrap">
+          <div class="axis-y"><span id="row-top">–</span><span class="axis-label">subcarrier</span><span id="row-bottom">–</span></div>
+          <canvas id="heatmap" aria-label="Subcarrier amplitude heatmap"></canvas>
+        </div>
+        <div class="axis-x"><span>−10 s</span><span id="kinds-seen" class="hint"></span><span>now</span></div>
+        <div class="legend"><output id="lo">–</output><span id="gradient" class="gradient"></span><output id="hi">–</output></div>
+      </section>
+
+      <section class="card" aria-labelledby="motion-h">
+        <div class="card-head">
+          <h2 id="motion-h">Motion <small>last 30 s</small></h2>
+          <span class="key"><i style="background: var(--c-motion)"></i>app <output id="motion-app">–</output></span>
+          <span class="key"><i class="dash" style="border-color: var(--c-board)"></i>board <output id="motion-board">–</output></span>
+        </div>
+        <canvas id="plot-motion" class="plot"></canvas>
+        <p class="hint">App: mean |amplitude − 2 s baseline| / baseline. Board: the <code>motion</code> property (own scale). Dashed line: the stillness threshold.</p>
+      </section>
+
+      <section class="card" aria-labelledby="link-h">
+        <div class="card-head">
+          <h2 id="link-h">Link <small>last 30 s</small></h2>
+          <span class="key"><i style="background: var(--c-rssi)"></i>RSSI <output id="rssi">–</output></span>
+          <span class="key"><i style="background: var(--c-rate)"></i>records/s <output id="rate">–</output></span>
+        </div>
+        <canvas id="plot-rssi" class="plot half"></canvas>
+        <canvas id="plot-rate" class="plot half"></canvas>
+        <dl class="counters">
+          <div><dt>records</dt><dd id="records" data-n="0">0</dd></div>
+          <div><dt>board drops</dt><dd id="drops" data-n="0">0</dd></div>
+          <div><dt>hub gaps</dt><dd id="gaps" data-n="0">0</dd></div>
+          <div><dt>board rate</dt><dd id="board-rate">–</dd></div>
+          <div><dt>channel</dt><dd id="channel">–</dd></div>
+          <div><dt>stream</dt><dd id="stream-id">–</dd></div>
+        </dl>
+      </section>
+
+      <section class="card breath" aria-labelledby="breath-h">
+        <div class="card-head">
+          <h2 id="breath-h">Breathing <small>last 30 s, 0.1–0.6 Hz</small></h2>
+          <label class="field inline">
+            <span>still below</span>
+            <input id="still" type="number" min="0.001" max="1" step="0.005" value="0.04" />
+          </label>
+        </div>
+        <div class="breath-main">
+          <div class="bpm"><output id="bpm" data-bpm="" data-confidence="">–</output><span>breaths/min</span></div>
+          <div class="conf">
+            <div class="meter"><span id="conf-bar"></span></div>
+            <span>confidence <output id="conf">–</output></span>
+          </div>
+        </div>
+        <p id="breath-state" class="hint">waiting for a stream</p>
+        <canvas id="plot-breath" class="plot small"></canvas>
+        <p class="hint">Subcarriers used: <span id="breath-subs">–</span></p>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

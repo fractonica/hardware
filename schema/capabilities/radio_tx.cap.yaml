@@ -1,0 +1,29 @@
+capability: fr.radio_tx
+id: 0x000A
+version: "1.0"
+summary: A transmitter that sends ESP-NOW frames at a fixed rate toward one station, as the sensed source of a CSI receiver.
+doc: |
+  Design csi-c1 D9. start sends ESP-NOW unicast frames of `len` bytes to peer_mac rate_hz times a second, at the robust
+  rate of the band (2.4 GHz: 11b 1 Mbps; 5 GHz: 11a 6 Mbps), on the channel the node's station is on, for `seconds`;
+  the receiver's fr.csi with source peer keeps their CSI. Frames carry no meaning (a sequence number, then zeros); a
+  frame the peer does not acknowledge is not sent again. Both boards must be on one channel: on 2.4 GHz any two nodes
+  of the fleet's network, on 5 GHz two 5 GHz-capable ones (a second C5). One run at a time: a start replaces the
+  running one. `sending` follows it.
+properties:
+  sending: { id: 1, type: bool, doc: "a start runs: start to its seconds, a stop, or the station leaving its channel" }
+commands:
+  start:
+    id: 1
+    delivery: reliable
+    doc: "Starts sending (replacing a running start). INVALID_ARGS: peer_mac is not 6 bytes, or is a group address; BUSY: the station is not connected (no channel to send on)."
+    fields:
+      peer_mac: { id: 1, type: bytes, max: 6, doc: "the receiver's station MAC" }
+      rate_hz:  { id: 2, type: u16, default: 100, range: [1, 200], unit: Hz }
+      len:      { id: 3, type: u16, default: 32, range: [8, 250], unit: B, doc: "payload bytes per frame (ESP-NOW v1's limit is 250)" }
+      seconds:  { id: 4, type: u16, unit: s, doc: "0: until stop" }
+    examples: [ { peer_mac: "aabbccddeeff", rate_hz: 100, seconds: 60 }, { peer_mac: "aabbccddeeff", rate_hz: 50, len: 64, seconds: 0 } ]
+  stop:
+    id: 2
+    delivery: reliable
+    idempotent: true
+    doc: Stops sending; OK when nothing is sent.

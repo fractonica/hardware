@@ -55,6 +55,7 @@ typedef struct {
     fr_net_creds_t creds;
     char country[4];   // ISO code (`LV`); empty: the driver default
     char hub_ip[16];   // dotted IPv4 fallback for hub_host; empty: none
+    uint8_t band;      // `band` (design csi-c1 D6): 0 auto (also when absent), 1 2g, 2 5g
     uint32_t prov_ts;  // 0 when fr_ident carries none
 } fr_net_config_t;
 

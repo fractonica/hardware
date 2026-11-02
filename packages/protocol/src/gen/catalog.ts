@@ -1877,6 +1877,303 @@ export const CATALOG: Catalog = {
       ]
     },
     {
+      "id": 9,
+      "name": "fr.csi",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "Wi-Fi channel state information (CSI) captured on the node, its motion and RSSI reported, its raw records streamed to the hub over a separate HTTP connection.",
+      "doc": "Design csi-c1 D7, D8, D10, D11, §12. The node keeps the CSI of the frames its source names: `router` pings the\ndefault gateway rate_hz times a second and keeps the frames from the AP's BSSID; `peer` keeps the frames from\npeer_mac (a board running fr.radio_tx); `any` keeps every frame's, its sender's MAC in the record. Capture runs from\nthe moment the station has an IP until reboot, so the properties are live without a stream; `motion` is the mean\nabsolute change of the subcarrier amplitudes against an exponential baseline (about 2 s), normalised to 0..65535,\nreported at features_hz. Records never travel on the hub link: stream_start makes the node POST them to the hub's\nHTTP listener (`POST /v1/stream/in/<stream_id>`, chunked, X-Fr-Kind csi, X-Fr-Format csi1; the block and record\nlayout in design csi-c1 §12), and stream_ended reports how it ended. A stream id is one the hub issued; one stream\nat a time (BUSY otherwise). Records lost to a Wi-Fi stall are counted in `dropped`, never filled in.\nA stream may name its own source and peer for its length (a live view switching router and peer); capture and the\nfeatures follow it, and return to the config's at its end.\n",
+      "types": {
+        "SourceMode": {
+          "router": 0,
+          "peer": 1,
+          "any": 2
+        },
+        "Format": {
+          "auto": 0,
+          "lltf": 1,
+          "ht": 2,
+          "he": 3
+        },
+        "StreamEndReason": {
+          "stopped": 0,
+          "done": 1,
+          "net_lost": 2,
+          "overflow": 3,
+          "error": 4
+        }
+      },
+      "traits": [],
+      "config": [
+        {
+          "name": "source",
+          "type": "SourceMode",
+          "default": "router",
+          "doc": "router: pings to the default gateway; peer: frames from peer_mac; any: every frame"
+        },
+        {
+          "name": "rate_hz",
+          "type": "u16",
+          "default": 100,
+          "range": [
+            10,
+            200
+          ],
+          "unit": "Hz",
+          "doc": "router: pings per second (a router may answer fewer; `rate` shows what came)"
+        },
+        {
+          "name": "peer_mac",
+          "type": "array<u8>",
+          "max": 6,
+          "doc": "peer: the transmitter's station MAC, 6 bytes; empty: none (source peer then needs a stream's peer_mac)"
+        },
+        {
+          "name": "format",
+          "type": "Format",
+          "default": "auto",
+          "doc": "the CSI asked of the hardware; auto keeps every format the frames carry"
+        },
+        {
+          "name": "features_hz",
+          "type": "u8",
+          "default": 10,
+          "range": [
+            1,
+            20
+          ],
+          "unit": "Hz",
+          "doc": "`motion`, `rssi` and `rate` reports per second"
+        }
+      ],
+      "properties": [
+        {
+          "name": "motion",
+          "id": 1,
+          "type": "u16",
+          "doc": "0..65535: the mean absolute amplitude change against the ~2 s baseline, normalised; a still room reads low"
+        },
+        {
+          "name": "rssi",
+          "id": 2,
+          "type": "i8",
+          "unit": "dBm",
+          "doc": "mean RSSI of the kept frames over the last report window"
+        },
+        {
+          "name": "rate",
+          "id": 3,
+          "type": "u16",
+          "unit": "Hz",
+          "doc": "CSI records kept per second over the last report window"
+        }
+      ],
+      "commands": [
+        {
+          "name": "stream_start",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Starts streaming records to the hub over HTTP (design csi-c1 D11). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for source peer without a 6-byte peer_mac (here or in config). A connection that cannot be opened ends the stream with stream_ended net_lost (records 0).",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32",
+              "doc": "issued by the hub; the POST path names it"
+            },
+            {
+              "name": "seconds",
+              "id": 2,
+              "type": "u16",
+              "unit": "s",
+              "doc": "0: until stream_stop"
+            },
+            {
+              "name": "source",
+              "id": 3,
+              "type": "SourceMode",
+              "optional": true,
+              "doc": "absent: config source; for this stream only"
+            },
+            {
+              "name": "peer_mac",
+              "id": 4,
+              "type": "bytes",
+              "max": 6,
+              "optional": true,
+              "doc": "absent: config peer_mac; for this stream only"
+            }
+          ],
+          "examples": [
+            {
+              "stream_id": 1,
+              "seconds": 60
+            },
+            {
+              "stream_id": 2,
+              "seconds": 0,
+              "source": "peer",
+              "peer_mac": "aabbccddeeff"
+            }
+          ]
+        },
+        {
+          "name": "stream_stop",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream.",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32"
+            }
+          ],
+          "examples": [
+            {
+              "stream_id": 1
+            }
+          ]
+        },
+        {
+          "name": "baseline_reset",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "`motion`'s baseline becomes the amplitudes now (after someone left the room, or the board was moved).",
+          "fields": []
+        }
+      ],
+      "events": [
+        {
+          "name": "stream_ended",
+          "id": 1,
+          "priority": "normal",
+          "doc": "A stream ended: stopped (stream_stop), done (`seconds` reached), net_lost (a send stalled 3 s or the connection dropped), error (capture failed).",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "reason",
+              "id": 2,
+              "type": "StreamEndReason"
+            },
+            {
+              "name": "records",
+              "id": 3,
+              "type": "u32",
+              "doc": "records covered by the stream, dropped ones included"
+            },
+            {
+              "name": "dropped",
+              "id": 4,
+              "type": "u32",
+              "doc": "records lost to ring overflows (a jump of a block's first_index)"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "name": "fr.radio_tx",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "A transmitter that sends ESP-NOW frames at a fixed rate toward one station, as the sensed source of a CSI receiver.",
+      "doc": "Design csi-c1 D9. start sends ESP-NOW unicast frames of `len` bytes to peer_mac rate_hz times a second, at the robust\nrate of the band (2.4 GHz: 11b 1 Mbps; 5 GHz: 11a 6 Mbps), on the channel the node's station is on, for `seconds`;\nthe receiver's fr.csi with source peer keeps their CSI. Frames carry no meaning (a sequence number, then zeros); a\nframe the peer does not acknowledge is not sent again. Both boards must be on one channel: on 2.4 GHz any two nodes\nof the fleet's network, on 5 GHz two 5 GHz-capable ones (a second C5). One run at a time: a start replaces the\nrunning one. `sending` follows it.\n",
+      "types": {},
+      "traits": [],
+      "config": [],
+      "properties": [
+        {
+          "name": "sending",
+          "id": 1,
+          "type": "bool",
+          "doc": "a start runs: start to its seconds, a stop, or the station leaving its channel"
+        }
+      ],
+      "commands": [
+        {
+          "name": "start",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Starts sending (replacing a running start). INVALID_ARGS: peer_mac is not 6 bytes, or is a group address; BUSY: the station is not connected (no channel to send on).",
+          "fields": [
+            {
+              "name": "peer_mac",
+              "id": 1,
+              "type": "bytes",
+              "max": 6,
+              "doc": "the receiver's station MAC"
+            },
+            {
+              "name": "rate_hz",
+              "id": 2,
+              "type": "u16",
+              "default": 100,
+              "range": [
+                1,
+                200
+              ],
+              "unit": "Hz"
+            },
+            {
+              "name": "len",
+              "id": 3,
+              "type": "u16",
+              "default": 32,
+              "range": [
+                8,
+                250
+              ],
+              "unit": "B",
+              "doc": "payload bytes per frame (ESP-NOW v1's limit is 250)"
+            },
+            {
+              "name": "seconds",
+              "id": 4,
+              "type": "u16",
+              "unit": "s",
+              "doc": "0: until stop"
+            }
+          ],
+          "examples": [
+            {
+              "peer_mac": "aabbccddeeff",
+              "rate_hz": 100,
+              "seconds": 60
+            },
+            {
+              "peer_mac": "aabbccddeeff",
+              "rate_hz": 50,
+              "len": 64,
+              "seconds": 0
+            }
+          ]
+        },
+        {
+          "name": "stop",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Stops sending; OK when nothing is sent.",
+          "fields": []
+        }
+      ],
+      "events": []
+    },
+    {
       "id": 240,
       "name": "fr.node",
       "version": "1.0",
@@ -2255,4 +2552,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0x0fcffa34;
+export const CATALOG_HASH = 0xbdb52e7a;

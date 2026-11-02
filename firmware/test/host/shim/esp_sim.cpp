@@ -40,6 +40,7 @@ struct esp_timer {
     uint32_t late_us = 0;
     int fail_starts = 0;
     int fires = 0;
+    uint64_t period_us = 0;  // esp_timer_start_periodic's; 0: one-shot
 };
 
 struct rmt_channel_t {
@@ -235,6 +236,10 @@ void fire(esp_timer *t)
         return;
     }
     t->armed = false;
+    if (t->period_us > 0) {
+        t->armed = true;  // periodic: the next alarm is set before the callback, as esp_timer does
+        t->ct->start(static_cast<uint32_t>(t->period_us));
+    }
     if (t->lose) {
         return;
     }
@@ -850,7 +855,25 @@ esp_err_t esp_timer_start_once_at(esp_timer_handle_t timer, uint64_t alarm_us)
         return ESP_ERR_INVALID_STATE;  // timer_init: inserting it twice would loop the list
     }
     timer->armed = true;
+    timer->period_us = 0;
     timer->ct->start(static_cast<uint32_t>(std::max<int64_t>(0, at - now)) + timer->late_us);
+    return ESP_OK;
+}
+
+esp_err_t esp_timer_start_periodic(esp_timer_handle_t timer, uint64_t period)
+{
+    if (timer == nullptr || period == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (timer->dead) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (timer->armed) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    timer->armed = true;
+    timer->period_us = period;
+    timer->ct->start(static_cast<uint32_t>(period));
     return ESP_OK;
 }
 
@@ -863,6 +886,7 @@ esp_err_t esp_timer_stop(esp_timer_handle_t timer)
         return ESP_ERR_INVALID_STATE;
     }
     timer->armed = false;
+    timer->period_us = 0;
     timer->ct->stop();
     return ESP_OK;
 }

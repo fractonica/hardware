@@ -27,6 +27,7 @@
 #include "esp_vfs_eventfd.h"
 #include "esp_wifi.h"
 #include "fr/net/esp.hpp"
+#include "fr/net/limits.hpp"
 #include "fr/net/tx_fifo.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -36,6 +37,7 @@
 #include "lwip/sockets.h"
 #include "mdns.h"
 #include "sdkconfig.h"
+#include "band_rules.hpp"
 #include "hub_resolve.hpp"
 #include "protocol.hpp"  // generated fr::proto::kMtuBulk
 #include "wifi_sta.hpp"
@@ -54,7 +56,9 @@ constexpr bool kHubIp = CONFIG_FR_ROLE != 1;
 constexpr UBaseType_t kTaskPrio = 11;
 constexpr uint32_t kTaskStack = 4096;
 constexpr size_t kEventQueue = 16;
-constexpr size_t kTxBytes = 8192;  // a few bulk RESULTs, or a get_state burst before udp_ok (a power of two)
+// A few bulk RESULTs, or a get_state burst before udp_ok (8 KB, or the memory class's).
+constexpr size_t kTxBytes = limits::kTcpTxBytes;
+static_assert((kTxBytes & (kTxBytes - 1)) == 0, "FR_NET_TCP_TX_BYTES must be a power of two");
 constexpr size_t kMaxFrame = fr::proto::kMtuBulk;
 constexpr TimeUs kBackoffMinUs = 250'000;  // 05 §5.11: reconnect backoff 0.25 -> 5 s
 constexpr TimeUs kBackoffMaxUs = 5'000'000;
@@ -841,6 +845,14 @@ void wake()
 
 }  // namespace detail
 
+namespace {
+
+static_assert(WIFI_PROTOCOL_11B == detail::kProto11b && WIFI_PROTOCOL_11G == detail::kProto11g &&
+              WIFI_PROTOCOL_11N == detail::kProto11n && WIFI_PROTOCOL_11A == detail::kProto11a &&
+              WIFI_PROTOCOL_11AC == detail::kProto11ac && WIFI_PROTOCOL_11AX == detail::kProto11ax);
+
+}  // namespace
+
 bool start(const Settings &settings, const Hooks &hooks)
 {
     if (s_started) {
@@ -916,6 +928,7 @@ bool start(const Settings &settings, const Hooks &hooks)
         ESP_LOGE(TAG, "cannot create the fr_net task");
         return false;
     }
+    // The band mode (design csi-c1 D6) is set on the fr_net task at STA_START, before its first scan (WifiSta).
     if (!check(esp_wifi_start(), "esp_wifi_start")) {
         return false;
     }
@@ -1020,12 +1033,11 @@ fr::Status wifi_proto(bool ax)
     if (!s_started) {
         return std::unexpected(Err::failed);
     }
-    const uint8_t bgn = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N;
-    s_wifi.request_protocol(ax ? bgn | WIFI_PROTOCOL_11AX : bgn, now_us());
+    s_wifi.request_protocol(ax, now_us());
     return {};
 #else
     static_cast<void>(ax);
-    return std::unexpected(Err::unsupported);  // design m2-c4-gateway D19 (e): 11ax is the C6's alone
+    return std::unexpected(Err::unsupported);  // design m2-c4-gateway D19 (e): 11ax is the HE chips' (C6, C5) alone
 #endif
 }
 

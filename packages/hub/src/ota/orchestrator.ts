@@ -43,6 +43,7 @@ import { CHIP_IDS, markImageFlashed } from '../registry/store.ts';
 import { nowUs } from '../ring.ts';
 import { routerInfo } from '../router/index.ts';
 import { AudioStreams } from '../audio/streams.ts';
+import { StreamRoutes } from '../streams/route.ts';
 import { NodeHttpServer, type NodeHttpCounters, type OtaImage } from './http.ts';
 
 /** The node HTTP port (spec 08 §8.10): `GET /ota/<fw_id>.bin` for nodes with an outstanding OFFER. */
@@ -435,6 +436,8 @@ export class OtaOrchestrator implements OtaService {
   #http: NodeHttpServer;
   /** The audio ops' ids and routes on the same listener (design audio-a1 D3). */
   #audio: AudioStreams;
+  /** The generic stream route's ids (design csi-c1 D11): csi_stream and /app/stream issue them. */
+  #streams: StreamRoutes;
   #listenError: string | null = null;
   /** Children not finalized yet, by job id (QUEUED ones included). */
   #children = new Map<string, Child>();
@@ -450,7 +453,14 @@ export class OtaOrchestrator implements OtaService {
     this.#deps = deps;
     this.config = { ...OTA_DEFAULTS, ...deps.config };
     this.#audio = new AudioStreams({ tcpAddress: (id) => deps.router.tcpAddress(id) });
-    this.#http = new NodeHttpServer({ host: deps.http.host, port: deps.http.port, authorize: (fw, ip) => this.#authorize(fw, ip), audio: this.#audio });
+    this.#streams = new StreamRoutes();
+    this.#http = new NodeHttpServer({
+      host: deps.http.host,
+      port: deps.http.port,
+      authorize: (fw, ip) => this.#authorize(fw, ip),
+      audio: this.#audio,
+      streams: this.#streams,
+    });
     this.#sweep();
   }
 
@@ -503,6 +513,10 @@ export class OtaOrchestrator implements OtaService {
 
   audio(): AudioStreams {
     return this.#audio;
+  }
+
+  streams(): StreamRoutes {
+    return this.#streams;
   }
 
   // ---- plan, start, status ----

@@ -18,6 +18,7 @@
 #include "fr/id.h"
 #include "fr/net/esp.hpp"
 #include "freertos/FreeRTOS.h"
+#include "band_rules.hpp"
 #include "sta_rules.hpp"
 
 namespace fr::net::esp::detail {
@@ -43,6 +44,11 @@ public:
     static constexpr TimeUs kRetryMinUs = 250'000;
     static constexpr TimeUs kRetryMaxUs = 2'000'000;
     static constexpr uint32_t kPinScanMs = 30;           // 05 §5.4: active, <= 30 ms on channel C
+    /** A radar (DFS) channel, 52-144: a station may not transmit there until a scan has heard the AP's beacon (IDF
+     * "passive radar detection"), so the pin scan listens instead, for about two beacon intervals (CSI-1 bench: an
+     * active 30 ms scan on channel 52 left every auth/assoc frame unsent, reason 2 then 4). */
+    static constexpr uint32_t kDfsScanMs = 220;
+    static constexpr bool is_dfs_channel(uint8_t ch) { return ch >= 52 && ch <= 144; }
     static constexpr TimeUs kTrialUs = 60'000'000;       // 06 §6.3: fr_net2 reverted after 60 s
     static constexpr TimeUs kApplyDelayUs = 300'000;     // net_set, wifi_down: let its RESULT leave first
     static constexpr TimeUs kScanTimeoutUs = 1'000'000;  // no SCAN_DONE: give up on that scan
@@ -61,9 +67,11 @@ public:
     bool request_override(const fr_net_creds_t &creds, TimeUs now);
     /** Core task: queues `net wifi_down <seconds>` (0 ends a hold); a newer request replaces a waiting one. */
     void request_down(uint32_t seconds, TimeUs now);
-    /** Core task: queues `wifi proto` (design m2-c4-gateway D19 (e)): esp_wifi_set_protocol(`bitmap`) and a rejoin
-     * (none during a wifi_down hold: its end joins with the new protocols); a newer request replaces a waiting one. */
-    void request_protocol(uint8_t bitmap, TimeUs now);
+    /** Core task: queues `wifi proto` (design m2-c4-gateway D19 (e)): esp_wifi_set_protocols with each band's
+     * protocols, 11ax on both or neither (band_rules.hpp wifi_protocols; design csi-c1 D6: esp_wifi_set_protocol is
+     * 2.4 GHz only), and a rejoin (none during a wifi_down hold: its end joins with the new protocols); a newer request
+     * replaces a waiting one. */
+    void request_protocol(bool ax, TimeUs now);
 
     bool ip_up() const { return ip_up_; }
     /** wifi_err_reason_t of the last disconnect; 0 after an address came (an address lost on its own). */
@@ -118,6 +126,13 @@ private:
     void set_home(uint8_t channel);
     /** Puts the idle radio on C (esp_wifi_set_channel), so ESP-NOW hears its neighbours between scans. */
     void keep_channel();
+    /**
+     * Design csi-c1 D6: fr_ident's band (esp_wifi_set_band_mode), at STA_START: after esp_wifi_start
+     * (ESP_ERR_WIFI_NOT_STARTED before) and before this task's first keep_channel and scan, which it would otherwise
+     * race. The country, set before the start, decides the 5 GHz channels. A chip without 5 GHz takes no band mode:
+     * 2g is what it does anyway, 5g (the hub refuses it at provisioning) is logged and it stays on 2.4 GHz.
+     */
+    void apply_band();
     void apply_down(uint32_t seconds, TimeUs now);
     void release(TimeUs now);
 
@@ -130,6 +145,7 @@ private:
         portEXIT_CRITICAL(&mux_);
     }
 
+    uint8_t band_ = 0;  // fr_ident fr_net/band (Settings::band)
     fr_net_creds_t base_{};
     fr_net_creds_t creds_{};
     fr_net_override_t override_{};  // what fr_net2 holds while an override is active
@@ -169,7 +185,7 @@ private:
     // `wifi proto` handover from the core task (under mux_ too).
     bool proto_pending_ = false;
     TimeUs proto_at_ = 0;
-    uint8_t proto_ = 0;
+    bool proto_ax_ = false;
 
     Snapshot snap_;  // under mux_
 };

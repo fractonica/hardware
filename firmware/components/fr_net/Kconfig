@@ -151,6 +151,78 @@ menu "Fractonica network"
             Set from the board manifest's rf.max_tx_power_qdbm by `fr gen firmware` (spec 05 §5.3). Some
             boards' antennas fail authentication at full power; the C3 0.42" OLED board needs 34 (8.5 dBm).
 
+    # Table and queue sizes (spec 05 §5.17): the defaults are every profile's; a profile's `memory: small` (a chip
+    # without PSRAM, one SRAM for code, data and Wi-Fi) has `fr gen firmware` lower them in sdkconfig.board to what a
+    # sensor needs. fr/net/limits.hpp reads them (the host suite takes the defaults).
+
+    config FR_WINDOW_SOURCES_NODE
+        int "Node sources with a duplicate window"
+        range 4 64
+        default 64
+        help
+            05 §5.17 FR_WINDOW_SOURCES_NODE, least recently heard evicted first (56 B each).
+
+    config FR_DIRECTORY_MAX
+        int "Directory entries kept (addr -> MAC)"
+        range 4 64
+        default 64
+        help
+            05 §5.17 FR_DIRECTORY_MAX: beyond it the node RESOLVEs. Also bounds the stored nvs:fr_dir blob.
+
+    config FR_NET_NEIGHBORS_MAX
+        int "ESP-NOW neighbours kept"
+        range 4 20
+        default 20
+
+    config FR_NET_OUTBOX
+        int "Q1 frames awaiting the hub's ACK, and STATE second copies, at once"
+        range 2 8
+        default 8
+
+    config FR_NET_RESP_CACHE
+        int "Responses kept for DUP requests"
+        range 2 8
+        default 8
+
+    config FR_NET_EXEC_SLOTS
+        int "exec_at CMDs scheduled at once"
+        range 1 8
+        default 8
+
+    config FR_NET_RELAY_QUEUE
+        int "Flood relays waiting for their delay at once"
+        range 1 8
+        default 8
+
+    config FR_NET_NODE_OUT
+        int "Node -> node frames in flight"
+        range 1 8
+        default 8
+
+    config FR_NET_BENCH_SOURCES
+        int "`air bench rx` sources kept"
+        range 1 4
+        default 4
+
+    config FR_NET_TCP_TX_BYTES
+        int "Hub TCP send FIFO (bytes, a power of two)"
+        range 2048 8192
+        default 8192
+        help
+            Envelopes queued for the hub's TCP session: a few bulk RESULTs, or a get_state burst before udp_ok.
+
+    config FR_NET_AIR_QUEUE
+        int "ESP-NOW frames queued for the air at once"
+        range 8 16
+        default 16
+        help
+            All priorities together; 4 of them are kept for URGENT.
+
+    config FR_NET_AIR_RX_SLOTS
+        int "Received ESP-NOW frames between the Wi-Fi task and the core task"
+        range 4 16
+        default 16
+
     # Development fallback for UNASSIGNED nodes (spec 06 §6.4 "Adopting foreign devices"). Set them only in
     # the git-ignored firmware/config/sdkconfig.local; they are compiled into that build's image.
 

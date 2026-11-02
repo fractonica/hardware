@@ -12,12 +12,13 @@
 
 #include "fr/base.hpp"
 #include "fr/net/air.hpp"
+#include "fr/net/limits.hpp"
 #include "messages.hpp"  // generated fr::proto::Binding (kMaxSize)
 
 namespace fr::net {
 
-/** FR_DIRECTORY_MAX: directory entries a node keeps (05 §5.17); RESOLVE beyond that. */
-inline constexpr size_t kDirectoryMax = 64;
+/** FR_DIRECTORY_MAX: directory entries a node keeps (05 §5.17; 64, or the memory class's); RESOLVE beyond that. */
+inline constexpr size_t kDirectoryMax = limits::kDirectory;
 /** FR_BINDINGS_MAX: binding slots per node (07 §7.11); a Binding's slot is 0..15. */
 inline constexpr size_t kBindingsMax = 16;
 /** fr.node.bind_clear `slot` that clears every slot. */

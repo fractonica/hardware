@@ -5,6 +5,7 @@
 import { camelKeys, snakeKeys } from './case.ts';
 import { Connection } from './connection.ts';
 import { DeviceDirectory, DeviceHandle, type DeviceHost } from './devices.ts';
+import { StreamClient } from './streams.ts';
 import { CommandError, FractonicaError } from './errors.ts';
 import { CATALOG_HASH } from './gen/caps.ts';
 import type {
@@ -66,6 +67,8 @@ export function injectedToken(): string | undefined {
 
 export class HubClient implements Hub<Registry>, DeviceHost {
   readonly devices: DeviceDirectory;
+  /** `/app/stream` subscriptions (design csi-c1 D12), each on its own socket. */
+  readonly streams: StreamClient;
   readonly broadcast = {
     msg: (topic: string, data?: unknown): Promise<BroadcastResult> =>
       this.#request<AppMsgFrame>({ t: 'msg', req: 0, to: 'broadcast', topic, ...(data !== undefined ? { data } : {}) }, `broadcast ${topic}`, APP_CMD_TIMEOUT_MS).then((r) => {
@@ -98,6 +101,16 @@ export class HubClient implements Hub<Registry>, DeviceHost {
     this.#registryRev = o.registry?.registryRev ?? null;
     this.devices = new DeviceDirectory(this, o.registry);
     const Ctor = o.WebSocket ?? (globalThis as { WebSocket?: new (url: string) => unknown }).WebSocket;
+    this.streams = new StreamClient({
+      url: o.url ?? defaultUrl(),
+      token: () => o.token ?? injectedToken() ?? '',
+      WebSocket: Ctor ?? (class {
+        constructor() {
+          throw new Error('no WebSocket in this runtime: pass connect({ WebSocket })');
+        }
+      } as unknown as new (url: string) => unknown),
+      reconnect: o.reconnect === false ? false : { ...RECONNECT, ...o.reconnect },
+    });
     this.#conn = new Connection({
       url: o.url ?? defaultUrl(),
       WebSocket: Ctor ?? (class {
@@ -164,6 +177,7 @@ export class HubClient implements Hub<Registry>, DeviceHost {
   close(): void {
     this.#fail(new FractonicaError('CLOSED', 'hub.close() was called'));
     this.#conn.close();
+    this.streams.closeAll();
   }
 
   // ---- DeviceHost ----

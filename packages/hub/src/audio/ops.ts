@@ -118,7 +118,7 @@ function configRate(hub: HubContext, dev: Device, inst: PortCap): number {
 }
 
 /** The one device, online (a stream needs its link). */
-function onlineDevice(hub: HubContext, selector: string): Device {
+export function onlineDevice(hub: HubContext, selector: string): Device {
   const dev = resolveOne(hub, selector);
   const p = hub.router.presence(dev.device_id);
   if (p !== 'online' && p !== 'suspect') {
@@ -128,7 +128,7 @@ function onlineDevice(hub: HubContext, selector: string): Device {
 }
 
 /** A command that did not answer OK, as the op's error. */
-function commandFailed(dev: Device, what: string, o: CommandOutcome): FrError {
+export function commandFailed(dev: Device, what: string, o: CommandOutcome): FrError {
   const code =
     o.status === 'busy'
       ? 'DEVICE_BUSY'
@@ -150,7 +150,7 @@ function commandFailed(dev: Device, what: string, o: CommandOutcome): FrError {
 }
 
 /** The first `<instance>.<member>` event of `dev` matching `pred`, from now on; off() stops listening. */
-function nextCapEvent(hub: HubContext, dev: Device, type: string, pred: (f: Record<string, unknown>, e: HubEvent) => boolean): { event: Promise<HubEvent>; off: () => void } {
+export function nextCapEvent(hub: HubContext, dev: Device, type: string, pred: (f: Record<string, unknown>, e: HubEvent) => boolean): { event: Promise<HubEvent>; off: () => void } {
   let resolveFn!: (e: HubEvent) => void;
   const event = new Promise<HubEvent>((r) => (resolveFn = r));
   const off = hub.events.subscribe((e) => {

@@ -14,6 +14,8 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <optional>
 
 #include "catalog.hpp"  // generated cap::catalog_hash
@@ -1563,11 +1565,17 @@ void on_text_line(std::string_view line)
     std::memcpy(b->bytes, line.data(), line.size());
     b->len = line.size();
     bool posted = s_core.post([b] {
-        static char out[wire::kMaxLine];  // core task only
-        size_t n = diag::execute({b->bytes, b->len}, s_diag_host, out);
+        // The answer's 2 KB from the heap for the line (serial diag lines come now and then): not in .bss.
+        const std::unique_ptr<char[]> out(new (std::nothrow) char[wire::kMaxLine]);
+        if (!out) {
+            reject_line({b->bytes, b->len}, "busy", "out of memory");
+            release_line(b);
+            return;
+        }
+        size_t n = diag::execute({b->bytes, b->len}, s_diag_host, {out.get(), wire::kMaxLine});
         release_line(b);
         if (n > 0) {
-            serial::write_line({out, n});
+            serial::write_line({out.get(), n});
         }
     });
     if (!posted) {
@@ -1588,6 +1596,7 @@ net::esp::Settings wifi_settings()
         ws.creds = nc.creds;
         std::memcpy(ws.country, nc.country, sizeof(ws.country));
         std::memcpy(ws.hub_ip, nc.hub_ip, sizeof(ws.hub_ip));
+        ws.band = nc.band;
         ws.prov_ts = nc.prov_ts;
     } else if (CONFIG_FR_DEV_WIFI_SSID[0] != '\0') {
         ESP_LOGW(TAG, "no provisioned network: using the dev Wi-Fi from sdkconfig");

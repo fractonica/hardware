@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "sdkconfig.h"
 
 namespace fr::net::esp::detail {
 namespace {
@@ -35,6 +36,7 @@ void zero_creds(fr_net_creds_t &c)
 
 void WifiSta::configure(const Settings &s, TimeUs now)
 {
+    band_ = s.band;
     base_ = s.creds;
     prov_ts_ = s.prov_ts;
     lost_since_ = now;  // a pin found at boot counts the sweep's wait (sta_rules.hpp) from here
@@ -125,9 +127,14 @@ void WifiSta::attempt(TimeUs now)
         }
         sc.channel = join_channel_;
         sc.show_hidden = true;
-        sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
-        sc.scan_time.active.min = 0;
-        sc.scan_time.active.max = kPinScanMs;
+        if (is_dfs_channel(join_channel_)) {
+            sc.scan_type = WIFI_SCAN_TYPE_PASSIVE;
+            sc.scan_time.passive = kDfsScanMs;
+        } else {
+            sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+            sc.scan_time.active.min = 0;
+            sc.scan_time.active.max = kPinScanMs;
+        }
         esp_err_t err = esp_wifi_scan_start(&sc, false);
         if (err != ESP_OK) {
             ESP_LOGD(TAG, "wifi: channel %u scan not started (%s)", join_channel_, esp_err_to_name(err));
@@ -271,12 +278,46 @@ void WifiSta::store_pin()
     }
 }
 
+void WifiSta::apply_band()
+{
+#if CONFIG_SOC_WIFI_SUPPORT_5G
+    constexpr bool kHas5g = true;
+#else
+    constexpr bool kHas5g = false;
+#endif
+    const Band band = band_from_ident(band_);
+    wifi_band_mode_t mode = WIFI_BAND_MODE_AUTO;
+    switch (band_action(band, kHas5g)) {
+    case BandAction::none:
+        return;
+    case BandAction::refuse_5g:
+        ESP_LOGE(TAG, "wifi: band 5g provisioned on a chip without 5 GHz; staying on 2.4 GHz");
+        return;
+    case BandAction::only_2g:
+        mode = WIFI_BAND_MODE_2G_ONLY;
+        break;
+    case BandAction::only_5g:
+        mode = WIFI_BAND_MODE_5G_ONLY;
+        break;
+    case BandAction::both:
+        mode = WIFI_BAND_MODE_AUTO;
+        break;
+    }
+    const esp_err_t err = esp_wifi_set_band_mode(mode);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "wifi: band %s", band_name(band));
+    } else {
+        ESP_LOGE(TAG, "esp_wifi_set_band_mode: %s", esp_err_to_name(err));
+    }
+}
+
 void WifiSta::on_event(const Event &e, TimeUs now)
 {
     if (e.base == WIFI_EVENT) {
         switch (e.id) {
         case WIFI_EVENT_STA_START:
             started_ = true;
+            apply_band();    // before keep_channel and the first scan: C may be a 5 GHz channel
             keep_channel();  // ESP-NOW on C from the start, whatever the first join does
             attempt(now);
             break;
@@ -439,12 +480,12 @@ void WifiSta::request_down(uint32_t seconds, TimeUs now)
     wake();
 }
 
-void WifiSta::request_protocol(uint8_t bitmap, TimeUs now)
+void WifiSta::request_protocol(bool ax, TimeUs now)
 {
     portENTER_CRITICAL(&mux_);
     proto_pending_ = true;
     proto_at_ = now + kApplyDelayUs;
-    proto_ = bitmap;
+    proto_ax_ = ax;
     portEXIT_CRITICAL(&mux_);
     wake();
 }
@@ -575,19 +616,21 @@ void WifiSta::poll(TimeUs now)
     }
 
     bool proto = false;
-    uint8_t bitmap = 0;
+    bool ax = false;
     portENTER_CRITICAL(&mux_);
     if (proto_pending_ && now >= proto_at_) {
         proto_pending_ = false;
         proto = true;
-        bitmap = proto_;
+        ax = proto_ax_;
     }
     portEXIT_CRITICAL(&mux_);
     if (proto) {
         // Design m2-c4-gateway D19 (e): the protocols an association negotiates, so a rejoin follows (the hold's end
         // does it during a wifi_down).
-        esp_err_t err = esp_wifi_set_protocol(WIFI_IF_STA, bitmap);
-        ESP_LOGW(TAG, "wifi: protocols 0x%02x (debug hook): %s%s", bitmap, esp_err_to_name(err),
+        const Protocols want = wifi_protocols(ax);
+        wifi_protocols_t p = {.ghz_2g = want.ghz_2g, .ghz_5g = want.ghz_5g};
+        esp_err_t err = esp_wifi_set_protocols(WIFI_IF_STA, &p);
+        ESP_LOGW(TAG, "wifi: protocols 2g 0x%02x 5g 0x%02x (debug hook): %s%s", want.ghz_2g, want.ghz_5g, esp_err_to_name(err),
                  err == ESP_OK && !held_ ? ", rejoining" : "");
         if (err == ESP_OK && !held_) {
             rejoin(now);

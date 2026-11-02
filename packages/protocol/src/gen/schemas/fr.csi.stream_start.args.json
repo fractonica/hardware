@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.csi.stream_start.args",
+  "title": "fr.csi.stream_start arguments",
+  "description": "Starts streaming records to the hub over HTTP (design csi-c1 D11). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for source peer without a 6-byte peer_mac (here or in config). A connection that cannot be opened ends the stream with stream_ended net_lost (records 0).",
+  "type": "object",
+  "properties": {
+    "stream_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "issued by the hub; the POST path names it"
+    },
+    "seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "0: until stream_stop (s)"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "router",
+        "peer",
+        "any"
+      ],
+      "description": "absent: config source; for this stream only"
+    },
+    "peer_mac": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{2}){0,6}$",
+      "contentEncoding": "base16",
+      "description": "absent: config peer_mac; for this stream only (<= 6 bytes)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "stream_id": 1,
+      "seconds": 60
+    },
+    {
+      "stream_id": 2,
+      "seconds": 0,
+      "source": "peer",
+      "peer_mac": "aabbccddeeff"
+    }
+  ]
+}

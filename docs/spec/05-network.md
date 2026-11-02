@@ -685,7 +685,7 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | `FR_SUSPECT_X10` / `FR_OFFLINE_X10` / `FR_OFFLINE_MIN_MS` | 25 / 35 / 750 |
 | `FR_TTL_DEFAULT` / `FR_TTL_MAX` | 2 / 7 (1..15) |
 | `FR_RELAY_JMIN_MS` / `FR_RELAY_JMAX_MS` / `FR_RELAY_K` | 1 / 16 / 2 (1..8; copies heard over ESP-NOW) |
-| `FR_WINDOW_BITS_NODE` / `FR_WINDOW_BITS_HUB` / `FR_WINDOW_SOURCES_NODE` | 128 / 256 / 64 |
+| `FR_WINDOW_BITS_NODE` / `FR_WINDOW_BITS_HUB` / `FR_WINDOW_SOURCES_NODE` | 128 / 256 / 64 (`memory: small`: 16) |
 | `FR_ACK_BASE_MS` / `FR_ACK_PER_HOP_MS` / `FR_MAX_ATTEMPTS` | 20 / 10 (0..1000) / 4 |
 | `FR_BINDINGS_MAX` | 16 |
 | `FR_TCP_DELIVERY_MS` / `FR_CMD_EXPIRE_MS` / `FR_EVENT_MAX_AGE_MS` | 2000 / 1000 / 1000 |
@@ -694,7 +694,7 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | `FR_MTU_RT` / `FR_MTU_BULK` | 250 / 1470 |
 | `FR_RATE_PROFILE` | robust |
 | `FR_HUB_PORT` / `FR_HUB_HTTP_PORT` | 7421 (tcp + udp) / 7422 |
-| `FR_DIRECTORY_MAX` | 64 |
+| `FR_DIRECTORY_MAX` | 64 (`memory: small`: 16) |
 | `FR_HELLO_RETRY_MS` | 1000 (HELLO on an up link until WELCOME) |
 | `FR_WIFI_MAX_TX_POWER_QDBM` | 0 = driver default; `fr gen firmware` sets it from the board manifest ([04 §4.6](04-boards.md)) |
 | `FR_NET_LOG_LEVEL` | 3 = I (1 E … 5 V): the most verbose ESP_LOG level sent to the hub as LOG frames over TCP, in every build type (since M2-C2, §5.7) |
@@ -702,6 +702,8 @@ If the game runs on another device (a tablet), add one Wi-Fi hop for hub → app
 | `FR_DEV_WIFI_SSID` / `FR_DEV_WIFI_PASS` / `FR_DEV_HUB_HOST` | empty; UNASSIGNED nodes only, set in `sdkconfig.local` ([03 §3.7](03-firmware.md)) |
 
 `FR_SUSPECT_X10` and `FR_CMD_EXPIRE_MS` are hub rules; the node does not use them.
+
+A profile's `memory: small` (CSI-1: a chip without PSRAM whose one SRAM holds code, data and Wi-Fi) has `fr gen firmware` lower the node's table and queue sizes in sdkconfig.board to a sensor's: the two above, and fr_net's `FR_NET_*` (neighbours, outbox, response cache, exec_at slots, relay queue, node -> node frames, the TCP send FIFO, the ESP-NOW queues) and fr_serial's rings. Every other profile keeps the defaults; the wire is the same.
 
 **Fixed values (since C5, not Kconfig).**
 - Node: relay queue 8; flood rate 10/s per source, burst 10, 8 sources; node → node frames in flight 8; neighbours 20; unicast peers 17 (1 s hold); driver queue 16 (4 for URGENT); send-callback guard 100 ms, owed up to 1 s (`kSendLostUs`); send completion 250 ms; RESOLVE once per second per addr over the last 4 addrs; binding chain depth 2; the encoded binding table and `bind_list` ≤ 1400 B (`kBindListMax`); MSG handlers 8.

@@ -5,16 +5,16 @@
 // The temp dirs live under FR_HOME (tmp/ident, 0700), which only the hub holding hub.lock writes: a hub
 // that dies mid-flash leaves them there, and the next start removes them (sweepIdentDirs).
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { paths } from '@fractonica/host';
-import { FrError } from '@fractonica/protocol';
+import { FrError, NETWORK_BAND_IDENT } from '@fractonica/protocol';
 
 import { type PytoolsRequest, runPytools } from '../flash.ts';
 import type { JobCtx } from '../jobs.ts';
-import type { NetworkRecord } from '../network.ts';
+import { type NetworkRecord, readWifiPassword } from '../network.ts';
 
 /** fr_ident schema version (06 §6.3, key `schema`). */
 export const IDENT_SCHEMA = 1;
@@ -40,6 +40,8 @@ export interface IdentNet {
   pass?: string;
   bssid?: string | null;
   country?: string | null;
+  /** fr_net `band` u8 (design csi-c1 D6, NETWORK_BAND_IDENT): 0 auto, 1 2g, 2 5g; absent reads as auto. */
+  band?: number;
   hub_host: string;
   hub_ip?: string | null;
 }
@@ -82,30 +84,15 @@ export function identCsv(id: IdentFields, net: IdentNet): string {
     ...(net.pass !== undefined ? [dataRow('pass', 'string', net.pass, true)] : []),
     ...(net.bssid ? [dataRow('bssid', 'hex2bin', net.bssid.replace(/[:-]/g, '').toLowerCase())] : []),
     ...(net.country ? [dataRow('country', 'string', net.country)] : []),
+    ...(net.band !== undefined ? [dataRow('band', 'u8', net.band)] : []),
     dataRow('hub_host', 'string', net.hub_host),
     ...(net.hub_ip ? [dataRow('hub_ip', 'string', net.hub_ip)] : []),
   ];
   return rows.join('\n') + '\n';
 }
 
-/** The stored Wi-Fi password (secrets.json `wifi_password`), or undefined. Errors never quote the file. */
-export function readWifiPassword(): string | undefined {
-  const file = paths.secrets();
-  if (!existsSync(file)) {
-    return undefined;
-  }
-  let secrets: unknown;
-  try {
-    secrets = JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    // V8's parse error quotes the input, which would put secret bytes in the job error.
-    throw new FrError('ENV_MISSING', `${file} is not valid JSON`, {
-      remediation: [{ human: `fix or delete ${file}, then set the network again`, cli: 'fr net set --ssid <ssid> --password-stdin' }],
-    });
-  }
-  const pass = (secrets as { wifi_password?: unknown } | null)?.wifi_password;
-  return typeof pass === 'string' ? pass : undefined;
-}
+/** The stored Wi-Fi password of a network (secrets.json `wifi_passwords[name]`; network.ts), or undefined. */
+export { readWifiPassword } from '../network.ts';
 
 /**
  * The Mac's LAN IPv4, the fallback nodes use when mDNS fails (06 §6.3 `hub_ip`): the first non-internal,
@@ -126,7 +113,10 @@ export function hubIpv4(): string | null {
   return null;
 }
 
-/** The network part of fr_ident from the active record; ENV_MISSING when there is none (06 §6.4 step 5). */
+/**
+ * The network part of fr_ident from a stored network's record (design csi-c1 D5: the device's), with that network's
+ * password and its band (NETWORK_BAND_IDENT); ENV_MISSING when there is none (06 §6.4 step 5).
+ */
 export function identNet(net: NetworkRecord | null): IdentNet {
   if (!net) {
     throw new FrError('ENV_MISSING', 'no Wi-Fi network is stored, so the node would not know where to connect', {
@@ -134,8 +124,16 @@ export function identNet(net: NetworkRecord | null): IdentNet {
       remediation: [{ tool: 'network_set', cli: 'fr net set --ssid <ssid> --password-stdin' }],
     });
   }
-  const pass = readWifiPassword();
-  return { ssid: net.ssid, ...(pass !== undefined ? { pass } : {}), bssid: net.bssid, country: net.country, hub_host: net.hub_host, hub_ip: hubIpv4() };
+  const pass = readWifiPassword(net.name);
+  return {
+    ssid: net.ssid,
+    ...(pass !== undefined ? { pass } : {}),
+    bssid: net.bssid,
+    country: net.country,
+    band: NETWORK_BAND_IDENT[net.band] ?? 0,
+    hub_host: net.hub_host,
+    hub_ip: hubIpv4(),
+  };
 }
 
 export interface RenderedIdent {

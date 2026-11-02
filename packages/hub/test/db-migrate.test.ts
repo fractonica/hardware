@@ -89,7 +89,8 @@ describe('openDb user_version migrations', () => {
     expect(sql).toContain("'fixture'");
     expect(db.prepare("SELECT name FROM sqlite_master WHERE name LIKE 'devices_v%'").all()).toEqual([]);
     const rows = db.prepare('SELECT * FROM devices ORDER BY device_id').all() as Record<string, unknown>[];
-    expect(rows.map((r) => Object.values(r))).toEqual(ROWS.map((r) => [...r]));
+    // Every column kept, plus csi-c1's devices.network (default for every row from before it).
+    expect(rows.map(({ network, ...r }) => (expect(network).toBe('default'), Object.values(r)))).toEqual(ROWS.map((r) => [...r]));
     expect(kvGet(db, 'registry.addr_hwm')).toBe('5');
     // The constraints came across: alias unique without case, addr unique and in range.
     expect(() => db.prepare("INSERT INTO devices (device_id, alias, created_at) VALUES ('ffffffffffff', 'PAD-C6', 't')").run()).toThrow(/UNIQUE/);

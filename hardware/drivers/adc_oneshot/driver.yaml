@@ -6,7 +6,7 @@ id: adc_oneshot
 summary: One ADC1 channel through IDF adc_oneshot at 12 dB with curve-fitting calibration; read on the core task.
 implements: hal.AnalogSource
 class: fr::drv::AdcOneshot              # header: include/fr/drv/adc_oneshot.hpp
-targets: [esp32c3, esp32c6, esp32s3]
+targets: [esp32c3, esp32c5, esp32c6, esp32s3]
 binds: gpio                             # a bare pin: bind gpio.<n> (no board section)
 accepts_kinds: [gpio]
 config:                                 # same order as AdcOneshot::Config

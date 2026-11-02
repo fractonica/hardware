@@ -5,7 +5,8 @@
 // the gate is the source IP of the device's live TCP session, so the listener needs no credentials and
 // serves nothing to a host that has no node link. Crash reports (`POST /node/v1/coredump/...`) answer 501
 // until they land. Audio (design audio-a1 D3; audio/streams.ts) adds `POST /v1/audio/in/<stream_id>` and
-// `GET /v1/audio/out/<play_id>` for the ids the audio ops issued; every other path is 404.
+// `GET /v1/audio/out/<play_id>` for the ids the audio ops issued; CSI-1 (design csi-c1 D11; streams/route.ts) the
+// generic `POST /v1/stream/in/<stream_id>`; every other path is 404.
 //
 // Plain node:http, not the API's Fastify: the only routes stream files with Range, and the listener binds
 // the node-facing interface (0.0.0.0), so it shares nothing with the loopback API server. A record POST is
@@ -17,6 +18,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from 'node:net';
 
 import { AUDIO_IN_PREFIX, AUDIO_OUT_PATH_RE, type AudioStreams } from '../audio/streams.ts';
+import { STREAM_IN_PREFIX, type StreamRoutes } from '../streams/route.ts';
 
 /** The image a request may download, as the orchestrator answers `authorize`. */
 export interface OtaImage {
@@ -39,6 +41,8 @@ export interface NodeHttpOptions {
   authorize: Authorize;
   /** The audio routes (audio/streams.ts); without them both answer 404. */
   audio?: AudioStreams;
+  /** The generic stream route (design csi-c1 D11, streams/route.ts); without it `POST /v1/stream/in/` answers 404. */
+  streams?: StreamRoutes;
 }
 
 export interface NodeHttpCounters {
@@ -132,6 +136,7 @@ export class NodeHttpServer {
       s.destroy();
     }
     this.#opts.audio?.closeAll();
+    this.#opts.streams?.closeAll();
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
       server.closeAllConnections();
@@ -155,21 +160,30 @@ export class NodeHttpServer {
     };
     const onData = (d: Buffer) => {
       buf = buf.length ? Buffer.concat([buf, d]) : d;
-      const n = Math.min(buf.length, AUDIO_IN_PREFIX.length);
-      if (buf.subarray(0, n).equals(AUDIO_IN_PREFIX.subarray(0, n))) {
-        if (buf.length < AUDIO_IN_PREFIX.length) {
-          return; // could still be one: wait for more
+      // A raw route whose prefix the bytes so far agree with: wait for the whole prefix, or hand it over.
+      let maybe = false;
+      for (const r of this.#rawRoutes()) {
+        const n = Math.min(buf.length, r.prefix.length);
+        if (!buf.subarray(0, n).equals(r.prefix.subarray(0, n))) {
+          continue;
+        }
+        if (buf.length < r.prefix.length) {
+          maybe = true; // could still be one: wait for more
+          continue;
         }
         done();
         this.counters.requests++;
-        if (this.#opts.audio) {
-          this.#opts.audio.acceptRecord(socket, buf);
+        if (r.accept) {
+          r.accept(socket, buf);
         } else {
           this.counters.not_found++;
           socket.end('HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 10\r\nConnection: close\r\n\r\nnot found\n');
           socket.resume();
           setTimeout(() => socket.destroy(), 2000).unref();
         }
+        return;
+      }
+      if (maybe) {
         return;
       }
       done();
@@ -189,6 +203,16 @@ export class NodeHttpServer {
       this.#raw.delete(socket);
     });
     socket.on('data', onData);
+  }
+
+  /** The routes that take a raw socket (chunk boundaries kept): A1's record POST and the generic stream POST (csi-c1 D11). */
+  #rawRoutes(): { prefix: Buffer; accept: ((socket: Socket, initial: Buffer) => void) | null }[] {
+    const audio = this.#opts.audio;
+    const streams = this.#opts.streams;
+    return [
+      { prefix: AUDIO_IN_PREFIX, accept: audio ? (s, b) => audio.acceptRecord(s, b) : null },
+      { prefix: STREAM_IN_PREFIX, accept: streams ? (s, b) => streams.acceptPost(s, b) : null },
+    ];
   }
 
   #handle(req: IncomingMessage, res: ServerResponse): void {

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string_view>
 
@@ -233,7 +234,8 @@ private:
 
     // fr_worker during a job (and the commit after it).
     Download dl_;
-    uint8_t buf_[kChunk];
+    /** kChunk bytes, from the heap while a download runs (prepare() to end()): never held between OTAs. */
+    std::unique_ptr<uint8_t[]> buf_;
 };
 
 }  // namespace fr::ota

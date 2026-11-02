@@ -23,18 +23,19 @@ namespace {
 constexpr const char *TAG = "fr_serial";
 constexpr uint32_t kUsjBuffer = 4096;
 // The frame ring also carries diag responses and bulk ENV frames (up to a full 2048-character line), so
-// it holds a few.
-constexpr size_t kFrameRingBytes = 8192;
-constexpr size_t kLogRingBytes = 4096;
+// it holds a few (8 KB; at least two in the memory class's 4 KB).
+constexpr size_t kFrameRingBytes = CONFIG_FR_SERIAL_FRAME_RING;
+constexpr size_t kLogRingBytes = CONFIG_FR_SERIAL_LOG_RING;
 /** Longest record: a full line plus its '\n'. */
 constexpr size_t kMaxRecord = wire::kMaxLine + 1;
+static_assert(kFrameRingBytes >= 2 + kMaxRecord, "the frame ring must hold a full line");
 /** Longest log line kept whole; the ready banner with long alias/board/version strings is ~330. */
 constexpr size_t kLogLine = 384;
 static_assert(kLogLine == kLogLineMax + 1);
-// The net log ring (design m2-c2 D20): 4 KB on a radio image, a token one on the radio-off fixture, which never
-// enables it. A record is `level u8 | pushed_ms u32 LE | tag_len u8 | tag | text`.
+// The net log ring (design m2-c2 D20): 4 KB (or the memory class's) on a radio image, a token one on the radio-off
+// fixture, which never enables it. A record is `level u8 | pushed_ms u32 LE | tag_len u8 | tag | text`.
 #if defined(CONFIG_FR_NET_RADIO) && CONFIG_FR_NET_RADIO
-constexpr size_t kNetRingBytes = 4096;
+constexpr size_t kNetRingBytes = CONFIG_FR_SERIAL_NET_LOG_RING;
 constexpr size_t kNetJoinSlots = 3;  // tasks with a line half printed at once (the Wi-Fi blob's, a few others)
 #else
 constexpr size_t kNetRingBytes = 64;

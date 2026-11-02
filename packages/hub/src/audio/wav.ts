@@ -9,7 +9,7 @@
 // - LevelStats: peak, RMS and clipping over the samples written (audio_record's answer).
 
 import { randomBytes } from 'node:crypto';
-import { closeSync, fstatSync, openSync, readdirSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
+import { closeSync, fstatSync, fsyncSync, openSync, readdirSync, readSync, renameSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** The header WavWriter writes: RIFF, a 16-byte fmt chunk, then data. */
@@ -164,7 +164,7 @@ export class WavWriter {
     this.stats.addSilence(n);
   }
 
-  /** Patches the header, closes and renames the file into place; returns the samples. Once only. */
+  /** Patches the header, flushes the file to disk (fsync, so the rename never lands before the bytes), closes and renames it into place; returns the samples. Once only. */
   finish(): number {
     if (this.#fd === null) {
       return this.#samples;
@@ -173,6 +173,7 @@ export class WavWriter {
     this.#fd = null;
     try {
       writeSync(fd, wavHeader(this.sampleHz, this.#samples), 0, WAV_HEADER_BYTES, 0);
+      fsyncSync(fd);
     } finally {
       closeSync(fd);
     }

@@ -114,6 +114,7 @@ ssid,data,string,LabNet
 pass,data,string,<wifi password>
 bssid,data,hex2bin,<6 bytes, optional>
 country,data,string,LV
+band,data,u8,2
 hub_host,data,string,dimas-3.local
 hub_ip,data,string,192.168.0.17
 ```
@@ -121,6 +122,7 @@ hub_ip,data,string,192.168.0.17
 - **Generation.** The pytools sidecar's `nvs_gen` builds the image with `esp-idf-nvs-partition-gen` (0x4000); no event or error it emits carries the CSV's content. A round-trip check with `nvs_tool` is planned. Every write gets a fresh `prov_ts`.
 - **Secrets handling.** The CSV is rendered from the **active network record** plus its secret, in its own 0700 directory under `~/.fractonica/tmp/ident`. The CSV is deleted as soon as `nvs_gen` returns, the directory after the flash (or by an exit hook). A hub start, holding `hub.lock`, removes whatever a killed hub left there, and this user's `fr-ident-*` directories older than 10 min in the system temp directory, where older hubs rendered. The password never appears in SQLite, logs, job logs, `dry_run` output or results.
 - **Where the network record comes from.** `network_set` ([09 §9.4](09-agent-api.md)). The Wi-Fi password lives in `~/.fractonica/secrets.json` (mode 0600) and is never in SQLite.
+- **Several networks** (design csi-c1 D4, D5). The hub stores named networks (`default`, the one older hubs had, and e.g. `5g`), each with `ssid`, `bssid`, `country` and a `band`, all under the fleet's one `net_id`; their passwords are `secrets.json` `wifi_passwords[<name>]` (an older `wifi_password` is `default`'s; the hub keeps writing it as a copy of `default`'s, and keeps `default` at `networks.id` 1, for a hub downgraded to before csi-c1). A device's registry row names its network (`devices.network`, default `default`; `device_provision` and `flash_start` take `network`), and `fr_net` is rendered from that one. `band` (u8): 0 `auto` (also when the key is absent: images and identities before csi-c1), 1 `2g`, 2 `5g`; the node passes it to `esp_wifi_set_band_mode` (`WIFI_BAND_MODE_AUTO`, `_2G_ONLY`, `_5G_ONLY`) after `esp_wifi_start` on a chip with `SOC_WIFI_SUPPORT_5G` and ignores it on the others; the hub refuses a `5g` network for a 2.4 GHz-only chip at provisioning, and `network_set` refuses band `5g` for a network such a device uses. On 5 GHz, `country` decides the allowed channels.
 - **RW namespaces in `nvs`:**
   - `fr_ovr`: alias + rev, groups (M2), and `addr`/`net` written by adoption (M2);
   - `fr_link`: the last channel C, the pinned BSSID and `ssid_h`, the hash of the SSID they belong to ([05 §5.4](05-network.md)); a `net_set` trial's pin is written only once the trial is confirmed;

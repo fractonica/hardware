@@ -12,6 +12,8 @@ const char *to_name(ChipId v)
         return "esp32s3";
     case ChipId::esp32c6:
         return "esp32c6";
+    case ChipId::esp32c5:
+        return "esp32c5";
     }
     return nullptr;
 }
@@ -28,6 +30,10 @@ bool from_name(std::string_view s, ChipId &out)
     }
     if (s == "esp32c6") {
         out = ChipId::esp32c6;
+        return true;
+    }
+    if (s == "esp32c5") {
+        out = ChipId::esp32c5;
         return true;
     }
     return false;

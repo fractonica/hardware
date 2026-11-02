@@ -4,5 +4,5 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   resolve: { conditions: ['@fractonica/source'] },
   ssr: { resolve: { conditions: ['@fractonica/source'], externalConditions: ['@fractonica/source'] } },
-  test: { include: ['packages/*/test/**/*.test.ts'] },
+  test: { include: ['packages/*/test/**/*.test.ts', 'web/*/test/**/*.test.ts'] },
 });

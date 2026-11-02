@@ -12,7 +12,7 @@ import type { FastifyInstance } from 'fastify';
 
 import { FrError } from '@fractonica/protocol';
 import { CATALOG, CATALOG_HASH } from '@fractonica/protocol/gen';
-import { APP_DEAD_MS, APP_HELLO_TIMEOUT_MS, APP_MAX_IN_FLIGHT, APP_PING_MS, type HelloFrame, type WelcomeFrame } from '@fractonica/sdk/wire';
+import { APP_DEAD_MS, APP_HELLO_TIMEOUT_MS, APP_MAX_IN_FLIGHT, APP_PING_MS, APP_STREAM_PATH, type HelloFrame, type WelcomeFrame } from '@fractonica/sdk/wire';
 
 import type { AppServer, Device, HubContext, HubEvent, HubRunOptions } from '../context.ts';
 import { mintCursor } from '../events/index.ts';
@@ -20,6 +20,7 @@ import { nowUs } from '../ring.ts';
 import { appFrame, frameBytes } from './bridge.ts';
 import { appVisible, capsSignature, ManifestCache, provisionedDevices, registryRev, welcomeDevice } from './directory.ts';
 import { AppSocket, type AppLimits, resumeSeq } from './socket.ts';
+import { StreamSocket } from './stream.ts';
 import { type AppTokenSource, loadAppToken } from './token.ts';
 
 /** `hello.resume` (D8): at most this many missed events are replayed, none older than this. */
@@ -49,6 +50,8 @@ export interface AppServerOptions {
 export interface AppServerPart extends AppServer, AppTokenSource {
   /** Live sockets (past their hello). */
   sockets(): number;
+  /** `/app/stream` sockets open (design csi-c1 D12). */
+  streamSockets(): number;
   /** Frames written to sockets and waiting in their queues, since start. */
   stats(): { sockets: number; written: number; queued: number };
   /** The limits in force (tests change them on a running part). */
@@ -59,6 +62,16 @@ export function createAppServer(hub: () => HubContext, _run: HubRunOptions, opts
   const limits: AppLimits = { ...APP_LIMITS, ...opts.limits };
   const sockets = new Set<AppSocket>();
   const live = new Set<AppSocket>();
+  /** `/app/stream` sockets (design csi-c1 D12): their own hello, pinged as /app's. */
+  const streams = new Set<StreamSocket>();
+  const streamHost = {
+    hub,
+    limits,
+    token: () => readToken(),
+    gone: (s: StreamSocket) => {
+      streams.delete(s);
+    },
+  };
   const manifests = new ManifestCache();
   /** The instances signature each device was last announced with: a change is announced again (device.added). */
   const announced = new Map<string, string>();
@@ -218,6 +231,9 @@ export function createAppServer(hub: () => HubContext, _run: HubRunOptions, opts
         for (const s of sockets) {
           s.ping();
         }
+        for (const s of streams) {
+          s.ping();
+        }
       }, limits.pingMs);
       pinger.unref();
     },
@@ -232,8 +248,11 @@ export function createAppServer(hub: () => HubContext, _run: HubRunOptions, opts
       for (const s of [...sockets]) {
         s.close(1001, 'hub stopping');
       }
+      for (const s of [...streams]) {
+        s.close(1001, 'hub stopping');
+      }
       const deadline = Date.now() + 500;
-      while (sockets.size && Date.now() < deadline) {
+      while ((sockets.size || streams.size) && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 10));
       }
     },
@@ -254,6 +273,20 @@ export function createAppServer(hub: () => HubContext, _run: HubRunOptions, opts
         socket.on('close', () => s.closed());
         socket.on('error', () => s.closed());
       });
+      // Design csi-c1 D12: one stream's blocks to one app; text frames JSON, the hub's blocks binary.
+      app.get(APP_STREAM_PATH, { websocket: true }, (socket: WebSocket, req) => {
+        const s = new StreamSocket(socket, req.raw.socket as Socket | undefined, streamHost);
+        streams.add(s);
+        socket.on('message', (data, isBinary) => {
+          if (isBinary) {
+            s.close(4400, 'frames to the hub are JSON text');
+            return;
+          }
+          s.message((Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data)).toString('utf8'));
+        });
+        socket.on('close', () => s.closed());
+        socket.on('error', () => s.closed());
+      });
     },
     appToken() {
       const t = readToken();
@@ -263,6 +296,7 @@ export function createAppServer(hub: () => HubContext, _run: HubRunOptions, opts
       return t;
     },
     sockets: () => live.size,
+    streamSockets: () => streams.size,
     stats: () => ({ sockets: live.size, written: [...sockets].reduce((n, s) => n + s.written, closedWritten), queued: [...sockets].reduce((n, s) => n + s.queued, 0) }),
     limits,
   };

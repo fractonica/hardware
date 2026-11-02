@@ -4,6 +4,8 @@
 # builds the same files (the services and the node descriptor). src/audio (design audio-a1 D5: the audio services' DSP,
 # rings and fr_audio/fr_stream engine) is IDF-free too; src/audio_rt_esp.cpp is its FreeRTOS layer (src/host/audio_rt.cpp
 # on the Mac). The audio services stream through fr_ota's src/http clients (HttpPost, HttpGet), hence fr_ota below.
+# src/stream (design csi-c1 D11) is what every stream shares (fr/stream/stream.hpp), fr.csi's CsiService one of them;
+# src/services/csi_record.cpp its ring and motion feature (fr/csi/csi.hpp). Both IDF-free.
 idf_component_register(SRCS "src/adc1.cpp"
                             "src/app_desc.cpp"
                             "src/audio/dsp.cpp"
@@ -23,12 +25,16 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/services/audio_in_service.cpp"
                             "src/services/audio_out_service.cpp"
                             "src/services/button_service.cpp"
+                            "src/services/csi_record.cpp"
+                            "src/services/csi_service.cpp"
                             "src/services/descriptor.cpp"
                             "src/services/display_service.cpp"
                             "src/services/fixture_service.cpp"
                             "src/services/led_service.cpp"
+                            "src/services/radio_tx_service.cpp"
                             "src/services/touch_service.cpp"
                             "src/s2_hooks.cpp"
+                            "src/stream/stream.cpp"
                             "src/test_pin.cpp"
                        INCLUDE_DIRS "include"
                        # Public: the generated capability classes (and fr_caps' FR_TEST_HOOKS definition,

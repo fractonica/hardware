@@ -63,6 +63,7 @@ file(GLOB FR_LIB_SRCS CONFIGURE_DEPENDS
     ${COMPONENTS_DIR}/fr_core/src/services/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/display/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/audio/*.cpp
+    ${COMPONENTS_DIR}/fr_core/src/stream/*.cpp
     ${COMPONENTS_DIR}/fr_core/src/host/*.cpp
     ${COMPONENTS_DIR}/fr_net/src/core/*.cpp
     ${COMPONENTS_DIR}/fr_gw/src/*.cpp
@@ -155,6 +156,23 @@ target_compile_definitions(fr_audio_sim PRIVATE FR_HOST_SHIM=1)
 target_link_libraries(fr_audio_sim PUBLIC fr_panel_sim fr_fixture_sim fr_host_lib)
 target_compile_options(fr_audio_sim PRIVATE ${FR_CXX_WARNINGS})
 
+# The radio drivers of CSI-1 (design csi-c1 D7-D9) unchanged against shim/idf's esp_wifi CSI calls, esp_netif and
+# esp_ping (shim/wifi_sim.cpp: the C5's MAC v3 types) and esp_sim's esp_timer, and espnow_tx against a fake of fr_net's
+# ESP-NOW calls (shim/espnow_sim.cpp): the tests check the CSI config, the filter, the pings and the send pacing.
+set(FR_RADIO_INCLUDES
+    ${REPO_DIR}/hardware/drivers/wifi_csi/include
+    ${REPO_DIR}/hardware/drivers/espnow_tx/include)
+add_library(fr_radio_sim STATIC
+    ${HOST_DIR}/shim/wifi_sim.cpp
+    ${HOST_DIR}/shim/espnow_sim.cpp
+    ${REPO_DIR}/hardware/drivers/wifi_csi/src/wifi_csi.cpp
+    ${REPO_DIR}/hardware/drivers/espnow_tx/src/espnow_tx.cpp)
+target_include_directories(fr_radio_sim PRIVATE ${HOST_DIR}/shim/idf ${COMPONENTS_DIR}/fr_id/include
+    ${COMPONENTS_DIR}/fr_net/src/esp/include PUBLIC ${HOST_DIR}/shim ${FR_RADIO_INCLUDES})
+target_compile_definitions(fr_radio_sim PRIVATE FR_HOST_SHIM=1 CONFIG_ESP_WIFI_CSI_ENABLED=1)
+target_link_libraries(fr_radio_sim PUBLIC fr_fixture_sim fr_host_lib)
+target_compile_options(fr_radio_sim PRIVATE ${FR_CXX_WARNINGS})
+
 # The T2 fleet kit (design m2-c2 §3 item 5, D1-D8; namespace frsim): the N-node medium, each node's radio over the
 # real air::Scheduler, a core per node and the executor, and the node classes fr_net_node and fr_fleet share. The
 # driver's air_sched.hpp is private to fr_net/src/esp, so only this library gets that directory. Threads: the wall
@@ -167,7 +185,7 @@ target_link_libraries(fr_sim PUBLIC fr_host_lib Threads::Threads)
 target_compile_options(fr_sim PRIVATE ${FR_CXX_WARNINGS})
 
 add_executable(fr_host_tests ${FR_TEST_SRCS} ${FR_FUZZ_TARGET_SRCS})
-target_link_libraries(fr_host_tests PRIVATE fr_sim fr_audio_sim fr_panel_sim fr_fixture_sim fr_host_lib)
+target_link_libraries(fr_host_tests PRIVATE fr_sim fr_audio_sim fr_radio_sim fr_panel_sim fr_fixture_sim fr_host_lib)
 target_include_directories(fr_host_tests PRIVATE ${FR_FIXTURE_INCLUDES})
 target_compile_options(fr_host_tests PRIVATE ${FR_CXX_WARNINGS})
 

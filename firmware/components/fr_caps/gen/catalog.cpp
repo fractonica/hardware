@@ -44,6 +44,11 @@ constexpr MemberInfo kAudioInProperties[] = {{1, "level"}, {2, "streaming"}, {3,
 constexpr MemberInfo kTouchCommands[] = {{1, "inject"}};
 constexpr MemberInfo kTouchEvents[] = {{1, "down"}, {2, "up"}, {3, "gesture"}};
 constexpr MemberInfo kTouchProperties[] = {{1, "pressed"}};
+constexpr MemberInfo kCsiCommands[] = {{1, "stream_start"}, {2, "stream_stop"}, {3, "baseline_reset"}};
+constexpr MemberInfo kCsiEvents[] = {{1, "stream_ended"}};
+constexpr MemberInfo kCsiProperties[] = {{1, "motion"}, {2, "rssi"}, {3, "rate"}};
+constexpr MemberInfo kRadioTxCommands[] = {{1, "start"}, {2, "stop"}};
+constexpr MemberInfo kRadioTxProperties[] = {{1, "sending"}};
 constexpr MemberInfo kNodeCommands[] = {
     {1, "identify"},
     {2, "describe"},
@@ -69,6 +74,8 @@ constexpr CapInfo kCaps[] = {
     {0x0006, "fr.fixture", {0, 2}, kFixtureCommands, kFixtureEvents, kFixtureProperties},
     {0x0007, "fr.audio_in", {1, 1}, kAudioInCommands, kAudioInEvents, kAudioInProperties},
     {0x0008, "fr.touch", {1, 0}, kTouchCommands, kTouchEvents, kTouchProperties},
+    {0x0009, "fr.csi", {1, 0}, kCsiCommands, kCsiEvents, kCsiProperties},
+    {0x000A, "fr.radio_tx", {1, 0}, kRadioTxCommands, {}, kRadioTxProperties},
     {0x00F0, "fr.node", {1, 0}, kNodeCommands, kNodeEvents, {}},
     {0x00F1, "fr.ota", {1, 0}, {}, {}, {}},
     {0x00F2, "fr.diag", {1, 0}, kDiagCommands, kDiagEvents, {}},

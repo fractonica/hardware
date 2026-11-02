@@ -14,6 +14,9 @@
 // driver's 20 peer entries (05 §5.3), a node keeps one for its chosen gateway (pin(): outside the LRU, so binding
 // churn never evicts it) and one spare (`air churn`'s throwaway peer); a gateway's bridge takes all 19 beside the
 // broadcast peer as its LRU (set_bridge()).
+//
+// CSI-1 (design csi-c1 D9): a frame may be plain (espnow_tx's fixed-rate frames for a CSI receiver, not envelopes): it
+// queues and goes one in flight like any other, but gets no link retry, and its end goes to Radio::done_plain, not Net.
 #pragma once
 
 #include <algorithm>
@@ -25,16 +28,18 @@
 
 #include "fr/base.hpp"
 #include "fr/net/air.hpp"
+#include "fr/net/limits.hpp"
 #include "fr/net/us_histogram.hpp"
 
 namespace fr::net::air {
 
 /** FR_MTU_RT: one ESP-NOW v1 payload. A BULK frame never goes on the air (design c5 §2). */
 inline constexpr size_t kMtu = 250;
-/** Frames queued at once, all priorities together. */
-inline constexpr size_t kQueueFrames = 16;
+/** Frames queued at once, all priorities together (16, or the memory class's). */
+inline constexpr size_t kQueueFrames = limits::kAirQueue;
 /** Of those, kept for URGENT: relays and MSGs cannot crowd out a binding's command or a Q1 answer. */
 inline constexpr size_t kUrgentReserve = 4;
+static_assert(kQueueFrames > kUrgentReserve);
 /** 05 §5.3: 20 peer entries = the broadcast peer, gateways (M2) and up to 17 unicast peers. */
 inline constexpr size_t kUnicastPeers = 17;
 /** A gateway's bridge (design m2-c4-gateway D8): every entry beside the broadcast peer is its LRU's. */
@@ -74,6 +79,12 @@ public:
     virtual void disarm() = 0;
     /** A frame's end (Net::air_sent): `ok` for a MAC-ACKed unicast or a broadcast that went out. */
     virtual void done(uint32_t token, bool ok) = 0;
+    /** A plain frame's end (design csi-c1 D9: espnow_tx, outside Net). A radio without plain senders ignores it. */
+    virtual void done_plain(uint32_t token, bool ok)
+    {
+        static_cast<void>(token);
+        static_cast<void>(ok);
+    }
     /** The peer's rate from now on (esp_now_set_peer_rate_config; kBroadcastMac: the broadcast peer); peer_default is
      * the rate add_peer gives (the robust one on target). False when the driver refused it. */
     virtual bool set_rate(const Mac &mac, AirRate rate)
@@ -116,10 +127,11 @@ public:
     /**
      * AirLink::send: queues `envelope` for `dst` and starts it if nothing is in flight. Refused (no done()
      * follows): invalid_args when empty or above kMtu, busy when the queue is full for `prio` or `dst` would
-     * need a peer slot that no peer unused for a second can free.
+     * need a peer slot that no peer unused for a second can free. A `plain` frame (design csi-c1 D9) gets no link
+     * retry and ends through Radio::done_plain.
      */
     Status send(const Mac &dst, std::span<const uint8_t> envelope, AirPrio prio, uint32_t token, TimeUs now,
-                AirRate rate = AirRate::peer_default)
+                AirRate rate = AirRate::peer_default, bool plain = false)
     {
         refused_no_peer_ = false;
         if (envelope.empty() || envelope.size() > kMtu) {
@@ -147,6 +159,7 @@ public:
         f->used = true;
         f->prio = prio;
         f->rate = rate;
+        f->plain = plain;
         f->order = ++order_;
         f->token = token;
         f->queued_at = now;
@@ -341,6 +354,33 @@ public:
         return r;
     }
     AirRate default_rate(bool broadcast) const { return default_rate_[broadcast ? 1 : 0]; }
+    /**
+     * Design csi-c1 D6: channel C moved to the other band, so every peer entry's rate config (the broadcast peer's,
+     * the LRU's, the pinned gateway's) is one of the old band's (11b does not exist on 5 GHz). Each is set again at
+     * the rate the scheduler has for it, which the radio maps onto the new band. A refusal is counted (rate_fail): that
+     * peer keeps the old config until its rate is set again.
+     */
+    RateChange reapply_rates()
+    {
+        RateChange r;
+        const auto again = [&](const Mac &mac, AirRate cur) {
+            ++r.peers;
+            if (!radio_.set_rate(mac, cur)) {
+                ++r.failed;
+                ++stats_.rate_fail;
+            }
+        };
+        again(kBroadcastMac, bcast_rate_);
+        for (size_t i = 0; i < limit_; ++i) {
+            if (peers_[i].live) {
+                again(peers_[i].mac, peers_[i].rate);
+            }
+        }
+        if (pinned_.live) {
+            again(pinned_.mac, pinned_.rate);
+        }
+        return r;
+    }
     /** The last send() was refused busy for want of a peer slot, not of queue room (AirLink::refused_no_peer). */
     bool refused_no_peer() const { return refused_no_peer_; }
     /** How send `token` ended (AirLink::done_info): valid inside the done() call for it, {} for another token. */
@@ -360,6 +400,7 @@ private:
         bool used = false;
         AirPrio prio = AirPrio::normal;
         AirRate rate = AirRate::peer_default;  // its own, else the default for its kind of peer
+        bool plain = false;                    // design csi-c1 D9: no link retry, ends through done_plain
         uint8_t len = 0;
         uint32_t order = 0;
         uint32_t token = 0;
@@ -500,7 +541,7 @@ private:
 
     void failed_attempt(TimeUs now)
     {
-        if (attempts_ < kLinkRetries) {
+        if (attempts_ < kLinkRetries && !frames_[inflight_].plain) {
             ++stats_.retries;
             arm(State::retry_wait, kRetryDelayUs[attempts_++], now);
             return;
@@ -520,6 +561,7 @@ private:
         // Settled before done(): Net may send again from inside it (the fallback chain), which kicks here.
         Frame &f = frames_[inflight_];
         const uint32_t token = f.token;
+        const bool plain = f.plain;
         done_token_ = token;
         done_ = {.retries = attempts_,
                  .queued_us = static_cast<uint32_t>(std::clamp<TimeUs>(f.started_at - f.queued_at, 0, UINT32_MAX))};
@@ -528,7 +570,11 @@ private:
         state_ = State::idle;
         radio_.disarm();
         ++(ok ? stats_.sent : stats_.failed);
-        radio_.done(token, ok);
+        if (plain) {
+            radio_.done_plain(token, ok);
+        } else {
+            radio_.done(token, ok);
+        }
         kick(now);
     }
 

@@ -38,7 +38,7 @@ class AdcAudio final : public hal::AudioSource
 public:
     enum class Atten : uint8_t { db0, db2_5, db6, db12 };
 
-    /** The ADC DMA's conversion ceiling on C3, C6 and S3 (IDF SOC_ADC_SAMPLE_FREQ_THRES_HIGH); codegen's agrees. */
+    /** The ADC DMA's conversion ceiling on C3, C5, C6 and S3 (IDF SOC_ADC_SAMPLE_FREQ_THRES_HIGH); codegen's agrees. */
     static constexpr uint32_t kMaxConversionsHz = 83'333;
     /** Conversions per DMA frame (IDF conv_frame_size / 4) and IDF's pool for them (max_store_buf_size). */
     static constexpr uint32_t kFrameConversions = 256;

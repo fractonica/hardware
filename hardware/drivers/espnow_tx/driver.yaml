@@ -1,0 +1,14 @@
+# Driver manifest (design csi-c1 D9; spec 07 §7.8). Nothing on the board: the radio is the chip's own, so the
+# profile's instance has no `bind` (codegen's binds: none). It sends through fr_net's ESP-NOW (the hub link's radio
+# and peer table), so it needs no Kconfig of its own. Stream F implements it (CSI-1).
+schema: fractonica/driver@1
+id: espnow_tx
+summary: ESP-NOW unicast frames at a fixed rate from the chip's own radio, on the station's channel, at the band's robust rate (the peer source of a CSI receiver).
+implements: hal.RadioTx
+class: fr::drv::EspnowTx                # header: include/fr/drv/espnow_tx.hpp
+targets: [esp32c3, esp32c5, esp32c6, esp32s3]   # ESP-NOW on every Wi-Fi chip; 5 GHz (11a) on the C5 only
+binds: none
+accepts_kinds: [none]
+config: {}
+resources: {}
+dependencies: {}

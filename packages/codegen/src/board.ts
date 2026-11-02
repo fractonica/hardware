@@ -17,7 +17,8 @@
 // controllers: a driver field of type i2s_port (auto or a number, resolved here), the board's `resources.i2s`, and
 // `share_with: <instance>` (type instance), which puts two instances on one controller with shared BCLK/WS. A2 (design
 // audio-a2 D2) adds a driver field's `range`, the ADC1 unit in continuous mode (resource adc_continuous: one per
-// firmware, alone on ADC1) and its conversion ceiling (config sample_hz x oversample).
+// firmware, alone on ADC1) and its conversion ceiling (config sample_hz x oversample). CSI-1 adds the profile's
+// `memory: small` (SMALL_MEMORY): a sensor's table sizes and more IDF code in flash on a chip without PSRAM.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -81,9 +82,10 @@ export type CapValue = JsonScalar | number[];
 /**
  * The top of ADC1's range at 12 dB attenuation, per target (design m2-c3-inputs D3; *inferred* from the IDF
  * adc_oneshot docs, and logged by adc_oneshot from its calibration scheme at init): fr.analog_in's
- * full_scale_mv when its driver does not declare one.
+ * full_scale_mv when its driver does not declare one. esp32c5 (design csi-c1 D1): *inferred* as the C6's (the same
+ * per-channel curve-fitting calibration in IDF v6.1; no figure in the IDF docs); the bench reads it at provisioning.
  */
-export const ADC1_FULL_SCALE_MV: Readonly<Record<string, number>> = { esp32c3: 2500, esp32c6: 3300, esp32s3: 3300 };
+export const ADC1_FULL_SCALE_MV: Readonly<Record<string, number>> = { esp32c3: 2500, esp32c5: 3300, esp32c6: 3300, esp32s3: 3300 };
 
 /**
  * The L2 service behind each capability (design c2 §5): ButtonService takes three timers (lockout, long press,
@@ -145,6 +147,11 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
   // driver.yaml `traits:`.
   'fr.audio_in': { implements: 'hal.AudioSource', service: 'fr::AudioInService', header: 'fr/services/audio_in_service.hpp', timers: 1 },
   'fr.audio_out': { implements: 'hal.AudioSink', service: 'fr::AudioOutService', header: 'fr/services/audio_out_service.hpp', timers: 1 },
+  // Design csi-c1 D7, D9: one timer each (fr.csi: the feature reports and the stream's end; fr.radio_tx: a run's
+  // seconds and the driver's own stop); the records on the Wi-Fi task and the fr_stream task, the frames on the
+  // driver's own pacing.
+  'fr.csi': { implements: 'hal.CsiSource', service: 'fr::CsiService', header: 'fr/services/csi_service.hpp', timers: 1 },
+  'fr.radio_tx': { implements: 'hal.RadioTx', service: 'fr::RadioTxService', header: 'fr/services/radio_tx_service.hpp', timers: 1 },
 };
 
 /** The HIL fixture's capability: its lines' `drive` decides the power-up glitch rule (design m2-c1-hil D5). */
@@ -210,9 +217,10 @@ const ADC1_RESOURCE = 'adc1_channel';
 const ADC_CONTINUOUS_RESOURCE = 'adc_continuous';
 /**
  * Conversions per second the ADC DMA reaches (IDF v6.1 SOC_ADC_SAMPLE_FREQ_THRES_HIGH; fr::drv::AdcAudio's
- * kMaxConversionsHz): an adc_continuous instance's config sample_hz x its driver's `oversample` must fit.
+ * kMaxConversionsHz): an adc_continuous instance's config sample_hz x its driver's `oversample` must fit. The C5's is
+ * the same (read in its soc_caps.h, design csi-c1 D1).
  */
-export const ADC_CONVERSIONS_HZ: Readonly<Record<string, number>> = { esp32c3: 83_333, esp32c6: 83_333, esp32s3: 83_333 };
+export const ADC_CONVERSIONS_HZ: Readonly<Record<string, number>> = { esp32c3: 83_333, esp32c5: 83_333, esp32c6: 83_333, esp32s3: 83_333 };
 /** The driver field of an adc_continuous driver that multiplies its conversion rate. */
 const OVERSAMPLE_FIELD = 'oversample';
 
@@ -308,6 +316,12 @@ const PIN_RESOURCE = 'gpio';
 const PIN_SECTION = 'gpio';
 const PIN_BIND = /^gpio\.(\d{1,2})$/;
 
+/**
+ * A driver that binds nothing (design csi-c1 D7, D9: wifi_csi and espnow_tx, the radio's own): `binds: none` and
+ * `accepts_kinds: [none]` in driver.yaml, no `bind` in the profile, no pins and no board fields.
+ */
+const NO_BIND = 'none';
+
 /** fr_core's board instance table (`kMaxInstances`, fr_core/include/fr/core.hpp): it leaves out and logs the rest. */
 export const MAX_INSTANCES = 16;
 
@@ -350,6 +364,12 @@ const RawProfile = z.strictObject({
    * (MALLOC_CAP_SPIRAM) only: LVGL's shadow framebuffer. Without it, or `off`, nothing is rendered (SPIRAM off).
    */
   psram: z.enum(['on', 'off']).optional(),
+  /**
+   * `small`: the memory class of a chip without PSRAM whose one SRAM holds code, data and Wi-Fi (the C5 sensor): the
+   * fleet tables, the serial rings and the CSI buffers at a sensor's sizes, and more IDF code in flash (SMALL_MEMORY).
+   * Without it, or `default`, nothing is rendered: every size is its Kconfig default.
+   */
+  memory: z.enum(['default', 'small']).optional(),
   caps: z.record(
     z.string(),
     z.strictObject({
@@ -358,10 +378,13 @@ const RawProfile = z.strictObject({
       // A board entry, or a bare pin for a driver that binds `gpio` (design m2-c1-hil D5: the fixture lines), or
       // several named bare pins (design audio-a1 D7: `{ bclk: gpio.41, ws: gpio.42, din: gpio.2 }`), one per driver
       // field `from: bind.<key>`.
-      bind: z.union([
-        z.string().regex(/^([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|gpio\.\d{1,2})$/, 'expected <section>.<entry>, e.g. leds.status, or gpio.<n>'),
-        z.record(ident, z.string().regex(/^gpio\.\d{1,2}$/, 'expected gpio.<n>')).refine((m) => Object.keys(m).length > 0, 'expected at least one pin'),
-      ]),
+      // Left out for a driver that binds nothing (design csi-c1 D7: `binds: none`).
+      bind: z
+        .union([
+          z.string().regex(/^([a-z][a-z0-9_]*\.[a-z][a-z0-9_]*|gpio\.\d{1,2})$/, 'expected <section>.<entry>, e.g. leds.status, or gpio.<n>'),
+          z.record(ident, z.string().regex(/^gpio\.\d{1,2}$/, 'expected gpio.<n>')).refine((m) => Object.keys(m).length > 0, 'expected at least one pin'),
+        ])
+        .optional(),
       // A list of integers sets an array<T> capability config entry (design m2-c3-inputs D4).
       config: z.record(z.string(), z.union([jsonScalar, z.array(z.number())])).optional(),
     }),
@@ -711,6 +734,7 @@ function renderFragment(inp: Inputs, driverLines: readonly string[]): string {
     // `test_pin: none` leaves it unset, so it stays -1 (design m2-c1-hil D5).
     ...(testPin != null ? [`CONFIG_FR_TEST_PIN=${testPin}`] : []),
     ...psramLines(inp),
+    ...memoryLines(inp),
     ...displayStackLines(inp),
     ...(driverLines.length > 0 ? ["# From the bound drivers' driver.yaml `sdkconfig` (design m2-c1-hil D5).", ...driverLines] : []),
     '',
@@ -746,6 +770,51 @@ function psramLines(inp: Inputs): string[] {
     'CONFIG_SPIRAM=y',
     psram.mode === 'octal' ? 'CONFIG_SPIRAM_MODE_OCT=y' : 'CONFIG_SPIRAM_MODE_QUAD=y',
     'CONFIG_SPIRAM_USE_CAPS_ALLOC=y',
+  ];
+}
+
+/**
+ * A profile's `memory: small`: what sdkconfig.board sets, the FR_* sizes (each Kconfig's default is every other
+ * profile's) and the IDF options that move code out of IRAM. Kept in IRAM: whatever runs with the cache disabled (the
+ * flash driver, the IRAM GPIO ISR service and input_slot_isr, esp_timer, the interrupt and system code). Moved: Wi-Fi's
+ * TBTT/beacon and extra RX/TX paths (throughput and power-save current only), the ring buffer's ISR API (no IRAM ISR in
+ * such a profile uses it: USB-Serial/JTAG's ISR is not IRAM, UART, ADC continuous and I2C ISRs are not IRAM-safe) and
+ * the heap (never called from an IRAM ISR). Wi-Fi's dynamic buffers are capped, so a burst cannot take the heap.
+ */
+export const SMALL_MEMORY: readonly (readonly [string, string])[] = [
+  ['CONFIG_FR_WINDOW_SOURCES_NODE', '16'], // Net sources, 56 B each (64)
+  ['CONFIG_FR_DIRECTORY_MAX', '16'], // directory entries, 8 B each in Net twice and in nvs:fr_dir (64)
+  ['CONFIG_FR_NET_NEIGHBORS_MAX', '8'], // ESP-NOW neighbours, 32 B each (20)
+  ['CONFIG_FR_NET_OUTBOX', '4'], // Q1 frames and STATE second copies, 304 B each (8)
+  ['CONFIG_FR_NET_RESP_CACHE', '4'], // cached responses, 268 B each (8)
+  ['CONFIG_FR_NET_EXEC_SLOTS', '2'], // exec_at CMDs, 280 B each (8)
+  ['CONFIG_FR_NET_RELAY_QUEUE', '4'], // pending relays, 280 B each (8)
+  ['CONFIG_FR_NET_NODE_OUT', '2'], // node -> node frames in flight, 304 B each (8)
+  ['CONFIG_FR_NET_BENCH_SOURCES', '1'], // `air bench rx` sources, 424 B each (4)
+  ['CONFIG_FR_NET_TCP_TX_BYTES', '4096'], // the hub TCP send FIFO (8192)
+  ['CONFIG_FR_NET_AIR_QUEUE', '8'], // ESP-NOW frames queued, 288 B each (16)
+  ['CONFIG_FR_NET_AIR_RX_SLOTS', '8'], // ESP-NOW frames received, 288 B each (16)
+  ['CONFIG_FR_SERIAL_FRAME_RING', '4096'], // the serial frame ring (8192)
+  ['CONFIG_FR_SERIAL_LOG_RING', '2048'], // the serial log ring (4096)
+  ['CONFIG_FR_SERIAL_NET_LOG_RING', '2048'], // the net log ring (4096)
+  ['CONFIG_FR_CSI_RING_BYTES', '4096'], // the CSI record ring (8192)
+  ['CONFIG_FR_CSI_BLOCK_BYTES', '4096'], // each CSI stream block, while a stream runs (8192)
+  ['CONFIG_ESP_WIFI_SLP_IRAM_OPT', 'n'], // Wi-Fi TBTT/beacon code and the PM sleep code in IRAM, about 9.5 KB
+  ['CONFIG_ESP_WIFI_EXTRA_IRAM_OPT', 'n'], // more Wi-Fi code in IRAM, over 5 KB
+  ['CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH', 'y'], // the ring buffer ISR API in IRAM, about 3.4 KB
+  ['CONFIG_HEAP_PLACE_FUNCTION_INTO_FLASH', 'y'], // the heap in IRAM, about 1.5 KB
+  // Wi-Fi's heap peaks: frames in flight to lwIP and to the air, about 1.6 KB each (32 each; RX at least the static 6).
+  ['CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM', '16'],
+  ['CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM', '16'],
+];
+
+function memoryLines(inp: Inputs): string[] {
+  if (inp.profile.memory !== 'small') {
+    return [];
+  }
+  return [
+    "# memory: small (no PSRAM, one SRAM for code, data and Wi-Fi): a sensor's table sizes, more code in flash.",
+    ...SMALL_MEMORY.map(([sym, value]) => `${sym}=${value}`),
   ];
 }
 
@@ -889,6 +958,20 @@ function loadDriverInto(sourceDir: string, id: string, issues: Issues): DriverMa
     }
     if (f.type === INSTANCE_REF && f.default !== undefined) {
       bad(['config', name, 'default'], `an ${INSTANCE_REF} field has no default (absent: none)`);
+    }
+  }
+  if (d.binds === NO_BIND) {
+    // Design csi-c1 D7: nothing on the board to read from or claim.
+    for (const [name, f] of Object.entries(d.config ?? {})) {
+      if (f.from !== undefined || f.type === 'gpio' || f.type === GPIO_MASK) {
+        bad(['config', name], `a driver that binds ${NO_BIND} has no pins and no board fields`);
+      }
+    }
+    if ((d.resources?.[PIN_RESOURCE] ?? 0) !== 0) {
+      bad(['resources', PIN_RESOURCE], `a driver that binds ${NO_BIND} claims no gpio`);
+    }
+    if (d.accepts_kinds.join() !== NO_BIND) {
+      bad(['accepts_kinds'], `a driver that binds ${NO_BIND} accepts [${NO_BIND}]`);
     }
   }
   const binds = Object.values(d.config ?? {}).filter((f) => f.from === 'bind' || f.from?.startsWith('bind.'));
@@ -1214,6 +1297,9 @@ function checkProfile(inp: Inputs, issues: Issues): void {
   if (profile.psram === 'on' && !inp.board.psram) {
     issues.add(pf, ['psram'], `psram: on, but board ${inp.board.id} has no PSRAM (psram: null)`);
   }
+  if (profile.memory === 'small' && profile.role === 'gateway') {
+    issues.add(pf, ['memory'], "memory: small is a sensor node's class; a gateway bridges the whole fleet and keeps the full tables");
+  }
   if (profile.role === 'fixture') {
     if (profile.test_pin !== 'none') {
       issues.add(pf, ['test_pin'], 'a role: fixture profile needs test_pin: none');
@@ -1315,10 +1401,20 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       bad([...at, 'driver'], `driver ${driver.id} does not support ${board.idf_target} (targets: ${driver.targets.join(', ')})`);
     }
 
-    // A multi-pin bind (design audio-a1 D7): named bare pins, each a driver field `from: bind.<key>`.
+    // A multi-pin bind (design audio-a1 D7): named bare pins, each a driver field `from: bind.<key>`. No bind at all
+    // (design csi-c1 D7): a driver that binds none, which has nothing on the board.
+    const unbound = c.bind === undefined;
     const bindMap = typeof c.bind === 'object' ? Object.fromEntries(Object.entries(c.bind).map(([k, v]) => [k, Number(v.slice(PIN_SECTION.length + 1))])) : null;
-    const bindText = bindMap ? `{${Object.entries(c.bind).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : (c.bind as string);
-    const [section, entryName] = bindMap ? [PIN_SECTION, ''] : bindText.split('.');
+    const bindText = unbound ? NO_BIND : typeof c.bind === 'object' ? `{${Object.entries(c.bind).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : c.bind!;
+    const [section, entryName] = unbound ? [NO_BIND, ''] : bindMap ? [PIN_SECTION, ''] : bindText.split('.');
+    if (unbound && driver.binds !== NO_BIND) {
+      bad([...at, 'bind'], `driver ${driver.id} needs a bind (board ${driver.binds} entries)`);
+      continue;
+    }
+    if (!unbound && driver.binds === NO_BIND) {
+      bad([...at, 'bind'], `driver ${driver.id} binds nothing: leave bind out`);
+      continue;
+    }
     if (section !== driver.binds) {
       bad([...at, 'bind'], `driver ${driver.id} binds board ${driver.binds} entries, not ${section}`);
     }
@@ -1335,7 +1431,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     // A bare pin (design m2-c1-hil D5) has no board entry: it is just its GPIO, checked with the pins below.
     const pinBind = bindMap ? null : PIN_BIND.exec(bindText);
     const bindPin = pinBind ? Number(pinBind[1]) : undefined;
-    const entry = bindMap ?? (bindPin !== undefined ? { gpio: bindPin } : lookupEntry(board, section, entryName));
+    const entry = unbound ? { kind: NO_BIND } : (bindMap ?? (bindPin !== undefined ? { gpio: bindPin } : lookupEntry(board, section, entryName)));
     if (!entry) {
       bad([...at, 'bind'], `board ${board.id} has no entry ${bindText}`);
       continue;
@@ -1992,7 +2088,7 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
     const ns = `inst_${i.name}`;
     const drvCfg = `${i.driver.class}::Config`;
     const capCfg = `fr::cap::${i.cap.pascalName}Config`;
-    lines.push(`// ${i.name}: ${i.cap.name} on port ${i.port}, driver ${i.driver.id} on ${i.bind}`, `namespace ${ns} {`, '');
+    lines.push(`// ${i.name}: ${i.cap.name} on port ${i.port}, driver ${i.driver.id} ${i.bind === NO_BIND ? '(no bind)' : `on ${i.bind}`}`, `namespace ${ns} {`, '');
     // Assignments rather than designated initializers, so the generated config structs may order their
     // members freely.
     lines.push(`constexpr ${drvCfg} kDriverConfig = [] {`, `    ${drvCfg} c{};`);
@@ -2006,13 +2102,20 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
       lines.push(`    c.${f.name} = ${v};`);
     }
     lines.push('    return c;', '}();', '');
-    lines.push(`constexpr ${capCfg} kConfig = [] {`, `    ${capCfg} c{};`);
-    for (const f of i.capConfig) {
-      lines.push(`    c.${cppIdent(f.entry.name)} = ${capLiteral(i.cap, f.entry, f.value)};`);
+    // A capability without config (design csi-c1 D9: fr.radio_tx) has no generated Config struct: its service
+    // takes the driver only.
+    const hasConfig = i.cap.config.length > 0;
+    if (hasConfig) {
+      lines.push(`constexpr ${capCfg} kConfig = [] {`, `    ${capCfg} c{};`);
+      for (const f of i.capConfig) {
+        lines.push(`    c.${cppIdent(f.entry.name)} = ${capLiteral(i.cap, f.entry, f.value)};`);
+      }
+      lines.push('    return c;', '}();', '');
     }
-    lines.push('    return c;', '}();', '');
     const backend = displayBackend(i);
-    if (backend) {
+    if (!hasConfig) {
+      lines.push(`${i.driver.class} driver{kDriverConfig};`, `${i.service.service} service{driver};`, '');
+    } else if (backend) {
       // Design m2-c5-display D3: the panel's renderer, which the service draws through.
       lines.push(`${i.driver.class} driver{kDriverConfig};`, `${backend.cls} backend;`, `${i.service.service} service{driver, backend, kConfig};`, '');
     } else {

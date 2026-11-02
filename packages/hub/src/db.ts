@@ -15,14 +15,25 @@ function devicesTable(name: string): string {
      net INTEGER, board TEXT, profile TEXT, chip TEXT, tags TEXT NOT NULL DEFAULT '[]',
      role TEXT NOT NULL DEFAULT 'node' CHECK (role IN ('node', 'gateway', 'fixture')), fw_id TEXT,
      provisioned INTEGER NOT NULL DEFAULT 0, last_seen TEXT, last_epoch INTEGER, created_at TEXT NOT NULL,
-     provision TEXT)`;
+     provision TEXT, network TEXT NOT NULL DEFAULT 'default')`;
+}
+
+/**
+ * The networks table (design csi-c1 D4): one row per named network (`default` is the one of hubs before csi-c1), each
+ * with its band; net_id is the fleet's, the same in every row (network.ts). `id` stays the rowid, as before csi-c1.
+ */
+function networksTable(name: string): string {
+  return `CREATE TABLE IF NOT EXISTS ${name} (
+     id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE DEFAULT 'default', ssid TEXT NOT NULL, bssid TEXT, country TEXT,
+     band TEXT NOT NULL DEFAULT 'auto' CHECK (band IN ('auto', '2g', '5g')), updated_at TEXT NOT NULL,
+     net_id INTEGER CHECK (net_id BETWEEN 1 AND 65535), hub_host TEXT)`;
 }
 
 /**
  * PRAGMA user_version: the schema changes ADD COLUMN cannot make, done once each. 0 is every database before
- * M2-C1; 1 has the `fixture` role (migrateRoleCheck).
+ * M2-C1; 1 has the `fixture` role (migrateRoleCheck); 2 has named networks (migrateNetworks, design csi-c1 D4).
  */
-export const DB_SCHEMA_VERSION = 1;
+export const DB_SCHEMA_VERSION = 2;
 
 const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)`,
@@ -38,9 +49,7 @@ const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS artifacts (
      build_id TEXT PRIMARY KEY, source_dir TEXT NOT NULL, profile TEXT NOT NULL, build_type TEXT NOT NULL,
      fw_id TEXT NOT NULL, built_at TEXT NOT NULL, manifest_path TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS networks (
-     id INTEGER PRIMARY KEY CHECK (id = 1), ssid TEXT NOT NULL, bssid TEXT, country TEXT, updated_at TEXT NOT NULL,
-     net_id INTEGER CHECK (net_id BETWEEN 1 AND 65535), hub_host TEXT)`,
+  networksTable('networks'),
   `CREATE TABLE IF NOT EXISTS ports_seen (
      usb_serial TEXT PRIMARY KEY, last_path TEXT NOT NULL, vid TEXT, pid TEXT, last_seen TEXT NOT NULL)`,
   // The registry (devicesTable).
@@ -80,6 +89,8 @@ const ADDED_COLUMNS: { table: string; column: string; decl: string }[] = [
   // C6: who started a job (design c6 D18: the X-Fr-Client header, cli|mcp|dashboard|app; NULL without
   // one), so job_list filters in SQL. The json keeps it too.
   { table: 'jobs', column: 'origin', decl: 'TEXT' },
+  // CSI-1 (design csi-c1 D5): the network a device's fr_ident names.
+  { table: 'devices', column: 'network', decl: "TEXT NOT NULL DEFAULT 'default'" },
 ];
 
 /**
@@ -102,8 +113,25 @@ function migrateRoleCheck(db: Db): void {
   db.exec('ALTER TABLE devices_v1 RENAME TO devices');
 }
 
+/**
+ * Version 2 (design csi-c1 D4): the single-row networks table (`CHECK (id = 1)`) becomes one row per named network.
+ * Its row becomes `default` (band auto), keeping id, ssid, bssid, country, updated_at, net_id and hub_host.
+ */
+function migrateNetworks(db: Db): void {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'networks'").get() as { sql: string } | undefined;
+  if (!row || !/CHECK\s*\(\s*id\s*=\s*1\s*\)/i.test(row.sql)) {
+    return;
+  }
+  const old = new Set((db.prepare('PRAGMA table_info(networks)').all() as { name: string }[]).map((c) => c.name));
+  const cols = ['id', 'ssid', 'bssid', 'country', 'updated_at', 'net_id', 'hub_host'].filter((c) => old.has(c)).join(', ');
+  db.exec(networksTable('networks_v2'));
+  db.exec(`INSERT INTO networks_v2 (name, band, ${cols}) SELECT 'default', 'auto', ${cols} FROM networks`);
+  db.exec('DROP TABLE networks');
+  db.exec('ALTER TABLE networks_v2 RENAME TO networks');
+}
+
 /** The user_version steps, in order: step i takes a database from version i to i + 1. */
-const VERSION_STEPS: ((db: Db) => void)[] = [migrateRoleCheck];
+const VERSION_STEPS: ((db: Db) => void)[] = [migrateRoleCheck, migrateNetworks];
 
 export function openDb(file: string): Db {
   const db = new Database(file);
