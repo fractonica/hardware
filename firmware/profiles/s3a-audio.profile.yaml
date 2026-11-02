@@ -11,4 +11,4 @@ caps:
   boot:   { cap: fr.button,    driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,       driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 32 } }
   mic:    { cap: fr.audio_in,  driver: i2s_mic,     bind: { bclk: gpio.41, ws: gpio.42, din: gpio.2 }, config: { slot: left } }
-  spk:    { cap: fr.audio_out, driver: i2s_amp,     bind: { bclk: gpio.39, ws: gpio.40, dout: gpio.38 } }
+  spk:    { cap: fr.audio_out, driver: i2s_amp,     bind: { bclk: gpio.14, ws: gpio.13, dout: gpio.12 } }   # beside 5V/GND (38-40 are the SD slot's)

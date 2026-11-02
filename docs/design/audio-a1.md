@@ -8,6 +8,7 @@
 > - **`stats audio`** in diag: `rx_overflows`, `dropped_samples`, `clipping`, `underruns`, `ring_dry`.
 > - **The INMP441 picks up the board's own Wi-Fi transmissions** through its wires (spike note, finding 2): short wires cut it by about 19 dB; TX power stays at the default for now.
 > - **The hub** reads `POST /v1/audio/in/` on a raw socket (node:http hides chunk boundaries), identifies a play GET by the TCP session's address, and survives disk errors and stalled downloads.
+> - **The amp moved to GPIO14/13/12:** the board's underside micro-SD slot shares GPIO38-40 (its lines corrupted the I2S data on many-bit flips); the manifest now reserves them as `sd_card`.
 > - **IDF v6.1** dropped `i2s_port_t`; the host shim now matches it.
 
 **The hardware** (your photo, 2026-11-02):
@@ -75,7 +76,7 @@ The hub turns any WAV it is given into the board's format (mono, 16-bit, `sample
 | Mic SCK / WS / SD | GPIO41 / GPIO42 / GPIO2 |
 | Mic L/R | GND (left slot) |
 | Mic VDD / GND | 3V3 / GND |
-| Amp BCLK / LRC / DIN | GPIO39 / GPIO40 / GPIO38 |
+| Amp BCLK / LRC / DIN | GPIO14 / GPIO13 / GPIO12 (first 39/40/38: the micro-SD slot's pins, which made playback crackle; spike note finding 4) |
 | Amp Vin / GND | 5V / GND |
 | Amp GAIN, SD | not connected |
 

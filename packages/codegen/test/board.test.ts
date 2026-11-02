@@ -1537,12 +1537,13 @@ describe('audio: multi-pin binds, I2S controllers and the audio board (design au
       }
     });
 
-  it('the board manifest: the DevKitC-1 clone with the LED on 48 and GPIO38 free, detected like the fixture board', () => {
+  it('the board manifest: the DevKitC-1 clone with the LED on 48 and the micro-SD slot on 38-40, detected like the fixture board', () => {
     const b = loadBoardManifest(ROOT, 'esp32s3-wroom1-cam-n16r8') as Yaml;
     const fix = loadBoardManifest(ROOT, 'esp32s3-devkitc1-n16r8') as Yaml;
     expect(b.leds.rgb).toMatchObject({ gpio: 48, kind: 'ws2812', confidence: 'H' });
     expect(b.pins.reserved).not.toHaveProperty('rgb_alt');
-    expect(b.pins.free).toEqual([...fix.pins.free, 38].sort((x: number, y: number) => x - y));
+    expect(b.pins.reserved.sd_card).toEqual([38, 39, 40]);
+    expect(b.pins.free).toEqual(fix.pins.free.filter((p: number) => p !== 39 && p !== 40));
     expect(b.detection).toEqual(fix.detection);
     expect(b.resources.i2s).toBe(2);
     expect(fix.resources.i2s).toBe(2);
@@ -1566,9 +1567,9 @@ describe('audio: multi-pin binds, I2S controllers and the audio board (design au
       driverConfig: { bclk: 41, ws: 42, din: 2, slot: 'left', format: 'philips', port: 0, share_with: 0 },
     });
     expect(r.instances.spk).toEqual({
-      bind: '{bclk: gpio.39, ws: gpio.40, dout: gpio.38}',
-      pins: [39, 40, 38],
-      driverConfig: { bclk: 39, ws: 40, dout: 38, sd: -1, port: 1, share_with: 0 },
+      bind: '{bclk: gpio.14, ws: gpio.13, dout: gpio.12}',
+      pins: [14, 13, 12],
+      driverConfig: { bclk: 14, ws: 13, dout: 12, sd: -1, port: 1, share_with: 0 },
     });
     const cpp = file(r, 'fr_board/fr_board.cpp');
     expect(cpp).toContain('    c.slot = fr::drv::I2sMic::Slot::left;\n');
@@ -1591,17 +1592,27 @@ describe('audio: multi-pin binds, I2S controllers and the audio board (design au
     ]);
     edit(dir, PROFILE(S3A), (y) => {
       y.caps.mic.bind = { bclk: 'gpio.41', ws: 'gpio.45', din: 'gpio.33' };
-      y.caps.spk.bind = { bclk: 'gpio.39', ws: 'gpio.40', dout: 'gpio.48' };
+      y.caps.spk.bind = { bclk: 'gpio.14', ws: 'gpio.13', dout: 'gpio.48' };
     });
     expect(messages(dir, S3A)).toEqual([
       'GPIO45 ({bclk: gpio.41, ws: gpio.45, din: gpio.33}) is a strapping pin; a gpio.<n> bind may not use one',
       'GPIO33 ({bclk: gpio.41, ws: gpio.45, din: gpio.33}) is reserved for psram on esp32s3-wroom1-cam-n16r8',
-      'GPIO48 ({bclk: gpio.39, ws: gpio.40, dout: gpio.48}) is already claimed by \'status\'',
-      'GPIO48 ({bclk: gpio.39, ws: gpio.40, dout: gpio.48}) is not in pins.free of esp32s3-wroom1-cam-n16r8',
+      'GPIO48 ({bclk: gpio.14, ws: gpio.13, dout: gpio.48}) is already claimed by \'status\'',
+      'GPIO48 ({bclk: gpio.14, ws: gpio.13, dout: gpio.48}) is not in pins.free of esp32s3-wroom1-cam-n16r8',
     ]);
+    // The A1 bench: the amp first went on 38-40, the underside micro-SD slot's lines (it crackled).
     edit(dir, PROFILE(S3A), (y) => {
       y.caps.mic.bind = { bclk: 'gpio.41', ws: 'gpio.42', din: 'gpio.2' };
       y.caps.spk.bind = { bclk: 'gpio.39', ws: 'gpio.40', dout: 'gpio.38' };
+    });
+    expect(messages(dir, S3A).filter((m) => m.includes('sd_card'))).toEqual([
+      'GPIO39 ({bclk: gpio.39, ws: gpio.40, dout: gpio.38}) is reserved for sd_card on esp32s3-wroom1-cam-n16r8',
+      'GPIO40 ({bclk: gpio.39, ws: gpio.40, dout: gpio.38}) is reserved for sd_card on esp32s3-wroom1-cam-n16r8',
+      'GPIO38 ({bclk: gpio.39, ws: gpio.40, dout: gpio.38}) is reserved for sd_card on esp32s3-wroom1-cam-n16r8',
+    ]);
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.mic.bind = { bclk: 'gpio.41', ws: 'gpio.42', din: 'gpio.2' };
+      y.caps.spk.bind = { bclk: 'gpio.14', ws: 'gpio.13', dout: 'gpio.12' };
       y.caps.mic.config = { din: 5, sample_hz: 12000 };
     });
     expect(messages(dir, S3A)).toEqual(["'din' is pin 'din' of the bind and cannot be set in config", 'sample_hz 12000 is not one of 8000, 16000, 22050, 32000, 44100, 48000']);
