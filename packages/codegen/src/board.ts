@@ -15,7 +15,9 @@
 // A1 (design audio-a1 D1, D2, D6, D7) adds fr.audio_in and fr.audio_out (their services and rates), the multi-pin bare
 // bind (`bind: { bclk: gpio.41, ws: gpio.42, din: gpio.2 }`, each pin a driver field `from: bind.<key>`), and the I2S
 // controllers: a driver field of type i2s_port (auto or a number, resolved here), the board's `resources.i2s`, and
-// `share_with: <instance>` (type instance), which puts two instances on one controller with shared BCLK/WS.
+// `share_with: <instance>` (type instance), which puts two instances on one controller with shared BCLK/WS. A2 (design
+// audio-a2 D2) adds a driver field's `range`, the ADC1 unit in continuous mode (resource adc_continuous: one per
+// firmware, alone on ADC1) and its conversion ceiling (config sample_hz x oversample).
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -199,6 +201,20 @@ const ANALOG_CAP = 'fr.analog_in';
 
 /** The board resource an ADC1 channel draws (design m2-c3-inputs D3): a driver that declares it binds ADC1 pins only. */
 const ADC1_RESOURCE = 'adc1_channel';
+
+/**
+ * The ADC1 unit in continuous (DMA) mode (design audio-a2 D2): IDF's adc_continuous has one handle per chip, and the
+ * unit cannot also serve adc_oneshot, so a driver that declares it is the firmware's only one and the only ADC1 reader
+ * (no adc1_channel instance of another driver, no board `battery`). Checked by checkAdcContinuous, not budgeted.
+ */
+const ADC_CONTINUOUS_RESOURCE = 'adc_continuous';
+/**
+ * Conversions per second the ADC DMA reaches (IDF v6.1 SOC_ADC_SAMPLE_FREQ_THRES_HIGH; fr::drv::AdcAudio's
+ * kMaxConversionsHz): an adc_continuous instance's config sample_hz x its driver's `oversample` must fit.
+ */
+export const ADC_CONVERSIONS_HZ: Readonly<Record<string, number>> = { esp32c3: 83_333, esp32c6: 83_333, esp32s3: 83_333 };
+/** The driver field of an adc_continuous driver that multiplies its conversion rate. */
+const OVERSAMPLE_FIELD = 'oversample';
 
 /** ADC2 pins of targets whose ADC1 list could be mistaken for them: the C3's GPIO5 is ADC2_CH0 (design D3). */
 const ADC2_PINS: Readonly<Record<string, readonly number[]>> = { esp32c3: [5] };
@@ -445,6 +461,8 @@ const RawDriverField = z.strictObject({
    * is -1 in the Config, and no pin is claimed. resources.gpio still counts the field.
    */
   optional: z.boolean().optional(),
+  /** Inclusive bounds of an integer field (design audio-a2 D2: adc_audio's oversample 1..8), for its default and a profile. */
+  range: z.tuple([int, int]).optional(),
   default: jsonScalar.optional(),
   doc: z.string().optional(),
 });
@@ -834,7 +852,21 @@ function loadDriverInto(sourceDir: string, id: string, issues: Issues): DriverMa
     if (f.type !== 'enum' && f.values) {
       bad(['config', name, 'values'], 'values apply only to enums');
     }
-    if (f.default !== undefined) {
+    let rangeOk = true;
+    if (f.range) {
+      const t = f.type as string;
+      const bounds = t in DRIVER_BOUNDS && t !== 'bool' && t !== 'gpio' ? DRIVER_BOUNDS[t as keyof typeof DRIVER_BOUNDS] : undefined;
+      rangeOk = false;
+      if (!bounds) {
+        bad(['config', name, 'range'], 'range applies only to integer fields (u8..i32)');
+      } else if (f.range[0] > f.range[1] || f.range[0] < bounds[0] || f.range[1] > bounds[1]) {
+        bad(['config', name, 'range'], `range [${f.range.join(', ')}] must be ascending and within ${bounds[0]}..${bounds[1]} (${t})`);
+      } else {
+        rangeOk = true;
+      }
+    }
+    // A default is checked against a valid range only (a bad range is reported once, above).
+    if (f.default !== undefined && rangeOk) {
       const p = checkDriverValue(f, f.default);
       if (p) {
         bad(['config', name, 'default'], p);
@@ -930,7 +962,7 @@ function checkDriverValue(f: RawDriverField, v: unknown): string | null {
   if (f.type === 'bool') {
     return typeof v === 'boolean' ? null : `expected a boolean, got ${JSON.stringify(v)}`;
   }
-  const [lo, hi] = DRIVER_BOUNDS[f.type];
+  const [lo, hi] = f.range ?? DRIVER_BOUNDS[f.type];
   if (typeof v !== 'number' || !Number.isInteger(v) || v < lo || v > hi) {
     return `expected an integer in ${lo}..${hi} (${f.type}), got ${JSON.stringify(v)}`;
   }
@@ -1496,6 +1528,19 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         issues.add(pf, settings.sample_hz !== undefined ? [...at, 'config', 'sample_hz'] : at, `sample_hz ${String(rate)} is not one of ${AUDIO_RATES.join(', ')}`);
       }
     }
+    // The ADC DMA's ceiling (design audio-a2 D2): config sample_hz x oversample conversions per second. A stream that
+    // asks for a faster rate at runtime gets fewer conversions per sample (AdcAudio::oversample_at), never a refusal.
+    if ((driver.resources?.[ADC_CONTINUOUS_RESOURCE] ?? 0) > 0) {
+      const rate = Number(capConfig.find((x) => x.entry.name === 'sample_hz')?.value ?? 0);
+      const over = Number(driverConfig.find((x) => x.name === OVERSAMPLE_FIELD)?.value ?? 1);
+      const limit = ADC_CONVERSIONS_HZ[board.idf_target];
+      if (limit === undefined) {
+        issues.add(pf, [...at, 'driver'], `driver ${driver.id} runs the ADC in continuous mode, whose rate codegen does not know on ${board.idf_target} (ADC_CONVERSIONS_HZ)`);
+      } else if (rate * over > limit) {
+        const key = settings[OVERSAMPLE_FIELD] !== undefined ? OVERSAMPLE_FIELD : settings.sample_hz !== undefined ? 'sample_hz' : undefined;
+        issues.add(pf, key ? [...at, 'config', key] : at, `sample_hz ${rate} x oversample ${over} is ${rate * over} conversions/s, above the ${limit} the ADC DMA reaches on ${board.idf_target}; at most oversample ${Math.max(1, Math.floor(limit / rate))}`);
+      }
+    }
 
     if (ok && cap && service) {
       out.push({ name, port: 0, bind: bindText, bare: bindMap !== null || bindPin !== undefined, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins });
@@ -1572,6 +1617,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     }
   }
 
+  checkAdcContinuous(inp, out, issues);
   checkTestPin(inp, out, reserved, strapping, issues);
   checkProfile(inp, issues);
   checkBoardFacts(board, issues);
@@ -1587,8 +1633,8 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       pwmLines.push(inst.name);
     }
     for (const [res, n] of Object.entries(uses)) {
-      // I2S controllers are counted by bindI2s, where a share_with pair takes one.
-      if (res === PIN_RESOURCE || res === I2S_RESOURCE || n === 0) {
+      // I2S controllers are counted by bindI2s, where a share_with pair takes one; adc_continuous by checkAdcContinuous.
+      if (res === PIN_RESOURCE || res === I2S_RESOURCE || res === ADC_CONTINUOUS_RESOURCE || n === 0) {
         continue;
       }
       const r = need.get(res) ?? { total: 0, users: [] };
@@ -1612,6 +1658,30 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     }
   }
   return out;
+}
+
+/**
+ * The ADC1 unit in continuous mode (design audio-a2 D2; ADC_CONTINUOUS_RESOURCE): at most one instance draws it, and
+ * then no other instance reads ADC1 (adc1_channel, e.g. adc_oneshot) and the board has no `battery` (the vitals' vbat
+ * reader is adc_oneshot on ADC1).
+ */
+function checkAdcContinuous(inp: Inputs, insts: ResolvedInstance[], issues: Issues): void {
+  const pf = profileFile(inp.profile.profile);
+  const dma = insts.filter((i) => (i.driver.resources?.[ADC_CONTINUOUS_RESOURCE] ?? 0) > 0);
+  const owner = dma[0];
+  if (!owner) {
+    return;
+  }
+  for (const i of dma.slice(1)) {
+    issues.add(pf, ['caps', i.name, 'driver'], `'${owner.name}' already runs the ADC1 unit in continuous mode (driver ${owner.driver.id}); IDF's adc_continuous has one handle, so a firmware has one ${ADC_CONTINUOUS_RESOURCE} instance`);
+  }
+  for (const i of insts.filter((x) => !dma.includes(x) && (x.driver.resources?.[ADC1_RESOURCE] ?? 0) > 0)) {
+    issues.add(pf, ['caps', i.name, 'driver'], `driver ${i.driver.id} reads ADC1, which '${owner.name}' (driver ${owner.driver.id}) runs in continuous mode; the unit cannot serve both`);
+  }
+  const bat = inp.board.battery?.gpio;
+  if (bat !== undefined) {
+    issues.add(pf, ['caps', owner.name, 'driver'], `board ${inp.board.id} reads its battery on ADC1 (battery.gpio ${bat}, adc_oneshot), so driver ${owner.driver.id} cannot run the unit in continuous mode`);
+  }
 }
 
 /**

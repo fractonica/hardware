@@ -10,6 +10,11 @@ export type AudioInStreamEndReason = keyof typeof AudioInStreamEndReason;
 
 const AudioInStreamEndReasonNames = $.enumNames(AudioInStreamEndReason);
 
+export const AudioInMonitorEndReason = { stopped: 0, done: 1, busy: 2, error: 3 } as const;
+export type AudioInMonitorEndReason = keyof typeof AudioInMonitorEndReason;
+
+const AudioInMonitorEndReasonNames = $.enumNames(AudioInMonitorEndReason);
+
 /** Descriptor traits. */
 export interface AudioInTraits {
   max_sample_hz: number;
@@ -58,7 +63,7 @@ export interface AudioInConfig {
 
 export const AUDIO_IN_CONFIG_DEFAULTS: Readonly<AudioInConfig> = { sample_hz: 16000, gain_db: 12, hpf_hz: 20, level_hz: 5 };
 
-/** fr.audio_in.stream_start arguments (command 1, reliable). Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0). */
+/** fr.audio_in.stream_start arguments (command 1, reliable). Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs (or a monitor runs at another rate), INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0). */
 export interface AudioInStreamStartArgs {
   /** issued by the hub; the POST path names it */
   stream_id: number;
@@ -197,6 +202,49 @@ export function decodeAudioInLevelGetResult(bytes: Uint8Array): Decoded<AudioInL
   return $.done(r, v);
 }
 
+/** fr.audio_in.monitor_start arguments (command 4, reliable). Routes this input to fr.audio_out port to_port on the same node (1.1, design audio-a2 D3). Dispatch never blocks: OK once fr_audio has the monitor. INVALID_ARGS: to_port is not an fr.audio_out instance, or its sample_hz differs from this input's. BUSY: this input already monitors, or streams at another rate; or the output plays, or another input monitors to it. Ends with monitor_ended. */
+export interface AudioInMonitorStartArgs {
+  /** the fr.audio_out instance's capability port */
+  to_port: number;
+  /** 0: until monitor_stop (s) */
+  seconds: number;
+  /** 0: the output's own volume; else this monitor's only (%; 0..100) */
+  volume: number;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeAudioInMonitorStartArgs(v: Partial<AudioInMonitorStartArgs> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.int(v.to_port ?? 0, 0, 255, 'to_port');
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.seconds ?? 0, 0, 65535, 'seconds');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.volume ?? 0, 0, 255, 'volume');
+  if (f3 !== 0) w.fieldUint(3, f3);
+  return w.finish();
+}
+
+export function decodeAudioInMonitorStartArgs(bytes: Uint8Array): Decoded<AudioInMonitorStartArgs> {
+  const r = new Reader(bytes);
+  const v: AudioInMonitorStartArgs = { to_port: 0, seconds: 0, volume: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.to_port = r.readUint(255);
+        break;
+      case 2:
+        v.seconds = r.readUint(65535);
+        break;
+      case 3:
+        v.volume = r.readUint(255);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
 /** fr.audio_in.stream_ended event (id 1, normal). A stream ended: stopped (stream_stop), done (`seconds` reached), net_lost (a send stalled 3 s or the connection dropped), overflow, error. */
 export interface AudioInStreamEnded {
   stream_id: number;
@@ -245,9 +293,51 @@ export function decodeAudioInStreamEnded(bytes: Uint8Array): Decoded<AudioInStre
   return $.done(r, v);
 }
 
+/** fr.audio_in.monitor_ended event (id 2, normal). A monitor ended (1.1): stopped (monitor_stop), done (`seconds` reached), busy (a play or tone took the output), error (the source or the output failed). */
+export interface AudioInMonitorEnded {
+  reason: AudioInMonitorEndReason | number;
+  /** the output it fed */
+  to_port: number;
+  /** samples routed to the output */
+  samples: number;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeAudioInMonitorEnded(v: Partial<AudioInMonitorEnded> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.enumValue(AudioInMonitorEndReason, v.reason ?? 'stopped', 'reason', 255);
+  if (f1 !== 0) w.fieldUint(1, f1);
+  const f2 = $.int(v.to_port ?? 0, 0, 255, 'to_port');
+  if (f2 !== 0) w.fieldUint(2, f2);
+  const f3 = $.int(v.samples ?? 0, 0, 0xffffffff, 'samples');
+  if (f3 !== 0) w.fieldUint(3, f3);
+  return w.finish();
+}
+
+export function decodeAudioInMonitorEnded(bytes: Uint8Array): Decoded<AudioInMonitorEnded> {
+  const r = new Reader(bytes);
+  const v: AudioInMonitorEnded = { reason: 'stopped', to_port: 0, samples: 0 };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.reason = $.readEnum(r, AudioInMonitorEndReasonNames, 255);
+        break;
+      case 2:
+        v.to_port = r.readUint(255);
+        break;
+      case 3:
+        v.samples = r.readUint(0xffffffff);
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
 /** fr.audio_in.level STATE body (property 1; the value is field 1). */
 export interface AudioInLevelState {
-  /** RMS over the last 1/level_hz s, dBFS x 10 (-900 is silence) (dBFS/10) */
+  /** RMS over the last 1/level_hz s, dBFS x 10 (-900 is silence); paused while monitoring (dBFS/10) */
   level: number;
 }
 
@@ -302,23 +392,56 @@ export function decodeAudioInStreamingState(bytes: Uint8Array): Decoded<AudioInS
   return $.done(r, v);
 }
 
-/** fr.audio_in: A microphone sampled on the node, its level reported and its PCM streamed to the hub over a separate HTTP connection. */
+/** fr.audio_in.monitoring STATE body (property 3; the value is field 1). */
+export interface AudioInMonitoringState {
+  /** a monitor runs (1.1): monitor_start to monitor_ended */
+  monitoring: boolean;
+}
+
+/** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
+export function encodeAudioInMonitoringState(v: Partial<AudioInMonitoringState> = {}): Uint8Array {
+  const w = new Writer();
+  const f1 = $.bool(v.monitoring ?? false, 'monitoring');
+  if (f1) w.fieldBool(1, f1);
+  return w.finish();
+}
+
+export function decodeAudioInMonitoringState(bytes: Uint8Array): Decoded<AudioInMonitoringState> {
+  const r = new Reader(bytes);
+  const v: AudioInMonitoringState = { monitoring: false };
+  while (r.next()) {
+    switch (r.field) {
+      case 1:
+        v.monitoring = r.readBool();
+        break;
+      default:
+        r.skip();
+    }
+  }
+  return $.done(r, v);
+}
+
+/** fr.audio_in: A microphone (or any analog signal at audio rate) sampled on the node, its level reported, its PCM streamed to the hub over a separate HTTP connection or routed to an output on the same node. */
 export const AUDIO_IN_CAP: $.CapInfo = {
   id: 0x0007,
   name: 'fr.audio_in',
-  version: { major: 1, minor: 0 },
+  version: { major: 1, minor: 1 },
   section: 'standard',
   traits: { fields: [{ name: 'max_sample_hz' }, { name: 'bits' }], maxSize: 9, encode: encodeAudioInTraits, decode: decodeAudioInTraits },
   commands: [
     { id: 1, name: 'stream_start', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'stream_id' }, { name: 'seconds' }, { name: 'sample_hz' }], maxSize: 16, encode: encodeAudioInStreamStartArgs, decode: decodeAudioInStreamStartArgs }, result: { fields: [{ name: 'sample_hz' }], maxSize: 6, encode: encodeAudioInStreamStartResult, decode: decodeAudioInStreamStartResult } },
     { id: 2, name: 'stream_stop', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'stream_id' }], maxSize: 6, encode: encodeAudioInStreamStopArgs, decode: decodeAudioInStreamStopArgs }, result: null },
     { id: 3, name: 'level_get', delivery: 'reliable', idempotent: false, visibility: 'public', args: $.EMPTY_CODEC, result: { fields: [{ name: 'dbfs_x10' }, { name: 'peak_dbfs_x10' }, { name: 'clipping' }], maxSize: 14, encode: encodeAudioInLevelGetResult, decode: decodeAudioInLevelGetResult } },
+    { id: 4, name: 'monitor_start', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'to_port' }, { name: 'seconds' }, { name: 'volume', range: [0, 100] }], maxSize: 10, encode: encodeAudioInMonitorStartArgs, decode: decodeAudioInMonitorStartArgs }, result: null },
+    { id: 5, name: 'monitor_stop', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: null },
   ],
   events: [
     { id: 1, name: 'stream_ended', priority: 'normal', codec: { fields: [{ name: 'stream_id' }, { name: 'reason', members: AudioInStreamEndReason }, { name: 'samples' }, { name: 'dropped_samples' }], maxSize: 21, encode: encodeAudioInStreamEnded, decode: decodeAudioInStreamEnded } },
+    { id: 2, name: 'monitor_ended', priority: 'normal', codec: { fields: [{ name: 'reason', members: AudioInMonitorEndReason }, { name: 'to_port' }, { name: 'samples' }], maxSize: 12, encode: encodeAudioInMonitorEnded, decode: decodeAudioInMonitorEnded } },
   ],
   properties: [
     { id: 1, name: 'level', codec: { fields: [{ name: 'level' }], maxSize: 4, encode: encodeAudioInLevelState, decode: decodeAudioInLevelState } },
     { id: 2, name: 'streaming', codec: { fields: [{ name: 'streaming' }], maxSize: 2, encode: encodeAudioInStreamingState, decode: decodeAudioInStreamingState } },
+    { id: 3, name: 'monitoring', codec: { fields: [{ name: 'monitoring' }], maxSize: 2, encode: encodeAudioInMonitoringState, decode: decodeAudioInMonitoringState } },
   ],
 };

@@ -92,6 +92,9 @@ void AudioOutService::publish(Kind kind)
 
 void AudioOutService::end_current()
 {
+    if (take_monitor(audio::MonitorEnd::busy)) {
+        return;  // no play_done for a monitor: its input sends monitor_ended
+    }
     if (playing_) {
         emit_play_done({.play_id = play_id_,
                         .reason = Reason::stopped,
@@ -163,7 +166,9 @@ Status AudioOutService::stop()
     if (!playing_) {
         return {};
     }
-    end_current();
+    if (!take_monitor(audio::MonitorEnd::stopped)) {
+        end_current();
+    }
     publish(Kind::none);
     playing_ = false;
     report_playing(false);
@@ -177,6 +182,62 @@ Status AudioOutService::set_volume(const cap::AudioOutSetVolumeArgs &args)
         report_volume(v);
     }
     return {};
+}
+
+bool AudioOutService::take_monitor(audio::MonitorEnd why)
+{
+    if (mon_core_ == 0) {
+        return false;
+    }
+    mon_taken_.store(static_cast<uint8_t>(why), std::memory_order_relaxed);
+    mon_claim_.store(0, std::memory_order_release);
+    mon_core_ = 0;
+    return true;
+}
+
+std::expected<uint32_t, Err> AudioOutService::monitor_claim(uint32_t sample_hz, uint8_t volume)
+{
+    if (!ready_) {
+        return std::unexpected(Err::failed);
+    }
+    if (sample_hz != cfg_.sample_hz || !hal::is_audio_rate(sample_hz) || sample_hz > sink_.max_sample_hz()) {
+        return std::unexpected(Err::invalid_args);
+    }
+    if (playing_) {
+        return std::unexpected(Err::busy);  // a tone, a play, or another input's monitor
+    }
+    req_rate_.store(sample_hz, std::memory_order_relaxed);
+    req_volume_.store(volume != 0 ? std::min<uint8_t>(volume, 100) : kNoVolume, std::memory_order_relaxed);
+    // The claim is the job's gen, held before fr_audio can see the job (its sink failing gives it back).
+    const uint32_t claim = gen_ + 1 == 0 ? 1 : gen_ + 1;
+    mon_core_ = claim;
+    mon_taken_.store(static_cast<uint8_t>(audio::MonitorEnd::none), std::memory_order_relaxed);
+    mon_claim_.store(claim, std::memory_order_release);
+    publish(Kind::monitor);  // gen_ becomes `claim`
+    playing_ = true;
+    report_playing(true);
+    return claim;
+}
+
+void AudioOutService::monitor_release(uint32_t claim)
+{
+    if (claim == 0 || claim != mon_core_) {
+        return;  // a tone, play or stop took the output already (it reports `playing` itself)
+    }
+    mon_claim_.store(0, std::memory_order_release);
+    mon_core_ = 0;
+    publish(Kind::none);
+    playing_ = false;
+    report_playing(false);
+}
+
+audio::MonitorEnd AudioOutService::monitor_preempted(uint32_t claim) const
+{
+    if (claim != 0 && mon_claim_.load(std::memory_order_acquire) == claim) {
+        return audio::MonitorEnd::none;
+    }
+    const auto why = static_cast<audio::MonitorEnd>(mon_taken_.load(std::memory_order_relaxed));
+    return why == audio::MonitorEnd::none ? audio::MonitorEnd::busy : why;
 }
 
 void AudioOutService::on_timer()
@@ -255,6 +316,10 @@ bool AudioOutService::flush(uint32_t wait_ms)
 
 void AudioOutService::finish(Reason why)
 {
+    if (monitoring_out()) {
+        monitor_fail();  // a monitor has no play_done: its input ends with error
+        return;
+    }
     // The sink's own late buffers count up to the last write, not while it drains.
     if (out_ == OutState::tone || out_ == OutState::playing) {
         count_sink();
@@ -276,6 +341,50 @@ void AudioOutService::finish(Reason why)
         drain_until_ = core_->now() + static_cast<TimeUs>(kDrainFrames) * 1'000'000 / sink_rate_ + 1000;
     } else {
         stop_sink(0);
+        out_ = OutState::idle;
+    }
+}
+
+void AudioOutService::monitor_fail()
+{
+    mon_taken_.store(static_cast<uint8_t>(audio::MonitorEnd::error), std::memory_order_relaxed);
+    uint32_t held = job_gen_;
+    mon_claim_.compare_exchange_strong(held, 0, std::memory_order_acq_rel);
+    chunk_len_ = chunk_off_ = 0;
+    stop_sink(0);
+    out_ = OutState::idle;
+}
+
+size_t AudioOutService::monitor_write(uint32_t claim, std::span<const int16_t> pcm)
+{
+    // fr_audio (the input's pass, before the outputs'): only into the ring of the job this claim is, once it is emptied.
+    size_t n = 0;
+    if (claim != 0 && claim == job_gen_ && monitoring_out()) {
+        const size_t cap = std::min<size_t>(static_cast<size_t>(job_rate_) * kMonitorPrebufferMs / 1000 + 2 * kChunk,
+                                            ring_.capacity());
+        const size_t used = ring_.size();
+        n = ring_.write(pcm.first(std::min(pcm.size(), cap > used ? cap - used : 0)));
+    }
+    if (n < pcm.size()) {
+        mon_dropped_.fetch_add(static_cast<uint32_t>(pcm.size() - n), std::memory_order_relaxed);
+    }
+    return n;
+}
+
+void AudioOutService::monitor_finish(uint32_t claim)
+{
+    // fr_audio, the input's pass: no more samples come. The DMA plays out (draining, uncounted) until the release.
+    if (claim == 0 || claim != job_gen_ || !monitoring_out()) {
+        return;
+    }
+    if (out_ == OutState::monitor) {
+        count_sink();
+    }
+    chunk_len_ = chunk_off_ = 0;
+    if (sink_rate_ != 0) {
+        out_ = OutState::draining;
+        drain_until_ = core_->now() + static_cast<TimeUs>(kDrainFrames) * 1'000'000 / sink_rate_ + 1000;
+    } else {
         out_ = OutState::idle;
     }
 }
@@ -304,6 +413,7 @@ bool AudioOutService::audio_pass(uint32_t wait_ms)
         cur_underruns_.store(0, std::memory_order_relaxed);
         job_volume_ = req_volume_.load(std::memory_order_relaxed);
         job_rate_ = req_rate_.load(std::memory_order_relaxed);
+        job_monitor_ = false;
         progress();
         switch (static_cast<Kind>(req_kind_.load(std::memory_order_relaxed))) {
         case Kind::tone:
@@ -320,6 +430,13 @@ bool AudioOutService::audio_pass(uint32_t wait_ms)
             stop_sink(0);  // started again once the ring holds the prebuffer
             out_ = OutState::wait_stream;
             break;
+        case Kind::monitor:
+            // The ring changes hands as for a play (fr_stream may still write for the play before), then fills from
+            // the input's monitor_write.
+            stop_sink(0);
+            job_monitor_ = true;
+            out_ = OutState::wait_stream;
+            break;
         case Kind::none:
         default:
             stop_sink(0);
@@ -328,10 +445,11 @@ bool AudioOutService::audio_pass(uint32_t wait_ms)
         }
     }
     const uint32_t vol = job_volume_ != kNoVolume ? job_volume_ : volume_.load(std::memory_order_relaxed);
-    if (out_ == OutState::tone || out_ == OutState::playing) {
+    if (out_ == OutState::tone || out_ == OutState::playing || out_ == OutState::monitor) {
         count_sink();
     }
-    if (out_ != OutState::idle && out_ != OutState::draining && stuck()) {
+    // A monitor's input owns its end (its source failing ends it with error): no backstop for it here.
+    if (out_ != OutState::idle && out_ != OutState::draining && !job_monitor_ && stuck()) {
         // The backstop: nothing moved for kStuckMs (a play: net_lost; a tone whose sink takes nothing: error).
         finish(out_ == OutState::tone ? Reason::error : Reason::net_lost);
         return true;
@@ -367,7 +485,7 @@ bool AudioOutService::audio_pass(uint32_t wait_ms)
         ring_.discard_all();
         cons_gen_.store(job_gen_, std::memory_order_release);
         audio::engine().wake_stream();
-        out_ = OutState::prebuffer;
+        out_ = job_monitor_ ? OutState::monitor_prebuffer : OutState::prebuffer;
         ring_seen_ = 0;
         progress();
         return true;
@@ -430,6 +548,41 @@ bool AudioOutService::audio_pass(uint32_t wait_ms)
             chunk_pcm_ = false;
             flush(wait_ms);
             return true;
+        }
+    case OutState::monitor_prebuffer:
+        if (ring_.size() < static_cast<size_t>(job_rate_) * kMonitorPrebufferMs / 1000) {
+            return false;
+        }
+        if (!start_sink(job_rate_)) {
+            monitor_fail();
+            return true;
+        }
+        out_ = OutState::monitor;
+        dry_ = false;
+        [[fallthrough]];
+    case OutState::monitor:
+        // As playing: until the sink takes no more without waiting or the ring has nothing. Dry with nothing pending:
+        // an underrun counted, no silence written (it would stay in the DMA as latency).
+        for (bool wrote = false;; wait_ms = 0) {
+            wrote = wrote || chunk_off_ < chunk_len_;
+            if (!flush(wait_ms) || out_ != OutState::monitor) {
+                return true;
+            }
+            const size_t n = ring_.read(chunk_);
+            if (n > 0) {
+                dry_ = false;
+                wrote = true;
+                chunk_len_ = n;
+                audio::apply_volume({chunk_, chunk_len_}, audio::volume_q15(static_cast<uint8_t>(vol)));
+                chunk_pcm_ = true;
+                continue;
+            }
+            if (!wrote && !dry_) {
+                dry_ = true;
+                ++underruns_;
+                ring_dry_total_.fetch_add(1, std::memory_order_relaxed);
+            }
+            return wrote;
         }
     }
     return false;

@@ -258,6 +258,19 @@ describe('fr (subprocess)', { timeout: 20_000 }, () => {
     await run(['latency', 'tag:poc', '--window', '60'], { op: 'latency_stats', body: { selector: 'tag:poc', window_s: 60 } });
   });
 
+  it('generates `fr audio monitor <dev> --from --to --seconds --volume` and prints its one line (design audio-a2 D5)', async () => {
+    const job = { job_id: 'j_a2', kind: 'audio', status: 'completed', targets: ['a0b1c2d3e4f5'], created_at: '2026-11-02T00:00:00Z' };
+    const result = { device: 'a0b1c2d3e4f5', alias: 'mic-s3', from: 'rf', to: 'spk', seconds: 3, reason: 'done', underruns: 0, rx_overflows: 0 };
+    replies.set('audio_monitor', { status: 200, body: { ok: true, data: { ...job, result }, cursor: 'c:1.1' } });
+    const r = await fr(['audio', 'monitor', 'mic-s3', '--from', 'rf', '--to', 'spk', '--seconds', '3', '--volume', '60']);
+    expect(r.code).toBe(0);
+    expect(requests.at(-1)).toEqual({ op: 'audio_monitor', body: { device: 'mic-s3', from: 'rf', to: 'spk', seconds: 3, volume: 60, wait_s: 110 } });
+    expect(r.stdout.trim()).toBe('j_a2 audio completed\nmic-s3 rf -> spk: 3 s, done (underruns 0, rx_overflows 0)');
+    expect((await fr(['audio', 'monitor', 'mic-s3', '--json'])).code).toBe(0);
+    expect(requests.at(-1)).toEqual({ op: 'audio_monitor', body: { device: 'mic-s3', wait_s: 110 } }); // the hub applies seconds 30
+    replies.delete('audio_monitor');
+  });
+
   it('generates the C6 commands (design c6 §3.2, spec 09 §9.5)', { timeout: 90_000 }, async () => {
     const run = async (args: string[], want: { op: string; body: Record<string, unknown> }) => {
       const r = await fr([...args, '--json']);

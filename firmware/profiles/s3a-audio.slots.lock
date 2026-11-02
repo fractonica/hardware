@@ -4,3 +4,4 @@ boot: 1
 status: 2
 mic: 3
 spk: 4
+rf: 5

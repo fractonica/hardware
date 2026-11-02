@@ -202,6 +202,17 @@ void Engine::stream_main(void *arg)
     }
 }
 
+MonitorSink *Engine::monitor_sink(uint8_t port)
+{
+    const size_t n = count_.load(std::memory_order_acquire);
+    for (size_t i = 0; i < n; ++i) {
+        if (!workers_[i]->is_input() && workers_[i]->worker_port() == port) {
+            return workers_[i]->monitor_sink();
+        }
+    }
+    return nullptr;
+}
+
 size_t Engine::stats(std::span<WorkerStats> out) const
 {
     const size_t n = count_.load(std::memory_order_acquire);

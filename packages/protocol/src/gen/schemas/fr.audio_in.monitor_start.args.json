@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.audio_in.monitor_start.args",
+  "title": "fr.audio_in.monitor_start arguments",
+  "description": "Routes this input to fr.audio_out port to_port on the same node (1.1, design audio-a2 D3). Dispatch never blocks: OK once fr_audio has the monitor. INVALID_ARGS: to_port is not an fr.audio_out instance, or its sample_hz differs from this input's. BUSY: this input already monitors, or streams at another rate; or the output plays, or another input monitors to it. Ends with monitor_ended.",
+  "type": "object",
+  "properties": {
+    "to_port": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "the fr.audio_out instance's capability port"
+    },
+    "seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "0: until monitor_stop (s)"
+    },
+    "volume": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "0: the output's own volume; else this monitor's only (%; 0..100)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "to_port": 4,
+      "seconds": 30,
+      "volume": 0
+    },
+    {
+      "to_port": 4,
+      "seconds": 0,
+      "volume": 60
+    }
+  ]
+}

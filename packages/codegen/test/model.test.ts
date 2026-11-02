@@ -648,9 +648,10 @@ describe('capability message types and bulk commands (design m2-c5-display D1, D
 });
 
 describe('audio (design audio-a1 D1, D2)', () => {
-  it('fr.audio_in is 0x0007 1.0: level and streaming, stream_ended, three reliable commands', () => {
+  it('fr.audio_in is 0x0007 1.1: level, streaming and monitoring, stream_ended and monitor_ended, five reliable commands', () => {
     const a = cap(model(), 'fr.audio_in');
-    expect(a).toMatchObject({ id: 0x0007, section: 'standard', version: { major: 1, minor: 0 }, testOnly: false });
+    // 1.0 (A1), 1.1 (design audio-a2 D3: the on-board monitor, additive).
+    expect(a).toMatchObject({ id: 0x0007, section: 'standard', version: { major: 1, minor: 1 }, testOnly: false });
     expect(a.traits.map((t) => [t.name, t.typeName])).toEqual([
       ['max_sample_hz', 'u32'],
       ['bits', 'u8'],
@@ -664,14 +665,28 @@ describe('audio (design audio-a1 D1, D2)', () => {
     expect(a.properties.map((p) => [p.name, p.typeName])).toEqual([
       ['level', 'i16'],
       ['streaming', 'bool'],
+      ['monitoring', 'bool'],
     ]);
-    expect(a.events.map((e) => [e.name, e.priority, e.fields.map((f) => f.name)])).toEqual([['stream_ended', 'normal', ['stream_id', 'reason', 'samples', 'dropped_samples']]]);
+    expect(a.events.map((e) => [e.name, e.id, e.priority, e.fields.map((f) => f.name)])).toEqual([
+      ['stream_ended', 1, 'normal', ['stream_id', 'reason', 'samples', 'dropped_samples']],
+      ['monitor_ended', 2, 'normal', ['reason', 'to_port', 'samples']],
+    ]);
     expect(a.commands.map((c) => [c.name, c.id, c.delivery, c.bulk])).toEqual([
       ['stream_start', 1, 'reliable', false],
       ['stream_stop', 2, 'reliable', false],
       ['level_get', 3, 'reliable', false],
+      ['monitor_start', 4, 'reliable', false],
+      ['monitor_stop', 5, 'reliable', false],
     ]);
-    expect(a.enums[0].members.map((x) => x.name)).toEqual(['stopped', 'done', 'net_lost', 'overflow', 'error']);
+    expect(a.commands.find((c) => c.name === 'monitor_start')!.fields.map((f) => [f.name, f.typeName])).toEqual([
+      ['to_port', 'u8'],
+      ['seconds', 'u16'],
+      ['volume', 'u8'],
+    ]);
+    expect(a.enums.map((e) => [e.name, e.members.map((x) => x.name)])).toEqual([
+      ['StreamEndReason', ['stopped', 'done', 'net_lost', 'overflow', 'error']],
+      ['MonitorEndReason', ['stopped', 'done', 'busy', 'error']],
+    ]);
   });
 
   it('fr.audio_out is 0x0004 1.0: tone, play, stop, set_volume and play_done', () => {

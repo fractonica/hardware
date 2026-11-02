@@ -136,15 +136,20 @@ target_compile_definitions(fr_panel_sim PRIVATE FR_HOST_SHIM=1)
 target_link_libraries(fr_panel_sim PUBLIC fr_fixture_sim fr_host_lib)
 target_compile_options(fr_panel_sim PRIVATE ${FR_CXX_WARNINGS})
 
-# The audio drivers (design audio-a1 D6) unchanged against shim/idf's I2S (shim/i2s_sim.cpp) and esp_sim's GPIO: the
-# tests check the channels they make (one i2s_new_channel for a share_with pair), their slots, clocks and pins.
+# The audio drivers (design audio-a1 D6, audio-a2 D2) unchanged against shim/idf's I2S (shim/i2s_sim.cpp), its ADC
+# continuous mode (shim/adc_sim.cpp: IDF v6.1's adc_continuous.h declarations) and esp_sim's GPIO: the tests check the
+# channels they make (one i2s_new_channel for a share_with pair), their slots, clocks and pins, and adc_audio's
+# handle, pattern, rate and averaging.
 set(FR_AUDIO_INCLUDES
     ${REPO_DIR}/hardware/drivers/i2s_mic/include
-    ${REPO_DIR}/hardware/drivers/i2s_amp/include)
+    ${REPO_DIR}/hardware/drivers/i2s_amp/include
+    ${REPO_DIR}/hardware/drivers/adc_audio/include)
 add_library(fr_audio_sim STATIC
     ${HOST_DIR}/shim/i2s_sim.cpp
+    ${HOST_DIR}/shim/adc_sim.cpp
     ${REPO_DIR}/hardware/drivers/i2s_mic/src/i2s_mic.cpp
-    ${REPO_DIR}/hardware/drivers/i2s_amp/src/i2s_amp.cpp)
+    ${REPO_DIR}/hardware/drivers/i2s_amp/src/i2s_amp.cpp
+    ${REPO_DIR}/hardware/drivers/adc_audio/src/adc_audio.cpp)
 target_include_directories(fr_audio_sim PRIVATE ${HOST_DIR}/shim/idf PUBLIC ${HOST_DIR}/shim ${FR_AUDIO_INCLUDES})
 target_compile_definitions(fr_audio_sim PRIVATE FR_HOST_SHIM=1)
 target_link_libraries(fr_audio_sim PUBLIC fr_panel_sim fr_fixture_sim fr_host_lib)

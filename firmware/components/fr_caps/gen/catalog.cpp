@@ -32,9 +32,15 @@ constexpr MemberInfo kAnalogInProperties[] = {{1, "value"}};
 constexpr MemberInfo kFixtureCommands[] = {{1, "press"}, {2, "release"}, {3, "read"}, {4, "set_duty"}};
 constexpr MemberInfo kFixtureEvents[] = {{1, "edges"}, {2, "frame"}};
 constexpr MemberInfo kFixtureProperties[] = {{1, "level"}};
-constexpr MemberInfo kAudioInCommands[] = {{1, "stream_start"}, {2, "stream_stop"}, {3, "level_get"}};
-constexpr MemberInfo kAudioInEvents[] = {{1, "stream_ended"}};
-constexpr MemberInfo kAudioInProperties[] = {{1, "level"}, {2, "streaming"}};
+constexpr MemberInfo kAudioInCommands[] = {
+    {1, "stream_start"},
+    {2, "stream_stop"},
+    {3, "level_get"},
+    {4, "monitor_start"},
+    {5, "monitor_stop"},
+};
+constexpr MemberInfo kAudioInEvents[] = {{1, "stream_ended"}, {2, "monitor_ended"}};
+constexpr MemberInfo kAudioInProperties[] = {{1, "level"}, {2, "streaming"}, {3, "monitoring"}};
 constexpr MemberInfo kTouchCommands[] = {{1, "inject"}};
 constexpr MemberInfo kTouchEvents[] = {{1, "down"}, {2, "up"}, {3, "gesture"}};
 constexpr MemberInfo kTouchProperties[] = {{1, "pressed"}};
@@ -61,7 +67,7 @@ constexpr CapInfo kCaps[] = {
     {0x0004, "fr.audio_out", {1, 0}, kAudioOutCommands, kAudioOutEvents, kAudioOutProperties},
     {0x0005, "fr.analog_in", {1, 0}, kAnalogInCommands, kAnalogInEvents, kAnalogInProperties},
     {0x0006, "fr.fixture", {0, 2}, kFixtureCommands, kFixtureEvents, kFixtureProperties},
-    {0x0007, "fr.audio_in", {1, 0}, kAudioInCommands, kAudioInEvents, kAudioInProperties},
+    {0x0007, "fr.audio_in", {1, 1}, kAudioInCommands, kAudioInEvents, kAudioInProperties},
     {0x0008, "fr.touch", {1, 0}, kTouchCommands, kTouchEvents, kTouchProperties},
     {0x00F0, "fr.node", {1, 0}, kNodeCommands, kNodeEvents, {}},
     {0x00F1, "fr.ota", {1, 0}, {}, {}, {}},

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <span>
 
 #include "fr/base.hpp"
@@ -64,10 +65,52 @@ struct WorkerStats {
     uint32_t ring_dry = 0;         // times the play ring ran dry while its GET went on (silence written)
 };
 
+/** Why an output gave a monitor's claim back before monitor_release (design audio-a2 D3): the input's end reason. */
+enum class MonitorEnd : uint8_t { none, stopped, busy, error };
+
+/**
+ * An output an input's on-board monitor plays into (design audio-a2 D3, §10): fr.audio_out's AudioOutService. The
+ * input claims it on the core task, writes its converted samples into it on fr_audio (no network, no fr_stream) and
+ * releases it on the core task once fr_audio has stopped writing (monitor_finish, then the core timer's release). A claim has an id (non-zero); a play or tone on the
+ * output takes the output from it (MonitorEnd::busy), a stop on the output ends it (stopped), a failed write to the
+ * converter ends it (error): monitor_preempted says so, and the input ends its monitor with that reason.
+ */
+class MonitorSink
+{
+public:
+    /**
+     * Core task: the output for a monitor at `sample_hz` (its config rate: Err::invalid_args otherwise), at `volume`
+     * (0: the output's own, set_volume applies; else 1-100 for the monitor only). Err::busy while a tone or play runs
+     * or another claim holds it. The claim's id.
+     */
+    virtual std::expected<uint32_t, Err> monitor_claim(uint32_t sample_hz, uint8_t volume) = 0;
+    /**
+     * fr_audio: `pcm` into the output's play ring, as much as fits under its latency cap, the rest dropped (before the
+     * output has taken the claim up, all of it); how many went in. 0 for a claim that is not the output's current one.
+     */
+    virtual size_t monitor_write(uint32_t claim, std::span<const int16_t> pcm) = 0;
+    /**
+     * fr_audio: the input has written its last samples (its monitor ended there): the output plays out what its DMA
+     * holds and counts no underruns while it waits for monitor_release (the core timer's, up to 50 ms later).
+     */
+    virtual void monitor_finish(uint32_t claim) = 0;
+    /** Core task: the claim ends (the output stops; nothing when the claim was taken from it already). */
+    virtual void monitor_release(uint32_t claim) = 0;
+    /** Any task: MonitorEnd::none while `claim` holds the output, else why it was taken. */
+    virtual MonitorEnd monitor_preempted(uint32_t claim) const = 0;
+
+protected:
+    ~MonitorSink() = default;
+};
+
 /** One service's halves on the two tasks. */
 class Worker
 {
 public:
+    /** The service's capability port (Capability::port()), so an input finds an output by it; 0xFF: none. */
+    virtual uint8_t worker_port() const { return 0xFF; }
+    /** An output's monitor side (nullptr: it takes no monitor, as every input). */
+    virtual MonitorSink *monitor_sink() { return nullptr; }
     /** An input (fr_audio passes inputs after outputs, and the inputs pace the loop: their reads block). */
     virtual bool is_input() const = 0;
     /**
@@ -130,6 +173,9 @@ public:
     bool stream_once();
     /** Ends the tasks and waits for them (fr_net_node's exit). */
     void stop();
+
+    /** Core task: the output worker on capability port `port` that takes monitors (nullptr: none). */
+    MonitorSink *monitor_sink(uint8_t port);
 
     /** diag `stats audio`: each worker's counters into `out`, in the order they were added; how many. Core task. */
     size_t stats(std::span<WorkerStats> out) const;

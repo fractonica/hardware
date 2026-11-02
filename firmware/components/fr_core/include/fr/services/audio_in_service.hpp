@@ -61,6 +61,20 @@ namespace fr {
  *
  * selftest never touches the source on the core task: fr_audio runs it (start at config sample_hz, frames within
  * kTestMs, stop) once at init and again after each selftest(), which answers the newest result.
+ *
+ * The on-board monitor (fr.audio_in 1.1, design audio-a2 D3, §10): monitor_start finds the fr.audio_out on to_port
+ * through the Engine (audio::Engine::monitor_sink: INVALID_ARGS for none), answers BUSY while this input monitors or
+ * streams at a rate other than its config sample_hz, and claims the output at config sample_hz and the volume
+ * (audio::MonitorSink::monitor_claim: INVALID_ARGS for an output of another rate, BUSY while it plays or another input
+ * monitors to it). fr_audio then runs the source at config sample_hz (warm-up and glide as for a stream; a stream at
+ * that rate may run beside it, fed the same converted samples) and hands each converted buffer to the output
+ * (monitor_write, the same task: no fr_stream, no network), up to seconds x rate samples (0: until monitor_stop). DMA
+ * buffers the driver lost are not put back as zeros for the monitor (that would only add latency). It ends the monitor
+ * at `seconds` (done), at monitor_stop (stopped), when the output was taken (a tone or play on it: busy; its stop:
+ * stopped; its sink failing: error, as audio::MonitorSink::monitor_preempted says) or when the source fails (error).
+ * The core timer collects the end: the claim released, `monitoring` false, monitor_ended {reason, to_port, samples}
+ * (samples: those handed to the output). While monitoring, `level` STATEs pause (the meter runs on: level_get
+ * answers from it), so the board's own traffic stays at its heartbeat.
  */
 class AudioInService final : public cap::AudioIn, private audio::Worker
 {
@@ -106,8 +120,12 @@ public:
     std::expected<cap::AudioInStreamStartResult, Err> stream_start(const cap::AudioInStreamStartArgs &args) override;
     Status stream_stop(const cap::AudioInStreamStopArgs &args) override;
     std::expected<cap::AudioInLevelGetResult, Err> level_get() override;
+    /** fr.audio_in 1.1's on-board monitor (design audio-a2 D3, §10; above). monitor_stop: OK when none runs. */
+    Status monitor_start(const cap::AudioInMonitorStartArgs &args) override;
+    Status monitor_stop() override;
     int16_t level() const override { return level_; }
     bool streaming() const override { return streaming_; }
+    bool monitoring() const override { return monitoring_; }
     cap::AudioInTraits traits() const override;
 
     /** DMA buffers' worth of frames the driver lost (put back as zeros) since init. */
@@ -138,6 +156,8 @@ private:
     void capture(std::span<const int16_t> pcm);
     void publish_fill();
     void end_capture(cap::AudioInStreamEndReason why);
+    void route(std::span<const int16_t> pcm);
+    void end_monitor(cap::AudioInMonitorEndReason why);
     // fr_stream
     void begin_stream(uint32_t gen);
     void abort_stream(cap::AudioInStreamEndReason why, bool connected);
@@ -152,6 +172,12 @@ private:
 
     // ---- core task ----
     bool streaming_ = false;
+    uint32_t stream_rate_ = 0;
+    bool monitoring_ = false;
+    uint32_t mon_gen_ = 0;  // the newest monitor's
+    uint8_t mon_port_ = 0;
+    uint32_t mon_claim_ = 0;
+    audio::MonitorSink *mon_sink_ = nullptr;
     uint32_t stream_id_ = 0;
     uint32_t gen_ = 0;  // the newest stream's
     int16_t level_ = audio::kSilenceDbfsX10;
@@ -171,6 +197,11 @@ private:
     std::atomic<uint32_t> test_req_{0};
     std::atomic<uint32_t> stall_ms_{0};
     std::atomic<uint32_t> stall_seq_{0};
+    std::atomic<audio::MonitorSink *> mon_req_sink_{nullptr};
+    std::atomic<uint32_t> mon_req_claim_{0};
+    std::atomic<uint32_t> mon_req_max_{0};  // samples; 0: until monitor_stop
+    std::atomic<uint32_t> mon_req_gen_{0};
+    std::atomic<uint32_t> mon_stop_gen_{0};
 
     // ---- between the tasks ----
     audio::RecordRing ring_;
@@ -196,6 +227,9 @@ private:
     std::atomic<int> last_status_{0};
     std::atomic<uint32_t> hub_samples_{0};
     std::atomic<uint8_t> test_result_{0};  // TestResult of the newest self-test
+    std::atomic<uint8_t> mon_end_reason_{0};
+    std::atomic<uint32_t> mon_end_samples_{0};
+    std::atomic<uint32_t> mon_end_gen_{0};
 
     // ---- fr_audio only ----
     audio::Converter conv_;
@@ -215,6 +249,12 @@ private:
     uint32_t cap_rate_ = 0;
     uint32_t cap_max_ = 0;
     uint32_t cap_samples_ = 0;  // the next sample's index since the stream began
+    uint32_t mon_run_ = 0;   // the gen being monitored (0: none)
+    uint32_t mon_last_ = 0;  // the newest gen whose monitor ended
+    audio::MonitorSink *mon_out_ = nullptr;
+    uint32_t mon_out_claim_ = 0;
+    uint32_t mon_max_ = 0;
+    uint32_t mon_samples_ = 0;  // handed to the output
     std::span<int16_t> fill_;
     uint32_t fill_len_ = 0;
     uint32_t fill_first_ = 0;

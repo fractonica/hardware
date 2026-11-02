@@ -413,7 +413,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: adc_oneshot, button_gpio, cst816_i2c, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, ssd1306_i2c, st7789_spi)",
+      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, ssd1306_i2c, st7789_spi)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -551,8 +551,8 @@ describe('validation', () => {
 describe('driver manifests', () => {
   const drivers = listDrivers(ROOT);
 
-  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers and A1\'s I2S ones', () => {
-    expect(drivers).toEqual(['adc_oneshot', 'button_gpio', 'cst816_i2c', 'fixture_gpio', 'fixture_ws2812_rx', 'i2s_amp', 'i2s_mic', 'led_gpio', 'led_ws2812', 'ssd1306_i2c', 'st7789_spi']);
+  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones and A2\'s adc_audio', () => {
+    expect(drivers).toEqual(['adc_audio', 'adc_oneshot', 'button_gpio', 'cst816_i2c', 'fixture_gpio', 'fixture_ws2812_rx', 'i2s_amp', 'i2s_mic', 'led_gpio', 'led_ws2812', 'ssd1306_i2c', 'st7789_spi']);
   });
 
   it.each(drivers)('%s: driver.yaml matches its header and idf_component.yml', (id) => {
@@ -1558,6 +1558,7 @@ describe('audio: multi-pin binds, I2S controllers and the audio board (design au
       ['status', 2, 'fr.led', 'led_ws2812'],
       ['mic', 3, 'fr.audio_in', 'i2s_mic'],
       ['spk', 4, 'fr.audio_out', 'i2s_amp'],
+      ['rf', 5, 'fr.audio_in', 'adc_audio'], // A2 (design audio-a2 D4): the ports above never move
     ]);
     expect(r.manifest.caps[2]).toMatchObject({ cap_id: 0x0007, config: { sample_hz: 16000, gain_db: 12, hpf_hz: 20, level_hz: 5 }, traits: { max_sample_hz: 48000, bits: 24 } });
     expect(r.manifest.caps[3]).toMatchObject({ cap_id: 0x0004, config: { volume: 60, sample_hz: 16000 }, traits: { max_sample_hz: 48000, bits: 16 } });
@@ -1709,5 +1710,133 @@ describe('audio: multi-pin binds, I2S controllers and the audio board (design au
       'config: from: bind (a gpio.<n> bind) and from: bind.<key> (a multi-pin bind) cannot be mixed',
       'resources.i2s: declares 2 i2s but has 1 config field(s) of type i2s_port',
     ]);
+  });
+});
+
+describe('A2: adc_audio, the ADC1 unit in continuous mode, and the RF detector on s3a-audio (design audio-a2 D2, D4)', () => {
+  const messages = (dir: string, profile: string) => issuesOf(() => gen(dir, profile, false)).map((i) => i.message);
+  const paths = (dir: string, profile: string) => issuesOf(() => gen(dir, profile, false)).map((i) => `${i.path}: ${i.message}`);
+  /** s3a-audio with its rf instance changed by `fn`. */
+  const rf = (dir: string, fn: (rf: Yaml, y: Yaml) => void) =>
+    edit(dir, PROFILE(S3A), (y) => {
+      y.caps.rf = { cap: 'fr.audio_in', driver: 'adc_audio', bind: 'gpio.1', config: { gain_db: 24 } };
+      fn(y.caps.rf, y);
+    });
+
+  it('s3a-audio gains rf on port 5: adc_audio on GPIO1 (ADC1 ch0), db0, oversample 4, gain_db 24, 12-bit traits', () => {
+    const r = generateFirmware({ sourceDir: ROOT, profile: S3A, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+    expect(r.slotsLockChanged).toBe(false);
+    expect(r.slotsLock.content).toBe(readFileSync(join(ROOT, slotsLockFile(S3A)), 'utf8'));
+    expect(r.manifest.caps[4]).toMatchObject({
+      name: 'rf',
+      port: 5,
+      cap_id: 0x0007,
+      version: '1.1',
+      config: { sample_hz: 16000, gain_db: 24, hpf_hz: 20, level_hz: 5 },
+      traits: { max_sample_hz: 48000, bits: 12 },
+    });
+    expect(r.instances.rf).toEqual({ bind: 'gpio.1', pins: [1], driverConfig: { gpio: 1, atten: 'db0', oversample: 4 } });
+    const cpp = file(r, 'fr_board/fr_board.cpp');
+    expect(cpp).toContain('#include "fr/drv/adc_audio.hpp"');
+    expect(cpp).toContain('    c.atten = fr::drv::AdcAudio::Atten::db0;\n    c.oversample = 4;\n');
+    expect(file(r, 'components.cmake')).toContain('hardware/drivers/adc_audio"');
+  });
+
+  it("gives fr.audio_in gain_db 24 by default through the driver's cap_config, and takes atten and oversample from the profile", () => {
+    const dir = fixture({ locks: true });
+    rf(dir, (i) => {
+      i.config = { atten: 'db6', oversample: 2 };
+    });
+    const r = gen(dir, S3A, false);
+    expect(r.manifest.caps.find((c) => c.name === 'rf')!.config).toMatchObject({ gain_db: 24 });
+    expect(r.instances.rf.driverConfig).toEqual({ gpio: 1, atten: 'db6', oversample: 2 });
+    rf(dir, (i) => {
+      i.config = { atten: '6', oversample: 9 };
+    });
+    expect(messages(dir, S3A)).toEqual(['expected one of db0, db2_5, db6, db12, got "6"', 'expected an integer in 1..8 (u8), got 9']);
+    rf(dir, (i) => {
+      i.config = { oversample: 0 };
+    });
+    expect(messages(dir, S3A)).toEqual(['expected an integer in 1..8 (u8), got 0']);
+  });
+
+  it('binds an ADC1 pin only, never the battery input', () => {
+    const dir = fixture({ locks: true });
+    rf(dir, (i) => {
+      i.bind = 'gpio.11';
+    });
+    expect(paths(dir, S3A)).toEqual(['caps.rf.bind: GPIO11 (gpio.11) is not in pins.adc1 of esp32s3-wroom1-cam-n16r8, which driver adc_audio needs (ADC1 only)']);
+    rf(dir, (i) => {
+      i.bind = 'gpio.2';
+    });
+    expect(messages(dir, S3A)).toEqual(["GPIO2 (gpio.2) is already claimed by 'mic'"]);
+  });
+
+  it('caps config sample_hz x oversample at the ADC DMA\'s 83,333 conversions/s', () => {
+    const dir = fixture({ locks: true });
+    rf(dir, (i) => {
+      i.config = { sample_hz: 32000 };
+    });
+    expect(paths(dir, S3A)).toEqual([
+      'caps.rf.config.sample_hz: sample_hz 32000 x oversample 4 is 128000 conversions/s, above the 83333 the ADC DMA reaches on esp32s3; at most oversample 2',
+    ]);
+    rf(dir, (i) => {
+      i.config = { sample_hz: 32000, oversample: 2 };
+    });
+    expect(gen(dir, S3A, false).instances.rf.driverConfig.oversample).toBe(2);
+    rf(dir, (i) => {
+      i.config = { sample_hz: 48000, oversample: 2 };
+    });
+    expect(paths(dir, S3A)).toEqual([
+      'caps.rf.config.oversample: sample_hz 48000 x oversample 2 is 96000 conversions/s, above the 83333 the ADC DMA reaches on esp32s3; at most oversample 1',
+    ]);
+    rf(dir, (i) => {
+      i.config = { sample_hz: 48000, oversample: 1 };
+    });
+    expect(gen(dir, S3A, false).instances.rf.driverConfig.oversample).toBe(1);
+  });
+
+  it('runs one adc_continuous per firmware, alone on ADC1: no second adc_audio, no adc_oneshot, no battery reader', () => {
+    const dir = fixture({ locks: true });
+    rf(dir, (_, y) => {
+      y.caps.rf2 = { cap: 'fr.audio_in', driver: 'adc_audio', bind: 'gpio.4' };
+    });
+    expect(paths(dir, S3A)).toEqual([
+      "caps.rf2.driver: 'rf' already runs the ADC1 unit in continuous mode (driver adc_audio); IDF's adc_continuous has one handle, so a firmware has one adc_continuous instance",
+    ]);
+    rf(dir, (_, y) => {
+      delete y.caps.rf2;
+      y.caps.pot = { cap: 'fr.analog_in', driver: 'adc_oneshot', bind: 'gpio.4' };
+    });
+    expect(paths(dir, S3A)).toEqual(["caps.pot.driver: driver adc_oneshot reads ADC1, which 'rf' (driver adc_audio) runs in continuous mode; the unit cannot serve both"]);
+    // A board with a battery reader (the vitals' vbat on ADC1): GPIO9 here, kept out of pins.free.
+    rf(dir, (_, y) => {
+      delete y.caps.pot;
+    });
+    edit(dir, S3A_BOARD, (b) => {
+      b.battery = { gpio: 9, divider: 2, low_mv: 3400 };
+      b.pins.reserved.battery = [9];
+      b.pins.free = b.pins.free.filter((p: number) => p !== 9);
+      b.pins.adc1 = b.pins.adc1.filter((p: number) => p !== 9);
+    });
+    expect(paths(dir, S3A)).toEqual(['caps.rf.driver: board esp32s3-wroom1-cam-n16r8 reads its battery on ADC1 (battery.gpio 9, adc_oneshot), so driver adc_audio cannot run the unit in continuous mode']);
+  });
+
+  it('checks a driver field\'s range in driver.yaml', () => {
+    const dir = fixture();
+    edit(dir, 'hardware/drivers/adc_audio/driver.yaml', (y) => {
+      y.config.atten.range = [0, 3];
+      y.config.oversample.range = [8, 1];
+    });
+    expect(issuesOf(() => loadDriver(dir, 'adc_audio')).map((i) => `${i.path}: ${i.message}`)).toEqual([
+      'config.atten.range: range applies only to integer fields (u8..i32)',
+      'config.oversample.range: range [8, 1] must be ascending and within 0..255 (u8)',
+    ]);
+    edit(dir, 'hardware/drivers/adc_audio/driver.yaml', (y) => {
+      delete y.config.atten.range;
+      y.config.oversample.range = [1, 8];
+      y.config.oversample.default = 12;
+    });
+    expect(issuesOf(() => loadDriver(dir, 'adc_audio')).map((i) => `${i.path}: ${i.message}`)).toEqual(['config.oversample.default: expected an integer in 1..8 (u8), got 12']);
   });
 });

@@ -17,6 +17,7 @@ namespace fr {
 namespace {
 
 using Reason = cap::AudioInStreamEndReason;
+using MonReason = cap::AudioInMonitorEndReason;
 
 /** The longest stall diag `audio stall` takes. */
 constexpr uint32_t kStallMaxMs = 60'000;
@@ -141,6 +142,9 @@ std::expected<cap::AudioInStreamStartResult, Err> AudioInService::stream_start(c
     if (!hal::is_audio_rate(rate) || rate > src_.max_sample_hz()) {
         return std::unexpected(Err::invalid_args);
     }
+    if (monitoring_ && rate != cfg_.sample_hz) {
+        return std::unexpected(Err::busy);  // the source runs the monitor's rate
+    }
     audio::Endpoint ep{};
     audio::StreamHost *host = audio::stream_host();
     const bool has_ep = host != nullptr && host->endpoint(ep) && ep.ipv4 != 0 && ep.port != 0;
@@ -155,6 +159,7 @@ std::expected<cap::AudioInStreamStartResult, Err> AudioInService::stream_start(c
     gen_ = gen_ + 1 == 0 ? 1 : gen_ + 1;
     req_gen_.store(gen_, std::memory_order_release);
     streaming_ = true;
+    stream_rate_ = rate;
     stream_id_ = args.stream_id;
     report_streaming(true);
     arm();
@@ -187,6 +192,47 @@ std::expected<cap::AudioInLevelGetResult, Err> AudioInService::level_get()
         arm();
     }
     return r;
+}
+
+Status AudioInService::monitor_start(const cap::AudioInMonitorStartArgs &args)
+{
+    if (!ready_) {
+        return std::unexpected(Err::failed);
+    }
+    audio::MonitorSink *sink = audio::engine().monitor_sink(args.to_port);
+    const uint32_t rate = cfg_.sample_hz;
+    if (sink == nullptr || !hal::is_audio_rate(rate) || rate > src_.max_sample_hz()) {
+        return std::unexpected(Err::invalid_args);
+    }
+    if (monitoring_ || (streaming_ && stream_rate_ != rate)) {
+        return std::unexpected(Err::busy);
+    }
+    const auto claim = sink->monitor_claim(rate, args.volume);
+    if (!claim) {
+        return std::unexpected(claim.error());
+    }
+    mon_sink_ = sink;
+    mon_claim_ = *claim;
+    mon_port_ = args.to_port;
+    mon_req_sink_.store(sink, std::memory_order_relaxed);
+    mon_req_claim_.store(*claim, std::memory_order_relaxed);
+    mon_req_max_.store(static_cast<uint32_t>(args.seconds) * rate, std::memory_order_relaxed);
+    mon_gen_ = mon_gen_ + 1 == 0 ? 1 : mon_gen_ + 1;
+    mon_req_gen_.store(mon_gen_, std::memory_order_release);
+    monitoring_ = true;
+    report_monitoring(true);
+    arm();
+    audio::engine().wake_audio();
+    return {};
+}
+
+Status AudioInService::monitor_stop()
+{
+    if (monitoring_) {
+        mon_stop_gen_.store(mon_gen_, std::memory_order_release);
+        audio::engine().wake_audio();
+    }
+    return {};
 }
 
 bool AudioInService::stats(audio::WorkerStats &out) const
@@ -228,8 +274,8 @@ void AudioInService::on_timer()
     if (seq != level_seen_) {
         level_seen_ = seq;
         level_ = level_dbfs_.load(std::memory_order_relaxed);
-        if (cfg_.level_hz > 0) {
-            report_level(level_);
+        if (cfg_.level_hz > 0 && !monitoring_) {
+            report_level(level_);  // paused while monitoring (design audio-a2 D3)
         }
     }
     if (streaming_ && end_gen_.load(std::memory_order_acquire) == gen_) {
@@ -240,9 +286,18 @@ void AudioInService::on_timer()
                            .samples = end_samples_.load(std::memory_order_relaxed),
                            .dropped_samples = end_dropped_.load(std::memory_order_relaxed)});
     }
+    if (monitoring_ && mon_end_gen_.load(std::memory_order_acquire) == mon_gen_) {
+        // fr_audio writes nothing more for this monitor: the output is free again (unless it was taken from it).
+        monitoring_ = false;
+        mon_sink_->monitor_release(mon_claim_);
+        report_monitoring(false);
+        emit_monitor_ended({.reason = static_cast<MonReason>(mon_end_reason_.load(std::memory_order_relaxed)),
+                            .to_port = mon_port_,
+                            .samples = mon_end_samples_.load(std::memory_order_relaxed)});
+    }
     // Ticking while anything runs, and half a second after: a level_get's meter run starts on fr_audio's time.
-    idle_ticks_ = streaming_ || running_.load(std::memory_order_acquire) ? 0 : idle_ticks_ + 1;
-    if (streaming_ || idle_ticks_ < 10) {
+    idle_ticks_ = streaming_ || monitoring_ || running_.load(std::memory_order_acquire) ? 0 : idle_ticks_ + 1;
+    if (streaming_ || monitoring_ || idle_ticks_ < 10) {
         timer_->start(kPollUs);
     }
 }
@@ -311,8 +366,38 @@ bool AudioInService::audio_pass(uint32_t wait_ms)
         testing_ = true;
         test_until_ = core_->now() + static_cast<TimeUs>(kTestMs) * 1000;
     }
+    // A new monitor, its stop, the output taken from it.
+    const uint32_t mg = mon_req_gen_.load(std::memory_order_acquire);
+    if (mg != 0 && mg != mon_run_ && mg != mon_last_) {
+        mon_run_ = mg;
+        mon_out_ = mon_req_sink_.load(std::memory_order_relaxed);
+        mon_out_claim_ = mon_req_claim_.load(std::memory_order_relaxed);
+        mon_max_ = mon_req_max_.load(std::memory_order_relaxed);
+        mon_samples_ = 0;
+    }
+    if (mon_run_ != 0 && mon_stop_gen_.load(std::memory_order_acquire) == mon_run_) {
+        end_monitor(MonReason::stopped);
+    } else if (mon_run_ != 0) {
+        switch (mon_out_->monitor_preempted(mon_out_claim_)) {
+        case audio::MonitorEnd::none:
+            break;
+        case audio::MonitorEnd::stopped:
+            end_monitor(MonReason::stopped);
+            break;
+        case audio::MonitorEnd::error:
+            end_monitor(MonReason::error);
+            break;
+        case audio::MonitorEnd::busy:
+        default:
+            end_monitor(MonReason::busy);
+            break;
+        }
+    }
 
-    const uint32_t want = cap_gen_ != 0 ? cap_rate_ : meter_left_ > 0 || testing_ ? cfg_.sample_hz : 0;
+    // A stream sets the rate (a monitor beside it runs at config sample_hz, which the commands made it); else a
+    // monitor, the meter or the self-test run config sample_hz.
+    const uint32_t want =
+        cap_gen_ != 0 ? cap_rate_ : mon_run_ != 0 || meter_left_ > 0 || testing_ ? cfg_.sample_hz : 0;
     if (want != rate_) {
         set_rate(want);
         if (want != 0 && rate_ == 0) {
@@ -323,6 +408,9 @@ bool AudioInService::audio_pass(uint32_t wait_ms)
             }
             if (cap_gen_ != 0) {
                 end_capture(Reason::error);
+            }
+            if (mon_run_ != 0) {
+                end_monitor(MonReason::error);
             }
             return true;
         }
@@ -339,6 +427,9 @@ bool AudioInService::audio_pass(uint32_t wait_ms)
         }
         if (cap_gen_ != 0) {
             end_capture(Reason::error);
+        }
+        if (mon_run_ != 0) {
+            end_monitor(MonReason::error);
         }
         set_rate(0);
         return true;
@@ -392,12 +483,39 @@ bool AudioInService::audio_pass(uint32_t wait_ms)
         if (cap_gen_ != 0) {
             capture(pcm);
         }
+        if (mon_run_ != 0) {
+            route(pcm);
+        }
         meter_left_ -= std::min<uint32_t>(meter_left_, static_cast<uint32_t>(metered.size()));
     }
     if (cap_gen_ != 0 && cap_max_ != 0 && cap_samples_ >= cap_max_) {
         end_capture(Reason::done);
     }
     return true;
+}
+
+void AudioInService::route(std::span<const int16_t> pcm)
+{
+    // What the output had no room for (above its latency cap) is dropped there: a monitor never waits.
+    size_t k = pcm.size();
+    if (mon_max_ != 0) {
+        k = std::min<size_t>(k, mon_max_ - mon_samples_);
+    }
+    mon_out_->monitor_write(mon_out_claim_, pcm.first(k));
+    mon_samples_ += static_cast<uint32_t>(k);
+    if (mon_max_ != 0 && mon_samples_ >= mon_max_) {
+        end_monitor(MonReason::done);
+    }
+}
+
+void AudioInService::end_monitor(MonReason why)
+{
+    mon_out_->monitor_finish(mon_out_claim_);  // nothing when the output was taken from the monitor already
+    mon_end_reason_.store(static_cast<uint8_t>(why), std::memory_order_relaxed);
+    mon_end_samples_.store(mon_samples_, std::memory_order_relaxed);
+    mon_end_gen_.store(mon_run_, std::memory_order_release);
+    mon_last_ = mon_run_;
+    mon_run_ = 0;
 }
 
 void AudioInService::capture(std::span<const int16_t> pcm)

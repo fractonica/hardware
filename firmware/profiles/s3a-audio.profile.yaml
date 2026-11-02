@@ -6,9 +6,12 @@ net: { link_profile: default }
 # (the modules are wired to the board, not part of it, so they are bare-pin binds). Mic L/R to GND (left slot); amp
 # GAIN and SD not connected. The mic and the amp each take one of the S3's two I2S controllers (D6).
 # PSRAM (D4, D5): the 2 s capture ring and the 1 s playback ring.
+# Design audio-a2 D1, D4: `rf`, a diode RF envelope detector (31 mm antenna, germanium diode, 1 nF and 10 kOhm to GND)
+# on GPIO1 (ADC1 channel 0, J3 beside GND), sampled at audio rate by adc_audio; heard on spk with fr.audio_in's monitor.
 psram: on
 caps:
   boot:   { cap: fr.button,    driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,       driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 32 } }
   mic:    { cap: fr.audio_in,  driver: i2s_mic,     bind: { bclk: gpio.41, ws: gpio.42, din: gpio.2 }, config: { slot: left } }
   spk:    { cap: fr.audio_out, driver: i2s_amp,     bind: { bclk: gpio.14, ws: gpio.13, dout: gpio.12 } }   # beside 5V/GND (38-40 are the SD slot's)
+  rf:     { cap: fr.audio_in,  driver: adc_audio,   bind: gpio.1, config: { gain_db: 24 } }   # atten db0, oversample 4 (driver defaults)

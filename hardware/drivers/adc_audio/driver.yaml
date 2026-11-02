@@ -1,0 +1,28 @@
+# Driver manifest (design audio-a2 D2; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::AdcAudio::Config from the instance's `bind: gpio.<n>`, which must be one of the board's pins.adc1 (never an
+# ADC2 pin, never the battery input). The ADC1 unit runs in continuous (DMA) mode, so codegen refuses a second
+# adc_audio, any other ADC1 reader (adc_oneshot) and a board `battery` in the same firmware. Stream F implements it (A2).
+schema: fractonica/driver@1
+id: adc_audio
+summary: Any analog signal at audio rate (an RF envelope detector, a line in) on one ADC1 channel through IDF adc_continuous, oversampled and averaged down to sample_hz.
+implements: hal.AudioSource
+class: fr::drv::AdcAudio                # header: include/fr/drv/adc_audio.hpp
+targets: [esp32c3, esp32c6, esp32s3]    # all three: SOC_ADC_DMA_SUPPORTED, 83,333 conversions/s, 4-byte results (IDF v6.1 soc_caps.h); benched on the S3 only
+binds: gpio                             # a bare pin: bind gpio.<n> (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as AdcAudio::Config
+  gpio:       { type: gpio, from: bind }
+  # ADC_ATTEN_DB_0 / _2_5 / _6 / _12: full scale about 950 mV, 1250 mV, 1750 mV, 3100 mV (IDF docs, inferred on the S3).
+  atten:      { type: enum, values: [db0, db2_5, db6, db12], default: db0, doc: "input attenuation; db0 for an RF detector's few hundred mV" }
+  # Conversions averaged per sample (an anti-alias filter for the detector's fast bursts): codegen refuses config
+  # sample_hz x oversample above the target's 83,333 conversions/s; start() at a faster stream rate uses fewer.
+  oversample: { type: u8, default: 4, range: [1, 8], doc: "conversions per sample, averaged" }
+# The detector is quieter than a MEMS microphone (inferred; tuned on the bench): fr.audio_in's gain_db default for it.
+cap_config: { gain_db: 24 }
+# fr.audio_in traits its service reports: 48 kHz is the highest kAudioRates rate under the DMA's 83,333/s at oversample
+# 1; the readings are 12-bit (left-justified into the 32-bit slot, bits 31..20).
+traits: { max_sample_hz: 48000, bits: 12 }
+# adc1_channel: the ADC1 pin rules and budget (as adc_oneshot). adc_continuous: the ADC1 unit in DMA mode, one per
+# firmware and alone on ADC1 (codegen: no adc_oneshot instance, no board battery reader).
+resources: { gpio: 1, adc1_channel: 1, adc_continuous: 1 }
+dependencies: {}

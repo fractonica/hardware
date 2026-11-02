@@ -3,8 +3,10 @@
 // first_sample, PCM), the ends and their figures, the ring's drop accounting, the stall hook, level_get, the warm-up
 // and the blocker's glide after a start, the self-test on fr_audio, the tone, the play GET (with and without PSRAM),
 // the full DMA while the microphone paces fr_audio, the drain without sleeping, the stuck-play backstop, replacement
-// and stop, and the counters of diag `stats audio`. The Engine runs by hand (set_manual): each round is 10 ms of the
-// amplifier's playing, one fr_audio and one fr_stream pass, then 10 ms of core time.
+// and stop, and the counters of diag `stats audio`; fr.audio_in 1.1's on-board monitor (design audio-a2 D3): the same
+// samples in order on the amplifier within 50 ms, its ends (done, stopped, busy), the commands' refusals, the latency
+// cap against a source faster than the sink, and a monitor beside a stream. The Engine runs by hand (set_manual): each
+// round is 10 ms of the amplifier's playing, one fr_audio and one fr_stream pass, then 10 ms of core time.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -39,7 +41,8 @@ constexpr uint8_t kSpkPort = 4;
 
 /**
  * A microphone whose sample n since start() is n as a 16-bit value (left-justified), or `gen(n)` when set, as fast as
- * it is read.
+ * it is read (240 a read); with `clock` set, in real time on that clock instead: a read returns what is due since
+ * start() (sample n at n / rate), as a DMA would.
  */
 class FakeMic final : public fr::hal::AudioSource
 {
@@ -52,15 +55,20 @@ public:
         }
         rate = hz;
         n = 0;
+        t0 = clock != nullptr ? clock->now() : 0;
         ++starts;
         return {};
     }
     std::expected<size_t, fr::Err> read(std::span<int32_t> frames, uint32_t) override
     {
-        if (rate == 0) {
+        if (rate == 0 || fail_read) {
             return std::unexpected(fr::Err::failed);
         }
-        const size_t k = std::min<size_t>(frames.size(), 240);
+        size_t k = std::min<size_t>(frames.size(), 240);
+        if (clock != nullptr) {
+            const uint64_t due = static_cast<uint64_t>(clock->now() - t0) * rate / 1'000'000;
+            k = static_cast<size_t>(std::min<uint64_t>(frames.size(), due - n));
+        }
         for (size_t i = 0; i < k; ++i, ++n) {
             frames[i] = gen ? gen(n) : static_cast<int32_t>(static_cast<uint32_t>(static_cast<uint16_t>(n)) << 16);
         }
@@ -85,6 +93,8 @@ public:
     }
 
     std::function<int32_t(uint32_t)> gen;
+    const FakeCore *clock = nullptr;
+    fr::TimeUs t0 = 0;
     uint32_t rate = 0;
     uint32_t n = 0;
     uint32_t lost = 0;
@@ -92,12 +102,13 @@ public:
     int stops = 0;
     int selftests = 0;
     bool fail_start = false;
+    bool fail_read = false;
 };
 
 /**
  * An amplifier with a DMA of kDma samples that plays `rate` samples a second as the rig's rounds tick: write() takes
  * what fits (0 when full), every sample it took is kept, and a tick that finds less queued than it plays counts as
- * starved (the DMA ran dry while started).
+ * starved (the DMA ran dry while started). With `clock` set, each tick also records when it played up to which sample.
  */
 class FakeAmp final : public fr::hal::AudioSink
 {
@@ -147,8 +158,24 @@ public:
         const size_t play = rate * ms / 1000;
         if (queued < play) {
             ++starved;
+            starved_at.push_back(played + queued);
         }
+        played += std::min(queued, play);
         queued -= std::min(queued, play);
+        if (clock != nullptr) {
+            plays.emplace_back(clock->now(), played);
+        }
+    }
+
+    /** When written sample `k` had played (the end of the tick that played it); -1 if it has not. */
+    fr::TimeUs played_at(size_t k) const
+    {
+        for (const auto &[t, upto] : plays) {
+            if (upto > k) {
+                return t;
+            }
+        }
+        return -1;
     }
 
     uint32_t rate = 0;
@@ -160,6 +187,10 @@ public:
     uint32_t max_stop_ms = 0;
     size_t queued_at_stop = 0;  // what the DMA still held when stop() came
     uint32_t late = 0;          // underruns(): the driver's starved DMA buffers, as the test sets them
+    const FakeCore *clock = nullptr;
+    size_t played = 0;
+    std::vector<size_t> starved_at;  // where each starved tick ran dry (samples played by then)
+    std::vector<std::pair<fr::TimeUs, size_t>> plays;  // (tick time, samples played since the first start)
 };
 
 /** One block of a record stream as the hub received it. */
@@ -1062,4 +1093,256 @@ TEST(audio_stats_tell_dma_loss_ring_drops_clipping_and_dry_spells)
     CHECK(lv->clipping > 0);
     CHECK(qs[2].input);
     CHECK_EQ(qs[2].clipping, lv->clipping);
+}
+
+// ---- the on-board monitor (fr.audio_in 1.1, design audio-a2 D3, §10) ----
+
+namespace {
+
+constexpr uint64_t kMonStopped = 0, kMonDone = 1, kMonBusy = 2, kMonError = 3;
+constexpr uint8_t kPropMonitoring = 3;
+
+/** A 997 Hz sine at 16 kHz in 16 bits (its period is no whole number of samples: an offset shows). */
+int16_t sine997(uint32_t n)
+{
+    return static_cast<int16_t>(std::lround(8000.0 * std::sin(2.0 * 3.14159265358979323846 * 997.0 * n / 16000.0)));
+}
+
+int32_t sine997_slot(uint32_t n)
+{
+    return static_cast<int32_t>(static_cast<uint32_t>(static_cast<uint16_t>(sine997(n))) << 16);
+}
+
+/** monitor_ended fields: reason, to_port, samples. */
+struct MonEnd {
+    uint64_t reason, to_port, samples;
+};
+MonEnd mon_end_of(const RecordingSink::Emission &e)
+{
+    return {frt::field_u(e.bytes, 1), frt::field_u(e.bytes, 2), frt::field_u(e.bytes, 3)};
+}
+
+/** A rig whose microphone and amplifier run on the core's clock (the sine above), so latency can be measured. */
+struct TimedRig : Rig {
+    TimedRig(fr::cap::AudioInConfig in = plain_in(), fr::cap::AudioOutConfig out = {}) : Rig(in, out)
+    {
+        src.clock = &core;
+        src.gen = sine997_slot;
+        amp.clock = &core;
+    }
+};
+
+}  // namespace
+
+TEST(audio_monitor_plays_the_input_on_the_output_in_order_within_50_ms)
+{
+    TimedRig r;
+    REQUIRE(r.init());
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort, .seconds = 2, .volume = 100}));
+    CHECK(r.mic.monitoring());
+    CHECK(r.spk.playing());  // the output is busy while claimed
+    CHECK((r.props(kMicPort, kPropMonitoring) == std::vector<uint64_t>{1}));
+    CHECK((r.props(kSpkPort, 1) == std::vector<uint64_t>{1}));
+    const size_t levels_before = r.props(kMicPort, 1).size();
+    REQUIRE(r.run([&] { return r.ended(kMicPort); }, 400));
+    const MonEnd e = mon_end_of(r.events(kMicPort)[0]);
+    CHECK_EQ(e.reason, kMonDone);
+    CHECK_EQ(e.to_port, kSpkPort);
+    CHECK_EQ(e.samples, 32000u);  // seconds x rate, after the source's warm-up
+    CHECK(!r.mic.monitoring());
+    CHECK((r.props(kMicPort, kPropMonitoring) == std::vector<uint64_t>{1, 0}));
+    CHECK_EQ(r.props(kMicPort, 1).size(), levels_before);  // `level` paused while monitoring
+    CHECK(r.events(kSpkPort).empty());                       // no play_done for a monitor
+    CHECK(!r.spk.playing());
+    CHECK((r.props(kSpkPort, 1) == std::vector<uint64_t>{1, 0}));
+    REQUIRE(r.run([&] { return r.amp.rate == 0 && r.src.rate == 0; }, 10));
+
+    // The input's converted samples, in order, from its first kept one (the warm-up's 1600 go nowhere): nothing lost,
+    // nothing repeated. What the ring still held at the release is not played.
+    const std::vector<int16_t> &w = r.amp.written;
+    CHECK_EQ(r.spk.monitor_dropped(), 0u);
+    CHECK(w.size() >= 32000u - 2 * 480u);
+    CHECK(w.size() <= 32000u);
+    bool same = true;
+    for (size_t k = 0; k < w.size(); ++k) {
+        same = same && w[k] == sine997(kWarmup + static_cast<uint32_t>(k));
+    }
+    CHECK(same);
+    // Latency: each sample played within 50 ms of being due at the source (kMonitorPrebufferMs 30 and the rig's
+    // 10 ms rounds); the DMA never ran dry.
+    fr::TimeUs worst = 0;
+    const fr::TimeUs t0 = r.src.t0;
+    for (size_t k = 0; k < w.size(); k += 7) {
+        const fr::TimeUs at = r.amp.played_at(k);
+        if (at < 0) {
+            continue;  // still queued when the sink stopped
+        }
+        const fr::TimeUs due = t0 + static_cast<fr::TimeUs>(kWarmup + k) * 1'000'000 / 16000;
+        worst = std::max(worst, at - due);
+    }
+    CHECK(worst > 0);
+    CHECK(worst <= 50'000);
+    // The DMA ran dry only once everything written had played (the end, before the sink stopped).
+    CHECK(std::all_of(r.amp.starved_at.begin(), r.amp.starved_at.end(), [&](size_t at) { return at == w.size(); }));
+    std::array<fr::audio::WorkerStats, 4> st{};
+    REQUIRE_EQ(fr::audio::engine().stats(st), 2u);
+    CHECK_EQ(st[0].rx_overflows, 0u);
+    CHECK_EQ(st[1].underruns, 0u);
+    CHECK_EQ(st[1].ring_dry, 0u);
+}
+
+TEST(audio_monitor_stop_seconds_0_and_the_commands_refusals)
+{
+    TimedRig r;
+    REQUIRE(r.init());
+    CHECK(r.mic.monitor_stop());  // none runs: OK
+    CHECK(r.mic.monitor_start({.to_port = 9}).error() == fr::Err::invalid_args);        // no output there
+    CHECK(r.mic.monitor_start({.to_port = kMicPort}).error() == fr::Err::invalid_args); // an input, not an output
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort}));  // seconds 0: until monitor_stop
+    CHECK(r.mic.monitor_start({.to_port = kSpkPort}).error() == fr::Err::busy);  // this input monitors already
+    // The output is busy: a play or tone would take it; another stream rate cannot run beside the monitor.
+    CHECK(r.mic.stream_start({.stream_id = 4, .has_sample_hz = true, .sample_hz = 8000}).error() == fr::Err::busy);
+    REQUIRE(r.run([&] { return r.amp.written.size() > 16000; }, 300));
+    CHECK(!r.ended(kMicPort));
+    REQUIRE(r.mic.monitor_stop());
+    REQUIRE(r.run([&] { return r.ended(kMicPort); }, 10));
+    const MonEnd e = mon_end_of(r.events(kMicPort)[0]);
+    CHECK_EQ(e.reason, kMonStopped);
+    CHECK(e.samples > 16000u);
+    CHECK(!r.spk.playing());
+    CHECK(r.events(kSpkPort).empty());
+
+    // Another input monitoring to the same output: BUSY until the first one ends.
+    FakeMic src2;
+    fr::AudioInService mic2(src2, plain_in());
+    mic2.attach(5, "rf", r.sink);
+    REQUIRE(mic2.init(r.core));
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort}));
+    CHECK(mic2.monitor_start({.to_port = kSpkPort}).error() == fr::Err::busy);
+    REQUIRE(r.mic.monitor_stop());
+    REQUIRE(r.run([&] { return !r.mic.monitoring(); }, 10));
+    REQUIRE(mic2.monitor_start({.to_port = kSpkPort, .seconds = 1}));
+    REQUIRE(r.run([&] { return !mic2.monitoring(); }, 300));
+    CHECK(!r.spk.playing());
+
+    // A tone or play running: BUSY.
+    r.sink.clear();
+    REQUIRE(r.spk.tone({.freq_hz = 500, .ms = 100}));
+    CHECK(r.mic.monitor_start({.to_port = kSpkPort}).error() == fr::Err::busy);
+    REQUIRE(r.run([&] { return r.ended(kSpkPort); }));
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort}));  // the tone done (and draining): free again
+    REQUIRE(r.mic.monitor_stop());
+    REQUIRE(r.run([&] { return r.ended(kMicPort); }, 10));
+}
+
+TEST(audio_monitor_needs_the_output_s_rate)
+{
+    {
+        fr::cap::AudioOutConfig out{};
+        out.sample_hz = 22050;
+        TimedRig r(plain_in(), out);
+        REQUIRE(r.init());
+        CHECK(r.mic.monitor_start({.to_port = kSpkPort}).error() == fr::Err::invalid_args);
+        CHECK(!r.mic.monitoring());
+        CHECK(!r.spk.playing());
+        CHECK(r.props(kMicPort, kPropMonitoring).empty());
+    }
+
+    // A stream at another rate running: BUSY (the source runs the stream's rate).
+    TimedRig q;
+    REQUIRE(q.init());
+    REQUIRE(q.mic.stream_start({.stream_id = 1, .seconds = 1, .has_sample_hz = true, .sample_hz = 8000}));
+    CHECK(q.mic.monitor_start({.to_port = kSpkPort}).error() == fr::Err::busy);
+    REQUIRE(q.run([&] { return q.ended(kMicPort); }));  // no endpoint: net_lost at once
+}
+
+TEST(audio_monitor_ends_busy_on_a_tone_stopped_on_the_output_s_stop_error_on_the_source)
+{
+    TimedRig r;
+    REQUIRE(r.init());
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort, .seconds = 30}));
+    REQUIRE(r.run([&] { return r.amp.written.size() > 3200; }, 300));
+    // A tone takes the output: the monitor ends busy, the tone plays out (playing stays true), done.
+    REQUIRE(r.spk.tone({.freq_hz = 1000, .ms = 100}));
+    CHECK(r.spk.playing());
+    REQUIRE(r.run([&] { return r.ended(kMicPort) && r.ended(kSpkPort); }));
+    CHECK_EQ(mon_end_of(r.events(kMicPort)[0]).reason, kMonBusy);
+    CHECK_EQ(end_of(r.events(kSpkPort)[0]).reason, kOutDone);  // the tone's play_done, none for the monitor
+    CHECK_EQ(end_of(r.events(kSpkPort)[0]).b, 1600u);
+    CHECK_EQ(r.events(kSpkPort).size(), 1u);
+    CHECK((r.props(kSpkPort, 1) == std::vector<uint64_t>{1, 0}));  // true from the claim to the tone's end
+
+    // The output's stop: the monitor ends stopped.
+    r.sink.clear();
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort}));
+    REQUIRE(r.run([&] { return r.amp.rate != 0; }, 300));
+    REQUIRE(r.spk.stop());
+    CHECK(!r.spk.playing());
+    REQUIRE(r.run([&] { return r.ended(kMicPort); }, 10));
+    CHECK_EQ(mon_end_of(r.events(kMicPort)[0]).reason, kMonStopped);
+    CHECK(r.events(kSpkPort).empty());
+
+    // The source failing: error.
+    r.sink.clear();
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort}));
+    REQUIRE(r.run([&] { return r.amp.rate != 0; }, 300));
+    r.src.fail_read = true;
+    REQUIRE(r.run([&] { return r.ended(kMicPort); }, 10));
+    CHECK_EQ(mon_end_of(r.events(kMicPort)[0]).reason, kMonError);
+    CHECK(!r.spk.playing());
+    r.src.fail_read = false;
+    REQUIRE(r.run([&] { return r.amp.rate == 0; }, 10));
+}
+
+TEST(audio_monitor_caps_its_latency_against_a_faster_source)
+{
+    // The untimed microphone makes 240 samples a 10 ms round, 1.5 x what the amplifier plays: what would build up
+    // above the ring's cap (kMonitorPrebufferMs + 2 x 240) is dropped, so the delay stays bounded (here the fake
+    // DMA's 1440 on top), and the sink never runs dry.
+    Rig r;
+    REQUIRE(r.init());
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort, .seconds = 3, .volume = 100}));
+    REQUIRE(r.run([&] { return r.ended(kMicPort); }, 400));
+    CHECK_EQ(mon_end_of(r.events(kMicPort)[0]).samples, 48000u);
+    CHECK(r.spk.monitor_dropped() > 10000u);
+    CHECK(r.amp.written.size() + r.spk.monitor_dropped() <= 48000u);
+    // Not played at the end: at most the ring's cap and the chunk in hand.
+    CHECK(r.amp.written.size() + r.spk.monitor_dropped() + 960u + 240u >= 48000u);
+    CHECK_EQ(r.amp.starved, 0);
+    // What did go out is the counter in order, with gaps only where the cap dropped.
+    bool rising = true;
+    for (size_t k = 1; k < r.amp.written.size(); ++k) {
+        rising = rising && static_cast<uint16_t>(r.amp.written[k] - r.amp.written[k - 1]) >= 1;
+    }
+    CHECK(rising);
+}
+
+TEST(audio_monitor_and_a_stream_at_one_rate_carry_the_same_samples)
+{
+    TimedRig r;
+    REQUIRE(r.init());
+    Hub hub;
+    r.host.port = hub.port;
+    hub.serve_post();
+    REQUIRE(r.mic.monitor_start({.to_port = kSpkPort, .seconds = 1, .volume = 100}));
+    REQUIRE(r.mic.stream_start({.stream_id = 5, .seconds = 1}));
+    REQUIRE(r.run([&] { return r.events(kMicPort).size() == 2; }, 400));
+    hub.join();
+    // Both began with the source's first kept sample: stream sample i is monitor sample i.
+    std::vector<int16_t> streamed;
+    for (const Block &b : hub.blocks()) {
+        streamed.insert(streamed.end(), b.pcm.begin(), b.pcm.end());
+    }
+    REQUIRE_EQ(streamed.size(), 16000u);
+    const std::vector<int16_t> &w = r.amp.written;
+    REQUIRE(w.size() > 15000u);
+    bool same = true;
+    for (size_t k = 0; k < streamed.size(); ++k) {
+        same = same && streamed[k] == sine997(kWarmup + static_cast<uint32_t>(k));
+        same = same && (k >= w.size() || w[k] == streamed[k]);
+    }
+    CHECK(same);
+    CHECK(std::all_of(r.amp.starved_at.begin(), r.amp.starved_at.end(), [&](size_t at) { return at == w.size(); }));
+    CHECK(!r.mic.streaming());
+    CHECK(!r.mic.monitoring());
 }

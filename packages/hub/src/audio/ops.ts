@@ -10,6 +10,12 @@
 //   by the board's GET after fr.audio_out play; a tone is the board's own `tone`. Both wait for play_done (or its
 //   length + 10 s, then stop); a GET body still going out 2 s after that is cut.
 // - audio_level (query): fr.audio_in level_get in dBFS.
+// - audio_monitor (job; design audio-a2 D3, D5, §10): an fr.audio_in instance heard live on an fr.audio_out of the
+//   same board (fr.audio_in 1.1 monitor_start; no PCM leaves the board). Refused before anything is sent when the two
+//   instances' config sample_hz differ. Holds both instances' locks; waits for the input's monitor_ended for that
+//   to_port (or seconds + 5 s, then monitor_stop: reason `timeout`); a cancel sends monitor_stop at once. underruns
+//   and rx_overflows are `stats audio` deltas (diag over the hub link), left out when the board does not answer it.
+//   No hub events: the event schema has no audio.monitor_* (the board's own <from>.monitor_ended is in the store).
 // The instance defaults to the device's first of the capability. A record and a play run on separate locks (one per
 // instance), so a board can play a tone while it records it (T-AUDIO's loopback).
 
@@ -20,11 +26,14 @@ import {
   AUDIO_RECORD_MAX_S,
   type AudioInEndReason,
   type AudioLevel,
+  type AudioMonitor,
+  type AudioMonitorEndReason,
   type AudioOpName,
   type AudioOutEndReason,
   type AudioPlay,
   type AudioRecord,
   FrError,
+  type ManifestCap,
   MAX_WAIT_S,
 } from '@fractonica/protocol';
 import { AUDIO_IN_CONFIG_DEFAULTS, AUDIO_OUT_CONFIG_DEFAULTS } from '@fractonica/protocol/gen';
@@ -38,6 +47,7 @@ import { readLockPid } from '../lock.ts';
 import { resolveOne } from '../registry/hub.ts';
 import { nowUs } from '../ring.ts';
 import type { PortCap } from '../router/caps.ts';
+import { diagOverLink } from '../router/diag.ts';
 import { routerInfo } from '../router/index.ts';
 import { type CommandOutcome, instancesOf, sendCommandTo } from '../router/ops.ts';
 import type { AudioStreams, RecordEnd } from './streams.ts';
@@ -91,15 +101,19 @@ function audioInstance(hub: HubContext, dev: Device, cap: AudioCap, name: string
   return inst;
 }
 
+/** The instance in its running firmware's manifest (its driver and config), or undefined without one. */
+function manifestCap(hub: HubContext, dev: Device, inst: PortCap): ManifestCap | undefined {
+  const fw = routerInfo(hub.router, dev.device_id)?.fw_id_prefix ?? dev.fw_id;
+  try {
+    return fw ? manifestCapsByFwPrefix(hub.db, fw)?.find((c) => c.name === inst.name) : undefined;
+  } catch {
+    return undefined; // no (readable) manifest for that firmware
+  }
+}
+
 /** The instance's configured sample_hz: its running firmware's manifest config, else the capability default. */
 function configRate(hub: HubContext, dev: Device, inst: PortCap): number {
-  const fw = routerInfo(hub.router, dev.device_id)?.fw_id_prefix ?? dev.fw_id;
-  let hz: unknown;
-  try {
-    hz = fw ? manifestCapsByFwPrefix(hub.db, fw)?.find((c) => c.name === inst.name)?.config?.sample_hz : undefined;
-  } catch {
-    // no manifest for that firmware: the default
-  }
+  const hz = manifestCap(hub, dev, inst)?.config?.sample_hz;
   return typeof hz === 'number' ? hz : inst.cap === 'fr.audio_in' ? AUDIO_IN_CONFIG_DEFAULTS.sample_hz : AUDIO_OUT_CONFIG_DEFAULTS.sample_hz;
 }
 
@@ -490,6 +504,119 @@ async function playJob(
   }
 }
 
+// ---- audio_monitor ----
+
+/** Past a monitor's own length, how long the hub waits for monitor_ended before monitor_stop (design audio-a2 D5). */
+export const AUDIO_MONITOR_SLACK_MS = 5000;
+
+/** `stats audio`: per instance its counters ({rx_overflows, dropped_samples, clipping} or {underruns, ring_dry}). */
+type AudioStats = Record<string, Record<string, unknown>>;
+
+/** `stats audio` over the hub link (fr.diag.exec), or null when the board does not answer it (or not with `audio`). */
+async function statsAudio(hub: HubContext, dev: Device): Promise<AudioStats | null> {
+  try {
+    const { response } = await diagOverLink(hub, dev.device_id, 'stats audio', AUDIO_CMD_TIMEOUT_MS / 1000);
+    const r = response as { ok?: unknown; audio?: unknown } | null;
+    return r && r.ok === true && r.audio && typeof r.audio === 'object' ? (r.audio as AudioStats) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** after − before of one instance's counter; undefined when either side lacks it. */
+function statDelta(before: AudioStats | null, after: AudioStats | null, inst: string, key: string): number | undefined {
+  const a = after?.[inst]?.[key];
+  const b = before?.[inst]?.[key];
+  return typeof a === 'number' && typeof b === 'number' ? a - b : undefined;
+}
+
+/**
+ * A microphone monitored on a speaker of its own board howls when they are near (design audio-a2 D3): the input's
+ * driver is i2s_mic (from the manifest), or, without a manifest, the instance is named `mic`.
+ */
+function feedbackRisk(hub: HubContext, dev: Device, from: PortCap): boolean {
+  const m = manifestCap(hub, dev, from);
+  return m ? m.driver === 'i2s_mic' : from.name === 'mic';
+}
+
+async function monitorJob(
+  hub: HubContext,
+  ctx: JobCtx,
+  dev: Device,
+  from: PortCap,
+  to: PortCap,
+  input: OpInput<'audio_monitor'>,
+  sampleHz: number,
+  warning: string | undefined,
+): Promise<AudioMonitor> {
+  const send = (command: string, args: Record<string, unknown>) => sendCommandTo(hub, dev, from.name, command, args, { ack: 'result', timeoutMs: AUDIO_CMD_TIMEOUT_MS });
+  const stop = () => send('monitor_stop', {}).catch(() => undefined);
+  if (warning) {
+    ctx.log(`warning: ${warning}`, 'err');
+  }
+  ctx.stage('stats');
+  const before = await statsAudio(hub, dev);
+  ctx.signal.throwIfAborted();
+  const ended = nextCapEvent(hub, dev, `${from.name}.monitor_ended`, (f) => f.to_port === to.port);
+  let stopTicker = () => {};
+  try {
+    ctx.stage('monitor_start');
+    const started = await send('monitor_start', { to_port: to.port, seconds: input.seconds, volume: input.volume ?? 0 });
+    if (started.status !== 'ok') {
+      if (started.status === 'timeout' || ctx.signal.aborted) {
+        await stop(); // it may have started all the same
+      }
+      ctx.signal.throwIfAborted();
+      const why =
+        started.status === 'busy'
+          ? `: ${from.name} already monitors or streams at another rate, or ${to.name} plays, or another input monitors to it`
+          : started.status === 'unsupported'
+            ? ': its firmware has no on-board monitor (fr.audio_in 1.1)'
+            : '';
+      const e = commandFailed(dev, `${from.name}.monitor_start to ${to.name}`, started);
+      throw new FrError(e.code, `${dev.alias} ${from.name}.monitor_start to ${to.name}: ${started.error ?? started.status}${why}`, { details: e.details });
+    }
+    const t0 = Date.now();
+    ctx.stage('monitoring');
+    ctx.log(`${from.name} -> ${to.name} (port ${to.port}): ${input.seconds} s at ${sampleHz} Hz${input.volume !== undefined ? `, volume ${input.volume}` : ''}`);
+    stopTicker = ticker(ctx, input.seconds * 1000, `${from.name} -> ${to.name}`);
+    let event = await within(ended.event, input.seconds * 1000 + AUDIO_MONITOR_SLACK_MS, ctx.signal);
+    let reason: AudioMonitorEndReason;
+    if (event) {
+      reason = (event.fields?.reason as AudioMonitorEndReason | undefined) ?? 'error';
+    } else {
+      // Cancelled (monitor_stop at once), or out of time: told to stop, and its monitor_ended (stopped) still counts samples.
+      await stop();
+      ctx.signal.throwIfAborted();
+      event = await within(ended.event, EVENT_GRACE_MS);
+      reason = 'timeout';
+    }
+    stopTicker();
+    const samples = event?.fields?.samples;
+    const seconds = typeof samples === 'number' ? samples / sampleHz : (Date.now() - t0) / 1000;
+    ctx.stage('stats');
+    const after = before ? await statsAudio(hub, dev) : null;
+    const underruns = statDelta(before, after, to.name, 'underruns');
+    const rxOverflows = statDelta(before, after, from.name, 'rx_overflows');
+    return {
+      device: dev.device_id,
+      alias: dev.alias,
+      from: from.name,
+      to: to.name,
+      seconds: round3(seconds),
+      reason,
+      ...(underruns !== undefined ? { underruns } : {}),
+      ...(rxOverflows !== undefined ? { rx_overflows: rxOverflows } : {}),
+      sample_hz: sampleHz,
+      ...(typeof samples === 'number' ? { samples } : {}),
+      ...(warning ? { warning } : {}),
+    };
+  } finally {
+    stopTicker();
+    ended.off();
+  }
+}
+
 export const AUDIO_HANDLERS: Record<AudioOpName, Handler> = {
   audio_record: (input: OpInput<'audio_record'>, hub) => {
     const out = checkWavOut(input.out);
@@ -529,5 +656,25 @@ export const AUDIO_HANDLERS: Record<AudioOpName, Handler> = {
       peak_dbfs: (f.peak_dbfs_x10 ?? -900) / 10,
       clipping: f.clipping ?? 0,
     };
+  },
+
+  audio_monitor: (input: OpInput<'audio_monitor'>, hub) => {
+    const dev = onlineDevice(hub, input.device);
+    const from = audioInstance(hub, dev, 'fr.audio_in', input.from);
+    const to = audioInstance(hub, dev, 'fr.audio_out', input.to);
+    const fromHz = configRate(hub, dev, from);
+    const toHz = configRate(hub, dev, to);
+    if (fromHz !== toHz) {
+      throw new FrError('INVALID_ARGS', `${dev.alias} ${from.name} runs at ${fromHz} Hz and ${to.name} at ${toHz} Hz: a monitor needs one sample_hz (design audio-a2 D3)`, {
+        hint: `set both instances' config sample_hz to one rate in the profile, or monitor to another output`,
+        details: { from: { instance: from.name, sample_hz: fromHz }, to: { instance: to.name, sample_hz: toHz } },
+      });
+    }
+    const warning = feedbackRisk(hub, dev, from)
+      ? `${from.name} is a microphone: on ${to.name}, its own board's speaker, it howls (feedback) unless they are apart or the volume is low`
+      : undefined;
+    const locks = [`audio:${dev.device_id}:${from.name}`, `audio:${dev.device_id}:${to.name}`];
+    const job = hub.jobs.start('audio', [dev.device_id], locks, (ctx) => monitorJob(hub, ctx, dev, from, to, input, fromHz, warning));
+    return hub.jobs.wait(job.job_id, Math.min(input.wait_s ?? 0, MAX_WAIT_S));
   },
 };

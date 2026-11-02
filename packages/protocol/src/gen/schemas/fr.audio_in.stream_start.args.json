@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:fractonica:schema:fr.audio_in.stream_start.args",
   "title": "fr.audio_in.stream_start arguments",
-  "description": "Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0).",
+  "description": "Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs (or a monitor runs at another rate), INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0).",
   "type": "object",
   "properties": {
     "stream_id": {

@@ -298,6 +298,9 @@ function renderJob(job: Job): string {
       return [head, ...(err ? errorLines(err) : []), renderGateReport(report, job.job_id)].join('\n');
     }
   }
+  if (job.kind === 'audio' && job.result && typeof job.result === 'object' && 'from' in job.result && 'to' in job.result) {
+    return [head, renderMonitor(job.result as Row)].join('\n'); // fr audio monitor (design audio-a2 D5)
+  }
   if (job.result) {
     parts.push(yamlish(job.result, '  ').replace(/^\n/, ''));
   }
@@ -305,6 +308,13 @@ function renderJob(job: Job): string {
     parts.push(yamlish({ error: job.error }, '  ').replace(/^\n/, ''));
   }
   return parts.join('\n');
+}
+
+/** audio_monitor's result as one line (the counters it could read), and its feedback warning on the next. */
+function renderMonitor(r: Row): string {
+  const counters = (['underruns', 'rx_overflows'] as const).filter((k) => typeof r[k] === 'number').map((k) => `${k} ${String(r[k])}`);
+  const line = `${String(r.alias ?? r.device)} ${String(r.from)} -> ${String(r.to)}: ${String(r.seconds)} s, ${String(r.reason)}${counters.length ? ` (${counters.join(', ')})` : ''}`;
+  return typeof r.warning === 'string' ? `${line}\nwarning: ${r.warning}` : line;
 }
 
 function renderPorts(ports: PortInfo[]): string {

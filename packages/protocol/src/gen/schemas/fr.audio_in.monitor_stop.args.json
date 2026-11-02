@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.audio_in.monitor_stop.args",
+  "title": "fr.audio_in.monitor_stop arguments",
+  "description": "Ends the monitor (monitor_ended reason stopped); OK when none runs.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

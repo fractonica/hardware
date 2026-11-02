@@ -86,7 +86,7 @@ describe('client_generate', () => {
         '// commit it. The token is in token.ts (git-ignored); pages the hub serves get it injected instead.',
         '',
         'export const devices = {',
-        `  catalogHash: 0x${CATALOG_HASH.toString(16)},`,
+        `  catalogHash: 0x${CATALOG_HASH.toString(16).padStart(8, '0')},`,
         `  registryRev: '${g.registry_rev}',`,
         '  devices: {',
         "    'pad-c3': { id: '1cdbd4175cc4', profile: 'c3o-pad', board: 'esp32c3-oled042', caps: { boot: 'fr.button', status: 'fr.led' } },",

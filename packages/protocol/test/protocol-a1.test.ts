@@ -16,15 +16,17 @@ const hashOf = (ops: readonly { name: string; input: z.ZodType }[]) =>
 
 describe('A1 ops (design audio-a1 D8)', () => {
   it('adds audio_record and audio_play as mutate jobs and audio_level as a read query, and moves REGISTRY_HASH once', () => {
-    expect(OPS).toHaveLength(51);
+    // A2 (design audio-a2 D5) adds audio_monitor: protocol-a2.test.ts.
+    const a1 = OPS.filter((o) => o.name !== 'audio_monitor');
+    expect(a1).toHaveLength(51);
     expect(findOp('audio_record')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['audio', 'record'], positional: ['device', 'out'] } });
     expect(findOp('audio_play')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['audio', 'play'], positional: ['device', 'file'] } });
     expect(findOp('audio_level')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['audio', 'level'], positional: ['device'] } });
     for (const name of ['audio_record', 'audio_play', 'audio_level']) {
       expect(findOp(name)!.summary.length, name).toBeLessThan(1000);
-      expect(hashOf(OPS.filter((o) => o.name !== name)), name).not.toBe(REGISTRY_HASH);
+      expect(hashOf(a1.filter((o) => o.name !== name)), name).not.toBe('445e6697686c');
     }
-    expect(hashOf(OPS)).toBe(REGISTRY_HASH);
+    expect(hashOf(a1)).toBe('445e6697686c'); // A1's
     expect(hashOf(OPS.filter((o) => !o.name.startsWith('audio_')))).toBe('afc13588b596'); // M2-C5's
     expect(JOB_KINDS).toContain('audio');
   });

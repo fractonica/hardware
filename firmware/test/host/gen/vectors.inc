@@ -39,7 +39,7 @@ inline std::expected<fr::wire::SerialFrame, fr::wire::DecodeErr> decode_serial(s
     return fr::wire::decode_line({reinterpret_cast<const char *>(in.data()), in.size()}, scratch);
 }
 
-inline constexpr size_t kCount = 640;
+inline constexpr size_t kCount = 652;
 
 template <class V>
 void for_each(V &&v)
@@ -6048,6 +6048,51 @@ void for_each(V &&v)
         x.clipping = 0;
         v.value("fr.audio_in.level_get.result.min", "fr.audio_in.level_get.result", x, enc, fr::cap::decode_audio_in_level_get_result, "08ffff0310ffff03", true);
     }
+    // fr.audio_in.monitor_start.args.defaults (cap fr.audio_in.monitor_start.args)
+    {
+        fr::cap::AudioInMonitorStartArgs x{};
+        x.to_port = 0;
+        x.seconds = 0;
+        x.volume = 0;
+        v.value("fr.audio_in.monitor_start.args.defaults", "fr.audio_in.monitor_start.args", x, enc, fr::cap::decode_audio_in_monitor_start_args, "", true);
+    }
+    // fr.audio_in.monitor_start.args.sample (cap fr.audio_in.monitor_start.args)
+    {
+        fr::cap::AudioInMonitorStartArgs x{};
+        x.to_port = 177;
+        x.seconds = 62306;
+        x.volume = 57;
+        v.value("fr.audio_in.monitor_start.args.sample", "fr.audio_in.monitor_start.args", x, enc, fr::cap::decode_audio_in_monitor_start_args, "08b10110e2e6031839", true);
+    }
+    // fr.audio_in.monitor_start.args.max (cap fr.audio_in.monitor_start.args)
+    {
+        fr::cap::AudioInMonitorStartArgs x{};
+        x.to_port = 255;
+        x.seconds = 65535;
+        x.volume = 100;
+        v.value("fr.audio_in.monitor_start.args.max", "fr.audio_in.monitor_start.args", x, enc, fr::cap::decode_audio_in_monitor_start_args, "08ff0110ffff031864", true);
+    }
+    // fr.audio_in.monitor_start.args.example_0 (cap fr.audio_in.monitor_start.args)
+    {
+        fr::cap::AudioInMonitorStartArgs x{};
+        x.to_port = 4;
+        x.seconds = 30;
+        x.volume = 0;
+        v.value("fr.audio_in.monitor_start.args.example_0", "fr.audio_in.monitor_start.args", x, enc, fr::cap::decode_audio_in_monitor_start_args, "0804101e", true);
+    }
+    // fr.audio_in.monitor_start.args.example_1 (cap fr.audio_in.monitor_start.args)
+    {
+        fr::cap::AudioInMonitorStartArgs x{};
+        x.to_port = 4;
+        x.seconds = 0;
+        x.volume = 60;
+        v.value("fr.audio_in.monitor_start.args.example_1", "fr.audio_in.monitor_start.args", x, enc, fr::cap::decode_audio_in_monitor_start_args, "0804183c", true);
+    }
+    // fr.audio_in.monitor_stop.args.empty (cap fr.audio_in.monitor_stop.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.audio_in.monitor_stop.args.empty", "fr.audio_in.monitor_stop.args", x, enc, fr::proto::decode_empty, "", true);
+    }
     // fr.audio_in.stream_ended.event.defaults (cap fr.audio_in.stream_ended.event)
     {
         fr::cap::AudioInStreamEnded x{};
@@ -6074,6 +6119,30 @@ void for_each(V &&v)
         x.samples = 4294967295u;
         x.dropped_samples = 4294967295u;
         v.value("fr.audio_in.stream_ended.event.max", "fr.audio_in.stream_ended.event", x, enc, fr::cap::decode_audio_in_stream_ended, "08ffffffff0f100418ffffffff0f20ffffffff0f", true);
+    }
+    // fr.audio_in.monitor_ended.event.defaults (cap fr.audio_in.monitor_ended.event)
+    {
+        fr::cap::AudioInMonitorEnded x{};
+        x.reason = AudioInMonitorEndReason::stopped;
+        x.to_port = 0;
+        x.samples = 0;
+        v.value("fr.audio_in.monitor_ended.event.defaults", "fr.audio_in.monitor_ended.event", x, enc, fr::cap::decode_audio_in_monitor_ended, "", true);
+    }
+    // fr.audio_in.monitor_ended.event.sample (cap fr.audio_in.monitor_ended.event)
+    {
+        fr::cap::AudioInMonitorEnded x{};
+        x.reason = AudioInMonitorEndReason::busy;
+        x.to_port = 98;
+        x.samples = 3668339987u;
+        v.value("fr.audio_in.monitor_ended.event.sample", "fr.audio_in.monitor_ended.event", x, enc, fr::cap::decode_audio_in_monitor_ended, "080210621893da99d50d", true);
+    }
+    // fr.audio_in.monitor_ended.event.max (cap fr.audio_in.monitor_ended.event)
+    {
+        fr::cap::AudioInMonitorEnded x{};
+        x.reason = AudioInMonitorEndReason::error;
+        x.to_port = 255;
+        x.samples = 4294967295u;
+        v.value("fr.audio_in.monitor_ended.event.max", "fr.audio_in.monitor_ended.event", x, enc, fr::cap::decode_audio_in_monitor_ended, "080310ff0118ffffffff0f", true);
     }
     // fr.audio_in.level.state.defaults (cap fr.audio_in.level.state)
     {
@@ -6116,6 +6185,24 @@ void for_each(V &&v)
         bool x = false;
         x = true;
         v.value("fr.audio_in.streaming.state.max", "fr.audio_in.streaming.state", x, fr::cap::encode_audio_in_streaming_state, fr::cap::decode_audio_in_streaming_state, "0801", true);
+    }
+    // fr.audio_in.monitoring.state.defaults (cap fr.audio_in.monitoring.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.audio_in.monitoring.state.defaults", "fr.audio_in.monitoring.state", x, fr::cap::encode_audio_in_monitoring_state, fr::cap::decode_audio_in_monitoring_state, "", true);
+    }
+    // fr.audio_in.monitoring.state.sample (cap fr.audio_in.monitoring.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.audio_in.monitoring.state.sample", "fr.audio_in.monitoring.state", x, fr::cap::encode_audio_in_monitoring_state, fr::cap::decode_audio_in_monitoring_state, "0801", true);
+    }
+    // fr.audio_in.monitoring.state.max (cap fr.audio_in.monitoring.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.audio_in.monitoring.state.max", "fr.audio_in.monitoring.state", x, fr::cap::encode_audio_in_monitoring_state, fr::cap::decode_audio_in_monitoring_state, "0801", true);
     }
     // fr.touch.traits.defaults (cap fr.touch.traits)
     {

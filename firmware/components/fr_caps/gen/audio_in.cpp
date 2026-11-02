@@ -47,6 +47,42 @@ bool from_name(std::string_view s, AudioInStreamEndReason &out)
     return false;
 }
 
+const char *to_name(AudioInMonitorEndReason v)
+{
+    switch (v) {
+    case AudioInMonitorEndReason::stopped:
+        return "stopped";
+    case AudioInMonitorEndReason::done:
+        return "done";
+    case AudioInMonitorEndReason::busy:
+        return "busy";
+    case AudioInMonitorEndReason::error:
+        return "error";
+    }
+    return nullptr;
+}
+
+bool from_name(std::string_view s, AudioInMonitorEndReason &out)
+{
+    if (s == "stopped") {
+        out = AudioInMonitorEndReason::stopped;
+        return true;
+    }
+    if (s == "done") {
+        out = AudioInMonitorEndReason::done;
+        return true;
+    }
+    if (s == "busy") {
+        out = AudioInMonitorEndReason::busy;
+        return true;
+    }
+    if (s == "error") {
+        out = AudioInMonitorEndReason::error;
+        return true;
+    }
+    return false;
+}
+
 size_t encode(const AudioInTraits &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -275,6 +311,57 @@ bool valid(const AudioInLevelGetResult &)
     return true;
 }
 
+size_t encode(const AudioInMonitorStartArgs &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.to_port != 0) {
+        w.field_uint(1, v.to_port);
+    }
+    if (v.seconds != 0) {
+        w.field_uint(2, v.seconds);
+    }
+    if (v.volume != 0) {
+        w.field_uint(3, v.volume);
+    }
+    return w.size() - start;
+}
+
+std::expected<AudioInMonitorStartArgs, fr::wire::DecodeErr> decode_audio_in_monitor_start_args(std::span<const uint8_t> in)
+{
+    AudioInMonitorStartArgs v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.to_port = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.seconds = static_cast<uint16_t>(r.read_uint(0xFFFF));
+            break;
+        case 3:
+            v.volume = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const AudioInMonitorStartArgs &a, const AudioInMonitorStartArgs &b)
+{
+    return a.to_port == b.to_port && a.seconds == b.seconds && a.volume == b.volume;
+}
+
+bool valid(const AudioInMonitorStartArgs &v)
+{
+    return v.volume <= 100;
+}
+
 size_t encode(const AudioInStreamEnded &v, fr::wire::Writer &w)
 {
     const size_t start = w.size();
@@ -331,6 +418,57 @@ bool operator==(const AudioInStreamEnded &a, const AudioInStreamEnded &b)
 }
 
 bool valid(const AudioInStreamEnded &v)
+{
+    return is_known(v.reason);
+}
+
+size_t encode(const AudioInMonitorEnded &v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v.reason != AudioInMonitorEndReason{}) {
+        w.field_uint(1, std::to_underlying(v.reason));
+    }
+    if (v.to_port != 0) {
+        w.field_uint(2, v.to_port);
+    }
+    if (v.samples != 0) {
+        w.field_uint(3, v.samples);
+    }
+    return w.size() - start;
+}
+
+std::expected<AudioInMonitorEnded, fr::wire::DecodeErr> decode_audio_in_monitor_ended(std::span<const uint8_t> in)
+{
+    AudioInMonitorEnded v{};
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v.reason = static_cast<AudioInMonitorEndReason>(r.read_uint(0xFF));
+            break;
+        case 2:
+            v.to_port = static_cast<uint8_t>(r.read_uint(0xFF));
+            break;
+        case 3:
+            v.samples = static_cast<uint32_t>(r.read_uint(0xFFFFFFFF));
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
+bool operator==(const AudioInMonitorEnded &a, const AudioInMonitorEnded &b)
+{
+    return a.reason == b.reason && a.to_port == b.to_port && a.samples == b.samples;
+}
+
+bool valid(const AudioInMonitorEnded &v)
 {
     return is_known(v.reason);
 }
@@ -393,6 +531,35 @@ std::expected<bool, fr::wire::DecodeErr> decode_audio_in_streaming_state(std::sp
     return v;
 }
 
+size_t encode_audio_in_monitoring_state(bool v, fr::wire::Writer &w)
+{
+    const size_t start = w.size();
+    if (v) {
+        w.field_bool(1, v);
+    }
+    return w.size() - start;
+}
+
+std::expected<bool, fr::wire::DecodeErr> decode_audio_in_monitoring_state(std::span<const uint8_t> in)
+{
+    bool v = false;
+    fr::wire::Reader r(in);
+    while (r.next()) {
+        switch (r.field()) {
+        case 1:
+            v = r.read_bool();
+            break;
+        default:
+            r.skip();
+            break;
+        }
+    }
+    if (!r.ok()) {
+        return std::unexpected(r.error());
+    }
+    return v;
+}
+
 Status AudioIn::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &reply)
 {
     switch (cmd_id) {
@@ -436,6 +603,19 @@ Status AudioIn::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
         }
         return {};
     }
+    case kCmdMonitorStart: {
+        const auto a = decode_audio_in_monitor_start_args(args);
+        if (!a || !valid(*a)) {
+            return std::unexpected(Err::invalid_args);
+        }
+        return monitor_start(*a);
+    }
+    case kCmdMonitorStop: {
+        if (!fr::proto::decode_empty(args)) {
+            return std::unexpected(Err::invalid_args);
+        }
+        return monitor_stop();
+    }
     default:
         return std::unexpected(Err::unsupported);
     }
@@ -445,6 +625,7 @@ void AudioIn::report_all()
 {
     report_level(level());
     report_streaming(streaming());
+    report_monitoring(monitoring());
 }
 
 void AudioIn::encode_traits(fr::wire::Writer &w) const
@@ -461,6 +642,17 @@ void AudioIn::emit_stream_ended(const AudioInStreamEnded &e, TimeUs at)
     fr::wire::Writer w(buf, sizeof(buf));
     encode(e, w);
     sink_->event(port_, kEventStreamEnded, Priority::normal, w.bytes(), at, kOrdered);
+}
+
+void AudioIn::emit_monitor_ended(const AudioInMonitorEnded &e, TimeUs at)
+{
+    if (sink_ == nullptr) {
+        return;
+    }
+    uint8_t buf[AudioInMonitorEnded::kMaxSize];
+    fr::wire::Writer w(buf, sizeof(buf));
+    encode(e, w);
+    sink_->event(port_, kEventMonitorEnded, Priority::normal, w.bytes(), at, kOrdered);
 }
 
 void AudioIn::report_level(int16_t v, TimeUs at)
@@ -483,6 +675,17 @@ void AudioIn::report_streaming(bool v, TimeUs at)
     fr::wire::Writer w(buf, sizeof(buf));
     encode_audio_in_streaming_state(v, w);
     sink_->property(port_, kPropStreaming, w.bytes(), at);
+}
+
+void AudioIn::report_monitoring(bool v, TimeUs at)
+{
+    if (sink_ == nullptr) {
+        return;
+    }
+    uint8_t buf[kAudioInMonitoringStateMaxSize];
+    fr::wire::Writer w(buf, sizeof(buf));
+    encode_audio_in_monitoring_state(v, w);
+    sink_->property(port_, kPropMonitoring, w.bytes(), at);
 }
 
 }  // namespace fr::cap

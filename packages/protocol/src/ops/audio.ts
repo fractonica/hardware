@@ -1,6 +1,7 @@
 // Audio ops (design audio-a1 D8, D9; stream H): audio_record (a board's microphone to a WAV file on the Mac),
 // audio_play (a WAV file or a tone on a board's speaker) and audio_level (the microphone's level now). PCM goes over
-// the node's own HTTP connection to the hub (D3), never the hub link. Spread into OPS (packages/protocol/src/ops.ts);
+// the node's own HTTP connection to the hub (D3), never the hub link. A2 (design audio-a2 D3, D5) adds audio_monitor
+// (an input heard live on an output of the same board, fr.audio_in 1.1 monitor_start; no PCM leaves it). Spread into OPS (packages/protocol/src/ops.ts);
 // handlers in packages/hub/src/audio/.
 
 import { z } from 'zod';
@@ -20,6 +21,13 @@ export type AudioInEndReason = (typeof AUDIO_IN_END_REASONS)[number];
 /** How a play ended: fr.audio_out's PlayEndReason, plus the hub's own `timeout` (no play_done came). */
 export const AUDIO_OUT_END_REASONS = ['done', 'stopped', 'net_lost', 'underrun', 'error', 'timeout'] as const;
 export type AudioOutEndReason = (typeof AUDIO_OUT_END_REASONS)[number];
+
+/** audio_monitor's bounds on `seconds` (design audio-a2 D5) and its default. */
+export const AUDIO_MONITOR_MAX_S = 3600;
+export const AUDIO_MONITOR_DEFAULT_S = 30;
+/** How a monitor ended: fr.audio_in's MonitorEndReason, plus the hub's own `timeout` (no monitor_ended came). */
+export const AUDIO_MONITOR_END_REASONS = ['stopped', 'done', 'busy', 'error', 'timeout'] as const;
+export type AudioMonitorEndReason = (typeof AUDIO_MONITOR_END_REASONS)[number];
 
 const rate = z
   .union(AUDIO_RATES.map((r) => z.literal(r)) as unknown as [z.ZodLiteral<AudioRate>, z.ZodLiteral<AudioRate>, ...z.ZodLiteral<AudioRate>[]])
@@ -81,6 +89,24 @@ export const AudioLevelSchema = z.looseObject({
 });
 export type AudioLevel = z.infer<typeof AudioLevelSchema>;
 
+/** audio_monitor's answer (design audio-a2 D5): which input fed which output, for how long, and how it ended. */
+export const AudioMonitorSchema = z.looseObject({
+  device: z.string(),
+  alias: z.string(),
+  /** The fr.audio_in instance heard. */
+  from: z.string(),
+  /** The fr.audio_out instance it played on. */
+  to: z.string(),
+  /** How long it ran (monitor_ended's samples / the input's sample_hz). */
+  seconds: z.number(),
+  reason: z.enum(AUDIO_MONITOR_END_REASONS),
+  /** The output's `stats audio` underruns over the monitor, when the hub could read them. */
+  underruns: z.number().int().optional(),
+  /** The input's `stats audio` rx_overflows over the monitor, when the hub could read them. */
+  rx_overflows: z.number().int().optional(),
+});
+export type AudioMonitor = z.infer<typeof AudioMonitorSchema>;
+
 export const AUDIO_OPS = [
   op({
     name: 'audio_record',
@@ -135,6 +161,23 @@ export const AUDIO_OPS = [
     }),
     output: AudioLevelSchema,
     cli: { path: ['audio', 'level'], positional: ['device'] },
+  }),
+  op({
+    name: 'audio_monitor',
+    kind: 'job',
+    tier: 'mutate',
+    summary:
+      "Hear a board's audio input live on its own speaker (fr.audio_in 1.1 monitor_start, design audio-a2 D3): the board routes the input's samples straight to an fr.audio_out instance, with no network and no hub, for `seconds`, then reports monitor_ended. Both instances must run one sample_hz. A play or tone on the output ends it (reason busy); cancelling the job sends monitor_stop. A microphone monitored on a speaker beside it howls (feedback). Returns from, to, seconds, the reason, and the output's underruns and the input's rx_overflows over the monitor (stats audio) when they could be read.",
+    input: z.object({
+      device: deviceSel,
+      from: instance('fr.audio_in').describe("the fr.audio_in instance, e.g. rf, mic (default: the device's first)"),
+      to: instance('fr.audio_out').describe("the fr.audio_out instance, e.g. spk (default: the device's first)"),
+      seconds: z.number().int().min(1).max(AUDIO_MONITOR_MAX_S).default(AUDIO_MONITOR_DEFAULT_S).describe(`seconds to listen (1..${AUDIO_MONITOR_MAX_S})`),
+      volume: z.number().int().min(1).max(100).optional().describe("1..100, this monitor's only (default: the output's own volume)"),
+      wait_s: waitS,
+    }),
+    output: AudioMonitorSchema,
+    cli: { path: ['audio', 'monitor'], positional: ['device'] },
   }),
 ] as const;
 

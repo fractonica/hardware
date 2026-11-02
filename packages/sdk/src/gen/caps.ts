@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0xd75bdaa2;
+export const CATALOG_HASH = 0x0fcffa34;
 
 // ---- fr.button ----
 
@@ -351,6 +351,8 @@ export interface AnalogInProps {
 
 export type AudioInStreamEndReason = 'stopped' | 'done' | 'net_lost' | 'overflow' | 'error';
 
+export type AudioInMonitorEndReason = 'stopped' | 'done' | 'busy' | 'error';
+
 /** fr.audio_in.stream_start arguments (all optional: the device applies the defaults). */
 export interface AudioInStreamStartArgs {
   /** issued by the hub; the POST path names it */
@@ -379,14 +381,28 @@ export interface AudioInLevelGetResult {
   clipping: number;
 }
 
+/** fr.audio_in.monitor_start arguments (all optional: the device applies the defaults). */
+export interface AudioInMonitorStartArgs {
+  /** the fr.audio_out instance's capability port */
+  toPort?: number;
+  /** 0: until monitor_stop (s) */
+  seconds?: number;
+  /** 0: the output's own volume; else this monitor's only (%; 0..100) */
+  volume?: number;
+}
+
 /** fr.audio_in commands, as methods of an instance. */
 export interface AudioInClient {
-  /** Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  /** Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs (or a monitor runs at another rate), INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
   streamStart(args?: AudioInStreamStartArgs, opts?: CallOptions): Promise<CmdResult<AudioInStreamStartResult>>;
   /** Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
   streamStop(args?: AudioInStreamStopArgs, opts?: CallOptions): Promise<CmdResult>;
   /** The level now, in dBFS x 10, and the clipped samples since the microphone started; starts the microphone for 200 ms when it is idle. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
   levelGet(opts?: CallOptions): Promise<CmdResult<AudioInLevelGetResult>>;
+  /** Routes this input to fr.audio_out port to_port on the same node (1.1, design audio-a2 D3). Dispatch never blocks: OK once fr_audio has the monitor. INVALID_ARGS: to_port is not an fr.audio_out instance, or its sample_hz differs from this input's. BUSY: this input already monitors, or streams at another rate; or the output plays, or another input monitors to it. Ends with monitor_ended. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  monitorStart(args?: AudioInMonitorStartArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Ends the monitor (monitor_ended reason stopped); OK when none runs. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  monitorStop(opts?: CallOptions): Promise<CmdResult>;
 }
 
 /** fr.audio_in.stream_ended event fields (normal). A stream ended: stopped (stream_stop), done (`seconds` reached), net_lost (a send stalled 3 s or the connection dropped), overflow, error. */
@@ -399,22 +415,35 @@ export interface AudioInStreamEndedFields {
   droppedSamples: number;
 }
 
+/** fr.audio_in.monitor_ended event fields (normal). A monitor ended (1.1): stopped (monitor_stop), done (`seconds` reached), busy (a play or tone took the output), error (the source or the output failed). */
+export interface AudioInMonitorEndedFields {
+  reason: AudioInMonitorEndReason | number;
+  /** the output it fed */
+  toPort: number;
+  /** samples routed to the output */
+  samples: number;
+}
+
 /** fr.audio_in events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
 export interface AudioInEvents {
   stream_ended: AudioInStreamEndedFields;
+  monitor_ended: AudioInMonitorEndedFields;
 }
 
 /** fr.audio_in properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
 export interface AudioInState {
-  /** RMS over the last 1/level_hz s, dBFS x 10 (-900 is silence) (dBFS/10) */
+  /** RMS over the last 1/level_hz s, dBFS x 10 (-900 is silence); paused while monitoring (dBFS/10) */
   level: number;
   streaming: boolean;
+  /** a monitor runs (1.1): monitor_start to monitor_ended */
+  monitoring: boolean;
 }
 
 /** fr.audio_in property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
 export interface AudioInProps {
   level: number;
   streaming: boolean;
+  monitoring: boolean;
 }
 
 // ---- fr.touch ----
@@ -714,7 +743,7 @@ export const CAP_META: Readonly<Record<string, CapMeta>> = {
   'fr.display': { commands: { clear: { method: 'clear', delivery: 'reliable', args: true }, text: { method: 'text', delivery: 'reliable', args: true }, fill_rect: { method: 'fillRect', delivery: 'reliable', args: true }, set_brightness: { method: 'setBrightness', delivery: 'reliable', args: true }, ui_load: { method: 'uiLoad', delivery: 'reliable', args: true }, ui_set: { method: 'uiSet', delivery: 'reliable', args: true }, snapshot: { method: 'snapshot', delivery: 'reliable', test: true }, snapshot_read: { method: 'snapshotRead', delivery: 'reliable', args: true, test: true } }, events: ['ui'], props: ['brightness'] },
   'fr.audio_out': { commands: { tone: { method: 'tone', delivery: 'reliable', args: true }, play: { method: 'play', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' }, set_volume: { method: 'setVolume', delivery: 'reliable', args: true } }, events: ['play_done'], props: ['playing', 'volume'] },
   'fr.analog_in': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true }, read: { method: 'read', delivery: 'reliable' } }, events: ['crossed'], props: ['value'] },
-  'fr.audio_in': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, level_get: { method: 'levelGet', delivery: 'reliable' } }, events: ['stream_ended'], props: ['level', 'streaming'] },
+  'fr.audio_in': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, level_get: { method: 'levelGet', delivery: 'reliable' }, monitor_start: { method: 'monitorStart', delivery: 'reliable', args: true }, monitor_stop: { method: 'monitorStop', delivery: 'reliable' } }, events: ['stream_ended', 'monitor_ended'], props: ['level', 'streaming', 'monitoring'] },
   'fr.touch': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['down', 'up', 'gesture'], props: ['pressed'] },
   'fr.node': { commands: { identify: { method: 'identify', delivery: 'reliable', args: true }, describe: { method: 'describe', delivery: 'reliable' }, reboot: { method: 'reboot', delivery: 'reliable', args: true }, set_alias: { method: 'setAlias', delivery: 'reliable', args: true }, set_groups: { method: 'setGroups', delivery: 'reliable', args: true }, net_set: { method: 'netSet', delivery: 'reliable', args: true }, get_state: { method: 'getState', delivery: 'reliable' }, bind_set: { method: 'bindSet', delivery: 'reliable', args: true }, bind_clear: { method: 'bindClear', delivery: 'reliable', args: true }, bind_list: { method: 'bindList', delivery: 'reliable' } }, events: ['boot', 'binding_fired'], props: [] },
   'fr.ota': { commands: {}, events: [], props: [] },

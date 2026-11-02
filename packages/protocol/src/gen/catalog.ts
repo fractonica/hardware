@@ -1432,10 +1432,10 @@ export const CATALOG: Catalog = {
     {
       "id": 7,
       "name": "fr.audio_in",
-      "version": "1.0",
+      "version": "1.1",
       "section": "standard",
-      "summary": "A microphone sampled on the node, its level reported and its PCM streamed to the hub over a separate HTTP connection.",
-      "doc": "Design audio-a1 D1, D3-D5. PCM never travels on the hub link: stream_start makes the node POST it to the hub's HTTP\nlistener (`POST /v1/audio/in/<stream_id>`, chunked, s16le mono at the stream's rate), and stream_ended reports how\nit ended. A stream id is one the hub issued; one stream at a time (BUSY otherwise). Samples lost to a Wi-Fi stall\nare counted in dropped_samples and the hub writes silence for them, so a recording keeps its length.\n`level` is a LATEST property (RMS over the last 1/level_hz s, in dBFS x 10) while the microphone runs.\n",
+      "summary": "A microphone (or any analog signal at audio rate) sampled on the node, its level reported, its PCM streamed to the hub over a separate HTTP connection or routed to an output on the same node.",
+      "doc": "Design audio-a1 D1, D3-D5. PCM never travels on the hub link: stream_start makes the node POST it to the hub's HTTP\nlistener (`POST /v1/audio/in/<stream_id>`, chunked, s16le mono at the stream's rate), and stream_ended reports how\nit ended. A stream id is one the hub issued; one stream at a time (BUSY otherwise). Samples lost to a Wi-Fi stall\nare counted in dropped_samples and the hub writes silence for them, so a recording keeps its length.\n`level` is a LATEST property (RMS over the last 1/level_hz s, in dBFS x 10) while the microphone runs.\n1.1 (design audio-a2 D3, additive): the on-board monitor. monitor_start routes this input's converted samples (after\nthe DC blocker and gain_db) into an fr.audio_out instance's play ring on the same node, inside the fr_audio task: no\nnetwork, no hub. The output must run this input's sample_hz (both configs; INVALID_ARGS otherwise). While a monitor\nruns the output is busy: a play or tone on it ends the monitor (monitor_ended busy), and monitor_start refuses an\noutput that plays (BUSY). `level` reports pause while monitoring (the board's own traffic stays at its heartbeat).\n",
       "types": {
         "StreamEndReason": {
           "stopped": 0,
@@ -1443,6 +1443,12 @@ export const CATALOG: Catalog = {
           "net_lost": 2,
           "overflow": 3,
           "error": 4
+        },
+        "MonitorEndReason": {
+          "stopped": 0,
+          "done": 1,
+          "busy": 2,
+          "error": 3
         }
       },
       "traits": [
@@ -1509,12 +1515,18 @@ export const CATALOG: Catalog = {
           "id": 1,
           "type": "i16",
           "unit": "dBFS/10",
-          "doc": "RMS over the last 1/level_hz s, dBFS x 10 (-900 is silence)"
+          "doc": "RMS over the last 1/level_hz s, dBFS x 10 (-900 is silence); paused while monitoring"
         },
         {
           "name": "streaming",
           "id": 2,
           "type": "bool"
+        },
+        {
+          "name": "monitoring",
+          "id": 3,
+          "type": "bool",
+          "doc": "a monitor runs (1.1): monitor_start to monitor_ended"
         }
       ],
       "commands": [
@@ -1524,7 +1536,7 @@ export const CATALOG: Catalog = {
           "delivery": "reliable",
           "idempotent": false,
           "visibility": "public",
-          "doc": "Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs, INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0).",
+          "doc": "Starts streaming to the hub over HTTP (design D3). Dispatch never blocks: OK once the fr_stream task has the stream, BUSY while another runs (or a monitor runs at another rate), INVALID_ARGS for a rate the driver does not take. A connection that cannot be opened ends the stream with stream_ended net_lost (samples 0).",
           "fields": [
             {
               "name": "stream_id",
@@ -1614,6 +1626,61 @@ export const CATALOG: Catalog = {
               "type": "u32"
             }
           ]
+        },
+        {
+          "name": "monitor_start",
+          "id": 4,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Routes this input to fr.audio_out port to_port on the same node (1.1, design audio-a2 D3). Dispatch never blocks: OK once fr_audio has the monitor. INVALID_ARGS: to_port is not an fr.audio_out instance, or its sample_hz differs from this input's. BUSY: this input already monitors, or streams at another rate; or the output plays, or another input monitors to it. Ends with monitor_ended.",
+          "fields": [
+            {
+              "name": "to_port",
+              "id": 1,
+              "type": "u8",
+              "doc": "the fr.audio_out instance's capability port"
+            },
+            {
+              "name": "seconds",
+              "id": 2,
+              "type": "u16",
+              "unit": "s",
+              "doc": "0: until monitor_stop"
+            },
+            {
+              "name": "volume",
+              "id": 3,
+              "type": "u8",
+              "range": [
+                0,
+                100
+              ],
+              "unit": "%",
+              "doc": "0: the output's own volume; else this monitor's only"
+            }
+          ],
+          "examples": [
+            {
+              "to_port": 4,
+              "seconds": 30,
+              "volume": 0
+            },
+            {
+              "to_port": 4,
+              "seconds": 0,
+              "volume": 60
+            }
+          ]
+        },
+        {
+          "name": "monitor_stop",
+          "id": 5,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Ends the monitor (monitor_ended reason stopped); OK when none runs.",
+          "fields": []
         }
       ],
       "events": [
@@ -1644,6 +1711,31 @@ export const CATALOG: Catalog = {
               "id": 4,
               "type": "u32",
               "doc": "samples lost to ring overflows (the hub writes silence for them)"
+            }
+          ]
+        },
+        {
+          "name": "monitor_ended",
+          "id": 2,
+          "priority": "normal",
+          "doc": "A monitor ended (1.1): stopped (monitor_stop), done (`seconds` reached), busy (a play or tone took the output), error (the source or the output failed).",
+          "fields": [
+            {
+              "name": "reason",
+              "id": 1,
+              "type": "MonitorEndReason"
+            },
+            {
+              "name": "to_port",
+              "id": 2,
+              "type": "u8",
+              "doc": "the output it fed"
+            },
+            {
+              "name": "samples",
+              "id": 3,
+              "type": "u32",
+              "doc": "samples routed to the output"
             }
           ]
         }
@@ -2163,4 +2255,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0xd75bdaa2;
+export const CATALOG_HASH = 0x0fcffa34;

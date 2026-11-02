@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.audio_in.monitor_ended.event",
+  "title": "fr.audio_in.monitor_ended event",
+  "description": "A monitor ended (1.1): stopped (monitor_stop), done (`seconds` reached), busy (a play or tone took the output), error (the source or the output failed).",
+  "type": "object",
+  "properties": {
+    "reason": {
+      "type": "string",
+      "enum": [
+        "stopped",
+        "done",
+        "busy",
+        "error"
+      ]
+    },
+    "to_port": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "the output it fed"
+    },
+    "samples": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "samples routed to the output"
+    }
+  },
+  "additionalProperties": false
+}
