@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>CSI live</title>
   </head>
-  <body data-connected="false" data-streaming="false">
+  <body data-connected="false" data-streaming="false" data-sound="off">
     <header class="bar">
       <h1>CSI live <small>Wi-Fi channel state, fr.csi</small></h1>
       <div class="status">
@@ -107,6 +107,65 @@
         <p id="breath-state" class="hint">waiting for a stream</p>
         <canvas id="plot-breath" class="plot small"></canvas>
         <p class="hint">Subcarriers used: <span id="breath-subs">–</span></p>
+      </section>
+
+      <section class="card sound" aria-labelledby="sound-h">
+        <div class="card-head">
+          <h2 id="sound-h">Sound <small>a drone from the subcarriers</small></h2>
+          <span id="sound-state" class="pill">off</span>
+          <button id="sound-toggle" type="button" class="primary">Sound on</button>
+        </div>
+        <div class="sound-main">
+          <div class="sound-controls">
+            <label class="field">
+              <span>Mode</span>
+              <select id="sound-mode"></select>
+            </label>
+            <label class="field">
+              <span>Volume</span>
+              <input id="sound-volume" type="range" min="0" max="100" step="1" value="60" />
+            </label>
+            <label class="field">
+              <span>Root</span>
+              <select id="sound-root"></select>
+            </label>
+            <label class="field drone-only">
+              <span>Scale</span>
+              <select id="sound-scale"></select>
+            </label>
+            <label class="field drone-only">
+              <span>Pitch</span>
+              <select id="sound-pitch"></select>
+            </label>
+            <label class="field">
+              <span>Bend <small>semitones</small></span>
+              <input id="sound-bend" type="range" min="0" max="24" step="1" value="7" title="Raw pitch: how far a band's change bends its voice." />
+            </label>
+            <label class="field">
+              <span>Bands</span>
+              <select id="sound-bands"></select>
+            </label>
+            <label class="field">
+              <span>Reactivity</span>
+              <input id="sound-react" type="range" min="0" max="100" step="1" value="50" title="Left: slow and calm. Right: quick and sensitive." />
+            </label>
+            <label class="field parrot-only">
+              <span><span class="lbl" data-parrot="Ratio" data-laugh="Ratio" data-babble="Ratio">Ratio</span> <output>10:1</output></span>
+              <input id="sound-ratio" type="range" min="2" max="40" step="1" value="10" title="Seconds heard per second spoken." />
+            </label>
+            <label class="field parrot-only">
+              <span><span class="lbl" data-parrot="Listen" data-laugh="Record at most" data-babble="Record at most">Listen</span> <output>≤ 8 s</output></span>
+              <input id="sound-listen" type="range" min="2" max="20" step="1" value="8" title="Parrot: each listen lasts a random 30–100 % of this. Laughter: a movement is recorded for at most this long." />
+            </label>
+            <label class="field parrot-only">
+              <span><span class="lbl" data-parrot="Quiet below" data-laugh="Laugh above" data-babble="Speak above">Quiet below</span> <output>0.15</output></span>
+              <input id="sound-quiet" type="range" min="0" max="100" step="1" value="15" title="Parrot: how much the room must change for it to speak. Laughter: the activity that starts a recording." />
+            </label>
+          </div>
+          <div id="sound-meter" class="sound-meter" role="img" aria-label="Band gains, low subcarriers (low notes) on the left" data-bands="0" data-peak="0"></div>
+        </div>
+        <p id="sound-hint" class="hint">One voice per band of subcarriers, low bands as low notes. The room's subcarrier profile sets the chord; a band swells when its subcarriers change; motion brightens it and adds a shimmer. A still room holds a quiet chord. Raw pitch drops the scale: each voice bends up or down as its band's signal rises or falls. Parrot listens for a while, then speaks what it heard as one compressed word; a still room gets silence. Laughter waits for movement, records it until it stops, then laughs at it: the ha-ha rate, pitch and vowel follow how you moved. Babble does the same in an invented language: longer syllables, four consonants and five vowels chosen by the movement, with pauses between words where it dipped.</p>
+        <p id="parrot-last" class="hint parrot-only" aria-live="polite"></p>
       </section>
     </main>
     <script type="module" src="/src/main.ts"></script>

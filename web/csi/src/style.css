@@ -16,6 +16,7 @@
   --c-rssi: #7c3aed;
   --c-rate: #0f8b8d;
   --c-breath: #1f8a4c;
+  --c-sound: #b4469e;
   --heat-bg: #e9ecf1;
   --heat-mid: #f7f7f7;
   color-scheme: light;
@@ -38,6 +39,7 @@
     --c-rssi: #b394f7;
     --c-rate: #4cc9c0;
     --c-breath: #4cc27f;
+    --c-sound: #e48bd2;
     --heat-bg: #20262f;
     --heat-mid: #2b313b;
     color-scheme: dark;
@@ -60,6 +62,7 @@
   --c-rssi: #b394f7;
   --c-rate: #4cc9c0;
   --c-breath: #4cc27f;
+  --c-sound: #e48bd2;
   --heat-bg: #20262f;
   --heat-mid: #2b313b;
   color-scheme: dark;
@@ -483,6 +486,77 @@ code {
   font-size: 12px;
 }
 
+.card.sound {
+  grid-column: 1 / -1;
+}
+
+.sound-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  align-items: flex-end;
+}
+
+.sound-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: flex-end;
+}
+
+.sound-controls input[type='range'] {
+  width: 120px;
+  margin: 6px 0 4px;
+  accent-color: var(--c-sound);
+}
+
+.sound-meter {
+  display: flex;
+  flex: 1 1 220px;
+  gap: 2px;
+  align-items: stretch;
+  min-width: 0;
+  height: 56px;
+  padding: 4px;
+  border-radius: 4px;
+  background: var(--heat-bg);
+}
+
+.sound-meter span {
+  flex: 1;
+  min-width: 0;
+  border-radius: 2px 2px 0 0;
+  background: var(--c-sound);
+  transform: scaleY(0);
+  transform-origin: bottom;
+  transition: transform 0.03s linear;
+}
+
+body[data-sound='on'] #sound-state {
+  border-color: var(--c-sound);
+  color: var(--c-sound);
+}
+
+body:not([data-sound-mode='parrot']):not([data-sound-mode='laugh']):not([data-sound-mode='babble']) .parrot-only,
+body[data-sound-mode='parrot'] .drone-only,
+body[data-sound-mode='laugh'] .drone-only,
+body[data-sound-mode='babble'] .drone-only {
+  display: none;
+}
+
+.sound-controls output {
+  color: var(--c-sound);
+  font-variant-numeric: tabular-nums;
+}
+
+.sound-controls :disabled {
+  opacity: 0.45;
+}
+
+#sound-hint[data-error='true'] {
+  color: var(--bad);
+}
+
 @media (max-width: 760px) {
   main {
     grid-template-columns: minmax(0, 1fr);
@@ -499,5 +573,13 @@ code {
 
   .bpm output {
     font-size: 36px;
+  }
+
+  .sound-controls input[type='range'] {
+    width: 100px;
+  }
+
+  .sound-meter {
+    flex-basis: 100%;
   }
 }

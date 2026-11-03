@@ -1,7 +1,8 @@
 // CSI-1's live app (design csi-c1 D14), served by the hub at /apps/csi/: pick a board with fr.csi (csi-c5 by
 // default), start a live stream on `/app/stream` with a source (router, or peer: a board with fr.radio_tx aimed at
 // the sensor, which this page can start and stop), and watch a subcarrier heatmap, motion (the board's property
-// and the app's own), RSSI, records/s, drops and gaps, and a breathing estimate while the room is still.
+// and the app's own), RSSI, records/s, drops and gaps, and a breathing estimate while the room is still; the
+// Sound card plays a drone from the subcarriers (./sonify.ts, ./sonify-map.ts; design §14).
 // The /app socket (presence, properties, commands) is the SDK's connect(); the binary stream is ./stream.ts (a
 // local adapter with the SDK's names, see its head). Outputs carry data-* attributes for headless checks.
 // A stream the page wants is started again when it ends, when the hub started none, and when the board comes back
@@ -15,6 +16,7 @@ import { estimateBreathing, MotionTracker, median, NullTracker, recordKind, type
 import { Heatmap, type HeatmapMode } from './heatmap.ts';
 import { drawSignal, TimePlot } from './plot.ts';
 import { csiAmplitudes, streams, type CsiBlock, type StreamEvent, type StreamInfo, type StreamSource, type StreamSubscription } from './stream.ts';
+import { mountSoundPanel } from './sonify.ts';
 import { dropBefore, RateWindow, RestartBackoff } from './window.ts';
 import './style.css';
 
@@ -186,6 +188,9 @@ async function main(): Promise<void> {
       $('gradient').style.background = heat.legendGradient();
     });
   }
+
+  // The drone (design csi-c1 §14): records of the current kind feed it while the sound is on.
+  const sound = mountSoundPanel(store, nowS);
 
   const hub: Hub = await connect({ subscribe: { types: ['*.motion', '*.rssi', '*.rate', '*.sending', '*.stream_ended', 'presence'] } });
   document.body.dataset.connected = 'true';
@@ -480,6 +485,9 @@ async function main(): Promise<void> {
       session.lastChannel = r.channel;
       if (k.kind.key === session.currentKind || session.currentKind === null) {
         appMotion.push({ t: now, v: m });
+      }
+      if (sound.on && k.kind.key === session.currentKind) {
+        sound.push(now, t, k.kind.key, amps, valid, m);
       }
     }
     // Bounded here, not in a timer or a frame (a background tab throttles the one and pauses the other).
