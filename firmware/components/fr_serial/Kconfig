@@ -1,5 +1,16 @@
 menu "Fractonica serial"
 
+    # Design camera-c1 D2: a board whose manifest says `console: uart0` (the classic ESP32 on a USB-UART bridge) has
+    # `fr gen firmware` set this in sdkconfig.board; fr_serial then builds its backend on driver/uart (UART0, 115200 8N1,
+    # RX ring 2 KB, TX ring 8 KB, uart_vfs_dev_use_driver(0)) instead of usb_serial_jtag. Stream F implements it.
+    config FR_SERIAL_UART
+        bool "Serial link over UART0 (USB-UART bridge) instead of USB-Serial/JTAG"
+        default n
+        help
+            The hub's serial link (frames, logs, diag) on UART0 at 115200, for boards without USB-Serial/JTAG
+            (the AI-Thinker ESP32-CAM on its CAM-MB base). Set by `fr gen firmware` from the board manifest's
+            `console: uart0`; never by hand.
+
     # The USB-Serial/JTAG rings (spec 03 §3.4, 05 §5.12.3). The defaults are every profile's; a profile's
     # `memory: small` has `fr gen firmware` lower them in sdkconfig.board.
 

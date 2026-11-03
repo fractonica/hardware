@@ -54,10 +54,13 @@ export class ChunkedParser {
   #have = 0;
   #onChunk: (chunk: Uint8Array) => void;
   #onEnd: () => void;
+  #maxChunk: number;
 
-  constructor(onChunk: (chunk: Uint8Array) => void, onEnd: () => void) {
+  /** `maxChunkBytes`: the largest chunk taken (default MAX_CHUNK_BYTES; a jpeg stream's frames need 1 MB, design camera-c1 D10). */
+  constructor(onChunk: (chunk: Uint8Array) => void, onEnd: () => void, opts: { maxChunkBytes?: number } = {}) {
     this.#onChunk = onChunk;
     this.#onEnd = onEnd;
+    this.#maxChunk = opts.maxChunkBytes ?? MAX_CHUNK_BYTES;
   }
 
   get done(): boolean {
@@ -144,8 +147,8 @@ export class ChunkedParser {
       throw new FramingError(`bad chunk size line ${JSON.stringify(text.slice(0, 32))}`);
     }
     const size = parseInt(m[1], 16);
-    if (size > MAX_CHUNK_BYTES) {
-      throw new FramingError(`a chunk of ${size} B (at most ${MAX_CHUNK_BYTES})`);
+    if (size > this.#maxChunk) {
+      throw new FramingError(`a chunk of ${size} B (at most ${this.#maxChunk})`);
     }
     if (size === 0) {
       this.#state = 'trailer';

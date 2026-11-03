@@ -1,10 +1,13 @@
 // One `/app/stream` socket (design csi-c1 D12, §12; stream H): the binary live channel beside `/app`. The first text
 // frame is a StreamHelloFrame within APP_HELLO_TIMEOUT_MS (the token only there; close codes as /app: 4400 a bad or
 // missing hello, also a device or instance that is not there, 4401 a bad token, 4409 another protocol major); one
-// subscription per socket, to {device, instance}. `start` begins a live stream (seconds 0) when none runs on the
-// instance (csi/ops.ts beginCsiStream; the hub stops it when its last such socket leaves); a running one is joined as
+// subscription per socket, to {device, instance}: an fr.csi or an fr.camera instance (design camera-c1 D12; the device's
+// only streaming one when unnamed). `start` begins a live stream (seconds 0) when none runs on the instance
+// (csi/ops.ts beginCsiStream with source and peer; camera/ops.ts beginCameraStream with interval_ms, frame_size and
+// quality, a live view to the hub; the hub stops it when its last such socket leaves); a running one is joined as
 // it is, unless it is ending (then the socket waits and begins the next one once it ended) or is not published live (a
-// csi_stream with live false: an `error` DEVICE_BUSY says so, and the socket waits for a live one). The hub answers StreamWelcomeFrame, then each block as one binary message (exactly the chunk's bytes), text
+// csi_stream or camera_stream with live false: an `error` DEVICE_BUSY says so, and the socket waits for a live one). The
+// hub answers StreamWelcomeFrame, then each block as one binary message (exactly the chunk's bytes), text
 // frames stream.started / stream.ended / stream.gap, and ping / pong / error as /app.
 // Backpressure (APP_LIMITS): a block is dropped, never queued, while the socket has more than highWater bytes
 // buffered; the count goes out as stream.gap before the next block that is sent (or before stream.ended), so a slow
@@ -14,13 +17,16 @@ import type { Socket } from 'node:net';
 
 import type { WebSocket } from '@fastify/websocket';
 
-import { CSI_SOURCES, FrError } from '@fractonica/protocol';
+import { CAMERA_FRAME_SIZES, CSI_SOURCES, FrError } from '@fractonica/protocol';
 import { APP_PROTOCOL_V, type StreamEndedFrame, type StreamHelloFrame, type StreamHubFrame, type StreamInfo } from '@fractonica/sdk/wire';
 
+import { beginCameraStream, CAMERA_CAP, cameraInstance } from '../camera/ops.ts';
 import type { Device, HubContext } from '../context.ts';
-import { csiLive, type CsiSubscriber } from '../csi/live.ts';
 import { beginCsiStream, csiInstance, resolvePeer } from '../csi/ops.ts';
 import { nowUs } from '../ring.ts';
+import type { PortCap } from '../router/caps.ts';
+import { instancesOf } from '../router/ops.ts';
+import { liveStreams, type StreamSubscriber } from '../streams/live.ts';
 import { appVisible } from './directory.ts';
 import type { AppLimits } from './socket.ts';
 import { tokenMatches } from './token.ts';
@@ -34,6 +40,10 @@ export interface StreamSocketHost {
 
 const OPEN = 1;
 const DEVICE_ID = /^[0-9a-f]{12}$/;
+const CSI_CAP = 'fr.csi';
+/** The capabilities whose instances stream on /app/stream (design csi-c1 D12, camera-c1 D12). */
+const STREAMING_CAPS: readonly string[] = [CSI_CAP, CAMERA_CAP];
+const isInt = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
 
 /** A stream hello's shape, or why it is not one. */
 function helloProblem(f: Record<string, unknown>): string | null {
@@ -55,7 +65,7 @@ function helloProblem(f: Record<string, unknown>): string | null {
   const st = f.start as Record<string, unknown> | undefined;
   if (st !== undefined) {
     if (typeof st !== 'object' || st === null || Array.isArray(st)) {
-      return 'stream.hello.start must be {source?, peer?}';
+      return 'stream.hello.start must be {source?, peer?} (fr.csi) or {interval_ms?, frame_size?, quality?} (fr.camera)';
     }
     if (st.source !== undefined && !(CSI_SOURCES as readonly unknown[]).includes(st.source)) {
       return `stream.hello.start.source must be one of ${CSI_SOURCES.join(', ')}`;
@@ -63,11 +73,59 @@ function helloProblem(f: Record<string, unknown>): string | null {
     if (st.peer !== undefined && (typeof st.peer !== 'string' || !st.peer)) {
       return 'stream.hello.start.peer must be a device or a MAC';
     }
+    if (st.interval_ms !== undefined && !isInt(st.interval_ms, 0, 3_600_000)) {
+      return 'stream.hello.start.interval_ms must be an integer 0..3600000';
+    }
+    if (st.frame_size !== undefined && !(CAMERA_FRAME_SIZES as readonly unknown[]).includes(st.frame_size)) {
+      return `stream.hello.start.frame_size must be one of ${CAMERA_FRAME_SIZES.join(', ')}`;
+    }
+    if (st.quality !== undefined && !isInt(st.quality, 4, 63)) {
+      return 'stream.hello.start.quality must be an integer 4..63';
+    }
   }
   return null;
 }
 
-export class StreamSocket implements CsiSubscriber {
+/** `start`'s fields against the instance's capability: a csi instance takes source and peer, a camera one the camera's. */
+function startProblem(inst: PortCap, start: NonNullable<StreamHelloFrame['start']>): string | null {
+  const csiFields = ['source', 'peer'].filter((k) => (start as Record<string, unknown>)[k] !== undefined);
+  const camFields = ['interval_ms', 'frame_size', 'quality'].filter((k) => (start as Record<string, unknown>)[k] !== undefined);
+  if (inst.cap === CSI_CAP && camFields.length) {
+    return `${inst.name} is ${CSI_CAP}: start takes source and peer, not ${camFields.join(', ')}`;
+  }
+  if (inst.cap === CAMERA_CAP && csiFields.length) {
+    return `${inst.name} is ${CAMERA_CAP}: start takes interval_ms, frame_size and quality, not ${csiFields.join(', ')}`;
+  }
+  return null;
+}
+
+/**
+ * The device's `name` instance (checked to stream: fr.csi or fr.camera), else its only (first) streaming one; the
+ * capability's own resolver says why when there is none.
+ */
+export function streamInstance(hub: HubContext, dev: Device, name: string | undefined): PortCap {
+  const instances = instancesOf(hub, dev);
+  if (name !== undefined) {
+    const inst = instances?.find((c) => c.name === name);
+    if (inst && STREAMING_CAPS.includes(inst.cap)) {
+      return inst;
+    }
+    if (inst) {
+      throw new FrError('INVALID_ARGS', `${dev.alias} ${inst.name} is ${inst.cap}, not a streaming instance (${STREAMING_CAPS.join(' or ')})`);
+    }
+    return csiInstance(hub, dev, name); // NOT_FOUND, naming the instances there are
+  }
+  const found = instances?.filter((c) => STREAMING_CAPS.includes(c.cap)) ?? [];
+  if (found.length === 1) {
+    return found[0];
+  }
+  if (found.length > 1) {
+    throw new FrError('AMBIGUOUS_SELECTOR', `${dev.alias} has ${found.length} streaming instances (${found.map((c) => `${c.name} (${c.cap})`).join(', ')}): name one`);
+  }
+  return csiInstance(hub, dev, undefined); // CAPABILITY_UNSUPPORTED, naming the instances there are
+}
+
+export class StreamSocket implements StreamSubscriber {
   state: 'hello' | 'live' | 'closed' = 'hello';
   lastRx = Date.now();
   /** Messages written (binary and text). */
@@ -133,7 +191,7 @@ export class StreamSocket implements CsiSubscriber {
     }
   }
 
-  // ---- CsiSubscriber ----
+  // ---- StreamSubscriber ----
 
   started(info: StreamInfo): void {
     if (this.#known !== info.stream_id) {
@@ -249,14 +307,19 @@ export class StreamSocket implements CsiSubscriber {
       this.#refuse('NOT_FOUND', `no provisioned device ${JSON.stringify(hello.device)}`);
       return;
     }
-    let instName: string;
+    let inst: PortCap;
     try {
-      instName = csiInstance(hub, dev, hello.instance).name;
+      inst = streamInstance(hub, dev, hello.instance);
+      const bad = hello.start ? startProblem(inst, hello.start) : null;
+      if (bad) {
+        throw new FrError('INVALID_ARGS', bad);
+      }
     } catch (e) {
       this.#refuse(e instanceof FrError ? e.code : 'INTERNAL', (e as Error).message);
       return;
     }
-    const live = csiLive(hub);
+    const instName = inst.name;
+    const live = liveStreams(hub);
     const running = live.get(dev.device_id, instName);
     let startError: { code: string; message: string } | null = null;
     let queued = false;
@@ -265,7 +328,7 @@ export class StreamSocket implements CsiSubscriber {
     } else if (hello.start && running && !running.live) {
       startError = {
         code: 'DEVICE_BUSY',
-        message: `${dev.alias} ${instName} runs stream ${running.info.stream_id}${running.jobId ? ` (job ${running.jobId})` : ''}, which is not published live (csi_stream live false): no live stream starts while it runs; this socket gets the next live one`,
+        message: `${dev.alias} ${instName} runs stream ${running.info.stream_id}${running.jobId ? ` (job ${running.jobId})` : ''}, which is not published live (${running.info.kind === 'jpeg' ? 'camera_stream' : 'csi_stream'} live false): no live stream starts while it runs; this socket gets the next live one`,
       };
     } else if (hello.start && !running) {
       startError = this.#start(dev, instName, hello.start);
@@ -292,13 +355,30 @@ export class StreamSocket implements CsiSubscriber {
     }
   }
 
-  /** Begins an app's live stream on the instance; null, else why none started (the socket stays and waits). */
+  /** Begins an app's live stream on the instance (a csi stream, or a camera's live view to the hub); null, else why none started (the socket stays and waits). */
   #start(dev: Device, instName: string, start: NonNullable<StreamHelloFrame['start']>): { code: string; message: string } | null {
     const hub = this.#host.hub();
     try {
       const p = hub.router.presence(dev.device_id);
       if (p !== 'online' && p !== 'suspect') {
         throw new FrError('DEVICE_OFFLINE', `${dev.alias} is ${p}`);
+      }
+      const inst = streamInstance(hub, dev, instName);
+      if (inst.cap === CAMERA_CAP) {
+        beginCameraStream(hub, {
+          dev,
+          inst: cameraInstance(hub, dev, instName),
+          seconds: 0,
+          intervalMs: start.interval_ms ?? 0,
+          maxFrames: 0,
+          to: 'hub',
+          live: true,
+          ...(start.frame_size !== undefined ? { frameSize: start.frame_size } : {}),
+          ...(start.quality !== undefined ? { quality: start.quality } : {}),
+          appOwned: true,
+          origin: 'app',
+        });
+        return null;
       }
       const peerMac = start.peer !== undefined ? resolvePeer(hub, start.peer) : undefined;
       beginCsiStream(hub, {

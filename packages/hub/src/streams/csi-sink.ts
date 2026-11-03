@@ -1,7 +1,7 @@
 // The csi sink of the generic stream route (design csi-c1 D11, §12; stream H): each chunk is parsed as a csi1 block
 // (whole records, at least one), counted (records, blocks, and the records the board dropped: a jump of first_index
 // past the previous block's first_index + its record count, counted and never filled), written to an optional .csi
-// file (§12: the head `FRCSI1\0\0` + version u32 LE, then each block as its length u32 LE and its exact bytes), and handed to the live fan-out (csi/live.ts). The file is written into
+// file (§12: the head `FRCSI1\0\0` + version u32 LE, then each block as its length u32 LE and its exact bytes), and handed to the live fan-out (streams/live.ts). The file is written into
 // `<path>.<pid>-<random>.tmp` beside `path`, flushed to disk (fsync) and renamed when the stream ends, so a reader
 // never sees half a file, nor (after a power cut) a renamed one whose blocks never reached the disk; a
 // revoked stream (its op failed) leaves none. A hub killed mid-stream leaves the temp, removed at the next start.
@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { type CsiBlock, csiFileHead, CsiParseError, parseCsiBlock } from '@fractonica/sdk/csi';
 
 import { FramingError } from '../audio/chunked.ts';
+import type { StreamCounts } from './live.ts';
 import type { StreamEndReason, StreamSink } from './route.ts';
 
 /** The largest block taken: §12 closes a block before 8,192 B; this leaves room and still bounds a bad node. */
@@ -21,15 +22,8 @@ export const CSI_BLOCK_MAX_BYTES = 64 * 1024;
 /** A CsiFile's temp name. */
 export const CSI_TEMP_RE = /\.csi\.\d+-[0-9a-f]{8}\.tmp$/i;
 
-export interface CsiCounts {
-  records: number;
-  /** Records the board dropped (first_index jumps), counted, never filled. */
-  dropped: number;
-  blocks: number;
-  /** Date.now() of the first block, null before it. */
-  firstAt: number | null;
-  lastAt: number | null;
-}
+/** A csi stream's counts (streams/live.ts StreamCounts): `records` csi records, `dropped` first_index jumps, `bytes` block bytes. */
+export type CsiCounts = StreamCounts;
 
 /** A .csi file written into a temp file (head, then length-prefixed blocks), renamed to `path` by finish(). Writes are synchronous, in order. */
 export class CsiFile {
@@ -107,7 +101,7 @@ export interface CsiSinkOptions {
 }
 
 export class CsiSink implements StreamSink {
-  readonly counts: CsiCounts = { records: 0, dropped: 0, blocks: 0, firstAt: null, lastAt: null };
+  readonly counts: CsiCounts = { records: 0, dropped: 0, blocks: 0, bytes: 0, firstAt: null, lastAt: null };
   /** The finished file's path (null: none asked for, not finished yet, or revoked). */
   path: string | null = null;
   #o: CsiSinkOptions;
@@ -146,6 +140,7 @@ export class CsiSink implements StreamSink {
     this.#next = Math.max(expected, b.firstIndex + b.records.length);
     c.records += b.records.length;
     c.blocks++;
+    c.bytes += bytes.length;
     const now = Date.now();
     const first = c.firstAt === null;
     c.firstAt ??= now;

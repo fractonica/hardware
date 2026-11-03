@@ -1429,6 +1429,8 @@ bool can_enter_bootloader()
 #if CONFIG_IDF_TARGET_ESP32C3 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32C6 || CONFIG_IDF_TARGET_ESP32C5
     return true;  // restart.cpp sets each one's force-download field (C5: design csi-c1 D2)
 #else
+    // The classic ESP32 (design camera-c1 D1): no force-download bit in rtc_cntl_reg.h; the hub's bridge pulses EN and
+    // IO0 instead (D4).
     return false;
 #endif
 }

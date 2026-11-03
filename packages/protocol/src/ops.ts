@@ -9,7 +9,8 @@
 // ops/display.ts (display_snapshot, display_render) and input_simulate's touch point. A1 (design audio-a1 D8) adds
 // ops/audio.ts (audio_record, audio_play, audio_level). CSI-1 (design csi-c1 D4, D5, D13) adds ops/csi.ts (csi_stream,
 // csi_status), network_list, and network names and bands (ops/network.ts) on network_set, network_get,
-// device_provision and flash_start.
+// device_provision and flash_start. CAM-1 (design camera-c1 D11) adds ops/camera.ts (camera_snap, camera_stream,
+// camera_status, camera_set, camera_sd_list, camera_sd_fetch, camera_sd_delete) and the bridge ports' `path:` selector.
 // This module loads no Node builtin: the browser entry (browser.ts) exports it, and REGISTRY_HASH,
 // which hashes it with node:crypto, lives in registry-hash.ts.
 
@@ -18,6 +19,7 @@ import { z } from 'zod';
 import { APPS_OPS } from './ops/apps.ts';
 import { AUDIO_OPS } from './ops/audio.ts';
 import { BENCH_OPS } from './ops/bench.ts';
+import { CAMERA_OPS } from './ops/camera.ts';
 import { CSI_OPS } from './ops/csi.ts';
 import { DISPLAY_OPS } from './ops/display.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
@@ -56,6 +58,32 @@ export {
   type AudioRecord,
 } from './ops/audio.ts';
 export { BenchStatusSchema, type BenchOpName, type BenchStatus } from './ops/bench.ts';
+export {
+  CAMERA_END_REASONS,
+  CAMERA_FRAME_SIZES,
+  CAMERA_SD_STATES,
+  CAMERA_STREAM_MAX_S,
+  CAMERA_TARGETS,
+  CameraRecordingSchema,
+  CameraSdDeleteSchema,
+  CameraSdListSchema,
+  CameraSetSchema,
+  CameraSnapSchema,
+  CameraStatusSchema,
+  CameraStreamSchema,
+  type CameraEndReason,
+  type CameraFrameSizeName,
+  type CameraOpName,
+  type CameraRecording,
+  type CameraSdDelete,
+  type CameraSdList,
+  type CameraSdState,
+  type CameraSet,
+  type CameraSnap,
+  type CameraStatus,
+  type CameraStream,
+  type CameraTargetName,
+} from './ops/camera.ts';
 export {
   CSI_END_REASONS,
   CSI_SOURCES,
@@ -332,6 +360,8 @@ export const OPS = [
   ...AUDIO_OPS,
   // CSI-1 (design csi-c1 D13): a board's CSI records to a file and live to apps, and its features now.
   ...CSI_OPS,
+  // CAM-1 (design camera-c1 D11): a board's camera: a photo, a live view or timelapse, its settings, its card's recordings.
+  ...CAMERA_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

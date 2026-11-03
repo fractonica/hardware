@@ -6,7 +6,7 @@ id: i2s_amp
 summary: An I2S DAC / class-D amplifier (MAX98357A), mono 16-bit on an I2S TX channel, with an optional shutdown pin.
 implements: hal.AudioSink
 class: fr::drv::I2sAmp                  # header: include/fr/drv/i2s_amp.hpp
-targets: [esp32c3, esp32c5, esp32c6, esp32s3]
+targets: [esp32, esp32c3, esp32c5, esp32c6, esp32s3]
 binds: gpio                             # bare pins: bind { bclk: gpio.<n>, ws: gpio.<n>, dout: gpio.<n>, sd: gpio.<n> } (no board section)
 accepts_kinds: [gpio]
 config:                                 # same order as I2sAmp::Config

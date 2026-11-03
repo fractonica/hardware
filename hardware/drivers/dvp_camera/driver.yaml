@@ -1,0 +1,41 @@
+# Driver manifest (design camera-c1 D9, §10; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::DvpCamera::Config from the bound `cameras.<name>` entry (the 16 pins). The sensor's clock, size, quality and
+# image settings come through fr.camera's config (hal::CameraInit), not from here. Stream F implements it (CAM-1).
+schema: fractonica/driver@1
+id: dvp_camera
+summary: A JPEG camera sensor (OV2640) on the chip's parallel DVP interface through espressif/esp32-camera; frames grabbed newest-first, settings applied to the sensor over SCCB.
+implements: hal.Camera
+class: fr::drv::DvpCamera               # header: include/fr/drv/dvp_camera.hpp
+# esp32-camera 2.1.8 targets the ESP32 (I2S0 in camera mode), S2 and S3 (LCD_CAM). Benched on the ESP32-CAM only; an S3
+# camera board is a manifest away.
+targets: [esp32, esp32s3]
+binds: cameras
+accepts_kinds: [dvp]
+config:                                 # same order as DvpCamera::Config
+  xclk:  { type: gpio, from: board.xclk, doc: "the sensor's master clock, an LEDC channel" }
+  sda:   { type: gpio, from: board.sda, doc: "SCCB (I2C) data" }
+  scl:   { type: gpio, from: board.scl, doc: "SCCB (I2C) clock" }
+  pwdn:  { type: gpio, from: board.pwdn, optional: true, doc: "power-down, driven low to run; null: not wired" }
+  reset: { type: gpio, from: board.reset, optional: true, doc: "sensor reset; null: tied to the module's reset" }
+  d0:    { type: gpio, from: board.d0 }
+  d1:    { type: gpio, from: board.d1 }
+  d2:    { type: gpio, from: board.d2 }
+  d3:    { type: gpio, from: board.d3 }
+  d4:    { type: gpio, from: board.d4 }
+  d5:    { type: gpio, from: board.d5 }
+  d6:    { type: gpio, from: board.d6 }
+  d7:    { type: gpio, from: board.d7 }
+  vsync: { type: gpio, from: board.vsync }
+  href:  { type: gpio, from: board.href }
+  pclk:  { type: gpio, from: board.pclk }
+  # The ESP32's camera DMA path is I2S0 (esp32-camera's ll_cam for the esp32), so the controller is budgeted and fixed;
+  # the S3 uses LCD_CAM and ignores it. Not `auto`: an i2s_mic or i2s_amp on the same board takes the other controller.
+  port:  { type: i2s_port, default: 0, doc: "the I2S controller the ESP32's camera DMA uses (0); unused on the S3" }
+# gpio: 16 fields (two optional); i2s: I2S0 on the ESP32; ledc: one timer and one channel for XCLK (esp32-camera's);
+# i2c: the SCCB bus (esp32-camera opens its own I2C port on sda/scl when sccb_i2c_port is -1), one of the board's.
+resources: { gpio: 16, i2s: 1, i2c: 1, ledc_timers: 1, ledc_channels: 1 }
+sdkconfig:
+  # The camera's DMA task on core 0 with Wi-Fi, lwIP and fr_net: the core task owns core 1 on dual-core targets (spec 03
+  # §3.4, as fr_net's and the audio tasks' pinning), so a frame's DMA never preempts a command's dispatch.
+  - CONFIG_CAMERA_CORE0=y
+dependencies: { espressif/esp32-camera: "==2.1.8" }   # must match idf_component.yml (+ its esp_jpeg)

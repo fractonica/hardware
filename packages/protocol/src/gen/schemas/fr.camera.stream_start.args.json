@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.camera.stream_start.args",
+  "title": "fr.camera.stream_start arguments",
+  "description": "Starts a stream of JPEG frames (design camera-c1 D8): to the hub over HTTP (an mjpg1 POST to /v1/stream/in/<stream_id>), to the card (a recording named by the stream id), or both. Dispatch never blocks: OK once the fr_stream task has it, BUSY while another runs, INVALID_ARGS for `to` sd or both with no card mounted, or a frame_size above the trait max_frame_size. interval_ms paces by each frame's start time (0: as fast as the sensor and the path allow); seconds and max_frames end it done (0: no limit, until stream_stop).",
+  "type": "object",
+  "properties": {
+    "stream_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "issued by the hub; the POST path and the recording's directory name it"
+    },
+    "seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "0: until stream_stop (or max_frames) (s)"
+    },
+    "interval_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "time between frame starts; 0: as fast as the path allows (a live view) (ms)"
+    },
+    "max_frames": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "frames to take; 0: no limit. 1 is a snapshot"
+    },
+    "to": {
+      "type": "string",
+      "enum": [
+        "hub",
+        "sd",
+        "both"
+      ],
+      "default": "hub"
+    },
+    "frame_size": {
+      "type": "string",
+      "enum": [
+        "qvga",
+        "vga",
+        "svga",
+        "xga",
+        "sxga",
+        "uxga"
+      ],
+      "description": "absent: the current frame_size (config, or the last set); for this stream only"
+    },
+    "quality": {
+      "type": "integer",
+      "minimum": 4,
+      "maximum": 63,
+      "description": "absent: the current quality; for this stream only (4..63)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "stream_id": 1,
+      "seconds": 0,
+      "interval_ms": 0,
+      "max_frames": 1
+    },
+    {
+      "stream_id": 2,
+      "seconds": 20,
+      "interval_ms": 0,
+      "max_frames": 0,
+      "to": "hub"
+    },
+    {
+      "stream_id": 3,
+      "seconds": 0,
+      "interval_ms": 1000,
+      "max_frames": 600,
+      "to": "sd",
+      "frame_size": "xga",
+      "quality": 10
+    }
+  ]
+}

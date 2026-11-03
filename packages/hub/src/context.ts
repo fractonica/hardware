@@ -55,7 +55,7 @@ export interface Device {
   net: number | null;
   board: string | null;
   profile: string | null;
-  /** `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. */
+  /** `esp32`, `esp32c3`, `esp32c5`, `esp32c6`, `esp32s3`. */
   chip: string | null;
   tags: string[];
   /** HELLO role (protocol DEVICE_ROLES); `fixture` is the HIL fixture node (design m2-c1-hil D6). */

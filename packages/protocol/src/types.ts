@@ -2,8 +2,9 @@ import { z } from 'zod';
 
 export const JOB_STATUSES = ['queued', 'working', 'completed', 'failed', 'cancelled'] as const;
 // msg: a repeated message_send (design c5 §4); test: test_run, latency: latency_probe (design c6 D19).
-// audio: audio_record and audio_play (design audio-a1 D8).
-export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg', 'test', 'latency', 'audio', 'csi'] as const;
+// audio: audio_record and audio_play (design audio-a1 D8). csi: csi_stream (design csi-c1 D13). camera: camera_snap,
+// camera_stream and camera_sd_fetch (design camera-c1 D11).
+export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg', 'test', 'latency', 'audio', 'csi', 'camera'] as const;
 
 /**
  * Who started a job (design c6 D18): the `X-Fr-Client` request header (CLIENT_HEADER) of the call that
@@ -47,12 +48,28 @@ export type PortLease = z.infer<typeof PortLeaseSchema>;
 export const PortHolderSchema = z.object({ app: z.string(), pid: z.number().int() });
 export type PortHolder = z.infer<typeof PortHolderSchema>;
 
+/**
+ * USB-UART bridges the hub lists beside Espressif's own USB (design camera-c1 D3), by `vid:pid` (lower-case hex): a
+ * bridge port has no MAC in its USB serial (`usb_serial` null), is keyed `path:<basename>`, and learns its device id
+ * from the first `@fr1:` envelope on the serial link. The CLI shows the name (`bridge: ch340`).
+ */
+export const BRIDGES: Readonly<Record<string, string>> = { '1a86:7523': 'ch340', '1a86:55d4': 'ch9102', '10c4:ea60': 'cp210x', '0403:6001': 'ft232' };
+
+/** The bridge name of a `vid:pid` (4 hex digits each, any case), or undefined for a chip's own USB or an unknown part. */
+export function bridgeName(vid: string, pid: string): string | undefined {
+  return BRIDGES[`${vid.toLowerCase()}:${pid.toLowerCase()}`];
+}
+
 export const PortInfoSchema = z.object({
   path: z.string(),
-  usb_serial: z.string().optional(),
+  /** The USB serial: the MAC on an Espressif chip's own USB; null on a bridge (design camera-c1 D3), absent when unknown. */
+  usb_serial: z.string().nullable().optional(),
+  /** The device id (MAC): the USB serial, or on a bridge the one learned from the serial link once the board spoke. */
   device_id: z.string().optional(),
   vid: z.string().optional(),
   pid: z.string().optional(),
+  /** The USB-UART bridge the port is behind (BRIDGES: ch340, ...); absent on a chip's own USB. */
+  bridge: z.string().optional(),
   state: z.enum(PORT_STATES),
   /** For display: the hub, `lease l_… (pid N)`, or the external program. */
   holder: z.string().optional(),

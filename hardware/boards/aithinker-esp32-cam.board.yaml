@@ -1,0 +1,74 @@
+schema: fractonica/board@1
+id: aithinker-esp32-cam
+name: AI-Thinker ESP32-CAM (OV2640, micro-SD) on the ESP32-CAM-MB base
+# The CAM-1 camera module (design camera-c1 D5, §10). The board has no USB and no BOOT button: it sits on the
+# ESP32-CAM-MB base, whose CH340 (USB 1a86:7523, no serial number) carries UART0 and the EN/IO0 auto-reset; the hub
+# finds it as a bridge port (D3) and resets it through DTR/RTS (D4). RESET is the only button (EN).
+# Read on the bench (your photo and esptool, 2026-11-03; the spike of design camera-c1 §9): ESP32-D0WD-V3 revision 3.1,
+# 40 MHz crystal, 4 MB flash (DIO at 40 MHz, 3.3 V by the strapping pin), 4 MB quad PSRAM (found and tested at boot),
+# an OV2640 on the FPC (SCCB 0x30: PID 0x26, VER 0x42, MIDH 0x7F, MIDL 0xA2), a 32 GB SDHC card mounting in 1-bit
+# mode, a white flash LED (GPIO4, active high, bright: ~100 mA pulses, keep them short), a red LED on the back (GPIO33,
+# active low). The camera and card pin maps are Arduino's CAMERA_MODEL_AI_THINKER and the ESP32's SD_MMC slot 1,
+# confirmed by the spike (frames and a card write/read).
+idf_target: esp32
+flash: { size: 4MB, mode: dio, part_profile: fr-4mb-v1 }   # the OTA pair of fr-4mb-v1 (1.875 MB each) fits: the spike app is 388 KB
+psram: { size: 4MB, mode: quad, voltage: 3.3V }             # IDF: CONFIG_SPIRAM_MODE_QUAD, 40 MHz (the spike's); the frame buffers live here
+usb: null                     # no USB on the chip or the board: the CAM-MB's CH340 is the hub's port (detection.usb names it)
+console: uart0                # fr_serial on UART0 at 115200 (design camera-c1 D2: CONFIG_FR_SERIAL_UART)
+buttons: {}                   # none: RESET is EN. No `boot` instance in any profile of this board.
+leds:
+  flash: { gpio: 4, kind: gpio, active_level: high, confidence: H }   # the white flash LED (read on the bench); also the card's unused D1
+  red:   { gpio: 33, kind: gpio, active_level: low, confidence: H }   # the red LED on the back (read on the bench); an input-only-adjacent pin, output-capable
+cameras:
+  # The OV2640 on the chip's DVP (I2S0 in camera mode on the ESP32): Arduino's CAMERA_MODEL_AI_THINKER map, confirmed
+  # by the spike. xclk 0 is a strapping pin (high at reset: the sensor's clock input does not pull it). reset: the
+  # sensor's RESET is tied to the module's (not a GPIO). xclk_hz 20 MHz is what the spike ran (fr.camera's config default).
+  main: { kind: dvp, sensor: ov2640, xclk: 0, sda: 26, scl: 27, pwdn: 32, reset: null, d0: 5, d1: 18, d2: 19, d3: 21, d4: 36, d5: 39, d6: 34, d7: 35, vsync: 25, href: 23, pclk: 22, xclk_hz: 20000000, confidence: H }
+sd_cards:
+  # The micro-SD slot on the ESP32's SD_MMC slot 1 (IOMUX: the pins are fixed). Wired 1-bit (design D5): D1 (4) is
+  # the flash LED's, D2 (12) and D3 (13) stay free for other uses; the spike mounted the 32 GB SDHC in 63 ms at 20 MHz.
+  # A card whose D2 is pulled up at reset would break boot (GPIO12 low selects the 3.3 V flash); it booted with the card in.
+  card: { kind: sdmmc, slot: 1, width: 1, clk: 14, cmd: 15, d0: 2, d1: 4, d2: 12, d3: 13, confidence: H }
+pins:
+  # 1/3: U0TXD/U0RXD to the CH340. 6-11: the SPI flash (SD_CLK, SD_DATA_0..3, SD_CMD: never on the headers). 16/17:
+  # the PSRAM's chip select and clock (not usable, though 16 reaches the right header). camera: the entry's 15 wired
+  # pins (34, 35, 36, 39 are input-only, as the data lines need); sd_card: the 1-bit slot's CLK, CMD and D0. 37/38 are
+  # not bonded on the WROVER-style module. GPIO4 (flash LED, card D1) and 33 (red LED) are the LED entries'.
+  reserved: { uart0: [1, 3], flash: [6, 7, 8, 9, 10, 11], psram: [16, 17], camera: [0, 5, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39], sd_card: [2, 14, 15] }
+  strapping: [0, 2, 5, 12, 15]
+  # ESP32 datasheet, strapping pins: 0 high for a normal boot (low with 2 low: download), 2 no requirement with 0
+  # high, 5 high (SDIO slave timing, default eFuses), 12 low (VDD_SDIO 3.3 V: the flash's voltage), 15 high (the ROM
+  # log on U0TXD). The camera (0, 5) and the card (2, 15) sit on four of them: warned by fr gen, read right by the spike.
+  strapping_levels: { 0: high, 2: none, 5: high, 12: low, 15: high }
+  free: [12, 13]              # both on the left header; 12 is a strapping pin (low at reset) and the card's D2, 13 its D3
+  adc1: []                    # ADC1 is GPIO32-39: the camera's and the red LED's. ADC2 is unusable with Wi-Fi.
+headers:
+  # Read off the photo (design camera-c1, "The board"): the two 8-pin rows of the ESP32-CAM itself, pin 1 nearest the
+  # antenna. GND_R on the right is the pin labelled "GND/R".
+  confidence: H
+  left:  [5V, GND, 12, 13, 15, 14, 2, 4]
+  right: [3V3, 16, 0, GND, VCC, U0R, U0T, GND_R]
+boot_uart_tx: 1               # U0TXD: the ROM log at every boot, through the CH340
+en_access: null               # EN reaches the RESET button only; not on a header
+rf: { max_tx_power_qdbm: null, antenna: pcb }   # the u.FL needs a resistor moved; the PCB antenna is fitted
+test_pin: null                # not on the HIL bench
+# IDF v6.1 soc_caps.h for the esp32: 8 RMT channels, each TX or RX (SOC_RMT_CHANNELS_PER_GROUP 8, one group: rmt_tx and
+# rmt_rx share them); LEDC 4 timers and 8 channels per speed mode x 2 modes (SOC_LEDC_SUPPORT_HS_MODE); 2 I2C
+# (SOC_I2C_NUM); no free ADC1 pin; 2 I2S controllers (I2S0 is the camera's DMA path, taken by dvp_camera's port 0; I2S1
+# free); 2 SD/MMC slots (SOC_SDMMC_NUM_SLOTS), slot 0 on the flash's pins, so one usable.
+resources: { rmt_tx: 8, rmt_rx: 8, ledc_timers: 8, ledc_channels: 16, i2c: 2, adc1_channel: 0, i2s: 2, sdmmc_slot: 1 }
+defaults:
+  status: { cap: fr.led, driver: led_gpio, bind: leds.red }
+detection:
+  # The CAM-MB base's CH340: no serial number, so the hub keys the port by its path and learns the device id from the
+  # serial link (design camera-c1 D3). The chip is read by esptool through the bridge.
+  usb: { vid: 0x1A86, pid: 0x7523, serial_is_mac: false }
+  # esptool says "ESP32-D0WD-V3 (revision v3.1)"; features name the two cores.
+  esptool: { chip_type: '^ESP32-D0WD', features: 'Dual Core', flash_size: 4MB }
+  probe: { leds: [red] }      # the flash LED is left out of the blink probe (bright, ~100 mA on the base's USB supply)
+sources:
+  - photo of the board and its base (2026-11-03); esptool over the CH340 (chip, flash, PSRAM at boot)
+  - the spike of design camera-c1 §9 (camspike: the pin maps, the OV2640's ids, the card in 1-bit mode)
+  - https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Camera/CameraWebServer/camera_pins.h   # CAMERA_MODEL_AI_THINKER
+  - https://documentation.espressif.com/esp32_datasheet_en.pdf   # strapping pins, ADC1 pins
+  - https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32/api-reference/peripherals/sdmmc_host.html   # slot 1 pins

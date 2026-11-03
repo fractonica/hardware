@@ -44,7 +44,8 @@ export {
   type CsiBlock,
   type CsiRecord,
 } from './csi.ts';
-export { StreamClient, streamUrl, type StreamBlockHandler, type StreamDescription, type StreamEvent, type Streams, type StreamSource, type StreamSubscribeOptions } from './streams.ts';
+export { encodeJpegBlock, parseJpegBlock, JpegParseError, type JpegBlock } from './camera.ts';
+export { StreamClient, streamUrl, wireStart, type StreamBlockHandler, type StreamDescription, type StreamEvent, type Streams, type StreamSource, type StreamStartOptions, type StreamSubscribeOptions } from './streams.ts';
 export type {
   AnyDevice,
   AnyEvent,

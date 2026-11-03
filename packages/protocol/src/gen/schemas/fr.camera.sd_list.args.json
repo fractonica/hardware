@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.camera.sd_list.args",
+  "title": "fr.camera.sd_list arguments",
+  "description": "The recordings on the card, oldest first, from the `from`-th (0: the first): at most 64 per answer, `next` the index to ask for the rest (0: none left). UNSUPPORTED without a card (property sd none or error). BULK: TCP or serial, never over a gateway.",
+  "type": "object",
+  "properties": {
+    "from": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "default": 0
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "from": 0
+    }
+  ]
+}

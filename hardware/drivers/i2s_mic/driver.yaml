@@ -6,7 +6,7 @@ id: i2s_mic
 summary: An I2S standard-mode MEMS microphone (INMP441, ICS-43434; SPH0645 with format msb), mono, 32-bit slots, on an I2S RX channel.
 implements: hal.AudioSource
 class: fr::drv::I2sMic                  # header: include/fr/drv/i2s_mic.hpp
-targets: [esp32c3, esp32c5, esp32c6, esp32s3]
+targets: [esp32, esp32c3, esp32c5, esp32c6, esp32s3]
 binds: gpio                             # bare pins: bind { bclk: gpio.<n>, ws: gpio.<n>, din: gpio.<n> } (no board section)
 accepts_kinds: [gpio]
 config:                                 # same order as I2sMic::Config

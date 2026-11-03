@@ -26,7 +26,7 @@ import { readNetwork } from '../src/network.ts';
 import { HANDLERS } from '../src/ops.ts';
 import { identCsv, identTmpRoot, LEGACY_IDENT_MIN_AGE_MS, renderIdent, sweepIdentDirs } from '../src/registry/ident.ts';
 import { createRegistry, sweepIdentAtStart } from '../src/registry/index.ts';
-import { type ProvisionDeps, startProvision } from '../src/registry/provision.ts';
+import { ProbeSchema, type ProvisionDeps, startProvision } from '../src/registry/provision.ts';
 import { markIdentWritten, prepareIdentity, provisionOf } from '../src/registry/store.ts';
 import { nowUs } from '../src/ring.ts';
 import { CursorSeq } from '../src/seq.ts';
@@ -196,7 +196,7 @@ interface Rig {
 
 let rigs = 0;
 
-function rig(opts: { network?: boolean } = {}): Rig {
+function rig(opts: { network?: boolean; bridge?: boolean } = {}): Rig {
   const db = openDb(join(home, `hub-${++rigs}.db`));
   const seq = new CursorSeq(db);
   const logs = new LogStore(db, 1, { retention: false, seq, frames: new FrameDecoder(db) });
@@ -212,7 +212,8 @@ function rig(opts: { network?: boolean } = {}): Rig {
       }
       throw new FrError('NOT_FOUND', `no attached Espressif port matches ${sel}`);
     },
-    lease: async () => ({ ...entry, release: () => undefined }),
+    // A USB-UART bridge port (design camera-c1 D3): the lease says so, and the sidecar gets esptool's DTR/RTS sequence.
+    lease: async () => ({ ...entry, ...(opts.bridge ? { bridge: 'ch340' } : {}), release: () => undefined }),
     hardReset: async () => {
       r.resets++;
       r.onReset?.();
@@ -399,6 +400,35 @@ describe('device_provision', () => {
     expectNoSecret(r, job, jobLogs(r, job.job_id), calls().map((c) => ({ ...c, csv: undefined })));
   });
 
+  it('on a bridge port the probe and the flash ask the sidecar for esptool\'s default-reset (DTR/RTS), on a chip\'s own USB neither says', async () => {
+    const r = rig({ bridge: true });
+    artifact(r.db, 'c6-pad', 'esp32c6', 13, 'c6aaaaaaaaaa');
+    nodeBoots(r, { serial: 'frame', tcp: true });
+    const job = await provision(r, { profile: 'c6-pad' });
+    expect(job.error).toBeUndefined();
+    const reqs = calls().map((c) => c.req);
+    expect(reqs.map((q) => q.cmd)).toEqual(['probe', 'nvs_gen', 'flash']);
+    expect(reqs[0]).toMatchObject({ cmd: 'probe', before: 'default-reset' });
+    expect(reqs[2]).toMatchObject({ cmd: 'flash', before: 'default-reset', after: 'no-reset' });
+    const own = rig();
+    artifact(own.db, 'c6-pad', 'esp32c6', 13, 'c6aaaaaaaaab');
+    nodeBoots(own, { serial: 'frame', tcp: true });
+    sidecar();
+    expect((await provision(own, { profile: 'c6-pad' })).error).toBeUndefined();
+    for (const q of calls().map((c) => c.req)) {
+      expect(q, q.cmd as string).not.toHaveProperty('before');
+    }
+  });
+
+  it('ProbeSchema takes the sidecar\'s security_info note (the classic ESP32 ROM has no GET_SECURITY_INFO)', () => {
+    expect(ProbeSchema.safeParse({ ...C6_PROBE, security_info: 'read' }).success).toBe(true);
+    const esp32 = ProbeSchema.safeParse({ chip: 'ESP32-D0WD-V3', mac: '08:3a:f2:aa:bb:cc', features: ['Wi-Fi', 'BT', 'Dual Core', '240MHz'], secure_boot: false, flash_encryption: false, security_info: 'unsupported', flash_size: '4MB' });
+    expect(esp32.success).toBe(true);
+    expect(esp32.data).toMatchObject({ security_info: 'unsupported', secure_boot: false });
+    expect(ProbeSchema.safeParse({ ...C6_PROBE, security_info: 'maybe' }).success).toBe(false);
+    expect(ProbeSchema.safeParse(C6_PROBE).success).toBe(true); // an older sidecar says nothing
+  });
+
   it('reports wifi not_joined, not a failure, when no HELLO comes over TCP', async () => {
     const r = rig();
     artifact(r.db, 'c6-pad', 'esp32c6', 13, 'c6aaaaaaaaaa');
@@ -583,6 +613,16 @@ describe('flash_start plans with fr_ident', () => {
     expect(provisionOf(r.db, DEV)).toMatchObject({ via: 'full', build_id: buildId, epoch_floor: 10 });
     expect(r.hub.registry.get(DEV)!.fw_id).toBe('c6aaaaaaaaaa'.padEnd(64, '0'));
     expectNoSecret(r, plan, job, jobLogs(r, job.job_id));
+  });
+
+  it('on a bridge port the flash asks the sidecar for default-reset too', async () => {
+    const r = rig({ bridge: true });
+    artifact(r.db, 'c6-pad', 'esp32c6', 13, 'c6aaaaaaaaaa');
+    provisioned(r);
+    const job = (await flash(r, { device: 'pad-red-1', plan: 'app' })) as Job;
+    expect(job.error).toBeUndefined();
+    const flashed = calls().find((c) => c.cmd === 'flash')!;
+    expect(flashed.req).toMatchObject({ before: 'default-reset', after: 'no-reset' });
   });
 
   it('full for a board the registry does not know erases fr_ident (it boots UNASSIGNED)', async () => {
@@ -847,6 +887,53 @@ const idfPath = (() => {
   }
 })();
 const NVS_TOOL = join(idfPath, 'components', 'nvs_flash', 'nvs_partition_tool', 'nvs_tool.py');
+
+/** Runs `code` in the sidecar's venv against this checkout's tools/pytools sources (the venv holds an installed copy). */
+function pytoolsEval(code: string): unknown {
+  const src = join(REPO, 'tools', 'pytools', 'src');
+  const script = `import sys, json\nsys.path.insert(0, ${JSON.stringify(src)})\nfrom fractonica_pytools.__main__ import connect_error, security_info\n${code}`;
+  return JSON.parse(execFileSync(REAL_PYTHON, ['-I', '-c', script], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+}
+
+describe.skipIf(!existsSync(REAL_PYTHON))('the sidecar\'s own mapping (tools/pytools, run in its venv)', () => {
+  it('connect_error: boot mode 0xb names GPIO2 and the ESP32-CAM\'s card; other failures keep the BOOT/RST hint; port errors their codes', () => {
+    const hint = (msg: string) => pytoolsEval(`e = connect_error(${JSON.stringify(msg)})\nprint(json.dumps([e.code, e.hint]))`);
+    expect(hint('Wrong boot mode detected (0xb)! The chip needs to be in download mode.')).toEqual([
+      'FLASH_FAILED',
+      "boot mode 0xb: GPIO2 is held high (on an ESP32-CAM the SD card's DAT0 once the card was used): power-cycle the board with the card removed, then retry",
+    ]);
+    expect(hint('Failed to connect to ESP32: No serial data received.')).toEqual(['FLASH_FAILED', 'if the board does not respond: hold BOOT, tap RST, release BOOT, then retry']);
+    expect(hint('Wrong boot mode detected (0x13)! The chip needs to be in download mode.')).toEqual(['FLASH_FAILED', 'if the board does not respond: hold BOOT, tap RST, release BOOT, then retry']);
+    expect(hint('Could not open /dev/cu.usbserial-110, the port is busy or doesn\'t exist. ([Errno 35] Could not exclusively lock port)')).toEqual(['PORT_BUSY_EXTERNAL', 'close any other program using the port']);
+  });
+
+  it('security_info: a ROM without GET_SECURITY_INFO (UnsupportedCommandError, the classic ESP32) reads as unsupported, not a failure', () => {
+    const out = pytoolsEval(`
+from esptool.util import UnsupportedCommandError, FatalError
+class Esp32:
+    def get_security_info(self):
+        raise UnsupportedCommandError(self, 0x14)
+    def __init__(self):
+        self.secure_download_mode = False
+        self.CHIP_NAME = "ESP32"
+class Rom:
+    def get_security_info(self):
+        raise FatalError("This command (0x14) is not supported in the current download mode")
+class C6:
+    def get_security_info(self):
+        return {"flags": 1, "flash_crypt_cnt": 1}
+class Broken:
+    def get_security_info(self):
+        raise FatalError("Timed out waiting for packet header")
+try:
+    security_info(Broken())
+    broken = "returned"
+except FatalError as e:
+    broken = str(e)
+print(json.dumps([security_info(Esp32()), security_info(Rom()), security_info(C6()), broken]))`);
+    expect(out).toEqual([[{}, false], [{}, false], [{ flags: 1, flash_crypt_cnt: 1 }, true], 'Timed out waiting for packet header']);
+  });
+});
 
 describe.skipIf(!existsSync(REAL_PYTHON))('fr_ident through the installed sidecar', () => {
   it('nvs_gen renders a 16 KB image that nvs_tool reads back, and reports nothing secret', async () => {

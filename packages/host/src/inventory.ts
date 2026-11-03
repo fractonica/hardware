@@ -16,7 +16,7 @@ export interface BoardInfo {
   /** The board id (its file name). */
   board: string;
   name?: string;
-  /** IDF target: esp32c3, esp32c5, esp32c6, esp32s3. */
+  /** IDF target: esp32, esp32c3, esp32c5, esp32c6, esp32s3. */
   chip: string;
   /** Flash size, e.g. 4MB. */
   flash: string;

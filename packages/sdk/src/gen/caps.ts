@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0xbdb52e7a;
+export const CATALOG_HASH = 0x7df39e8e;
 
 // ---- fr.button ----
 
@@ -590,6 +590,142 @@ export interface RadioTxProps {
   sending: boolean;
 }
 
+// ---- fr.camera ----
+
+export type CameraFrameSize = 'qvga' | 'vga' | 'svga' | 'xga' | 'sxga' | 'uxga';
+
+export type CameraTarget = 'hub' | 'sd' | 'both';
+
+export type CameraStreamEndReason = 'stopped' | 'done' | 'net_lost' | 'overflow' | 'error';
+
+export type CameraCardState = 'none' | 'mounted' | 'error';
+
+/** fr.camera.stream_start arguments (all optional: the device applies the defaults). */
+export interface CameraStreamStartArgs {
+  /** issued by the hub; the POST path and the recording's directory name it */
+  streamId?: number;
+  /** 0: until stream_stop (or max_frames) (s) */
+  seconds?: number;
+  /** time between frame starts; 0: as fast as the path allows (a live view) (ms) */
+  intervalMs?: number;
+  /** frames to take; 0: no limit. 1 is a snapshot */
+  maxFrames?: number;
+  /** (default hub) */
+  to?: CameraTarget;
+  /** absent: the current frame_size (config, or the last set); for this stream only */
+  frameSize?: CameraFrameSize;
+  /** absent: the current quality; for this stream only (4..63) */
+  quality?: number;
+}
+
+/** fr.camera.stream_stop arguments (all optional: the device applies the defaults). */
+export interface CameraStreamStopArgs {
+  streamId?: number;
+}
+
+/** fr.camera.set arguments (all optional: the device applies the defaults). */
+export interface CameraSetArgs {
+  frameSize?: CameraFrameSize;
+  /** (4..63) */
+  quality?: number;
+  vflip?: boolean;
+  hmirror?: boolean;
+  /** (-2..2) */
+  brightness?: number;
+  /** (-2..2) */
+  contrast?: number;
+  /** (-2..2) */
+  saturation?: number;
+}
+
+/** fr.camera.sd_list arguments (all optional: the device applies the defaults). */
+export interface CameraSdListArgs {
+  /** (default 0) */
+  from?: number;
+}
+
+/** fr.camera.sd_list RESULT fields. */
+export interface CameraSdListResult {
+  /** (<= 64 items) */
+  recordings: { id: number; frames: number; bytes: number }[];
+  /** the `from` of the next page; 0: this was the last */
+  next: number;
+}
+
+/** fr.camera.sd_fetch arguments (all optional: the device applies the defaults). */
+export interface CameraSdFetchArgs {
+  /** issued by the hub; the POST path names it */
+  streamId?: number;
+  /** the recording's id (its stream_id when made) */
+  recording?: number;
+  /** (default 0) */
+  fromFrame?: number;
+}
+
+/** fr.camera.sd_delete arguments (all optional: the device applies the defaults). */
+export interface CameraSdDeleteArgs {
+  recording?: number;
+}
+
+/** fr.camera commands, as methods of an instance. */
+export interface CameraClient {
+  /** Starts a stream of JPEG frames (design camera-c1 D8): to the hub over HTTP (an mjpg1 POST to /v1/stream/in/<stream_id>), to the card (a recording named by the stream id), or both. Dispatch never blocks: OK once the fr_stream task has it, BUSY while another runs, INVALID_ARGS for `to` sd or both with no card mounted, or a frame_size above the trait max_frame_size. interval_ms paces by each frame's start time (0: as fast as the sensor and the path allow); seconds and max_frames end it done (0: no limit, until stream_stop). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  streamStart(args?: CameraStreamStartArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  streamStop(args?: CameraStreamStopArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Changes the sensor's settings now and keeps them until reboot (absent fields stay). INVALID_ARGS for a frame_size above the trait max_frame_size. A running stream takes the new settings from its next frame. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  set(args?: CameraSetArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** The recordings on the card, oldest first, from the `from`-th (0: the first): at most 64 per answer, `next` the index to ask for the rest (0: none left). UNSUPPORTED without a card (property sd none or error). BULK: TCP or serial, never over a gateway. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  sdList(args?: CameraSdListArgs, opts?: CallOptions): Promise<CmdResult<CameraSdListResult>>;
+  /** Streams recording `recording`'s frames to the hub as an mjpg1 stream (flags b0 set), from frame `from_frame`; ends done after the last. BUSY while a stream runs; NOT_FOUND for a recording not on the card; UNSUPPORTED without a card. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  sdFetch(args?: CameraSdFetchArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Removes recording `recording` from the card (its directory and frames); OK when it is already gone. UNSUPPORTED without a card; BUSY while a stream writes to or reads from it. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  sdDelete(args?: CameraSdDeleteArgs, opts?: CallOptions): Promise<CmdResult>;
+}
+
+/** fr.camera.stream_ended event fields (normal). A stream (or sd_fetch) ended: stopped (stream_stop), done (`seconds` or `max_frames` reached), net_lost (a send stalled 3 s or the connection dropped), overflow (the card is full or failed mid-stream), error (the sensor failed). */
+export interface CameraStreamEndedFields {
+  streamId: number;
+  reason: CameraStreamEndReason | number;
+  /** frames the stream covered, dropped ones included (the index it reached) */
+  frames: number;
+  /** frames the sensor delivered that the stream could not take (the hub path behind) */
+  dropped: number;
+  /** JPEG bytes sent and/or written */
+  bytes: number;
+}
+
+/** fr.camera events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface CameraEvents {
+  stream_ended: CameraStreamEndedFields;
+}
+
+/** fr.camera properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface CameraState {
+  /** frames captured since boot */
+  frames: number;
+  /** frames per second over the last second, x10 (0 while idle) */
+  fpsX10: number;
+  /** the last frame's JPEG bytes */
+  lastBytes: number;
+  /** a stream (or an sd_fetch) runs */
+  streaming: boolean;
+  /** the card: none (no card, or config sd false), mounted, error (mount or write failed) */
+  sd: CameraCardState | number;
+  /** free space on the card; 0 when none (MB) */
+  sdFreeMb: number;
+}
+
+/** fr.camera property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface CameraProps {
+  frames: number;
+  fps_x10: number;
+  last_bytes: number;
+  streaming: boolean;
+  sd: CameraCardState | number;
+  sd_free_mb: number;
+}
+
 // ---- fr.node ----
 
 /** fr.node.identify arguments (all optional: the device applies the defaults). */
@@ -791,6 +927,7 @@ export interface CapClients {
   'fr.touch': TouchClient;
   'fr.csi': CsiClient;
   'fr.radio_tx': RadioTxClient;
+  'fr.camera': CameraClient;
   'fr.node': NodeClient;
   'fr.ota': OtaClient;
   'fr.diag': DiagClient;
@@ -807,6 +944,7 @@ export interface CapEvents {
   'fr.touch': TouchEvents;
   'fr.csi': CsiEvents;
   'fr.radio_tx': RadioTxEvents;
+  'fr.camera': CameraEvents;
   'fr.node': NodeEvents;
   'fr.ota': OtaEvents;
   'fr.diag': DiagEvents;
@@ -823,6 +961,7 @@ export interface CapState {
   'fr.touch': TouchState;
   'fr.csi': CsiState;
   'fr.radio_tx': RadioTxState;
+  'fr.camera': CameraState;
   'fr.node': NodeState;
   'fr.ota': OtaState;
   'fr.diag': DiagState;
@@ -839,6 +978,7 @@ export interface CapProps {
   'fr.touch': TouchProps;
   'fr.csi': CsiProps;
   'fr.radio_tx': RadioTxProps;
+  'fr.camera': CameraProps;
   'fr.node': NodeProps;
   'fr.ota': OtaProps;
   'fr.diag': DiagProps;
@@ -858,6 +998,7 @@ export const CAP_META: Readonly<Record<string, CapMeta>> = {
   'fr.touch': { commands: { inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['down', 'up', 'gesture'], props: ['pressed'] },
   'fr.csi': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, baseline_reset: { method: 'baselineReset', delivery: 'reliable' } }, events: ['stream_ended'], props: ['motion', 'rssi', 'rate'] },
   'fr.radio_tx': { commands: { start: { method: 'start', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' } }, events: [], props: ['sending'] },
+  'fr.camera': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, set: { method: 'set', delivery: 'reliable', args: true }, sd_list: { method: 'sdList', delivery: 'reliable', args: true }, sd_fetch: { method: 'sdFetch', delivery: 'reliable', args: true }, sd_delete: { method: 'sdDelete', delivery: 'reliable', args: true } }, events: ['stream_ended'], props: ['frames', 'fps_x10', 'last_bytes', 'streaming', 'sd', 'sd_free_mb'] },
   'fr.node': { commands: { identify: { method: 'identify', delivery: 'reliable', args: true }, describe: { method: 'describe', delivery: 'reliable' }, reboot: { method: 'reboot', delivery: 'reliable', args: true }, set_alias: { method: 'setAlias', delivery: 'reliable', args: true }, set_groups: { method: 'setGroups', delivery: 'reliable', args: true }, net_set: { method: 'netSet', delivery: 'reliable', args: true }, get_state: { method: 'getState', delivery: 'reliable' }, bind_set: { method: 'bindSet', delivery: 'reliable', args: true }, bind_clear: { method: 'bindClear', delivery: 'reliable', args: true }, bind_list: { method: 'bindList', delivery: 'reliable' } }, events: ['boot', 'binding_fired'], props: [] },
   'fr.ota': { commands: {}, events: [], props: [] },
   'fr.diag': { commands: { exec: { method: 'exec', delivery: 'reliable', args: true } }, events: ['mark'], props: [] },

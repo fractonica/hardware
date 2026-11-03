@@ -1,0 +1,7 @@
+# Pinned exactly (spec 03 §3.8); driver.yaml `dependencies` repeats the pin for `fr gen firmware`.
+# 2.1.8 (2026-09-25) is the first esp32-camera that builds on IDF v6.1 without deprecation warnings (design camera-c1
+# §9); it pulls espressif/esp_jpeg itself.
+dependencies:
+  espressif/esp32-camera:
+    version: "==2.1.8"
+    require: private

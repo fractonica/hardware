@@ -6,6 +6,8 @@ namespace fr::proto {
 const char *to_name(ChipId v)
 {
     switch (v) {
+    case ChipId::esp32:
+        return "esp32";
     case ChipId::esp32c3:
         return "esp32c3";
     case ChipId::esp32s3:
@@ -20,6 +22,10 @@ const char *to_name(ChipId v)
 
 bool from_name(std::string_view s, ChipId &out)
 {
+    if (s == "esp32") {
+        out = ChipId::esp32;
+        return true;
+    }
     if (s == "esp32c3") {
         out = ChipId::esp32c3;
         return true;

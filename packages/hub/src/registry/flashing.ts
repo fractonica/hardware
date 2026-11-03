@@ -269,6 +269,8 @@ export async function startFlash(input: FlashStartInput, hub: HubContext): Promi
           port: lease.path,
           files,
           erase: plan.erase.map((e) => ({ offset: e.offset, size: e.size })),
+          // A USB-UART bridge port: esptool's classic DTR/RTS download sequence (design camera-c1 D4).
+          ...(lease.bridge ? { before: 'default-reset' } : {}),
           after: 'no-reset',
           // The sidecar refuses with TARGET_MISMATCH before writing if the connected chip differs.
           ...(chipId !== undefined ? { expect_chip_id: chipId } : {}),

@@ -3,17 +3,17 @@
 // - csi_stream (job): issues a stream id on the generic stream route (streams/route.ts), sends fr.csi stream_start
 //   {stream_id, seconds, source?, peer_mac?} (peer: a device selector or a MAC), and the board POSTs its csi1 blocks
 //   to the node HTTP listener: counted, written to `out` (a .csi under FR_HOME) when given, and published live to
-//   /app/stream subscribers (csi/live.ts) unless live is false. It ends on the board's stream_ended or the POST's end
+//   /app/stream subscribers (streams/live.ts) unless live is false. It ends on the board's stream_ended or the POST's end
 //   (the other gets a grace; with no stream_ended its reason is the POST's end), at seconds + 10 s (then stream_stop:
 //   reason timeout), or when cancelled (stream_stop at once: reason stopped, and the job still answers what came).
-//   Once one of these came the stream is `stopping` (live.ts): an app's `start` then begins the next one after it. Hub events stream.started (first block) and
+//   Once one of these came the stream is `stopping` (streams/live.ts): an app's `start` then begins the next one after it. Hub events stream.started (first block) and
 //   stream.ended.
 // - csi_status (query): the instance's properties from the router's mirror (the latest STATE), its config source,
 //   and the running stream's counters.
 // beginCsiStream is shared with /app/stream (apps/stream.ts), whose `start` begins a stream of seconds 0.
 
 import { mkdirSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { paths } from '@fractonica/host';
 import {
@@ -42,8 +42,8 @@ import { routerInfo } from '../router/index.ts';
 import { instancesOf, sendCommandTo } from '../router/ops.ts';
 import { normalizeMac } from '../serial.ts';
 import { CsiSink, sweepCsiTemps } from '../streams/csi-sink.ts';
+import { type LiveStream, liveStreams } from '../streams/live.ts';
 import type { StreamEndReason, StreamRoutes, StreamTicket } from '../streams/route.ts';
-import { csiLive, type LiveStream } from './live.ts';
 
 /** A command's RESULT (stream_start, stream_stop). */
 export const CSI_CMD_TIMEOUT_MS = 5000;
@@ -57,11 +57,11 @@ const CSI_CAP = 'fr.csi';
 const MAC_RE = /^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$|^[0-9a-f]{12}$/i;
 
 /** The generic stream route of the node HTTP listener; CAPABILITY_UNSUPPORTED when it is not running. */
-function routesOf(hub: HubContext): StreamRoutes {
+export function routesOf(hub: HubContext, what = 'CSI streams'): StreamRoutes {
   const routes = hub.ota?.streams?.();
   if (!routes || hub.ota.httpPort() === null) {
     const why = hub.ota?.listenError();
-    throw new FrError('CAPABILITY_UNSUPPORTED', `the hub's node HTTP listener is not running${why ? ` (${why})` : ''}: CSI streams ride it, never the hub link (design csi-c1 D11)`, {
+    throw new FrError('CAPABILITY_UNSUPPORTED', `the hub's node HTTP listener is not running${why ? ` (${why})` : ''}: ${what} ride it, never the hub link (design csi-c1 D11)`, {
       remediation: [{ tool: 'hub_status', cli: 'fr hub status' }],
     });
   }
@@ -122,9 +122,17 @@ export function checkCsiOut(out: string): string {
   return o;
 }
 
-/** Removes the .csi temps a hub killed mid-stream left (main.ts, once it holds hub.lock); elsewhere nothing. */
+/** Where the start sweep looks for .csi temps: FR_HOME/csi, where checkCsiOut's hint sends captures (not all of FR_HOME). */
+export function csiRoot(): string {
+  return join(resolve(paths.home()), 'csi');
+}
+
+/**
+ * Removes the .csi temps a hub killed mid-stream left under FR_HOME/csi (main.ts, once it holds hub.lock); elsewhere
+ * nothing. A temp beside an `out` elsewhere in FR_HOME is left: the sweep walks no artifact or log trees.
+ */
 export function sweepCsiTempsAtStart(): string[] {
-  return readLockPid(paths.lock()) === process.pid ? sweepCsiTemps(paths.home()) : [];
+  return readLockPid(paths.lock()) === process.pid ? sweepCsiTemps(csiRoot()) : [];
 }
 
 const round3 = (x: number) => Math.round(x * 1000) / 1000;
@@ -159,7 +167,7 @@ export interface BegunStream {
  * the live registry (subscribers waiting on the instance hear stream.started now), then runs the job.
  */
 export function beginCsiStream(hub: HubContext, req: CsiStreamRequest): BegunStream {
-  const live = csiLive(hub);
+  const live = liveStreams(hub);
   const { dev, inst } = req;
   const running = live.get(dev.device_id, inst.name);
   if (running) {
@@ -229,7 +237,7 @@ async function streamJob(hub: HubContext, ctx: JobCtx, req: CsiStreamRequest, p:
   const { dev, inst } = req;
   const { ticket, sink, stream } = p;
   const id = ticket.id;
-  const live = csiLive(hub);
+  const live = liveStreams(hub);
   const base = { kind: 'csi' as const, instance: inst.name, stream_id: id, job_id: ctx.jobId };
   let announced = false;
   const announce = () => {
@@ -325,7 +333,7 @@ async function streamJob(hub: HubContext, ctx: JobCtx, req: CsiStreamRequest, p:
       alias: dev.alias,
       instance: inst.name,
       stream_id: id,
-      source: stream.info.source,
+      source: stream.info.source as CsiSourceName, // a csi stream's info always carries one (StreamInfo is shared with jpeg streams)
       ...(req.peerMac ? { peer_mac: req.peerMac } : {}),
       ...(sink.path ? { path: sink.path } : {}),
       live: req.live,
@@ -421,7 +429,7 @@ export const CSI_HANDLERS: Record<CsiOpName, Handler> = {
     const dev = resolveOne(hub, input.device);
     const inst = csiInstance(hub, dev, input.instance);
     const props = routerInfo(hub.router, dev.device_id)?.properties;
-    const live = csiLive(hub);
+    const live = liveStreams(hub);
     const s = live.get(dev.device_id, inst.name);
     return {
       device: dev.device_id,
@@ -434,7 +442,7 @@ export const CSI_HANDLERS: Record<CsiOpName, Handler> = {
       stream: s
         ? {
             stream_id: s.info.stream_id,
-            source: s.info.source,
+            source: s.info.source as CsiSourceName,
             started_at: s.counts.firstAt === null ? null : new Date(s.counts.firstAt).toISOString(),
             seconds: s.info.seconds,
             records: s.counts.records,

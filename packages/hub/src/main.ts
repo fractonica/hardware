@@ -11,6 +11,7 @@ import { HUB_API_PORT, HUB_VERSION, REGISTRY_HASH } from '@fractonica/protocol';
 
 import { createAppServer } from './apps/server.ts';
 import { sweepAudioTempsAtStart } from './audio/ops.ts';
+import { sweepJpegTempsAtStart } from './camera/ops.ts';
 import { sweepCsiTempsAtStart } from './csi/ops.ts';
 import { createBindings } from './bindings/index.ts';
 import type { HubContext, HubRunOptions } from './context.ts';
@@ -103,6 +104,11 @@ async function main(): Promise<void> {
   const csiTemps = sweepCsiTempsAtStart();
   if (csiTemps.length) {
     console.log(JSON.stringify({ event: 'csi_temps_removed', count: csiTemps.length }));
+  }
+  // Frame-file temps of jpeg streams a killed hub left (camera-c1 D10, D14).
+  const jpegTemps = sweepJpegTempsAtStart();
+  if (jpegTemps.length) {
+    console.log(JSON.stringify({ event: 'jpeg_temps_removed', count: jpegTemps.length }));
   }
 
   const hubSourceDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');

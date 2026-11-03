@@ -46,6 +46,7 @@ from esptool.cmds import (
 from esptool.logger import TemplateLogger, log
 from esptool.reset import HardReset
 from esptool.targets import ROM_LIST
+from esptool.util import FatalError, UnsupportedCommandError
 
 
 def emit(**kv: Any) -> None:
@@ -117,14 +118,45 @@ def port_open_error(msg: str) -> SidecarError | None:
     return None
 
 
+def connect_error(msg: str) -> SidecarError:
+    """The SidecarError for a failed detect_chip: a port error by its text, else FLASH_FAILED with a hint.
+
+    Boot mode 0xb (HSPI_FLASH_BOOT) means IO0 was low but GPIO2 high at reset: on an ESP32-CAM the micro-SD card's DAT0
+    is GPIO2, and a card that was initialised once drives it high (after an unmount too) until the board is power-cycled,
+    so the ROM never enters download mode however EN and IO0 are driven (bench, 2026-11-03)."""
+    port_err = port_open_error(msg)
+    if port_err:
+        return port_err
+    if "boot mode" in msg and "0xb" in msg:
+        return SidecarError(
+            "FLASH_FAILED", msg,
+            "boot mode 0xb: GPIO2 is held high (on an ESP32-CAM the SD card's DAT0 once the card was used): "
+            "power-cycle the board with the card removed, then retry")
+    return SidecarError("FLASH_FAILED", msg, "if the board does not respond: hold BOOT, tap RST, release BOOT, then retry")
+
+
 def connect(port: str, before: str = "default-reset"):
     set_stage("connect")
     try:
         return detect_chip(port, connect_mode=before)
     except Exception as e:  # esptool raises FatalError / serial errors
-        msg = str(e)
-        raise port_open_error(msg) or SidecarError(
-            "FLASH_FAILED", msg, "if the board does not respond: hold BOOT, tap RST, release BOOT, then retry")
+        raise connect_error(str(e)) from None
+
+
+def security_info(esp: Any) -> tuple[dict, bool]:
+    """GET_SECURITY_INFO's answer and whether the ROM had it.
+
+    The classic ESP32's ROM has no GET_SECURITY_INFO (0x14): esptool raises UnsupportedCommandError ("not supported in
+    the current download mode"). A lab board without the command has neither secure boot nor flash encryption worth
+    refusing over (both would also show in the stub's flash reads), so the probe goes on and says it could not read it."""
+    try:
+        return esp.get_security_info(), True
+    except UnsupportedCommandError:
+        return {}, False
+    except FatalError as e:
+        if "not supported" in str(e).lower():
+            return {}, False
+        raise
 
 
 def chip_name(image_chip_id: int) -> str:
@@ -156,8 +188,10 @@ def cmd_version(_: dict) -> dict:
 def cmd_probe(req: dict) -> dict:
     with connect(req["port"], req.get("before", "default-reset")) as esp:
         set_stage("identify")
-        sec = esp.get_security_info()
+        sec, has_sec = security_info(esp)
         flash_crypt_cnt = int(sec.get("flash_crypt_cnt", 0) or 0)
+        # Nothing here needs a chip id: the ESP32 has none (esptool's chip_id command reads its MAC instead), and the
+        # chip is told apart by detect_chip's magic value; read_mac(BASE_MAC) works on every ROM.
         data = {
             "chip": esp.CHIP_NAME,
             "description": esp.get_chip_description(),
@@ -166,6 +200,7 @@ def cmd_probe(req: dict) -> dict:
             "crystal_mhz": esp.get_crystal_freq(),
             "secure_boot": bool(int(sec.get("flags", 0) or 0) & 1),
             "flash_encryption": bin(flash_crypt_cnt).count("1") % 2 == 1,
+            "security_info": "read" if has_sec else "unsupported",
         }
         esp = run_stub(esp)
         attach_flash(esp)

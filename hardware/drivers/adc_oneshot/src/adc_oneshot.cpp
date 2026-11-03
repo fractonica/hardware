@@ -71,7 +71,9 @@ uint16_t AdcOneshot::full_scale_mv() const
 {
     // design m2-c3-inputs D3, *inferred* from the IDF adc_oneshot docs; codegen's ADC1_FULL_SCALE_MV must agree,
     // since the descriptor carries this value as the full_scale_mv trait.
-#if CONFIG_IDF_TARGET_ESP32C3
+#if CONFIG_IDF_TARGET_ESP32
+    return 2450;  // esp32 (inferred from the datasheet's 11/12 dB range, design camera-c1 D1)
+#elif CONFIG_IDF_TARGET_ESP32C3
     return 2500;
 #else
     return 3300;  // esp32c5 (inferred, design csi-c1 D1), esp32c6, esp32s3

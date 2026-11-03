@@ -12,6 +12,7 @@ import { AUDIO_HANDLERS } from './audio/ops.ts';
 import { NET_HANDLERS } from './bindings/ops.ts';
 import { profileApp, runBuild } from './build.ts';
 import type { Handler, HubContext } from './context.ts';
+import { CAMERA_HANDLERS } from './camera/ops.ts';
 import { CSI_HANDLERS } from './csi/ops.ts';
 import { DISPLAY_HANDLERS } from './display/ops.ts';
 import { HUB_HANDLERS } from './doctor/ops.ts';
@@ -28,14 +29,14 @@ import { assertPortFree, listPorts, nameBusyHolder } from './ports/holders.ts';
 import { PORTS_HANDLERS } from './ports/ops.ts';
 import { INVENTORY_HANDLERS } from './registry/catalog-ops.ts';
 import { type FlashStartInput, startFlash } from './registry/flashing.ts';
-import { isDeviceId, registryOf } from './registry/hub.ts';
+import { isDeviceId, registryOf, resolvePort } from './registry/hub.ts';
 import { REGISTRY_HANDLERS } from './registry/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
 import { routerStatus } from './router/index.ts';
 import { LINKS_HANDLERS } from './router/ops.ts';
 import { type ProcessView, restStats, type WsStatsView } from './router/scale.ts';
 import { OTA_HANDLERS } from './ota/ops.ts';
-import { normalizeMac } from './serial.ts';
+import { normalizeMac, pathKey } from './serial.ts';
 import { TESTS_HANDLERS } from './tests/ops.ts';
 
 // Moved to context.ts (design c3 §4); re-exported for existing importers.
@@ -110,10 +111,20 @@ export function logDevices(
     }
     const registered = registryDevices(hub, selector);
     if (registered?.length) {
-      return registered;
+      // A USB-UART bridge port stores its lines under its path key (design camera-c1 D3): added for the device it learned.
+      const keys = new Set(registered);
+      for (const id of registered) {
+        try {
+          keys.add(hub.serial.resolve(id).key);
+        } catch {
+          // not attached (or on several ports): its own lines only
+        }
+      }
+      return [...keys];
     }
     const bare = selector.replace(/^(mac|port|id):/, '');
-    const key = [normalizeMac(bare), bare.replace('/dev/tty.', '/dev/cu.')].find((k) => hub.logs.hasDevice(k));
+    // A detached bridge port stored its lines under `path:<basename>` (design camera-c1 D3), so its bare /dev path reads them too.
+    const key = [normalizeMac(bare), bare.replace('/dev/tty.', '/dev/cu.'), pathKey(bare)].find((k) => hub.logs.hasDevice(k));
     if (key === undefined) {
       throw new FrError('NOT_FOUND', `no attached port or registered device matches ${selector}`, {
         remediation: [
@@ -376,13 +387,24 @@ export const HANDLERS: Record<OpName, Handler> = {
   flash_start: (input: FlashStartInput, hub) => startFlash(input, hub),
 
   device_reset: async (input: { port: string; mode: 'hard' | 'bootloader'; wait_s?: number }, hub) => {
-    const entry = await hub.serial.resolveWait(input.port);
-    const alias = isDeviceId(entry.key) ? registryOf(hub).get(entry.key)?.alias : undefined;
+    // A port, or a registry selector (`fr devices reset cam-esp32`) and the port its device is on: a bridge port that
+    // learned the id from the board's HELLO included (design camera-c1 D3, §11).
+    const entry = await resolvePort(hub, input.port);
+    // A bridge port's device is the one its board's HELLO named (design camera-c1 D3), a chip's own USB is keyed by it.
+    const deviceId = entry.deviceId ?? (isDeviceId(entry.key) ? entry.key : undefined);
+    const alias = deviceId ? registryOf(hub).get(deviceId)?.alias : undefined;
     // A serial lease, or another program (a Web Serial tab), has the port: refused before the job (design c6 D5).
     await assertPortFree(hub, { ...entry, ...(alias ? { alias } : {}) });
-    const job = hub.jobs.start('reset', [entry.key], [`port:${entry.key}`, `device:${entry.key}`], async (ctx) => {
+    const targets = [entry.key, ...(deviceId && deviceId !== entry.key ? [deviceId] : [])];
+    const job = hub.jobs.start('reset', targets, [`port:${entry.key}`, ...targets.map((t) => `device:${t}`)], async (ctx) => {
       if (input.mode === 'hard') {
         return { mode: 'hard', via: await hardResetCapturing(hub, entry.key, ctx) };
+      }
+      if (entry.bridge) {
+        // EN and IO0 hang on the bridge's RTS and DTR: esptool's classic download sequence on the hub's own handle
+        // (design camera-c1 D4); the classic ESP32 has no FORCE_DOWNLOAD_BOOT bit for the firmware's own path.
+        const r = await hub.serial.enterBootloader(entry.key);
+        return { mode: 'bootloader', via: 'hub', bridge: r.bridge };
       }
       const lease = await hub.serial.lease(entry.key, `job ${ctx.jobId}`);
       try {
@@ -501,8 +523,10 @@ export const HANDLERS: Record<OpName, Handler> = {
         return r.response;
       };
     } else {
-      const { key } = await hub.serial.resolveWait(input.port);
-      fenceDiagDevice(hub, isDeviceId(key) ? key : null, input.line);
+      // The port, or the port of the one registered device the selector names (an alias, over a bridge port too).
+      const entry = await resolvePort(hub, input.port);
+      const key = entry.key;
+      fenceDiagDevice(hub, entry.deviceId ?? (isDeviceId(key) ? key : null), input.line);
       request = (line) => diagRequest(hub, key, line, input.timeout_s);
     }
     const cursor = mintCursor(hub);
@@ -553,4 +577,6 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...AUDIO_HANDLERS,
   // CSI-1 (design csi-c1 D13): csi_stream, csi_status (stream C's stubs until H).
   ...CSI_HANDLERS,
+  // CAM-1 (design camera-c1 D11): camera_snap, camera_stream, camera_status, camera_set, camera_sd_* (H; placeholders).
+  ...CAMERA_HANDLERS,
 };

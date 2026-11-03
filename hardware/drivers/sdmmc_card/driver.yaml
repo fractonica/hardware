@@ -1,0 +1,23 @@
+# Driver manifest (design camera-c1 D9, §10; spec 07 §7.8). A store driver (ServiceFacts.store): a profile names it on
+# an fr.camera instance as `store: { driver: sdmmc_card, bind: sd_cards.<name> }`, and `fr gen firmware` fills
+# fr::drv::SdmmcCard::Config from that board entry. Stream F implements it (CAM-1).
+schema: fractonica/driver@1
+id: sdmmc_card
+summary: A FAT micro-SD card on the SD/MMC host (esp_vfs_fat_sdmmc_mount, 1-bit, 20 MHz, no auto-format) as the module's store of recordings; state and free space reported, recordings listed, read and removed.
+implements: hal.BlockStore
+class: fr::drv::SdmmcCard               # header: include/fr/drv/sdmmc_card.hpp
+# SOC_SDMMC_HOST_SUPPORTED: the ESP32 (slot pins fixed by IOMUX) and the S3 (GPIO matrix). Benched on the ESP32-CAM only.
+targets: [esp32, esp32s3]
+binds: sd_cards
+accepts_kinds: [sdmmc]
+config:                                 # same order as SdmmcCard::Config
+  slot:     { type: u8, from: board.slot, range: [0, 1], doc: "the SD/MMC host slot; on the ESP32 slot 1 is the only one off the flash's pins" }
+  # v1 is 1-bit (design D5, D9): D1-D3 are not claimed and stay free for other uses (the ESP32-CAM's flash LED is on its
+  # D1). A 4-bit board waits for a driver version that takes d1..d3 from the entry.
+  width:    { type: u8, from: board.width, range: [1, 1], default: 1, doc: "bus width; v1: 1-bit only" }
+  clk:      { type: gpio, from: board.clk, doc: "fixed by IOMUX on the ESP32 (slot 1: 14); routed on the S3" }
+  cmd:      { type: gpio, from: board.cmd, doc: "ESP32 slot 1: 15" }
+  d0:       { type: gpio, from: board.d0, doc: "ESP32 slot 1: 2 (a strapping pin the card pulls up; download mode is through the base's EN/IO0)" }
+  freq_khz: { type: u16, default: 20000, range: [400, 40000], doc: "the bus clock; 20 MHz is SDMMC_FREQ_DEFAULT, what the spike mounted at" }
+resources: { gpio: 3, sdmmc_slot: 1 }   # 1-bit: CLK, CMD, D0; one slot of the board's resources.sdmmc_slot
+dependencies: {}

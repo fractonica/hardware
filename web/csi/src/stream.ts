@@ -66,8 +66,12 @@ const info = (s: StreamDescription): StreamInfo => ({
   stream_id: s.streamId,
   kind: s.kind,
   format: s.format,
-  source: s.source,
+  ...(s.source !== undefined ? { source: s.source } : {}),
   ...(s.peerMac !== undefined ? { peer_mac: s.peerMac } : {}),
+  ...(s.to !== undefined ? { to: s.to } : {}),
+  ...(s.intervalMs !== undefined ? { interval_ms: s.intervalMs } : {}),
+  ...(s.frameSize !== undefined ? { frame_size: s.frameSize } : {}),
+  ...(s.quality !== undefined ? { quality: s.quality } : {}),
   seconds: s.seconds,
 });
 
@@ -87,7 +91,13 @@ export const streams = {
     });
     const sub = { stream: null as StreamInfo | null, open: false, close: () => {} };
     const emit = (e: StreamEvent) => opts.onEvent?.(e);
-    sub.close = client.subscribe(device, instance, onBlock, {
+    // The SDK parses each block by its stream's kind (design camera-c1 D12); this app reads csi streams only.
+    const onCsiBlock: Parameters<StreamClient['subscribe']>[2] = (block, bytes, stream) => {
+      if (stream.kind === 'csi') {
+        onBlock(block as CsiBlock, bytes);
+      }
+    };
+    sub.close = client.subscribe(device, instance, onCsiBlock, {
       ...(opts.start ? { start: opts.start } : {}),
       onEvent: (e) => {
         switch (e.type) {

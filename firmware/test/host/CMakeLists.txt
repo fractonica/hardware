@@ -184,9 +184,12 @@ target_include_directories(fr_sim PUBLIC ${HOST_DIR} PRIVATE ${COMPONENTS_DIR}/f
 target_link_libraries(fr_sim PUBLIC fr_host_lib Threads::Threads)
 target_compile_options(fr_sim PRIVATE ${FR_CXX_WARNINGS})
 
+# sdmmc_card's layout header (design camera-c1 §10: the card's path math, IDF-free) for its host test.
+set(FR_CARD_INCLUDES ${REPO_DIR}/hardware/drivers/sdmmc_card/include)
+
 add_executable(fr_host_tests ${FR_TEST_SRCS} ${FR_FUZZ_TARGET_SRCS})
 target_link_libraries(fr_host_tests PRIVATE fr_sim fr_audio_sim fr_radio_sim fr_panel_sim fr_fixture_sim fr_host_lib)
-target_include_directories(fr_host_tests PRIVATE ${FR_FIXTURE_INCLUDES})
+target_include_directories(fr_host_tests PRIVATE ${FR_FIXTURE_INCLUDES} ${FR_CARD_INCLUDES})
 target_compile_options(fr_host_tests PRIVATE ${FR_CXX_WARNINGS})
 
 add_executable(fr_host_fuzz ${FR_FUZZ_SRCS})

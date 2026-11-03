@@ -1,5 +1,6 @@
-// fr_serial (spec 03 §3.4, 05 §5.12.3, design c2 §5): the only reader and writer of the USB-Serial/JTAG.
-// Output is two bounded rings drained by one writer task, frames (and diag responses) before logs; a
+// fr_serial (spec 03 §3.4, 05 §5.12.3, design c2 §5): the only reader and writer of the serial port: the
+// USB-Serial/JTAG, or UART0 at 115200 under CONFIG_FR_SERIAL_UART (design camera-c1 D2: a board behind a USB-UART
+// bridge; the same rings, tasks and bytes on the wire). Output is two bounded rings drained by one writer task, frames (and diag responses) before logs; a
 // producer never blocks and a full ring drops and counts. Input is split into lines: `@fr1:` lines go
 // to the frame handler, other lines to the text handler (the serial command channel). Nothing echoes.
 //
@@ -36,8 +37,9 @@ struct Stats {
 };
 
 /**
- * Installs the USJ driver (rx/tx 4096 B), sends stdout through it, hooks ESP_LOG into the log ring and
- * starts the reader and writer tasks. Call once; returns false if the driver could not be installed.
+ * Installs the port's driver (USJ rx/tx 4096 B; UART0 rx 2048 / tx 8192 B under CONFIG_FR_SERIAL_UART), sends
+ * stdout through it, hooks ESP_LOG into the log ring and starts the reader and writer tasks. Call once; returns
+ * false if the driver could not be installed.
  */
 bool start(const Handlers &h);
 
@@ -52,7 +54,8 @@ bool write_frame(uint8_t type, std::span<const uint8_t> body);
 
 /**
  * Whether a USB host is attached (it sends SOFs), which is what makes the serial ENV channel a hub link
- * (design c3 §3). True even while no program has the port open; false on a charger.
+ * (design c3 §3). True even while no program has the port open; false on a charger. Always true on UART0
+ * (CONFIG_FR_SERIAL_UART): a bridge has no presence signal, and the hub learns the device from the HELLO.
  */
 bool connected();
 

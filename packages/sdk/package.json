@@ -6,7 +6,8 @@
   "exports": {
     ".": { "@fractonica/source": "./src/index.ts", "default": "./dist/index.js" },
     "./wire": { "@fractonica/source": "./src/wire.ts", "default": "./dist/wire.js" },
-    "./csi": { "@fractonica/source": "./src/csi.ts", "default": "./dist/csi.js" }
+    "./csi": { "@fractonica/source": "./src/csi.ts", "default": "./dist/csi.js" },
+    "./camera": { "@fractonica/source": "./src/camera.ts", "default": "./dist/camera.js" }
   },
   "files": ["dist"],
   "scripts": {

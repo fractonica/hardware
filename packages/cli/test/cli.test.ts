@@ -271,6 +271,29 @@ describe('fr (subprocess)', { timeout: 20_000 }, () => {
     replies.delete('audio_monitor');
   });
 
+  it('passes a numeric positional as a number (`camera sd fetch|rm <device> <recording>`), a word for a field that takes one, and options as before', { timeout: 60_000 }, async () => {
+    const run = async (args: string[], want: { op: string; body: Record<string, unknown> }) => {
+      const r = await fr([...args, '--json']);
+      expect(r.code, args.join(' ')).toBe(0);
+      expect(requests.at(-1)).toEqual(want);
+    };
+    // The bench round's miss (design camera-c1 §11): the recording id reached the hub as a string.
+    await run(['camera', 'sd', 'fetch', 'cam-esp32', '941721632'], { op: 'camera_sd_fetch', body: { device: 'cam-esp32', recording: 941721632, wait_s: 110 } });
+    await run(['camera', 'sd', 'rm', 'cam-esp32', '7'], { op: 'camera_sd_delete', body: { device: 'cam-esp32', recording: 7 } });
+    // A word that is no number stays one: the hub's schema names the field (expected number).
+    await run(['camera', 'sd', 'rm', 'cam-esp32', 'last'], { op: 'camera_sd_delete', body: { device: 'cam-esp32', recording: 'last' } });
+    // A device selector that looks like a number is still text (a string field).
+    await run(['camera', 'status', '12345'], { op: 'camera_status', body: { device: '12345' } });
+    // `bind rm <device> <slot>` takes a slot number or `all`: both reach the hub as given.
+    await run(['bind', 'rm', 'pad-c6', '3'], { op: 'binding_clear', body: { device: 'pad-c6', slot: '3' } });
+    await run(['bind', 'rm', 'pad-c6', 'all'], { op: 'binding_clear', body: { device: 'pad-c6', slot: 'all' } });
+    // Numeric options keep their parser: a number, or INVALID_ARGS for a word.
+    await run(['latency', 'tag:poc', '--window', '120'], { op: 'latency_stats', body: { selector: 'tag:poc', window_s: 120 } });
+    const bad = await fr(['camera', 'stream', 'cam-esp32', '--seconds', 'ten', '--json']);
+    expect(bad.code).toBe(64);
+    expect(JSON.parse(bad.stdout)).toMatchObject({ ok: false, error: { code: 'INVALID_ARGS' } });
+  });
+
   it('generates the C6 commands (design c6 §3.2, spec 09 §9.5)', { timeout: 90_000 }, async () => {
     const run = async (args: string[], want: { op: string; body: Record<string, unknown> }) => {
       const r = await fr([...args, '--json']);

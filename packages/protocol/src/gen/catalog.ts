@@ -2174,6 +2174,519 @@ export const CATALOG: Catalog = {
       "events": []
     },
     {
+      "id": 11,
+      "name": "fr.camera",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "A camera module that photographs on request, streams a live JPEG view to the hub, and records to its own micro-SD card for the hub to collect later.",
+      "doc": "Design camera-c1 D7, D8, D10, §10. The sensor (an OV2640 on the AI-Thinker ESP32-CAM) is read through the chip's\nDVP interface and delivers JPEG frames; the module keeps `frames`, `fps_x10` and `last_bytes` live. Frames never\ntravel on the hub link: stream_start makes the node POST them to the hub's HTTP listener (`POST /v1/stream/in/\n<stream_id>`, chunked, X-Fr-Kind jpeg, X-Fr-Format mjpg1: one frame per chunk behind a 24-byte head, design\ncamera-c1 D10) and/or write them to the card (`/sdcard/fr/<stream_id 8 hex>/<index 6 digits>.jpg`), as `to` says.\nA snapshot is a stream of max_frames 1; a timelapse a stream with interval_ms; a recording a stream `to sd` that\nruns without the hub. One stream at a time (BUSY otherwise); a stream id is one the hub issued. The card is\nmounted at boot when config `sd` is true (a missing card is CardState none, not an error); recordings on it are\nlisted with sd_list, fetched to the hub with sd_fetch (an mjpg1 stream whose frames carry flags b0) and removed\nwith sd_delete. `set` changes the sensor now and keeps the settings until reboot; frame sizes above the trait\nmax_frame_size (the size the frame buffers were made for at init) are INVALID_ARGS.\n",
+      "types": {
+        "FrameSize": {
+          "qvga": 0,
+          "vga": 1,
+          "svga": 2,
+          "xga": 3,
+          "sxga": 4,
+          "uxga": 5
+        },
+        "Target": {
+          "hub": 0,
+          "sd": 1,
+          "both": 2
+        },
+        "StreamEndReason": {
+          "stopped": 0,
+          "done": 1,
+          "net_lost": 2,
+          "overflow": 3,
+          "error": 4
+        },
+        "CardState": {
+          "none": 0,
+          "mounted": 1,
+          "error": 2
+        }
+      },
+      "messages": {
+        "Recording": {
+          "doc": "A recording on the card: the stream_id that made it (its directory name, 8 hex), its frame count and their total bytes.",
+          "fields": [
+            {
+              "name": "id",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "frames",
+              "id": 2,
+              "type": "u32"
+            },
+            {
+              "name": "bytes",
+              "id": 3,
+              "type": "u32"
+            }
+          ]
+        }
+      },
+      "traits": [
+        {
+          "name": "sensor",
+          "id": 1,
+          "type": "u8",
+          "doc": "the sensor fitted: 1 ov2640 (from the board entry; 0 unknown)"
+        },
+        {
+          "name": "max_frame_size",
+          "id": 2,
+          "type": "FrameSize",
+          "default": "uxga",
+          "doc": "the largest frame_size the buffers take (config max_frame_size)"
+        }
+      ],
+      "config": [
+        {
+          "name": "frame_size",
+          "type": "FrameSize",
+          "default": "svga",
+          "doc": "the frame size at boot (800x600); `set` changes it until reboot"
+        },
+        {
+          "name": "max_frame_size",
+          "type": "FrameSize",
+          "default": "uxga",
+          "doc": "the frame buffers are sized for this at init; frame_size never exceeds it"
+        },
+        {
+          "name": "quality",
+          "type": "u8",
+          "default": 12,
+          "range": [
+            4,
+            63
+          ],
+          "doc": "JPEG quality, lower is better (esp32-camera's scale)"
+        },
+        {
+          "name": "fb_count",
+          "type": "u8",
+          "default": 2,
+          "range": [
+            1,
+            3
+          ],
+          "doc": "frame buffers (PSRAM); 2 lets the sensor fill one while the other is sent"
+        },
+        {
+          "name": "vflip",
+          "type": "bool",
+          "default": false,
+          "doc": "flip the image vertically"
+        },
+        {
+          "name": "hmirror",
+          "type": "bool",
+          "default": false,
+          "doc": "mirror the image horizontally"
+        },
+        {
+          "name": "brightness",
+          "type": "i8",
+          "default": 0,
+          "range": [
+            -2,
+            2
+          ]
+        },
+        {
+          "name": "contrast",
+          "type": "i8",
+          "default": 0,
+          "range": [
+            -2,
+            2
+          ]
+        },
+        {
+          "name": "saturation",
+          "type": "i8",
+          "default": 0,
+          "range": [
+            -2,
+            2
+          ]
+        },
+        {
+          "name": "xclk_hz",
+          "type": "u32",
+          "default": 20000000,
+          "range": [
+            8000000,
+            24000000
+          ],
+          "unit": "Hz",
+          "doc": "the sensor's clock from the chip (XCLK, an LEDC channel); 20 MHz on the OV2640"
+        },
+        {
+          "name": "sd",
+          "type": "bool",
+          "default": true,
+          "doc": "mount the card at boot; a missing card is CardState none, not an error. false: the card is never touched (sd_* answer UNSUPPORTED)"
+        }
+      ],
+      "properties": [
+        {
+          "name": "frames",
+          "id": 1,
+          "type": "u32",
+          "doc": "frames captured since boot"
+        },
+        {
+          "name": "fps_x10",
+          "id": 2,
+          "type": "u16",
+          "doc": "frames per second over the last second, x10 (0 while idle)"
+        },
+        {
+          "name": "last_bytes",
+          "id": 3,
+          "type": "u32",
+          "doc": "the last frame's JPEG bytes"
+        },
+        {
+          "name": "streaming",
+          "id": 4,
+          "type": "bool",
+          "doc": "a stream (or an sd_fetch) runs"
+        },
+        {
+          "name": "sd",
+          "id": 5,
+          "type": "CardState",
+          "doc": "the card: none (no card, or config sd false), mounted, error (mount or write failed)"
+        },
+        {
+          "name": "sd_free_mb",
+          "id": 6,
+          "type": "u32",
+          "unit": "MB",
+          "doc": "free space on the card; 0 when none"
+        }
+      ],
+      "commands": [
+        {
+          "name": "stream_start",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Starts a stream of JPEG frames (design camera-c1 D8): to the hub over HTTP (an mjpg1 POST to /v1/stream/in/<stream_id>), to the card (a recording named by the stream id), or both. Dispatch never blocks: OK once the fr_stream task has it, BUSY while another runs, INVALID_ARGS for `to` sd or both with no card mounted, or a frame_size above the trait max_frame_size. interval_ms paces by each frame's start time (0: as fast as the sensor and the path allow); seconds and max_frames end it done (0: no limit, until stream_stop).",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32",
+              "doc": "issued by the hub; the POST path and the recording's directory name it"
+            },
+            {
+              "name": "seconds",
+              "id": 2,
+              "type": "u16",
+              "unit": "s",
+              "doc": "0: until stream_stop (or max_frames)"
+            },
+            {
+              "name": "interval_ms",
+              "id": 3,
+              "type": "u32",
+              "unit": "ms",
+              "doc": "time between frame starts; 0: as fast as the path allows (a live view)"
+            },
+            {
+              "name": "max_frames",
+              "id": 4,
+              "type": "u32",
+              "doc": "frames to take; 0: no limit. 1 is a snapshot"
+            },
+            {
+              "name": "to",
+              "id": 5,
+              "type": "Target",
+              "default": "hub"
+            },
+            {
+              "name": "frame_size",
+              "id": 6,
+              "type": "FrameSize",
+              "optional": true,
+              "doc": "absent: the current frame_size (config, or the last set); for this stream only"
+            },
+            {
+              "name": "quality",
+              "id": 7,
+              "type": "u8",
+              "optional": true,
+              "range": [
+                4,
+                63
+              ],
+              "doc": "absent: the current quality; for this stream only"
+            }
+          ],
+          "examples": [
+            {
+              "stream_id": 1,
+              "seconds": 0,
+              "interval_ms": 0,
+              "max_frames": 1
+            },
+            {
+              "stream_id": 2,
+              "seconds": 20,
+              "interval_ms": 0,
+              "max_frames": 0,
+              "to": "hub"
+            },
+            {
+              "stream_id": 3,
+              "seconds": 0,
+              "interval_ms": 1000,
+              "max_frames": 600,
+              "to": "sd",
+              "frame_size": "xga",
+              "quality": 10
+            }
+          ]
+        },
+        {
+          "name": "stream_stop",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Ends stream `stream_id` (stream_ended reason stopped); NOT_FOUND when it is not the running stream.",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32"
+            }
+          ],
+          "examples": [
+            {
+              "stream_id": 2
+            }
+          ]
+        },
+        {
+          "name": "set",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Changes the sensor's settings now and keeps them until reboot (absent fields stay). INVALID_ARGS for a frame_size above the trait max_frame_size. A running stream takes the new settings from its next frame.",
+          "fields": [
+            {
+              "name": "frame_size",
+              "id": 1,
+              "type": "FrameSize",
+              "optional": true
+            },
+            {
+              "name": "quality",
+              "id": 2,
+              "type": "u8",
+              "optional": true,
+              "range": [
+                4,
+                63
+              ]
+            },
+            {
+              "name": "vflip",
+              "id": 3,
+              "type": "bool",
+              "optional": true
+            },
+            {
+              "name": "hmirror",
+              "id": 4,
+              "type": "bool",
+              "optional": true
+            },
+            {
+              "name": "brightness",
+              "id": 5,
+              "type": "i8",
+              "optional": true,
+              "range": [
+                -2,
+                2
+              ]
+            },
+            {
+              "name": "contrast",
+              "id": 6,
+              "type": "i8",
+              "optional": true,
+              "range": [
+                -2,
+                2
+              ]
+            },
+            {
+              "name": "saturation",
+              "id": 7,
+              "type": "i8",
+              "optional": true,
+              "range": [
+                -2,
+                2
+              ]
+            }
+          ],
+          "examples": [
+            {
+              "frame_size": "xga",
+              "quality": 10
+            },
+            {
+              "vflip": true,
+              "hmirror": true
+            }
+          ]
+        },
+        {
+          "name": "sd_list",
+          "id": 4,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "bulk": true,
+          "doc": "The recordings on the card, oldest first, from the `from`-th (0: the first): at most 64 per answer, `next` the index to ask for the rest (0: none left). UNSUPPORTED without a card (property sd none or error). BULK: TCP or serial, never over a gateway.",
+          "fields": [
+            {
+              "name": "from",
+              "id": 1,
+              "type": "u32",
+              "default": 0
+            }
+          ],
+          "result": [
+            {
+              "name": "recordings",
+              "id": 1,
+              "type": "array<Recording>",
+              "max": 64
+            },
+            {
+              "name": "next",
+              "id": 2,
+              "type": "u32",
+              "doc": "the `from` of the next page; 0: this was the last"
+            }
+          ],
+          "examples": [
+            {
+              "from": 0
+            }
+          ]
+        },
+        {
+          "name": "sd_fetch",
+          "id": 5,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Streams recording `recording`'s frames to the hub as an mjpg1 stream (flags b0 set), from frame `from_frame`; ends done after the last. BUSY while a stream runs; NOT_FOUND for a recording not on the card; UNSUPPORTED without a card.",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32",
+              "doc": "issued by the hub; the POST path names it"
+            },
+            {
+              "name": "recording",
+              "id": 2,
+              "type": "u32",
+              "doc": "the recording's id (its stream_id when made)"
+            },
+            {
+              "name": "from_frame",
+              "id": 3,
+              "type": "u32",
+              "default": 0
+            }
+          ],
+          "examples": [
+            {
+              "stream_id": 9,
+              "recording": 3
+            }
+          ]
+        },
+        {
+          "name": "sd_delete",
+          "id": 6,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Removes recording `recording` from the card (its directory and frames); OK when it is already gone. UNSUPPORTED without a card; BUSY while a stream writes to or reads from it.",
+          "fields": [
+            {
+              "name": "recording",
+              "id": 1,
+              "type": "u32"
+            }
+          ],
+          "examples": [
+            {
+              "recording": 3
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "name": "stream_ended",
+          "id": 1,
+          "priority": "normal",
+          "doc": "A stream (or sd_fetch) ended: stopped (stream_stop), done (`seconds` or `max_frames` reached), net_lost (a send stalled 3 s or the connection dropped), overflow (the card is full or failed mid-stream), error (the sensor failed).",
+          "fields": [
+            {
+              "name": "stream_id",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "reason",
+              "id": 2,
+              "type": "StreamEndReason"
+            },
+            {
+              "name": "frames",
+              "id": 3,
+              "type": "u32",
+              "doc": "frames the stream covered, dropped ones included (the index it reached)"
+            },
+            {
+              "name": "dropped",
+              "id": 4,
+              "type": "u32",
+              "doc": "frames the sensor delivered that the stream could not take (the hub path behind)"
+            },
+            {
+              "name": "bytes",
+              "id": 5,
+              "type": "u32",
+              "doc": "JPEG bytes sent and/or written"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": 240,
       "name": "fr.node",
       "version": "1.0",
@@ -2552,4 +3065,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0xbdb52e7a;
+export const CATALOG_HASH = 0x7df39e8e;

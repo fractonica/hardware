@@ -7,6 +7,7 @@
 import { z } from 'zod';
 
 import { AUDIO_IN_END_REASONS, AUDIO_OUT_END_REASONS } from './ops/audio.ts';
+import { CAMERA_END_REASONS, CAMERA_FRAME_SIZES, CAMERA_TARGETS } from './ops/camera.ts';
 import { CSI_END_REASONS, CSI_SOURCES } from './ops/csi.ts';
 import { INPUT_LAYERS } from './ops/links.ts';
 import { JOB_KINDS, JOB_ORIGINS, JOB_STATUSES, PORT_STATES } from './types.ts';
@@ -263,18 +264,29 @@ export const AudioStreamEndedFields = z.looseObject({
   job_id: z.string().optional(),
 });
 
-/** The kinds of stream the generic route carries (design csi-c1 D11): the POST's X-Fr-Kind. */
-export const STREAM_KINDS = ['csi'] as const;
+/**
+ * The kinds of stream the generic route carries (design csi-c1 D11, camera-c1 D10): the POST's X-Fr-Kind. csi: fr.csi
+ * records (format csi1); jpeg: fr.camera frames, one per block (format mjpg1).
+ */
+export const STREAM_KINDS = ['csi', 'jpeg'] as const;
 export type StreamKind = (typeof STREAM_KINDS)[number];
 
-/** stream.started (design csi-c1 D11): the hub issued a stream (csi_stream, or an /app/stream subscriber) and the board's first block arrived. */
+/**
+ * stream.started (design csi-c1 D11, camera-c1 D11): the hub issued a stream (csi_stream, camera_stream, camera_snap,
+ * camera_sd_fetch, or an /app/stream subscriber) and the board's first block arrived. source is a csi stream's; to,
+ * interval_ms, frame_size and quality a jpeg stream's.
+ */
 export const StreamStartedFields = z.looseObject({
   kind: z.enum(STREAM_KINDS),
   instance: z.string(),
   stream_id: z.number().int(),
-  /** The POST's X-Fr-Format: csi1. */
+  /** The POST's X-Fr-Format: csi1, mjpg1. */
   format: z.string(),
   source: z.enum(CSI_SOURCES).optional(),
+  to: z.enum(CAMERA_TARGETS).optional(),
+  interval_ms: z.number().int().optional(),
+  frame_size: z.enum(CAMERA_FRAME_SIZES).optional(),
+  quality: z.number().int().optional(),
   /** 0: until stopped. */
   seconds: z.number().int(),
   path: z.string().optional(),
@@ -282,15 +294,20 @@ export const StreamStartedFields = z.looseObject({
   job_id: z.string().optional(),
 });
 
-/** stream.ended (design csi-c1 D11): its end with the figures (the board's stream_ended, and the hub's own count); `timeout` when that never came. */
+/**
+ * stream.ended (design csi-c1 D11, camera-c1 D11): its end with the figures (the board's stream_ended, and the hub's
+ * own count); `timeout` when that never came. `records` are csi records or jpeg frames (dropped ones not included);
+ * `bytes` the JPEG bytes of a jpeg stream.
+ */
 export const StreamEndedFields = z.looseObject({
   kind: z.enum(STREAM_KINDS),
   instance: z.string(),
   stream_id: z.number().int(),
-  reason: z.enum(CSI_END_REASONS),
+  reason: z.union([z.enum(CSI_END_REASONS), z.enum(CAMERA_END_REASONS)]),
   records: z.number().int(),
   dropped: z.number().int(),
   blocks: z.number().int(),
+  bytes: z.number().int().optional(),
   seconds: z.number(),
   path: z.string().optional(),
   job_id: z.string().optional(),

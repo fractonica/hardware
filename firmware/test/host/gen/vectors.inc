@@ -28,6 +28,7 @@
 #include "touch.hpp"
 #include "csi.hpp"
 #include "radio_tx.hpp"
+#include "camera.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -41,7 +42,7 @@ inline std::expected<fr::wire::SerialFrame, fr::wire::DecodeErr> decode_serial(s
     return fr::wire::decode_line({reinterpret_cast<const char *>(in.data()), in.size()}, scratch);
 }
 
-inline constexpr size_t kCount = 684;
+inline constexpr size_t kCount = 739;
 
 template <class V>
 void for_each(V &&v)
@@ -6585,6 +6586,893 @@ void for_each(V &&v)
         bool x = false;
         x = true;
         v.value("fr.radio_tx.sending.state.max", "fr.radio_tx.sending.state", x, fr::cap::encode_radio_tx_sending_state, fr::cap::decode_radio_tx_sending_state, "0801", true);
+    }
+    // fr.camera.traits.defaults (cap fr.camera.traits)
+    {
+        fr::cap::CameraTraits x{};
+        x.sensor = 0;
+        x.max_frame_size = CameraFrameSize::uxga;
+        v.value("fr.camera.traits.defaults", "fr.camera.traits", x, enc, fr::cap::decode_camera_traits, "1005", true);
+    }
+    // fr.camera.traits.sample (cap fr.camera.traits)
+    {
+        fr::cap::CameraTraits x{};
+        x.sensor = 177;
+        x.max_frame_size = CameraFrameSize::xga;
+        v.value("fr.camera.traits.sample", "fr.camera.traits", x, enc, fr::cap::decode_camera_traits, "08b1011003", true);
+    }
+    // fr.camera.traits.max (cap fr.camera.traits)
+    {
+        fr::cap::CameraTraits x{};
+        x.sensor = 255;
+        x.max_frame_size = CameraFrameSize::uxga;
+        v.value("fr.camera.traits.max", "fr.camera.traits", x, enc, fr::cap::decode_camera_traits, "08ff011005", true);
+    }
+    // fr.camera.stream_start.args.defaults (cap fr.camera.stream_start.args)
+    {
+        fr::cap::CameraStreamStartArgs x{};
+        x.stream_id = 0;
+        x.seconds = 0;
+        x.interval_ms = 0;
+        x.max_frames = 0;
+        x.to = CameraTarget::hub;
+        v.value("fr.camera.stream_start.args.defaults", "fr.camera.stream_start.args", x, enc, fr::cap::decode_camera_stream_start_args, "", true);
+    }
+    // fr.camera.stream_start.args.sample (cap fr.camera.stream_start.args)
+    {
+        fr::cap::CameraStreamStartArgs x{};
+        x.stream_id = 2654435761u;
+        x.seconds = 62306;
+        x.interval_ms = 3668339987u;
+        x.max_frames = 2027808452;
+        x.to = CameraTarget::both;
+        x.has_frame_size = true;
+        x.frame_size = CameraFrameSize::svga;
+        x.has_quality = true;
+        x.quality = 11;
+        v.value("fr.camera.stream_start.args.sample", "fr.camera.stream_start.args", x, enc, fr::cap::decode_camera_stream_start_args, "08b1f3ddf10910e2e6031893da99d50d20c4cdf7c60728023002380b", true);
+    }
+    // fr.camera.stream_start.args.max (cap fr.camera.stream_start.args)
+    {
+        fr::cap::CameraStreamStartArgs x{};
+        x.stream_id = 4294967295u;
+        x.seconds = 65535;
+        x.interval_ms = 4294967295u;
+        x.max_frames = 4294967295u;
+        x.to = CameraTarget::both;
+        x.has_frame_size = true;
+        x.frame_size = CameraFrameSize::uxga;
+        x.has_quality = true;
+        x.quality = 63;
+        v.value("fr.camera.stream_start.args.max", "fr.camera.stream_start.args", x, enc, fr::cap::decode_camera_stream_start_args, "08ffffffff0f10ffff0318ffffffff0f20ffffffff0f28023005383f", true);
+    }
+    // fr.camera.stream_start.args.example_0 (cap fr.camera.stream_start.args)
+    {
+        fr::cap::CameraStreamStartArgs x{};
+        x.stream_id = 1;
+        x.seconds = 0;
+        x.interval_ms = 0;
+        x.max_frames = 1;
+        x.to = CameraTarget::hub;
+        v.value("fr.camera.stream_start.args.example_0", "fr.camera.stream_start.args", x, enc, fr::cap::decode_camera_stream_start_args, "08012001", true);
+    }
+    // fr.camera.stream_start.args.example_1 (cap fr.camera.stream_start.args)
+    {
+        fr::cap::CameraStreamStartArgs x{};
+        x.stream_id = 2;
+        x.seconds = 20;
+        x.interval_ms = 0;
+        x.max_frames = 0;
+        x.to = CameraTarget::hub;
+        v.value("fr.camera.stream_start.args.example_1", "fr.camera.stream_start.args", x, enc, fr::cap::decode_camera_stream_start_args, "08021014", true);
+    }
+    // fr.camera.stream_start.args.example_2 (cap fr.camera.stream_start.args)
+    {
+        fr::cap::CameraStreamStartArgs x{};
+        x.stream_id = 3;
+        x.seconds = 0;
+        x.interval_ms = 1000;
+        x.max_frames = 600;
+        x.to = CameraTarget::sd;
+        x.has_frame_size = true;
+        x.frame_size = CameraFrameSize::xga;
+        x.has_quality = true;
+        x.quality = 10;
+        v.value("fr.camera.stream_start.args.example_2", "fr.camera.stream_start.args", x, enc, fr::cap::decode_camera_stream_start_args, "080318e80720d80428013003380a", true);
+    }
+    // fr.camera.stream_stop.args.defaults (cap fr.camera.stream_stop.args)
+    {
+        fr::cap::CameraStreamStopArgs x{};
+        x.stream_id = 0;
+        v.value("fr.camera.stream_stop.args.defaults", "fr.camera.stream_stop.args", x, enc, fr::cap::decode_camera_stream_stop_args, "", true);
+    }
+    // fr.camera.stream_stop.args.sample (cap fr.camera.stream_stop.args)
+    {
+        fr::cap::CameraStreamStopArgs x{};
+        x.stream_id = 2654435761u;
+        v.value("fr.camera.stream_stop.args.sample", "fr.camera.stream_stop.args", x, enc, fr::cap::decode_camera_stream_stop_args, "08b1f3ddf109", true);
+    }
+    // fr.camera.stream_stop.args.max (cap fr.camera.stream_stop.args)
+    {
+        fr::cap::CameraStreamStopArgs x{};
+        x.stream_id = 4294967295u;
+        v.value("fr.camera.stream_stop.args.max", "fr.camera.stream_stop.args", x, enc, fr::cap::decode_camera_stream_stop_args, "08ffffffff0f", true);
+    }
+    // fr.camera.stream_stop.args.example_0 (cap fr.camera.stream_stop.args)
+    {
+        fr::cap::CameraStreamStopArgs x{};
+        x.stream_id = 2;
+        v.value("fr.camera.stream_stop.args.example_0", "fr.camera.stream_stop.args", x, enc, fr::cap::decode_camera_stream_stop_args, "0802", true);
+    }
+    // fr.camera.set.args.defaults (cap fr.camera.set.args)
+    {
+        fr::cap::CameraSetArgs x{};
+        v.value("fr.camera.set.args.defaults", "fr.camera.set.args", x, enc, fr::cap::decode_camera_set_args, "", true);
+    }
+    // fr.camera.set.args.sample (cap fr.camera.set.args)
+    {
+        fr::cap::CameraSetArgs x{};
+        x.has_frame_size = true;
+        x.frame_size = CameraFrameSize::svga;
+        x.has_quality = true;
+        x.quality = 6;
+        x.has_vflip = true;
+        x.vflip = true;
+        x.has_hmirror = true;
+        x.hmirror = true;
+        x.has_brightness = true;
+        x.brightness = -2;
+        x.has_contrast = true;
+        x.contrast = -1;
+        x.has_saturation = true;
+        x.saturation = 1;
+        v.value("fr.camera.set.args.sample", "fr.camera.set.args", x, enc, fr::cap::decode_camera_set_args, "0802100618012001280330013802", true);
+    }
+    // fr.camera.set.args.max (cap fr.camera.set.args)
+    {
+        fr::cap::CameraSetArgs x{};
+        x.has_frame_size = true;
+        x.frame_size = CameraFrameSize::uxga;
+        x.has_quality = true;
+        x.quality = 63;
+        x.has_vflip = true;
+        x.vflip = true;
+        x.has_hmirror = true;
+        x.hmirror = true;
+        x.has_brightness = true;
+        x.brightness = 2;
+        x.has_contrast = true;
+        x.contrast = 2;
+        x.has_saturation = true;
+        x.saturation = 2;
+        v.value("fr.camera.set.args.max", "fr.camera.set.args", x, enc, fr::cap::decode_camera_set_args, "0805103f18012001280430043804", true);
+    }
+    // fr.camera.set.args.min (cap fr.camera.set.args)
+    {
+        fr::cap::CameraSetArgs x{};
+        x.has_brightness = true;
+        x.brightness = -2;
+        x.has_contrast = true;
+        x.contrast = -2;
+        x.has_saturation = true;
+        x.saturation = -2;
+        v.value("fr.camera.set.args.min", "fr.camera.set.args", x, enc, fr::cap::decode_camera_set_args, "280330033803", true);
+    }
+    // fr.camera.set.args.example_0 (cap fr.camera.set.args)
+    {
+        fr::cap::CameraSetArgs x{};
+        x.has_frame_size = true;
+        x.frame_size = CameraFrameSize::xga;
+        x.has_quality = true;
+        x.quality = 10;
+        v.value("fr.camera.set.args.example_0", "fr.camera.set.args", x, enc, fr::cap::decode_camera_set_args, "0803100a", true);
+    }
+    // fr.camera.set.args.example_1 (cap fr.camera.set.args)
+    {
+        fr::cap::CameraSetArgs x{};
+        x.has_vflip = true;
+        x.vflip = true;
+        x.has_hmirror = true;
+        x.hmirror = true;
+        v.value("fr.camera.set.args.example_1", "fr.camera.set.args", x, enc, fr::cap::decode_camera_set_args, "18012001", true);
+    }
+    // fr.camera.sd_list.args.defaults (cap fr.camera.sd_list.args)
+    {
+        fr::cap::CameraSdListArgs x{};
+        x.from = 0;
+        v.value("fr.camera.sd_list.args.defaults", "fr.camera.sd_list.args", x, enc, fr::cap::decode_camera_sd_list_args, "", true);
+    }
+    // fr.camera.sd_list.args.sample (cap fr.camera.sd_list.args)
+    {
+        fr::cap::CameraSdListArgs x{};
+        x.from = 2654435761u;
+        v.value("fr.camera.sd_list.args.sample", "fr.camera.sd_list.args", x, enc, fr::cap::decode_camera_sd_list_args, "08b1f3ddf109", true);
+    }
+    // fr.camera.sd_list.args.max (cap fr.camera.sd_list.args)
+    {
+        fr::cap::CameraSdListArgs x{};
+        x.from = 4294967295u;
+        v.value("fr.camera.sd_list.args.max", "fr.camera.sd_list.args", x, enc, fr::cap::decode_camera_sd_list_args, "08ffffffff0f", true);
+    }
+    // fr.camera.sd_list.args.example_0 (cap fr.camera.sd_list.args)
+    {
+        fr::cap::CameraSdListArgs x{};
+        x.from = 0;
+        v.value("fr.camera.sd_list.args.example_0", "fr.camera.sd_list.args", x, enc, fr::cap::decode_camera_sd_list_args, "", true);
+    }
+    // fr.camera.sd_list.result.defaults (cap fr.camera.sd_list.result)
+    {
+        fr::cap::CameraSdListResult x{};
+        x.next = 0;
+        v.value("fr.camera.sd_list.result.defaults", "fr.camera.sd_list.result", x, enc, fr::cap::decode_camera_sd_list_result, "", true);
+    }
+    // fr.camera.sd_list.result.sample (cap fr.camera.sd_list.result)
+    {
+        fr::cap::CameraSdListResult x{};
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 1013904226;
+            e0.frames = 3668339987u;
+            e0.bytes = 2027808452;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 3668339987u;
+            e0.frames = 2027808452;
+            e0.bytes = 387276917;
+            x.recordings.push_back(e0);
+        }
+        x.next = 1013904226;
+        v.value("fr.camera.sd_list.result.sample", "fr.camera.sd_list.result", x, enc, fr::cap::decode_camera_sd_list_result, "0a1208e2e6bbe3031093da99d50d18c4cdf7c6070a120893da99d50d10c4cdf7c60718f5c0d5b80110e2e6bbe303", true);
+    }
+    // fr.camera.sd_list.result.max (cap fr.camera.sd_list.result)
+    {
+        fr::cap::CameraSdListResult x{};
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        {
+            fr::cap::CameraRecording e0{};
+            e0.id = 4294967295u;
+            e0.frames = 4294967295u;
+            e0.bytes = 4294967295u;
+            x.recordings.push_back(e0);
+        }
+        x.next = 4294967295u;
+        v.value("fr.camera.sd_list.result.max", "fr.camera.sd_list.result", x, enc, fr::cap::decode_camera_sd_list_result, "0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f0a1208ffffffff0f10ffffffff0f18ffffffff0f10ffffffff0f", true);
+    }
+    // fr.camera.sd_fetch.args.defaults (cap fr.camera.sd_fetch.args)
+    {
+        fr::cap::CameraSdFetchArgs x{};
+        x.stream_id = 0;
+        x.recording = 0;
+        x.from_frame = 0;
+        v.value("fr.camera.sd_fetch.args.defaults", "fr.camera.sd_fetch.args", x, enc, fr::cap::decode_camera_sd_fetch_args, "", true);
+    }
+    // fr.camera.sd_fetch.args.sample (cap fr.camera.sd_fetch.args)
+    {
+        fr::cap::CameraSdFetchArgs x{};
+        x.stream_id = 2654435761u;
+        x.recording = 1013904226;
+        x.from_frame = 3668339987u;
+        v.value("fr.camera.sd_fetch.args.sample", "fr.camera.sd_fetch.args", x, enc, fr::cap::decode_camera_sd_fetch_args, "08b1f3ddf10910e2e6bbe3031893da99d50d", true);
+    }
+    // fr.camera.sd_fetch.args.max (cap fr.camera.sd_fetch.args)
+    {
+        fr::cap::CameraSdFetchArgs x{};
+        x.stream_id = 4294967295u;
+        x.recording = 4294967295u;
+        x.from_frame = 4294967295u;
+        v.value("fr.camera.sd_fetch.args.max", "fr.camera.sd_fetch.args", x, enc, fr::cap::decode_camera_sd_fetch_args, "08ffffffff0f10ffffffff0f18ffffffff0f", true);
+    }
+    // fr.camera.sd_fetch.args.example_0 (cap fr.camera.sd_fetch.args)
+    {
+        fr::cap::CameraSdFetchArgs x{};
+        x.stream_id = 9;
+        x.recording = 3;
+        x.from_frame = 0;
+        v.value("fr.camera.sd_fetch.args.example_0", "fr.camera.sd_fetch.args", x, enc, fr::cap::decode_camera_sd_fetch_args, "08091003", true);
+    }
+    // fr.camera.sd_delete.args.defaults (cap fr.camera.sd_delete.args)
+    {
+        fr::cap::CameraSdDeleteArgs x{};
+        x.recording = 0;
+        v.value("fr.camera.sd_delete.args.defaults", "fr.camera.sd_delete.args", x, enc, fr::cap::decode_camera_sd_delete_args, "", true);
+    }
+    // fr.camera.sd_delete.args.sample (cap fr.camera.sd_delete.args)
+    {
+        fr::cap::CameraSdDeleteArgs x{};
+        x.recording = 2654435761u;
+        v.value("fr.camera.sd_delete.args.sample", "fr.camera.sd_delete.args", x, enc, fr::cap::decode_camera_sd_delete_args, "08b1f3ddf109", true);
+    }
+    // fr.camera.sd_delete.args.max (cap fr.camera.sd_delete.args)
+    {
+        fr::cap::CameraSdDeleteArgs x{};
+        x.recording = 4294967295u;
+        v.value("fr.camera.sd_delete.args.max", "fr.camera.sd_delete.args", x, enc, fr::cap::decode_camera_sd_delete_args, "08ffffffff0f", true);
+    }
+    // fr.camera.sd_delete.args.example_0 (cap fr.camera.sd_delete.args)
+    {
+        fr::cap::CameraSdDeleteArgs x{};
+        x.recording = 3;
+        v.value("fr.camera.sd_delete.args.example_0", "fr.camera.sd_delete.args", x, enc, fr::cap::decode_camera_sd_delete_args, "0803", true);
+    }
+    // fr.camera.stream_ended.event.defaults (cap fr.camera.stream_ended.event)
+    {
+        fr::cap::CameraStreamEnded x{};
+        x.stream_id = 0;
+        x.reason = CameraStreamEndReason::stopped;
+        x.frames = 0;
+        x.dropped = 0;
+        x.bytes = 0;
+        v.value("fr.camera.stream_ended.event.defaults", "fr.camera.stream_ended.event", x, enc, fr::cap::decode_camera_stream_ended, "", true);
+    }
+    // fr.camera.stream_ended.event.sample (cap fr.camera.stream_ended.event)
+    {
+        fr::cap::CameraStreamEnded x{};
+        x.stream_id = 2654435761u;
+        x.reason = CameraStreamEndReason::overflow;
+        x.frames = 3668339987u;
+        x.dropped = 2027808452;
+        x.bytes = 387276917;
+        v.value("fr.camera.stream_ended.event.sample", "fr.camera.stream_ended.event", x, enc, fr::cap::decode_camera_stream_ended, "08b1f3ddf10910031893da99d50d20c4cdf7c60728f5c0d5b801", true);
+    }
+    // fr.camera.stream_ended.event.max (cap fr.camera.stream_ended.event)
+    {
+        fr::cap::CameraStreamEnded x{};
+        x.stream_id = 4294967295u;
+        x.reason = CameraStreamEndReason::error;
+        x.frames = 4294967295u;
+        x.dropped = 4294967295u;
+        x.bytes = 4294967295u;
+        v.value("fr.camera.stream_ended.event.max", "fr.camera.stream_ended.event", x, enc, fr::cap::decode_camera_stream_ended, "08ffffffff0f100418ffffffff0f20ffffffff0f28ffffffff0f", true);
+    }
+    // fr.camera.frames.state.defaults (cap fr.camera.frames.state)
+    {
+        uint32_t x = 0;
+        x = 0;
+        v.value("fr.camera.frames.state.defaults", "fr.camera.frames.state", x, fr::cap::encode_camera_frames_state, fr::cap::decode_camera_frames_state, "", true);
+    }
+    // fr.camera.frames.state.sample (cap fr.camera.frames.state)
+    {
+        uint32_t x = 0;
+        x = 2654435761u;
+        v.value("fr.camera.frames.state.sample", "fr.camera.frames.state", x, fr::cap::encode_camera_frames_state, fr::cap::decode_camera_frames_state, "08b1f3ddf109", true);
+    }
+    // fr.camera.frames.state.max (cap fr.camera.frames.state)
+    {
+        uint32_t x = 0;
+        x = 4294967295u;
+        v.value("fr.camera.frames.state.max", "fr.camera.frames.state", x, fr::cap::encode_camera_frames_state, fr::cap::decode_camera_frames_state, "08ffffffff0f", true);
+    }
+    // fr.camera.fps_x10.state.defaults (cap fr.camera.fps_x10.state)
+    {
+        uint16_t x = 0;
+        x = 0;
+        v.value("fr.camera.fps_x10.state.defaults", "fr.camera.fps_x10.state", x, fr::cap::encode_camera_fps_x10_state, fr::cap::decode_camera_fps_x10_state, "", true);
+    }
+    // fr.camera.fps_x10.state.sample (cap fr.camera.fps_x10.state)
+    {
+        uint16_t x = 0;
+        x = 31153;
+        v.value("fr.camera.fps_x10.state.sample", "fr.camera.fps_x10.state", x, fr::cap::encode_camera_fps_x10_state, fr::cap::decode_camera_fps_x10_state, "08b1f301", true);
+    }
+    // fr.camera.fps_x10.state.max (cap fr.camera.fps_x10.state)
+    {
+        uint16_t x = 0;
+        x = 65535;
+        v.value("fr.camera.fps_x10.state.max", "fr.camera.fps_x10.state", x, fr::cap::encode_camera_fps_x10_state, fr::cap::decode_camera_fps_x10_state, "08ffff03", true);
+    }
+    // fr.camera.last_bytes.state.defaults (cap fr.camera.last_bytes.state)
+    {
+        uint32_t x = 0;
+        x = 0;
+        v.value("fr.camera.last_bytes.state.defaults", "fr.camera.last_bytes.state", x, fr::cap::encode_camera_last_bytes_state, fr::cap::decode_camera_last_bytes_state, "", true);
+    }
+    // fr.camera.last_bytes.state.sample (cap fr.camera.last_bytes.state)
+    {
+        uint32_t x = 0;
+        x = 2654435761u;
+        v.value("fr.camera.last_bytes.state.sample", "fr.camera.last_bytes.state", x, fr::cap::encode_camera_last_bytes_state, fr::cap::decode_camera_last_bytes_state, "08b1f3ddf109", true);
+    }
+    // fr.camera.last_bytes.state.max (cap fr.camera.last_bytes.state)
+    {
+        uint32_t x = 0;
+        x = 4294967295u;
+        v.value("fr.camera.last_bytes.state.max", "fr.camera.last_bytes.state", x, fr::cap::encode_camera_last_bytes_state, fr::cap::decode_camera_last_bytes_state, "08ffffffff0f", true);
+    }
+    // fr.camera.streaming.state.defaults (cap fr.camera.streaming.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.camera.streaming.state.defaults", "fr.camera.streaming.state", x, fr::cap::encode_camera_streaming_state, fr::cap::decode_camera_streaming_state, "", true);
+    }
+    // fr.camera.streaming.state.sample (cap fr.camera.streaming.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.camera.streaming.state.sample", "fr.camera.streaming.state", x, fr::cap::encode_camera_streaming_state, fr::cap::decode_camera_streaming_state, "0801", true);
+    }
+    // fr.camera.streaming.state.max (cap fr.camera.streaming.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.camera.streaming.state.max", "fr.camera.streaming.state", x, fr::cap::encode_camera_streaming_state, fr::cap::decode_camera_streaming_state, "0801", true);
+    }
+    // fr.camera.sd.state.defaults (cap fr.camera.sd.state)
+    {
+        CameraCardState x = CameraCardState::none;
+        x = CameraCardState::none;
+        v.value("fr.camera.sd.state.defaults", "fr.camera.sd.state", x, fr::cap::encode_camera_sd_state, fr::cap::decode_camera_sd_state, "", true);
+    }
+    // fr.camera.sd.state.sample (cap fr.camera.sd.state)
+    {
+        CameraCardState x = CameraCardState::none;
+        x = CameraCardState::error;
+        v.value("fr.camera.sd.state.sample", "fr.camera.sd.state", x, fr::cap::encode_camera_sd_state, fr::cap::decode_camera_sd_state, "0802", true);
+    }
+    // fr.camera.sd.state.max (cap fr.camera.sd.state)
+    {
+        CameraCardState x = CameraCardState::none;
+        x = CameraCardState::error;
+        v.value("fr.camera.sd.state.max", "fr.camera.sd.state", x, fr::cap::encode_camera_sd_state, fr::cap::decode_camera_sd_state, "0802", true);
+    }
+    // fr.camera.sd_free_mb.state.defaults (cap fr.camera.sd_free_mb.state)
+    {
+        uint32_t x = 0;
+        x = 0;
+        v.value("fr.camera.sd_free_mb.state.defaults", "fr.camera.sd_free_mb.state", x, fr::cap::encode_camera_sd_free_mb_state, fr::cap::decode_camera_sd_free_mb_state, "", true);
+    }
+    // fr.camera.sd_free_mb.state.sample (cap fr.camera.sd_free_mb.state)
+    {
+        uint32_t x = 0;
+        x = 2654435761u;
+        v.value("fr.camera.sd_free_mb.state.sample", "fr.camera.sd_free_mb.state", x, fr::cap::encode_camera_sd_free_mb_state, fr::cap::decode_camera_sd_free_mb_state, "08b1f3ddf109", true);
+    }
+    // fr.camera.sd_free_mb.state.max (cap fr.camera.sd_free_mb.state)
+    {
+        uint32_t x = 0;
+        x = 4294967295u;
+        v.value("fr.camera.sd_free_mb.state.max", "fr.camera.sd_free_mb.state", x, fr::cap::encode_camera_sd_free_mb_state, fr::cap::decode_camera_sd_free_mb_state, "08ffffffff0f", true);
     }
     // fr.node.identify.args.defaults (cap fr.node.identify.args)
     {

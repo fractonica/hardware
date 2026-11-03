@@ -20,7 +20,7 @@ import { DEVICE_ROLES, FrError } from '@fractonica/protocol';
 
 import type { Device, Presence } from '../context.ts';
 
-export const CHIPS = ['esp32c3', 'esp32c5', 'esp32c6', 'esp32s3'] as const;
+export const CHIPS = ['esp32', 'esp32c3', 'esp32c5', 'esp32c6', 'esp32s3'] as const;
 /** The `role:` values: 05 §5.7 Role, as protocol DEVICE_ROLES lists them (`fixture`: design m2-c1-hil D6). */
 const ROLES: readonly string[] = DEVICE_ROLES;
 

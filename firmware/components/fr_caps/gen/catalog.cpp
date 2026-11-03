@@ -49,6 +49,23 @@ constexpr MemberInfo kCsiEvents[] = {{1, "stream_ended"}};
 constexpr MemberInfo kCsiProperties[] = {{1, "motion"}, {2, "rssi"}, {3, "rate"}};
 constexpr MemberInfo kRadioTxCommands[] = {{1, "start"}, {2, "stop"}};
 constexpr MemberInfo kRadioTxProperties[] = {{1, "sending"}};
+constexpr MemberInfo kCameraCommands[] = {
+    {1, "stream_start"},
+    {2, "stream_stop"},
+    {3, "set"},
+    {4, "sd_list"},
+    {5, "sd_fetch"},
+    {6, "sd_delete"},
+};
+constexpr MemberInfo kCameraEvents[] = {{1, "stream_ended"}};
+constexpr MemberInfo kCameraProperties[] = {
+    {1, "frames"},
+    {2, "fps_x10"},
+    {3, "last_bytes"},
+    {4, "streaming"},
+    {5, "sd"},
+    {6, "sd_free_mb"},
+};
 constexpr MemberInfo kNodeCommands[] = {
     {1, "identify"},
     {2, "describe"},
@@ -76,6 +93,7 @@ constexpr CapInfo kCaps[] = {
     {0x0008, "fr.touch", {1, 0}, kTouchCommands, kTouchEvents, kTouchProperties},
     {0x0009, "fr.csi", {1, 0}, kCsiCommands, kCsiEvents, kCsiProperties},
     {0x000A, "fr.radio_tx", {1, 0}, kRadioTxCommands, {}, kRadioTxProperties},
+    {0x000B, "fr.camera", {1, 0}, kCameraCommands, kCameraEvents, kCameraProperties},
     {0x00F0, "fr.node", {1, 0}, kNodeCommands, kNodeEvents, {}},
     {0x00F1, "fr.ota", {1, 0}, {}, {}, {}},
     {0x00F2, "fr.diag", {1, 0}, kDiagCommands, kDiagEvents, {}},

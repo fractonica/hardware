@@ -18,7 +18,12 @@
 // `share_with: <instance>` (type instance), which puts two instances on one controller with shared BCLK/WS. A2 (design
 // audio-a2 D2) adds a driver field's `range`, the ADC1 unit in continuous mode (resource adc_continuous: one per
 // firmware, alone on ADC1) and its conversion ceiling (config sample_hz x oversample). CSI-1 adds the profile's
-// `memory: small` (SMALL_MEMORY): a sensor's table sizes and more IDF code in flash on a chip without PSRAM.
+// `memory: small` (SMALL_MEMORY): a sensor's table sizes and more IDF code in flash on a chip without PSRAM. CAM-1
+// (design camera-c1 D1, D5, D6, D9, §10) adds the classic ESP32 target, a board's `console: uart0` (CONFIG_FR_SERIAL_UART),
+// the board sections `cameras` (kind dvp) and `sd_cards` (kind sdmmc) with their reserved pin groups, and a service's
+// second, optional hardware dependency (ServiceFacts.store): fr.camera's card, a driver instance the profile names as
+// `store: { driver: sdmmc_card, bind: sd_cards.<name> }` beside `bind`, resolved from its board entry and handed to the
+// service after the main driver.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -61,6 +66,13 @@ export interface ServiceFacts {
    * its driver at init: the target, and the driver.yaml `traits:` (design m2-c3-inputs D4: full_scale_mv).
    */
   traits?: (config: Readonly<Record<string, CapValue>>, ctx: TraitContext) => Record<string, JsonScalar>;
+  /**
+   * A second, optional hardware dependency (design camera-c1 D6, D9, §10: fr.camera's micro-SD card): a driver of its
+   * own, implementing `implements`, bound to a board entry of section `binds`. The profile names it beside `bind` as
+   * `store: { driver: <id>, bind: <section>.<entry> }`; the glue constructs it from its board entry and hands the
+   * service a pointer to it (nullptr when the profile has none: a board without the part).
+   */
+  store?: { implements: string; binds: string };
 }
 
 /**
@@ -84,8 +96,10 @@ export type CapValue = JsonScalar | number[];
  * adc_oneshot docs, and logged by adc_oneshot from its calibration scheme at init): fr.analog_in's
  * full_scale_mv when its driver does not declare one. esp32c5 (design csi-c1 D1): *inferred* as the C6's (the same
  * per-channel curve-fitting calibration in IDF v6.1; no figure in the IDF docs); the bench reads it at provisioning.
+ * esp32 (design camera-c1 D1): *inferred* from the ESP32 datasheet's ADC characteristics (the 11/12 dB range tops at
+ * 2450 mV; IDF v6.1's adc_oneshot docs defer to it); adc_oneshot's full_scale_mv() answers the same.
  */
-export const ADC1_FULL_SCALE_MV: Readonly<Record<string, number>> = { esp32c3: 2500, esp32c5: 3300, esp32c6: 3300, esp32s3: 3300 };
+export const ADC1_FULL_SCALE_MV: Readonly<Record<string, number>> = { esp32: 2450, esp32c3: 2500, esp32c5: 3300, esp32c6: 3300, esp32s3: 3300 };
 
 /**
  * The L2 service behind each capability (design c2 §5): ButtonService takes three timers (lockout, long press,
@@ -152,7 +166,22 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
   // driver's own pacing.
   'fr.csi': { implements: 'hal.CsiSource', service: 'fr::CsiService', header: 'fr/services/csi_service.hpp', timers: 1 },
   'fr.radio_tx': { implements: 'hal.RadioTx', service: 'fr::RadioTxService', header: 'fr/services/radio_tx_service.hpp', timers: 1 },
+  // Design camera-c1 D7-D9, §10: one timer (the fps window and a stream's end; the frames on the fr_stream task). The
+  // card is the service's store (hal::BlockStore on an `sd_cards` entry, driver sdmmc_card), optional: a profile without
+  // one gets a camera that answers sd_* UNSUPPORTED. Traits: `sensor` from the bound board entry's `sensor` (SENSOR_IDS),
+  // `max_frame_size` from config (the buffers are sized for it at init).
+  'fr.camera': {
+    implements: 'hal.Camera',
+    service: 'fr::CameraService',
+    header: 'fr/services/camera_service.hpp',
+    timers: 1,
+    store: { implements: 'hal.BlockStore', binds: 'sd_cards' },
+    traits: (c, { entry }) => ({ sensor: SENSOR_IDS[String(entry.sensor ?? '')] ?? 0, max_frame_size: String(c.max_frame_size ?? 'uxga') }),
+  },
 };
+
+/** fr.camera's `sensor` trait by the board entry's `sensor` (design camera-c1 D7): 0 is unknown. */
+export const SENSOR_IDS: Readonly<Record<string, number>> = { ov2640: 1 };
 
 /** The HIL fixture's capability: its lines' `drive` decides the power-up glitch rule (design m2-c1-hil D5). */
 const FIXTURE_CAP = 'fr.fixture';
@@ -166,7 +195,7 @@ const TOUCH_CAP = 'fr.touch';
  * pins of group `display` its own entry names (sclk, dc, backlight, ...), as one bound to `touch.<name>` those of
  * `touch`. The group keeps every other instance (a button, a bare-pin bind) off them.
  */
-const ENTRY_GROUPS: Readonly<Record<string, string>> = { displays: 'display', touch: 'touch' };
+const ENTRY_GROUPS: Readonly<Record<string, string>> = { displays: 'display', touch: 'touch', cameras: 'camera', sd_cards: 'sd_card' };
 
 /**
  * The renderer behind an fr.display instance (design m2-c5-display D3): LVGL (fr_ui) where the driver's `traits:` say
@@ -218,9 +247,10 @@ const ADC_CONTINUOUS_RESOURCE = 'adc_continuous';
 /**
  * Conversions per second the ADC DMA reaches (IDF v6.1 SOC_ADC_SAMPLE_FREQ_THRES_HIGH; fr::drv::AdcAudio's
  * kMaxConversionsHz): an adc_continuous instance's config sample_hz x its driver's `oversample` must fit. The C5's is
- * the same (read in its soc_caps.h, design csi-c1 D1).
+ * the same (read in its soc_caps.h, design csi-c1 D1); the classic ESP32's is 2,000,000 (read: its soc_caps.h; design
+ * camera-c1 D1), though no adc_continuous driver targets it yet.
  */
-export const ADC_CONVERSIONS_HZ: Readonly<Record<string, number>> = { esp32c3: 83_333, esp32c5: 83_333, esp32c6: 83_333, esp32s3: 83_333 };
+export const ADC_CONVERSIONS_HZ: Readonly<Record<string, number>> = { esp32: 2_000_000, esp32c3: 83_333, esp32c5: 83_333, esp32c6: 83_333, esp32s3: 83_333 };
 /** The driver field of an adc_continuous driver that multiplies its conversion rate. */
 const OVERSAMPLE_FIELD = 'oversample';
 
@@ -387,6 +417,14 @@ const RawProfile = z.strictObject({
         .optional(),
       // A list of integers sets an array<T> capability config entry (design m2-c3-inputs D4).
       config: z.record(z.string(), z.union([jsonScalar, z.array(z.number())])).optional(),
+      // The service's store (design camera-c1 D6, §10; ServiceFacts.store): a second driver on a board entry of the
+      // section the service names, e.g. `store: { driver: sdmmc_card, bind: sd_cards.card }` on an fr.camera instance.
+      store: z
+        .strictObject({
+          driver: ident,
+          bind: z.string().regex(/^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/, 'expected <section>.<entry>, e.g. sd_cards.card'),
+        })
+        .optional(),
     }),
   ),
 });
@@ -397,6 +435,13 @@ const STRAP_LEVELS = ['high', 'low', 'none'] as const;
 type StrapLevel = (typeof STRAP_LEVELS)[number];
 
 const gpioNum = int.min(0).max(48);
+
+/**
+ * A board's `console` (design camera-c1 D2): fr_serial on the chip's USB-Serial/JTAG (CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG),
+ * or on UART0 at 115200 behind the board's USB-UART bridge (CONFIG_FR_SERIAL_UART; the IDF console stays its UART default).
+ */
+export const CONSOLES = ['usb_serial_jtag', 'uart0'] as const;
+export type Console = (typeof CONSOLES)[number];
 
 /**
  * Header positions, pin 1 first (design m2-c1-hil D5): a GPIO number or a pin name (3V3, 5V, GND, EN), plus an
@@ -412,9 +457,70 @@ const RawBoard = z.looseObject({
   id: z.string(),
   idf_target: z.string(),
   flash: z.looseObject({ size: z.string().regex(/^\d+MB$/, 'expected e.g. 4MB'), part_profile: z.string() }),
-  console: z.string(),
+  /**
+   * Where fr_serial talks: the chip's USB-Serial/JTAG, or UART0 behind a USB-UART bridge (design camera-c1 D2:
+   * CONFIG_FR_SERIAL_UART, the AI-Thinker ESP32-CAM on its CAM-MB base).
+   */
+  console: z.enum(CONSOLES),
+  /** The chip's own USB (null: none, as the classic ESP32; the hub then finds the board through a bridge, design camera-c1 D3). */
+  usb: z.looseObject({ kind: z.string() }).nullable().optional(),
   /** In-package or module PSRAM (null: none); a profile's `psram: on` renders its mode (design m2-c5-display D3). */
   psram: z.looseObject({ size: z.string(), mode: z.enum(['quad', 'octal']) }).nullable().optional(),
+  /**
+   * Camera sensors on the chip's parallel (DVP) interface (design camera-c1 D5): the OV2640's 8 data lines, its sync
+   * and pixel clocks, the SCCB (I2C) pair, the master clock the chip gives it, power-down and reset (null: not wired).
+   * `sensor` names the part (fr.camera's trait); `xclk_hz` is the clock the spike ran it at (fr.camera's config
+   * default repeats it). Their pins sit in pins.reserved's `camera` group, which only an instance bound to the entry
+   * may claim (ENTRY_GROUPS).
+   */
+  cameras: z
+    .record(
+      ident,
+      z.looseObject({
+        kind: z.literal('dvp'),
+        sensor: z.string(),
+        xclk: gpioNum,
+        sda: gpioNum,
+        scl: gpioNum,
+        pwdn: gpioNum.nullable(),
+        reset: gpioNum.nullable(),
+        d0: gpioNum,
+        d1: gpioNum,
+        d2: gpioNum,
+        d3: gpioNum,
+        d4: gpioNum,
+        d5: gpioNum,
+        d6: gpioNum,
+        d7: gpioNum,
+        vsync: gpioNum,
+        href: gpioNum,
+        pclk: gpioNum,
+        xclk_hz: int.min(1_000_000).max(40_000_000),
+      }),
+    )
+    .optional(),
+  /**
+   * SD card slots on the SD/MMC host (design camera-c1 D5): the slot number, the bus width the board wires (1 or 4),
+   * CLK, CMD and D0, and D1-D3 (null: not wired, or left to other uses in 1-bit mode). The pins a driver claims sit in
+   * pins.reserved's `sd_card` group (ENTRY_GROUPS); D1-D3 of a 1-bit board stay where the board puts them (free, or
+   * another entry's: the ESP32-CAM's flash LED is on its D1).
+   */
+  sd_cards: z
+    .record(
+      ident,
+      z.looseObject({
+        kind: z.literal('sdmmc'),
+        slot: int.min(0).max(1),
+        width: z.union([z.literal(1), z.literal(4)]),
+        clk: gpioNum,
+        cmd: gpioNum,
+        d0: gpioNum,
+        d1: gpioNum.nullable().optional(),
+        d2: gpioNum.nullable().optional(),
+        d3: gpioNum.nullable().optional(),
+      }),
+    )
+    .optional(),
   pins: z.looseObject({
     reserved: z.record(z.string(), z.array(int)).optional(),
     strapping: z.array(int).optional(),
@@ -560,6 +666,8 @@ export interface ManifestCap {
    * value), then the driver's `traits:`, then what the service derives from `config`.
    */
   traits: Record<string, JsonScalar>;
+  /** The service's store (design camera-c1 D6, §10): its driver and board entry, when the profile names one. */
+  store?: { driver: string; bind: string };
 }
 
 /** fr_manifest.json, which `fr build` copies into the artifact manifest (`caps`). */
@@ -586,6 +694,8 @@ export interface BoundInstance {
   pins: number[];
   /** The effective driver Config (board entry, bind, profile, driver.yaml defaults), e.g. active_level. */
   driverConfig: Record<string, JsonScalar>;
+  /** The service's store (design camera-c1 §10), wired like the instance: its bind, its GPIOs and its driver Config. */
+  store?: { driver: string; bind: string; pins: number[]; driverConfig: Record<string, JsonScalar> };
 }
 
 export interface FirmwareResult {
@@ -722,6 +832,8 @@ function renderFragment(inp: Inputs, driverLines: readonly string[]): string {
     `CONFIG_ESPTOOLPY_FLASHSIZE_${board.flash.size.toUpperCase()}=y`,
     `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="${inp.csv}"`,
     ...(board.console === 'usb_serial_jtag' ? ['CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y'] : []),
+    // Design camera-c1 D2: fr_serial over UART0 (115200) behind a USB-UART bridge; the IDF console keeps its UART default.
+    ...(board.console === 'uart0' ? ['CONFIG_FR_SERIAL_UART=y'] : []),
     `CONFIG_FR_BOARD="${board.id}"`,
     `CONFIG_FR_PROFILE="${profile.profile}"`,
     `CONFIG_FR_PART_PROFILE="${board.flash.part_profile}"`,
@@ -848,7 +960,7 @@ export function resolveProfile(sourceDir: string, name: string): ResolvedProfile
   const inp = loadInputs(src, name, issues);
   issues.throwIfAny();
   const { profile, board } = inp!;
-  const ids = [...new Set(Object.values(profile.caps).map((c) => c.driver))];
+  const ids = [...new Set(Object.values(profile.caps).flatMap((c) => [c.driver, ...(c.store ? [c.store.driver] : [])]))];
   const drivers = ids.flatMap((id) => loadDriverInto(src, id, issues) ?? []);
   const lines = driverSdkconfig(drivers, issues);
   issues.throwIfAny();
@@ -1159,6 +1271,21 @@ interface ResolvedInstance {
   entryPins: number[];
   /** GPIOs of its gpio_mask fields (GPIO_MASK): driven at a fixed level by the driver, not claimed. */
   heldPins: number[];
+  /** The service's store (ServiceFacts.store), when the profile names one. */
+  store: ResolvedStore | null;
+}
+
+/**
+ * An instance's store (design camera-c1 D6, §10): a second driver on its own board entry, whose Config comes from that
+ * entry and driver.yaml defaults only (no profile overrides, no bind pins, no controllers). Its pins are the
+ * instance's, allowed in the entry's ENTRY_GROUPS group as the main driver's are in its own.
+ */
+interface ResolvedStore {
+  driver: DriverManifest;
+  /** The profile's `store.bind`, e.g. sd_cards.card. */
+  bind: string;
+  driverConfig: ResolvedInstance['driverConfig'];
+  pins: number[];
 }
 
 type Slots = Map<string, number>;
@@ -1349,6 +1476,100 @@ function checkBoardFacts(board: RawBoard, issues: Issues): void {
   if (board.en_access != null && !headerPositions(board, 'EN').includes(board.en_access)) {
     issues.add(bf, ['en_access'], `${board.en_access} is not an EN position in headers`);
   }
+}
+
+/**
+ * An instance's `store` (design camera-c1 D6, §10; ServiceFacts.store): its driver must implement the store contract,
+ * support the target and bind the section the service names; the bind is an entry of that section whose kind the
+ * driver accepts; each Config field comes from the entry (`from: board.<key>`) or its driver.yaml default, an optional
+ * gpio that is null or absent is -1. null (with issues) when anything is wrong.
+ */
+function resolveStore(
+  sourceDir: string,
+  inp: Inputs,
+  spec: { driver: string; bind: string },
+  facts: NonNullable<ServiceFacts['store']>,
+  at: (string | number)[],
+  drivers: Map<string, DriverManifest | null>,
+  known: string[],
+  issues: Issues,
+): ResolvedStore | null {
+  const { profile, board } = inp;
+  const pf = profileFile(profile.profile);
+  const bf = boardFile(board.id);
+  let ok = true;
+  const bad = (path: (string | number)[], message: string) => {
+    issues.add(pf, path, message);
+    ok = false;
+  };
+  if (!drivers.has(spec.driver)) {
+    drivers.set(spec.driver, loadDriverInto(sourceDir, spec.driver, issues));
+  }
+  const driver = drivers.get(spec.driver) ?? null;
+  if (!driver) {
+    if (!known.includes(spec.driver)) {
+      bad([...at, 'driver'], `unknown driver '${spec.driver}' (known: ${known.join(', ') || 'none'})`);
+    }
+    return null;
+  }
+  const df = driverFile(driver.id);
+  if (driver.implements !== facts.implements) {
+    bad([...at, 'driver'], `driver ${driver.id} implements ${driver.implements}, but a store needs ${facts.implements}`);
+  }
+  if (!driver.targets.includes(board.idf_target)) {
+    bad([...at, 'driver'], `driver ${driver.id} does not support ${board.idf_target} (targets: ${driver.targets.join(', ')})`);
+  }
+  if (driver.binds !== facts.binds) {
+    bad([...at, 'driver'], `driver ${driver.id} binds board ${driver.binds} entries; a store binds ${facts.binds}`);
+  }
+  const [section, entryName] = spec.bind.split('.');
+  if (section !== facts.binds) {
+    bad([...at, 'bind'], `a store binds board ${facts.binds} entries, not ${section}`);
+  }
+  const entry = lookupEntry(board, section, entryName);
+  if (!entry) {
+    bad([...at, 'bind'], `board ${board.id} has no entry ${spec.bind}`);
+    return null;
+  }
+  const kind = typeof entry.kind === 'string' ? entry.kind : DEFAULT_KIND;
+  if (!driver.accepts_kinds.includes(kind)) {
+    bad([...at, 'driver'], `driver ${driver.id} does not accept ${spec.bind} of kind '${kind}' (accepts: ${driver.accepts_kinds.join(', ')})`);
+  }
+  const driverConfig: ResolvedInstance['driverConfig'] = [];
+  const pins: number[] = [];
+  for (const [fname, field] of Object.entries(driver.config ?? {})) {
+    if (field.from === 'bind' || field.from?.startsWith('bind.') || field.type === I2S_PORT || field.type === INSTANCE_REF || field.type === GPIO_MASK) {
+      issues.add(df, ['config', fname], `a store driver's field comes from its board entry (from: board.<key>) or a default, not ${field.from ?? field.type}`);
+      ok = false;
+      continue;
+    }
+    const fromKey = field.from?.startsWith('board.') ? field.from.slice('board.'.length) : undefined;
+    let value: unknown = fromKey !== undefined ? entry[fromKey] : undefined;
+    let origin: Origin = [bf, [section, entryName, fromKey ?? fname]];
+    if (value == null && field.optional && field.type === 'gpio') {
+      driverConfig.push({ name: fname, field, value: -1 }); // not wired (design m2-c5-display D7)
+      continue;
+    }
+    if (value === undefined) {
+      value = field.default;
+      origin = [df, ['config', fname, 'default']];
+    }
+    if (value == null) {
+      bad([...at, 'bind'], fromKey ? `${spec.bind} has no '${fromKey}', which driver ${driver.id} needs (no default)` : `driver ${driver.id} needs config '${fname}'`);
+      continue;
+    }
+    const p = checkDriverValue(field, value);
+    if (p) {
+      issues.add(origin[0], origin[1], p);
+      ok = false;
+      continue;
+    }
+    driverConfig.push({ name: fname, field, value: value as JsonScalar });
+    if (field.type === 'gpio') {
+      pins.push(value as number);
+    }
+  }
+  return ok ? { driver, bind: spec.bind, driverConfig, pins } : null;
 }
 
 function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: Issues): ResolvedInstance[] {
@@ -1638,8 +1859,20 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       }
     }
 
+    // The service's store (design camera-c1 D6, §10): only a service that declares one takes it.
+    let store: ResolvedStore | null = null;
+    if (c.store !== undefined) {
+      if (!service?.store) {
+        const with_ = Object.entries(SERVICES).flatMap(([n, s]) => (s.store ? [n] : []));
+        bad([...at, 'store'], `${c.cap} takes no store (capabilities with one: ${with_.join(', ') || 'none'})`);
+      } else {
+        store = resolveStore(sourceDir, inp, c.store, service.store, [...at, 'store'], drivers, known, issues);
+        ok &&= store !== null;
+      }
+    }
+
     if (ok && cap && service) {
-      out.push({ name, port: 0, bind: bindText, bare: bindMap !== null || bindPin !== undefined, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins });
+      out.push({ name, port: 0, bind: bindText, bare: bindMap !== null || bindPin !== undefined, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins, store });
     }
   }
 
@@ -1664,36 +1897,42 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     const bare = inst.bare;
     const drive = inst.cap.name === FIXTURE_CAP ? inst.capConfig.find((c) => c.entry.name === 'drive')?.value : undefined;
     const ownGroup = ENTRY_GROUPS[inst.bind.split('.')[0]];
-    for (const pin of inst.pins) {
-      const where = ['caps', inst.name, 'bind'];
+    const storeGroup = inst.store ? ENTRY_GROUPS[inst.store.bind.split('.')[0]] : undefined;
+    // The store's pins (design camera-c1 §10) are the instance's too, under its own bind and reserved group.
+    const claims = [
+      ...inst.pins.map((pin) => ({ pin, bind: inst.bind, own: ownGroup, entry: inst.entryPins.includes(pin), bare })),
+      ...(inst.store?.pins ?? []).map((pin) => ({ pin, bind: inst.store!.bind, own: storeGroup, entry: true, bare: false })),
+    ];
+    for (const { pin, bind, own, entry, bare: barePin } of claims) {
+      const where = ['caps', inst.name, bind === inst.bind ? 'bind' : 'store'];
       const group = reserved.get(pin);
-      // A display or touch driver takes the pins its own board entry reserves (design m2-c5-display D9).
-      if (group !== undefined && !(group === ownGroup && inst.entryPins.includes(pin))) {
-        issues.add(pf, where, `GPIO${pin} (${inst.bind}) is reserved for ${group} on ${board.id}`);
+      // A display, touch, camera or card driver takes the pins its own board entry reserves (design m2-c5-display D9).
+      if (group !== undefined && !(group === own && entry)) {
+        issues.add(pf, where, `GPIO${pin} (${bind}) is reserved for ${group} on ${board.id}`);
       }
       const other = claimed.get(pin);
       if (other !== undefined) {
-        issues.add(pf, where, `GPIO${pin} (${inst.bind}) is already claimed by '${other}'`);
+        issues.add(pf, where, `GPIO${pin} (${bind}) is already claimed by '${other}'`);
       }
       claimed.set(pin, inst.name);
-      if (bare && strapping.has(pin)) {
-        issues.add(pf, where, `GPIO${pin} (${inst.bind}) is a strapping pin; a gpio.<n> bind may not use one`);
+      if (barePin && strapping.has(pin)) {
+        issues.add(pf, where, `GPIO${pin} (${bind}) is a strapping pin; a gpio.<n> bind may not use one`);
       } else if (strapping.has(pin)) {
-        issues.warnings.push(strapWarning(inst.name, pin, inst.bind, board.pins.strapping_levels?.[String(pin)]));
+        issues.warnings.push(strapWarning(inst.name, pin, bind, board.pins.strapping_levels?.[String(pin)]));
       }
-      if (bare && group === undefined && !strapping.has(pin) && !(board.pins.free ?? []).includes(pin)) {
-        issues.add(pf, where, `GPIO${pin} (${inst.bind}) is not in pins.free of ${board.id}`);
+      if (barePin && group === undefined && !strapping.has(pin) && !(board.pins.free ?? []).includes(pin)) {
+        issues.add(pf, where, `GPIO${pin} (${bind}) is not in pins.free of ${board.id}`);
       }
       if (typeof drive === 'string' && DRIVING.includes(drive) && !GLITCH_EXEMPT_DRIVES.includes(drive) && glitch.has(pin)) {
-        issues.add(pf, where, `GPIO${pin} (${inst.bind}) drives a level at power-up (pins.power_up_glitch), so no line with drive ${drive} may use it`);
+        issues.add(pf, where, `GPIO${pin} (${bind}) drives a level at power-up (pins.power_up_glitch), so no line with drive ${drive} may use it`);
       }
-      if ((inst.driver.resources?.[ADC1_RESOURCE] ?? 0) > 0) {
+      if (bind === inst.bind && (inst.driver.resources?.[ADC1_RESOURCE] ?? 0) > 0) {
         if (pin === batteryPin) {
-          issues.add(pf, where, `GPIO${pin} (${inst.bind}) is the battery input of ${board.id} (battery.gpio); driver ${inst.driver.id} may not sample it`);
+          issues.add(pf, where, `GPIO${pin} (${bind}) is the battery input of ${board.id} (battery.gpio); driver ${inst.driver.id} may not sample it`);
         } else if (adc2.includes(pin)) {
-          issues.add(pf, where, `GPIO${pin} (${inst.bind}) is an ADC2 pin on ${board.idf_target}; driver ${inst.driver.id} samples ADC1 only`);
+          issues.add(pf, where, `GPIO${pin} (${bind}) is an ADC2 pin on ${board.idf_target}; driver ${inst.driver.id} samples ADC1 only`);
         } else if (!adc1.has(pin)) {
-          issues.add(pf, where, `GPIO${pin} (${inst.bind}) is not in pins.adc1 of ${board.id}, which driver ${inst.driver.id} needs (ADC1 only)`);
+          issues.add(pf, where, `GPIO${pin} (${bind}) is not in pins.adc1 of ${board.id}, which driver ${inst.driver.id} needs (ADC1 only)`);
         }
       }
     }
@@ -1723,6 +1962,10 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
   const pwmLines: string[] = [];
   for (const inst of out) {
     const uses = { ...inst.driver.resources };
+    // The store's peripherals (design camera-c1 §10: the card's SD/MMC slot) count against the board with the instance's.
+    for (const [res, n] of Object.entries(inst.store?.driver.resources ?? {})) {
+      uses[res] = (uses[res] ?? 0) + n;
+    }
     uses.timer = (uses.timer ?? 0) + inst.service.timers;
     if (inst.driver.id === FIXTURE_GPIO_DRIVER && inst.capConfig.find((c) => c.entry.name === 'drive')?.value === 'pwm') {
       uses[PWM_LINE_RESOURCES.channel] = (uses[PWM_LINE_RESOURCES.channel] ?? 0) + 1;
@@ -1934,8 +2177,13 @@ function header(profile: string): string {
   return `// ${GENERATED} from ${profileFile(profile)}. Do not edit.`;
 }
 
+/** The driver components a profile binds, main drivers and stores alike (design camera-c1 §10), sorted. */
+function driverIdsOf(insts: readonly ResolvedInstance[]): string[] {
+  return [...new Set(insts.flatMap((i) => [i.driver.id, ...(i.store ? [i.store.driver.id] : [])]))].sort();
+}
+
 function emitComponentCmake(profile: string, insts: ResolvedInstance[]): string {
-  const drivers = [...new Set(insts.map((i) => i.driver.id))].sort();
+  const drivers = driverIdsOf(insts);
   // A panel rendered by LVGL needs fr_ui (design m2-c5-display D3); MonoBackend is fr_core's.
   const backends = [...new Set(insts.map((i) => displayBackend(i)?.component).filter((c): c is string => c !== undefined))].sort();
   const priv = [...drivers, ...backends];
@@ -2084,24 +2332,28 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
   ];
   // One namespace per instance: names derived from instance names can then neither collide with each
   // other nor with the fixed ones below, which never start with `inst_`.
+  // A driver Config as assignments rather than designated initializers, so the generated config structs may order
+  // their members freely.
+  const configLines = (cls: string, name: string, fields: ResolvedInstance['driverConfig']): string[] => [
+    `constexpr ${cls}::Config ${name} = [] {`,
+    `    ${cls}::Config c{};`,
+    ...fields.map((f) => {
+      const v = f.field.type === 'enum' ? `${cls}::${pascalCase(f.name)}::${f.value}` : f.field.type === GPIO_MASK ? `0x${BigInt(f.value as number).toString(16)}ULL` : String(f.value);
+      return `    c.${f.name} = ${v};`;
+    }),
+    '    return c;',
+    '}();',
+    '',
+  ];
   for (const i of insts) {
     const ns = `inst_${i.name}`;
-    const drvCfg = `${i.driver.class}::Config`;
     const capCfg = `fr::cap::${i.cap.pascalName}Config`;
-    lines.push(`// ${i.name}: ${i.cap.name} on port ${i.port}, driver ${i.driver.id} ${i.bind === NO_BIND ? '(no bind)' : `on ${i.bind}`}`, `namespace ${ns} {`, '');
-    // Assignments rather than designated initializers, so the generated config structs may order their
-    // members freely.
-    lines.push(`constexpr ${drvCfg} kDriverConfig = [] {`, `    ${drvCfg} c{};`);
-    for (const f of i.driverConfig) {
-      const v =
-        f.field.type === 'enum'
-          ? `${i.driver.class}::${pascalCase(f.name)}::${f.value}`
-          : f.field.type === GPIO_MASK
-            ? `0x${BigInt(f.value as number).toString(16)}ULL`
-            : String(f.value);
-      lines.push(`    c.${f.name} = ${v};`);
+    const storeNote = i.store ? `, store ${i.store.driver.id} on ${i.store.bind}` : '';
+    lines.push(`// ${i.name}: ${i.cap.name} on port ${i.port}, driver ${i.driver.id} ${i.bind === NO_BIND ? '(no bind)' : `on ${i.bind}`}${storeNote}`, `namespace ${ns} {`, '');
+    lines.push(...configLines(i.driver.class, 'kDriverConfig', i.driverConfig));
+    if (i.store) {
+      lines.push(...configLines(i.store.driver.class, 'kStoreConfig', i.store.driverConfig));
     }
-    lines.push('    return c;', '}();', '');
     // A capability without config (design csi-c1 D9: fr.radio_tx) has no generated Config struct: its service
     // takes the driver only.
     const hasConfig = i.cap.config.length > 0;
@@ -2113,14 +2365,18 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
       lines.push('    return c;', '}();', '');
     }
     const backend = displayBackend(i);
-    if (!hasConfig) {
-      lines.push(`${i.driver.class} driver{kDriverConfig};`, `${i.service.service} service{driver};`, '');
-    } else if (backend) {
+    lines.push(`${i.driver.class} driver{kDriverConfig};`);
+    if (backend) {
       // Design m2-c5-display D3: the panel's renderer, which the service draws through.
-      lines.push(`${i.driver.class} driver{kDriverConfig};`, `${backend.cls} backend;`, `${i.service.service} service{driver, backend, kConfig};`, '');
-    } else {
-      lines.push(`${i.driver.class} driver{kDriverConfig};`, `${i.service.service} service{driver, kConfig};`, '');
+      lines.push(`${backend.cls} backend;`);
     }
+    if (i.store) {
+      lines.push(`${i.store.driver.class} store{kStoreConfig};`);
+    }
+    // The service takes its driver, then the renderer (a panel), then its store's address (design camera-c1 §10:
+    // nullptr when the profile names none), then its config.
+    const args = ['driver', ...(backend ? ['backend'] : []), ...(i.service.store ? [i.store ? '&store' : 'nullptr'] : []), ...(hasConfig ? ['kConfig'] : [])];
+    lines.push(`${i.service.service} service{${args.join(', ')}};`, '');
     lines.push(`}  // namespace ${ns}`, '');
   }
   if (insts.length > 0) {
@@ -2204,6 +2460,7 @@ function buildManifest(inp: Inputs, model: Model, insts: ResolvedInstance[]): Fi
       driver: i.driver.id,
       config: Object.fromEntries(i.capConfig.map((c) => [c.entry.name, c.value])),
       traits: i.traits,
+      ...(i.store ? { store: { driver: i.store.driver.id, bind: i.store.bind } } : {}),
     })),
   };
 }
@@ -2235,7 +2492,8 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
   // Capability ports from protocol.yaml (05 §5.5: 1..239); 0 and 240+ are system endpoints.
   const ports = model.protocol.ports.capabilities;
   const locked = readSlots(sourceDir, opts.profile, ports, issues);
-  const driverLines = driverSdkconfig([...new Map(insts.map((i) => [i.driver.id, i.driver])).values()], issues);
+  const bound = new Map(insts.flatMap((i) => [[i.driver.id, i.driver] as const, ...(i.store ? [[i.store.driver.id, i.store.driver] as const] : [])]));
+  const driverLines = driverSdkconfig([...bound.values()], issues);
   issues.throwIfAny();
 
   const { slots, changed, full } = allocateSlots(Object.keys(inp!.profile.caps), locked, ports);
@@ -2251,7 +2509,7 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
   bindI2s(opts.profile, inp!.board, insts, issues);
   issues.throwIfAny();
 
-  const driverIds = [...new Set(insts.map((i) => i.driver.id))].sort();
+  const driverIds = driverIdsOf(insts);
   const manifest = buildManifest(inp!, model, insts);
   const files: GeneratedFile[] = [
     { path: 'fr_board/CMakeLists.txt', content: emitComponentCmake(opts.profile, insts) },
@@ -2277,7 +2535,15 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
     }
   }
   const instances = Object.fromEntries(
-    insts.map((i) => [i.name, { bind: i.bind, pins: i.pins, driverConfig: Object.fromEntries(i.driverConfig.map((f) => [f.name, f.value])) }]),
+    insts.map((i): [string, BoundInstance] => [
+      i.name,
+      {
+        bind: i.bind,
+        pins: i.pins,
+        driverConfig: Object.fromEntries(i.driverConfig.map((f) => [f.name, f.value])),
+        ...(i.store ? { store: { driver: i.store.driver.id, bind: i.store.bind, pins: i.store.pins, driverConfig: Object.fromEntries(i.store.driverConfig.map((f) => [f.name, f.value])) } } : {}),
+      },
+    ]),
   );
   return { files, manifest, instances, warnings: issues.warnings, slotsLockChanged: changed, slotsLock };
 }

@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstring>
 
-#include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "fr/serial_line.hpp"
@@ -13,15 +12,36 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+// The backend (design camera-c1 D2): UART0 on a board whose manifest says `console: uart0` (the classic ESP32 behind a
+// USB-UART bridge, which has no USB-Serial/JTAG), the USB-Serial/JTAG everywhere else. Both drivers take a write whole
+// into their TX ring and hand reads out of their RX ring, so the rings, the tasks and the line protocol above them are
+// the same and the bytes on the wire identical.
+#if CONFIG_FR_SERIAL_UART
+#include "driver/uart.h"
+#if CONFIG_VFS_SUPPORT_IO
+#include "driver/uart_vfs.h"
+#endif
+#else
+#include "driver/usb_serial_jtag.h"
 #if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED && CONFIG_VFS_SUPPORT_IO
 #include "driver/usb_serial_jtag_vfs.h"
+#endif
 #endif
 
 namespace fr::serial {
 namespace {
 
 constexpr const char *TAG = "fr_serial";
+#if CONFIG_FR_SERIAL_UART
+// UART0 at 115200 8N1 (design camera-c1 D2): the ROM and the bootloader print at that rate and the hub opens the port
+// once. RX 2 KB holds a full command line; TX 8 KB holds a few frame lines while the UART drains them (710 ms for all).
+constexpr uart_port_t kUart = UART_NUM_0;
+constexpr int kUartBaud = 115200;
+constexpr int kUartRxRing = 2048;
+constexpr int kUartTxRing = 8192;
+#else
 constexpr uint32_t kUsjBuffer = 4096;
+#endif
 // The frame ring also carries diag responses and bulk ENV frames (up to a full 2048-character line), so
 // it holds a few (8 KB; at least two in the memory class's 4 KB).
 constexpr size_t kFrameRingBytes = CONFIG_FR_SERIAL_FRAME_RING;
@@ -47,8 +67,9 @@ constexpr size_t kNetHead = 6;
 constexpr size_t kMaxFrameBody = 1470;
 static_assert(wire::kLinePrefix.size() + wire::base64url_len(kMaxFrameBody + 3) <= wire::kMaxLine);
 constexpr UBaseType_t kPrio = 9;
-// A host that stops reading must cost the writer at most this per line, and producers nothing.
-constexpr TickType_t kWriteTimeout = pdMS_TO_TICKS(20);
+// A host that stops reading must cost the writer at most this per line, and producers nothing (USJ; a UART drains
+// regardless, see write_whole).
+[[maybe_unused]] constexpr TickType_t kWriteTimeout = pdMS_TO_TICKS(20);
 // Producers wake the writer; the timeout only covers wakeups lost before the scheduler ran.
 constexpr TickType_t kIdleWait = pdMS_TO_TICKS(100);
 
@@ -268,6 +289,88 @@ int log_vprintf(const char *fmt, va_list ap)
     return n;
 }
 
+/**
+ * One line into the driver's TX ring, whole or not at all (the writer's contract above): true when it went in. The
+ * USJ driver takes it whole when its ring has room within kWriteTimeout (a host that stopped reading costs that much
+ * and drops the line); the UART driver copies it whole once the ring has room, which a UART always makes (the bridge
+ * drains it at 115200 whatever the host does: at most the full ring's 710 ms, for a burst of frame lines).
+ */
+bool write_whole(const char *p, size_t n)
+{
+#if CONFIG_FR_SERIAL_UART
+    return uart_write_bytes(kUart, p, n) == static_cast<int>(n);
+#else
+    return usb_serial_jtag_write_bytes(p, n, kWriteTimeout) == static_cast<int>(n);
+#endif
+}
+
+/** What the driver's RX ring holds, into `buf` (at least one byte: blocks until something comes). */
+int read_some(uint8_t *buf, size_t cap)
+{
+#if CONFIG_FR_SERIAL_UART
+    // uart_read_bytes waits for `length` bytes in all, so one byte blocking, then what else is queued at once: a
+    // command line is routed the moment its '\n' is in.
+    int n = uart_read_bytes(kUart, buf, 1, portMAX_DELAY);
+    if (n != 1) {
+        return 0;
+    }
+    size_t more = 0;
+    if (uart_get_buffered_data_len(kUart, &more) == ESP_OK && more > 0) {
+        more = std::min(more, cap - 1);
+        const int k = uart_read_bytes(kUart, buf + 1, more, 0);
+        if (k > 0) {
+            n += k;
+        }
+    }
+    return n;
+#else
+    return usb_serial_jtag_read_bytes(buf, cap, portMAX_DELAY);
+#endif
+}
+
+/** Installs the backend's driver and routes stdout through it. */
+bool backend_start()
+{
+#if CONFIG_FR_SERIAL_UART
+    uart_config_t cfg = {};  // assigned, not designated: source_clk sits in an anonymous union
+    cfg.baud_rate = kUartBaud;
+    cfg.data_bits = UART_DATA_8_BITS;
+    cfg.parity = UART_PARITY_DISABLE;
+    cfg.stop_bits = UART_STOP_BITS_1;
+    cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    cfg.rx_flow_ctrl_thresh = 0;
+    cfg.source_clk = UART_SCLK_DEFAULT;
+    esp_err_t err = uart_driver_install(kUart, kUartRxRing, kUartTxRing, 0, nullptr, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "uart_driver_install: %s", esp_err_to_name(err));
+        return false;
+    }
+    // The pins stay the ROM's (UART0's IOMUX defaults, the console's); only the parameters are set.
+    err = uart_param_config(kUart, &cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "uart_param_config: %s", esp_err_to_name(err));
+        return false;
+    }
+#if CONFIG_VFS_SUPPORT_IO
+    // Stray printf now queues in the driver's TX ring instead of racing the writer for the FIFO (as with the USJ).
+    uart_vfs_dev_use_driver(kUart);
+#endif
+    return true;
+#else
+    usb_serial_jtag_driver_config_t cfg = {.tx_buffer_size = kUsjBuffer, .rx_buffer_size = kUsjBuffer};
+    esp_err_t err = usb_serial_jtag_driver_install(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "usb_serial_jtag_driver_install: %s", esp_err_to_name(err));
+        return false;
+    }
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED && CONFIG_VFS_SUPPORT_IO
+    // Stray printf now queues in the driver's TX ring instead of racing the writer for the FIFO.
+    usb_serial_jtag_vfs_use_driver();
+#endif
+    return true;
+#endif
+}
+
 void writer_task(void *)
 {
     static char out[kMaxRecord];
@@ -285,12 +388,12 @@ void writer_task(void *)
             continue;
         }
         if (frame && line_open) {
-            usb_serial_jtag_write_bytes("\n", 1, kWriteTimeout);
+            write_whole("\n", 1);
             line_open = false;
         }
         // The driver's TX ring takes a write whole or not at all, so a dropped line never leaves half
         // a line behind for the host to misparse.
-        if (usb_serial_jtag_write_bytes(out, n, kWriteTimeout) == static_cast<int>(n)) {
+        if (write_whole(out, n)) {
             s_frames_tx += frame ? 1 : 0;
             if (!frame) {
                 line_open = out[n - 1] != '\n';
@@ -333,7 +436,7 @@ void reader_task(void *)
     size_t len = 0;
     bool discarding = false;
     for (;;) {
-        int n = usb_serial_jtag_read_bytes(rx, sizeof(rx), portMAX_DELAY);
+        int n = read_some(rx, sizeof(rx));
         for (int i = 0; i < n; ++i) {
             char c = static_cast<char>(rx[i]);
             if (c == '\n') {
@@ -361,16 +464,9 @@ void reader_task(void *)
 bool start(const Handlers &h)
 {
     s_handlers = h;
-    usb_serial_jtag_driver_config_t cfg = {.tx_buffer_size = kUsjBuffer, .rx_buffer_size = kUsjBuffer};
-    esp_err_t err = usb_serial_jtag_driver_install(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "usb_serial_jtag_driver_install: %s", esp_err_to_name(err));
+    if (!backend_start()) {
         return false;
     }
-#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_ENABLED && CONFIG_VFS_SUPPORT_IO
-    // Stray printf now queues in the driver's TX ring instead of racing the writer for the FIFO.
-    usb_serial_jtag_vfs_use_driver();
-#endif
     if (xTaskCreate(writer_task, "fr_serial", 3072, nullptr, kPrio, &s_writer) != pdPASS ||
         xTaskCreate(reader_task, "fr_serial_rx", 4096, nullptr, kPrio, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "cannot create tasks");
@@ -402,7 +498,13 @@ bool write_frame(uint8_t type, std::span<const uint8_t> body)
 
 bool connected()
 {
+#if CONFIG_FR_SERIAL_UART
+    // A UART has no host-presence signal (the bridge drains it whatever sits on the USB side): the serial link is a
+    // hub link whenever the board runs, and the hub learns the device from the HELLO it then sees (design camera-c1 D3).
+    return true;
+#else
     return usb_serial_jtag_is_connected();
+#endif
 }
 
 void enable_net_logs(uint8_t max_level, void (*wake)())

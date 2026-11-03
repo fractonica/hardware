@@ -1,0 +1,17 @@
+profile: e32a-cam
+board: aithinker-esp32-cam
+app: node
+net: { link_profile: default }
+# Design camera-c1 D6: the frame buffers (two of 96 KB at svga, more for uxga) live in the 4 MB quad PSRAM; the camera's
+# 32 KB of DMA buffers, Wi-Fi and the framework share the ~300 KB of internal RAM (the spike had 311 KB free after the
+# camera, before Wi-Fi). memory: default until the bench reads the heap with Wi-Fi up; `small` if under ~40 KB.
+psram: on
+memory: default
+# No `boot` instance: the board has no BOOT button (RESET is EN). status is the red LED on the back (on while booting,
+# as every node's); flash is the white LED, an fr.led the hub switches on around a snapshot (camera_snap --flash).
+# cam: fr.camera on the OV2640; its store is the micro-SD card (design §10: `store` beside `bind`), the module's own
+# recorder. A board without a slot leaves `store` out and gets a camera whose sd_* answer UNSUPPORTED.
+caps:
+  status: { cap: fr.led,    driver: led_gpio,   bind: leds.red }
+  flash:  { cap: fr.led,    driver: led_gpio,   bind: leds.flash }
+  cam:    { cap: fr.camera, driver: dvp_camera, bind: cameras.main, store: { driver: sdmmc_card, bind: sd_cards.card } }

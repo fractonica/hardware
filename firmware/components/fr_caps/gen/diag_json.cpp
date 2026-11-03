@@ -20,6 +20,7 @@
 #include "touch.hpp"
 #include "csi.hpp"
 #include "radio_tx.hpp"
+#include "camera.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -37,6 +38,7 @@ cJSON *to_json(const AnalogInTraits &v);
 cJSON *to_json(const FixtureTraits &v);
 cJSON *to_json(const AudioInTraits &v);
 cJSON *to_json(const TouchTraits &v);
+cJSON *to_json(const CameraTraits &v);
 #if FR_TEST_HOOKS
 cJSON *to_json(const ButtonInjectArgs &v);
 cJSON *to_json(const ButtonDown &v);
@@ -88,6 +90,15 @@ cJSON *to_json(const CsiStreamStartArgs &v);
 cJSON *to_json(const CsiStreamStopArgs &v);
 cJSON *to_json(const CsiStreamEnded &v);
 cJSON *to_json(const RadioTxStartArgs &v);
+cJSON *to_json(const CameraRecording &v);
+cJSON *to_json(const CameraStreamStartArgs &v);
+cJSON *to_json(const CameraStreamStopArgs &v);
+cJSON *to_json(const CameraSetArgs &v);
+cJSON *to_json(const CameraSdListArgs &v);
+cJSON *to_json(const CameraSdListResult &v);
+cJSON *to_json(const CameraSdFetchArgs &v);
+cJSON *to_json(const CameraSdDeleteArgs &v);
+cJSON *to_json(const CameraStreamEnded &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
 cJSON *to_json(const NodeDescribeResult &v);
 cJSON *to_json(const NodeRebootArgs &v);
@@ -463,6 +474,15 @@ cJSON *to_json(const TouchTraits &v)
     ok = ok && add(o, "width", json_number(v.width));
     ok = ok && add(o, "height", json_number(v.height));
     ok = ok && add(o, "display", json_number(v.display));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "sensor", json_number(v.sensor));
+    ok = ok && add(o, "max_frame_size", json_enum(v.max_frame_size));
     return finish(o, ok);
 }
 
@@ -964,6 +984,117 @@ cJSON *to_json(const RadioTxStartArgs &v)
     return finish(o, ok);
 }
 
+cJSON *to_json(const CameraRecording &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "id", json_number(v.id));
+    ok = ok && add(o, "frames", json_number(v.frames));
+    ok = ok && add(o, "bytes", json_number(v.bytes));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraStreamStartArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    ok = ok && add(o, "seconds", json_number(v.seconds));
+    ok = ok && add(o, "interval_ms", json_number(v.interval_ms));
+    ok = ok && add(o, "max_frames", json_number(v.max_frames));
+    ok = ok && add(o, "to", json_enum(v.to));
+    if (v.has_frame_size) {
+        ok = ok && add(o, "frame_size", json_enum(v.frame_size));
+    }
+    if (v.has_quality) {
+        ok = ok && add(o, "quality", json_number(v.quality));
+    }
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraStreamStopArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraSetArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    if (v.has_frame_size) {
+        ok = ok && add(o, "frame_size", json_enum(v.frame_size));
+    }
+    if (v.has_quality) {
+        ok = ok && add(o, "quality", json_number(v.quality));
+    }
+    if (v.has_vflip) {
+        ok = ok && add(o, "vflip", json_bool(v.vflip));
+    }
+    if (v.has_hmirror) {
+        ok = ok && add(o, "hmirror", json_bool(v.hmirror));
+    }
+    if (v.has_brightness) {
+        ok = ok && add(o, "brightness", json_number(v.brightness));
+    }
+    if (v.has_contrast) {
+        ok = ok && add(o, "contrast", json_number(v.contrast));
+    }
+    if (v.has_saturation) {
+        ok = ok && add(o, "saturation", json_number(v.saturation));
+    }
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraSdListArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "from", json_number(v.from));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraSdListResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "recordings", json_array(v.recordings, [](const CameraRecording &e) { return to_json(e); }));
+    ok = ok && add(o, "next", json_number(v.next));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraSdFetchArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    ok = ok && add(o, "recording", json_number(v.recording));
+    ok = ok && add(o, "from_frame", json_number(v.from_frame));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraSdDeleteArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "recording", json_number(v.recording));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const CameraStreamEnded &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "stream_id", json_number(v.stream_id));
+    ok = ok && add(o, "reason", json_enum(v.reason));
+    ok = ok && add(o, "frames", json_number(v.frames));
+    ok = ok && add(o, "dropped", json_number(v.dropped));
+    ok = ok && add(o, "bytes", json_number(v.bytes));
+    return finish(o, ok);
+}
+
 cJSON *to_json(const NodeIdentifyArgs &v)
 {
     cJSON *o = cJSON_CreateObject();
@@ -1099,7 +1230,7 @@ cJSON *to_json(const DiagMark &v)
     return finish(o, ok);
 }
 
-bool from_json_display_ui_widget(const cJSON *j, DisplayUiWidget &v)
+[[maybe_unused]] bool from_json_display_ui_widget(const cJSON *j, DisplayUiWidget &v)
 {
     if (!cJSON_IsObject(j)) {
         return false;
@@ -1142,7 +1273,7 @@ bool from_json_display_ui_widget(const cJSON *j, DisplayUiWidget &v)
     return ok;
 }
 
-bool from_json_display_ui_layout(const cJSON *j, DisplayUiLayout &v)
+[[maybe_unused]] bool from_json_display_ui_layout(const cJSON *j, DisplayUiLayout &v)
 {
     if (!cJSON_IsObject(j)) {
         return false;
@@ -1155,6 +1286,27 @@ bool from_json_display_ui_layout(const cJSON *j, DisplayUiLayout &v)
         } else if (key == "widgets") {
             ok = from_json_array(it, v.widgets,
                 [](const cJSON *e, DisplayUiWidget &out) { return from_json_display_ui_widget(e, out); });
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    return ok;
+}
+
+[[maybe_unused]] bool from_json_camera_recording(const cJSON *j, CameraRecording &v)
+{
+    if (!cJSON_IsObject(j)) {
+        return false;
+    }
+    bool ok = true;
+    for (const cJSON *it = j->child; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.id);
+        } else if (key == "frames") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.frames);
+        } else if (key == "bytes") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.bytes);
         } else {
             ok = false;  // unknown key
         }
@@ -1767,6 +1919,157 @@ Status args_radio_tx_stop(const cJSON *obj)
         return std::unexpected(Err::invalid_args);
     }
     return {};
+}
+
+Status args_camera_stream_start(const cJSON *obj, fr::wire::Writer &w)
+{
+    CameraStreamStartArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "stream_id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.stream_id);
+        } else if (key == "seconds") {
+            ok = from_json_uint(it, 0xFFFF, v.seconds);
+        } else if (key == "interval_ms") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.interval_ms);
+        } else if (key == "max_frames") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.max_frames);
+        } else if (key == "to") {
+            ok = from_json_enum(it, v.to);
+        } else if (key == "frame_size") {
+            v.has_frame_size = true;
+            ok = from_json_enum(it, v.frame_size);
+        } else if (key == "quality") {
+            v.has_quality = true;
+            ok = from_json_uint(it, 0xFF, v.quality);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_camera_stream_stop(const cJSON *obj, fr::wire::Writer &w)
+{
+    CameraStreamStopArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "stream_id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.stream_id);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_camera_set(const cJSON *obj, fr::wire::Writer &w)
+{
+    CameraSetArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "frame_size") {
+            v.has_frame_size = true;
+            ok = from_json_enum(it, v.frame_size);
+        } else if (key == "quality") {
+            v.has_quality = true;
+            ok = from_json_uint(it, 0xFF, v.quality);
+        } else if (key == "vflip") {
+            v.has_vflip = true;
+            ok = from_json_bool(it, v.vflip);
+        } else if (key == "hmirror") {
+            v.has_hmirror = true;
+            ok = from_json_bool(it, v.hmirror);
+        } else if (key == "brightness") {
+            v.has_brightness = true;
+            ok = from_json_sint(it, -0x80, 0x7F, v.brightness);
+        } else if (key == "contrast") {
+            v.has_contrast = true;
+            ok = from_json_sint(it, -0x80, 0x7F, v.contrast);
+        } else if (key == "saturation") {
+            v.has_saturation = true;
+            ok = from_json_sint(it, -0x80, 0x7F, v.saturation);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_camera_sd_list(const cJSON *obj, fr::wire::Writer &w)
+{
+    CameraSdListArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "from") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.from);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_camera_sd_fetch(const cJSON *obj, fr::wire::Writer &w)
+{
+    CameraSdFetchArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "stream_id") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.stream_id);
+        } else if (key == "recording") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.recording);
+        } else if (key == "from_frame") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.from_frame);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_camera_sd_delete(const cJSON *obj, fr::wire::Writer &w)
+{
+    CameraSdDeleteArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "recording") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.recording);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
 }
 
 Status args_node_identify(const cJSON *obj, fr::wire::Writer &w)
@@ -2533,6 +2836,105 @@ cJSON *radio_tx_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
     return nullptr;
 }
 
+cJSON *camera_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Camera::kCmdStreamStart:
+            return json_of(decode_camera_stream_start_args(body));
+        case Camera::kCmdStreamStop:
+            return json_of(decode_camera_stream_stop_args(body));
+        case Camera::kCmdSet:
+            return json_of(decode_camera_set_args(body));
+        case Camera::kCmdSdList:
+            return json_of(decode_camera_sd_list_args(body));
+        case Camera::kCmdSdFetch:
+            return json_of(decode_camera_sd_fetch_args(body));
+        case Camera::kCmdSdDelete:
+            return json_of(decode_camera_sd_delete_args(body));
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Camera::kCmdStreamStart:
+            return json_empty(body);
+        case Camera::kCmdStreamStop:
+            return json_empty(body);
+        case Camera::kCmdSet:
+            return json_empty(body);
+        case Camera::kCmdSdList:
+            return json_of(decode_camera_sd_list_result(body));
+        case Camera::kCmdSdFetch:
+            return json_empty(body);
+        case Camera::kCmdSdDelete:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Camera::kEventStreamEnded:
+            return json_of(decode_camera_stream_ended(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Camera::kPropFrames: {
+            const auto v = decode_camera_frames_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "frames", json_number(*v)));
+        }
+        case Camera::kPropFpsX10: {
+            const auto v = decode_camera_fps_x10_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "fps_x10", json_number(*v)));
+        }
+        case Camera::kPropLastBytes: {
+            const auto v = decode_camera_last_bytes_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "last_bytes", json_number(*v)));
+        }
+        case Camera::kPropStreaming: {
+            const auto v = decode_camera_streaming_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "streaming", json_bool(*v)));
+        }
+        case Camera::kPropSd: {
+            const auto v = decode_camera_sd_state(body);
+            if (!v || !(is_known(*v))) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "sd", json_enum(*v)));
+        }
+        case Camera::kPropSdFreeMb: {
+            const auto v = decode_camera_sd_free_mb_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "sd_free_mb", json_number(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
 cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
 {
     switch (cls) {
@@ -2660,6 +3062,8 @@ cJSON *traits_to_json(uint16_t cap_id, std::span<const uint8_t> traits)
         return json_empty(traits);
     case RadioTx::kId:
         return json_empty(traits);
+    case Camera::kId:
+        return json_of(decode_camera_traits(traits));
     case Node::kId:
         return json_empty(traits);
     case Ota::kId:
@@ -2833,6 +3237,27 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_radio_tx_stop(obj);
         }
         break;
+    case Camera::kId:
+        if (name == "stream_start") {
+            id = Camera::kCmdStreamStart;
+            s = args_camera_stream_start(obj, w);
+        } else if (name == "stream_stop") {
+            id = Camera::kCmdStreamStop;
+            s = args_camera_stream_stop(obj, w);
+        } else if (name == "set") {
+            id = Camera::kCmdSet;
+            s = args_camera_set(obj, w);
+        } else if (name == "sd_list") {
+            id = Camera::kCmdSdList;
+            s = args_camera_sd_list(obj, w);
+        } else if (name == "sd_fetch") {
+            id = Camera::kCmdSdFetch;
+            s = args_camera_sd_fetch(obj, w);
+        } else if (name == "sd_delete") {
+            id = Camera::kCmdSdDelete;
+            s = args_camera_sd_delete(obj, w);
+        }
+        break;
     case Node::kId:
         if (name == "identify") {
             id = Node::kCmdIdentify;
@@ -2906,6 +3331,8 @@ cJSON *decode_to_json(uint16_t cap_id, uint8_t cls, uint8_t member_id, std::span
         return csi_to_json(cls, member_id, body);
     case RadioTx::kId:
         return radio_tx_to_json(cls, member_id, body);
+    case Camera::kId:
+        return camera_to_json(cls, member_id, body);
     case Node::kId:
         return node_to_json(cls, member_id, body);
     case Ota::kId:

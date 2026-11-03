@@ -21,7 +21,6 @@ import { type CsiBlock, connect, encodeCsiBlock, encodeCsiFile, type Hub, parseC
 import { createAppServer } from '../src/apps/server.ts';
 import type { AppLimits } from '../src/apps/socket.ts';
 import type { HubContext, HubEvent, HubRunOptions, StaticSite, WsServer } from '../src/context.ts';
-import { csiLive } from '../src/csi/live.ts';
 import { csiReasonOfPost } from '../src/csi/ops.ts';
 import { DB_SCHEMA_VERSION, openDb } from '../src/db.ts';
 import { buildServer } from '../src/http.ts';
@@ -30,6 +29,7 @@ import { NodeHttpServer } from '../src/ota/http.ts';
 import { HANDLERS } from '../src/ops.ts';
 import { identCsv, identNet } from '../src/registry/ident.ts';
 import { CsiSink, sweepCsiTemps } from '../src/streams/csi-sink.ts';
+import { liveStreams } from '../src/streams/live.ts';
 import { type StreamEnd, StreamRoutes, STREAM_ID_TTL_MS } from '../src/streams/route.ts';
 import { chunk, LAST_CHUNK } from './audio-util.ts';
 import { type FakeNode, type OtaRig, otaRig, until, waitForEvent } from './fake-node.ts';
@@ -453,7 +453,7 @@ function watch(h: Hub, device = 'csi-c5', opts: { start?: { source?: 'router' | 
     device,
     undefined,
     (block, bytes) => {
-      w.blocks.push(block);
+      w.blocks.push(block as CsiBlock);
       w.bytes.push(bytes);
     },
     { ...opts, onEvent: (e) => w.events.push(e) },
@@ -490,7 +490,7 @@ describe('csi_stream and csi_status against a fake board, with /app/stream (D12,
     expect(Buffer.from(encodeCsiFile(w.bytes))).toEqual(readFileSync(out));
     expect(events(b.r, 'stream.started')[0]).toMatchObject({ device: DEV, fields: { kind: 'csi', instance: 'csi', stream_id: res.stream_id, format: 'csi1', source: 'router', seconds: 1, path: out, live: true, job_id: job.job_id } });
     expect(events(b.r, 'stream.ended')[0]).toMatchObject({ device: DEV, fields: { kind: 'csi', stream_id: res.stream_id, reason: 'done', records: 147, dropped: 3, blocks: 49, path: out } });
-    expect(csiLive(b.hub).get(DEV, 'csi')).toBeNull();
+    expect(liveStreams(b.hub).get(DEV, 'csi')).toBeNull();
   });
 
   it('csi_status: the mirrored properties, and the running stream counters; BUSY for a second stream; peer resolved to a MAC', async () => {
@@ -527,7 +527,7 @@ describe('csi_stream and csi_status against a fake board, with /app/stream (D12,
     expect(job.status).toBe('failed');
     expect(job.error).toMatchObject({ code: 'DELIVERY_FAILED' });
     expect(existsSync(join(home, 'n.csi'))).toBe(false);
-    expect(csiLive(b.hub).get(DEV, 'csi')).toBeNull();
+    expect(liveStreams(b.hub).get(DEV, 'csi')).toBeNull();
   });
 
   it('/app/stream start begins a live stream (seconds 0); a second starter joins it; the last one leaving stops it', async () => {
@@ -552,7 +552,7 @@ describe('csi_stream and csi_status against a fake board, with /app/stream (D12,
     const job = b.r.jobs.list(5).find((j) => j.kind === 'csi')!;
     const end = await b.r.jobs.wait(job.job_id, 20);
     expect(end).toMatchObject({ status: 'completed', origin: 'app', result: { reason: 'stopped', live: true } });
-    expect(csiLive(b.hub).get(DEV, 'csi')).toBeNull();
+    expect(liveStreams(b.hub).get(DEV, 'csi')).toBeNull();
   });
 
   it('backpressure: a socket over highWater is sent no blocks, then stream.gap with the count before stream.ended', async () => {
@@ -581,8 +581,8 @@ describe('csi_stream and csi_status against a fake board, with /app/stream (D12,
     const w1 = watch(h, 'csi-c5', { start: {} });
     await until(() => w1.blocks.length >= 3, 5000, 'blocks on the first socket');
     w1.off();
-    await until(() => csiLive(b.hub).get(DEV, 'csi')?.stopping, 5000, 'the stream stopping');
-    const old = csiLive(b.hub).get(DEV, 'csi')!.info.stream_id;
+    await until(() => liveStreams(b.hub).get(DEV, 'csi')?.stopping, 5000, 'the stream stopping');
+    const old = liveStreams(b.hub).get(DEV, 'csi')!.info.stream_id;
     const w2 = watch(h, 'csi-c5', { start: {} });
     await until(() => w2.blocks.length >= 3, 5000, 'blocks of the new stream');
     expect(b.starts.map((s) => s.stream_id)).toEqual([old, expect.any(Number)]);
@@ -600,7 +600,7 @@ describe('csi_stream and csi_status against a fake board, with /app/stream (D12,
     for (const j of jobs) {
       expect(await b.r.jobs.wait(j.job_id, 20)).toMatchObject({ status: 'completed', origin: 'app', result: { reason: 'stopped' } });
     }
-    expect(csiLive(b.hub).get(DEV, 'csi')).toBeNull();
+    expect(liveStreams(b.hub).get(DEV, 'csi')).toBeNull();
   });
 
   it('a start while a csi_stream that is not published live runs: an error frame says so (DEVICE_BUSY), no second stream', async () => {

@@ -82,12 +82,24 @@ function group(path: string[]): Command {
   return cmd;
 }
 
+const numeric = (v: string) => v.trim() !== '' && Number.isFinite(Number(v));
+
+/** An option's value for a numeric field (`--seconds 5`, `--window 60`): a number, or a usage error. */
 function parseNumber(v: string): number {
-  const n = Number(v);
-  if (!v.trim() || !Number.isFinite(n)) {
+  if (!numeric(v)) {
     throw new InvalidArgumentError('not a number');
   }
-  return n;
+  return Number(v);
+}
+
+/**
+ * A positional's word as its field takes it: a number for a numeric field (`fr camera sd fetch <device> <recording>`)
+ * when the word is one, else the word itself (a field that takes a number or a word, like `bind rm <device> <slot>`
+ * with `all`, keeps the word; the hub's schema says what is wrong otherwise).
+ */
+function coerceWord(field: z.ZodType, word: string): string | number {
+  const { base } = unwrap(field);
+  return base instanceof z.ZodNumber && numeric(word) ? Number(word) : word;
 }
 
 /**
@@ -257,7 +269,7 @@ function addOp(op: OpDef): void {
     }
     slots.forEach((p, i) => {
       if (words[i] !== undefined) {
-        input[p] = words[i];
+        input[p] = coerceWord(shape[p], words[i]);
       }
     });
     const missing = positional.find((p) => !isOptional(p) && input[p] === undefined);

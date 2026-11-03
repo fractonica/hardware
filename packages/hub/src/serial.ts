@@ -4,10 +4,16 @@
 // another program through a serial lease (design c6 D4, ports/leases.ts); before either, the hub asks who
 // else has the port open (D5, ports/holders.ts). The serial command channel (fr_diag) writes lines through
 // the hub's own handle.
+// USB-UART bridge ports (design camera-c1 D3, D4): a port whose vid:pid is in BRIDGES (a CH340 on the ESP32-CAM-MB,
+// a CP210x, an FT232) carries a board's UART0. It has no MAC in its USB serial, so its key is `path:<basename>`
+// (`path:usbserial-110`), `usb_serial` is null, and its device id is learned from the serial link: the router tells
+// learnDevice() the HELLO's device id when the first `@fr1:` envelope arrives on the port (kept until the port goes).
+// Its EN and IO0 hang on RTS and DTR through the base's transistor pair, as esptool drives them: hardReset pulses RTS
+// (EN) for 100 ms with DTR deasserted, enterBootloader runs esptool's classic download sequence.
 
 import { StringDecoder } from 'node:string_decoder';
 
-import { FrError, type PortHolder, type PortInfo, type PortLease, SERIAL_PREFIX } from '@fractonica/protocol';
+import { bridgeName, FrError, type PortHolder, type PortInfo, type PortLease, SERIAL_PREFIX } from '@fractonica/protocol';
 import { SerialPort } from 'serialport';
 
 import type { PortHolders } from './context.ts';
@@ -17,6 +23,17 @@ import type { LogStore } from './logstore.ts';
 import { busyExternal, holderText, LsofHolders, portLeased } from './ports/holders.ts';
 
 const ESPRESSIF_VID = '303a';
+/** A bridge port's key: `path:` and the /dev entry's basename (design camera-c1 D3). */
+export const PATH_KEY_PREFIX = 'path:';
+/**
+ * esptool's timings (esp_pylib.serial_reset, copied by HardReset / ClassicReset in esptool 5.6.0 reset.py): EN held
+ * low 100 ms on a UART bridge (200 ms on a chip's own USB, which re-enumerates), IO0 held 50 ms after EN rises.
+ */
+export const BRIDGE_RESET_HOLD_MS = 100;
+export const USJ_RESET_HOLD_MS = 200;
+export const BOOTLOADER_IO0_HOLD_MS = 50;
+/** A chip's own USB port is keyed by its MAC, the device id. */
+const DEVICE_ID = /^[0-9a-f]{12}$/;
 const POLL_MS = 500;
 const GONE_DEBOUNCE_MS = 1500;
 const BUSY_RETRY_MS = 5000;
@@ -42,12 +59,16 @@ const LATE_POLL_MS = 2000;
 
 type State = PortInfo['state'];
 
-interface Entry {
+export interface Entry {
   key: string;
   path: string;
   usbSerial?: string;
   vid?: string;
   pid?: string;
+  /** A USB-UART bridge's name (BRIDGES); undefined on a chip's own USB. */
+  bridge?: string;
+  /** A bridge port's device id, learned from the first `@fr1:` envelope (the HELLO) on it; a chip's own USB has it in `key`. */
+  deviceId?: string;
   state: State;
   holder?: string;
   port?: SerialPort;
@@ -89,6 +110,17 @@ const stuck = new WeakMap<SerialPort, Promise<void>>();
 
 function cuPath(path: string): string {
   return path.replace('/dev/tty.', '/dev/cu.');
+}
+
+/** `/dev/cu.usbserial-110` -> `path:usbserial-110` (a bridge port's key, design camera-c1 D3). */
+export function pathKey(path: string): string {
+  const base = cuPath(path).replace(/^\/dev\/(cu\.)?/, '');
+  return `${PATH_KEY_PREFIX}${base}`;
+}
+
+/** Whether the key is a bridge port's (`path:<basename>`). */
+export function isPathKey(key: string): boolean {
+  return key.startsWith(PATH_KEY_PREFIX);
 }
 
 /** What a lease asks of SerialPortManager.lease besides its holder text. */
@@ -214,15 +246,36 @@ export class SerialPortManager {
         await this.#reopenAfterResume(gap);
       }
       this.#lastPoll = now;
-      const listed = (await (this.#binding ? this.#binding.list() : SerialPort.list())).filter((p) => p.vendorId?.toLowerCase() === ESPRESSIF_VID);
+      // Espressif's own USB (keyed by the MAC in the USB serial) and the USB-UART bridges BRIDGES names (keyed by path).
+      const all = await (this.#binding ? this.#binding.list() : SerialPort.list());
+      const listed = all.flatMap((p) => {
+        const vid = p.vendorId?.toLowerCase();
+        if (vid === ESPRESSIF_VID) {
+          return [{ ...p, bridge: undefined as string | undefined }];
+        }
+        const bridge = vid && p.productId ? bridgeName(vid, p.productId) : undefined;
+        return bridge ? [{ ...p, bridge }] : [];
+      });
       const present = new Set<string>();
       for (const p of listed) {
-        const key = p.serialNumber ? normalizeMac(p.serialNumber) : cuPath(p.path);
+        const key = p.bridge ? pathKey(p.path) : p.serialNumber ? normalizeMac(p.serialNumber) : cuPath(p.path);
         present.add(key);
         let e = this.#entries.get(key);
         if (!e) {
           this.#gone.delete(key);
-          e = { key, path: cuPath(p.path), usbSerial: p.serialNumber, vid: p.vendorId, pid: p.productId, state: 'closed', decoder: new StringDecoder('utf8'), buf: '', lines: 0, lastSeen: now, nextOpenAt: 0 };
+          e = {
+            key,
+            path: cuPath(p.path),
+            ...(p.bridge ? { bridge: p.bridge } : { usbSerial: p.serialNumber }),
+            vid: p.vendorId,
+            pid: p.productId,
+            state: 'closed',
+            decoder: new StringDecoder('utf8'),
+            buf: '',
+            lines: 0,
+            lastSeen: now,
+            nextOpenAt: 0,
+          };
           this.#entries.set(key, e);
           this.#db
             .prepare('INSERT INTO ports_seen (usb_serial, last_path, vid, pid, last_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT(usb_serial) DO UPDATE SET last_path = excluded.last_path, last_seen = excluded.last_seen')
@@ -329,6 +382,10 @@ export class SerialPortManager {
   }
 
   #tellGone(key: string): void {
+    const e = this.#entries.get(key);
+    if (e) {
+      this.#forgetDevice(e); // the board is gone with its port: whatever comes back says HELLO again
+    }
     for (const fn of this.#goneListeners) {
       try {
         fn(key);
@@ -451,25 +508,82 @@ export class SerialPortManager {
       await new Promise<void>((resolve) => port.close(() => resolve()));
     }
     this.#flushPartial(e);
+    this.#forgetDevice(e);
   }
 
+  /**
+   * A bridge port's learned device id is kept until the port closes (design camera-c1 D3): a lease (a flash may put
+   * another board's firmware on it), an unplug or a reopen drops it, and the next HELLO on the port names the device
+   * again. port_list changes with it.
+   */
+  #forgetDevice(e: Entry): void {
+    if (e.deviceId !== undefined) {
+      e.deviceId = undefined;
+      this.#changed();
+    }
+  }
+
+  /**
+   * The port a selector names: its key (the MAC, or `path:<basename>` of a bridge port), its /dev path (tty. or cu.),
+   * a bridge port's basename, its USB serial, or the device id a bridge port learned from its board's HELLO.
+   */
   resolve(selector: string): Entry {
     const want = normalizeMac(selector.replace(/^(mac|port|id):/, ''));
+    const wantKey = isPathKey(want) ? want : want.startsWith('/dev/') ? pathKey(want) : `${PATH_KEY_PREFIX}${want}`;
     const hits = [...this.#entries.values()].filter(
-      (e) => e.key === want || e.path === want || cuPath(want) === e.path || (e.usbSerial && normalizeMac(e.usbSerial) === want),
+      (e) =>
+        e.key === want ||
+        e.key === wantKey ||
+        e.path === want ||
+        cuPath(want) === e.path ||
+        (e.usbSerial !== undefined && normalizeMac(e.usbSerial) === want) ||
+        (e.deviceId !== undefined && e.deviceId === want),
     );
     if (hits.length === 1) {
       return hits[0];
     }
     if (hits.length > 1) {
+      // A device id names a chip's own USB (its key) over a bridge port that learned the same id from a HELLO: the
+      // board may be on both (its USB and its UART0), or the bridge's learned id is stale until its port closes.
+      const own = DEVICE_ID.test(want) ? hits.filter((e) => e.key === want) : [];
+      if (own.length === 1) {
+        return own[0];
+      }
       throw new FrError('AMBIGUOUS_SELECTOR', `${selector} matches ${hits.length} ports`, {
         remediation: [{ tool: 'port_list', cli: 'fr ports ls', human: 'select one port by its path (port:<path>)' }],
         details: { candidates: hits.map((e) => ({ path: e.path, ...(e.usbSerial ? { usb_serial: e.usbSerial } : {}) })) },
       });
     }
-    throw new FrError('NOT_FOUND', `no attached Espressif port matches ${selector}`, {
+    throw new FrError('NOT_FOUND', `no attached Espressif or USB-UART bridge port matches ${selector}`, {
       remediation: [{ tool: 'port_list', cli: 'fr ports ls' }],
     });
+  }
+
+  /**
+   * A bridge port's device id, from the first `@fr1:` envelope on it (the router's HELLO handler, design camera-c1 D3):
+   * shown by port_list and matched by resolve() until the port goes. A port keyed by its MAC needs none (ignored).
+   */
+  learnDevice(key: string, deviceId: string): void {
+    const e = this.#entries.get(key);
+    if (!e || !isPathKey(key)) {
+      return;
+    }
+    const id = normalizeMac(deviceId);
+    if (e.deviceId !== id) {
+      e.deviceId = id;
+      this.#changed();
+    }
+  }
+
+  /** The device id a port stands for: its key (a chip's own USB), or the one a bridge port learned; undefined before that. */
+  deviceOf(key: string): string | undefined {
+    const e = this.#entries.get(key);
+    return e ? (e.deviceId ?? (DEVICE_ID.test(e.key) ? e.key : undefined)) : undefined;
+  }
+
+  /** The bridge a port is behind (BRIDGES), or undefined for a chip's own USB (or an unknown port). */
+  bridgeOf(key: string): string | undefined {
+    return this.#entries.get(key)?.bridge;
   }
 
   /**
@@ -498,7 +612,7 @@ export class SerialPortManager {
    * PORT_BUSY_EXTERNAL, naming the program, while another program has it open (design c6 D5): asked of
    * lsof at every lease once the hub's probe is in (useHolders), else only for a port that failed to open.
    */
-  async lease(selector: string, holder: string, opts: LeaseOptions = {}): Promise<{ path: string; key: string; release: () => void }> {
+  async lease(selector: string, holder: string, opts: LeaseOptions = {}): Promise<{ path: string; key: string; bridge?: string; release: () => void }> {
     const e = await this.resolveWait(selector);
     if (e.state === 'leased' || e.claimed) {
       throw portLeased(e, e);
@@ -534,6 +648,7 @@ export class SerialPortManager {
     return {
       path: e.path,
       key: e.key,
+      ...(e.bridge ? { bridge: e.bridge } : {}),
       release: () => {
         if (released) {
           return;
@@ -584,18 +699,44 @@ export class SerialPortManager {
   }
 
   /**
-   * Pulses EN via RTS on the hub's own handle, DTR deasserted so the chip boots normally. Native
-   * USB-Serial-JTAG survives the chip reset without re-enumerating, so the ROM, bootloader and
-   * boot-banner lines land in the log store instead of being dropped while nobody has the port open.
+   * Pulses EN via RTS on the hub's own handle, DTR deasserted so the chip boots normally (esptool's HardReset: the
+   * asserted line is the low one through the board's transistor pair, held 200 ms on a chip's own USB, 100 ms on a
+   * UART bridge, design camera-c1 D4). Native USB-Serial-JTAG survives the chip reset without re-enumerating, so the
+   * ROM, bootloader and boot-banner lines land in the log store instead of being dropped while nobody has the port
+   * open; a bridge never re-enumerates.
    */
   async hardReset(selector: string, waitOpenMs = 3000): Promise<{ path: string; key: string }> {
     const e = await this.resolveWait(selector);
     const port = await this.#waitOpen(e, waitOpenMs, 'cannot reset through it');
-    const set = (rts: boolean) => new Promise<void>((res, rej) => port.set({ dtr: false, rts }, (err) => (err ? rej(err) : res())));
-    await set(true);
-    await sleep(200);
-    await set(false);
+    const set = lines(port);
+    await set({ dtr: false, rts: true }); // EN low
+    await sleep(e.bridge ? BRIDGE_RESET_HOLD_MS : USJ_RESET_HOLD_MS);
+    await set({ dtr: false, rts: false }); // EN high, chip out of reset
     return { path: e.path, key: e.key };
+  }
+
+  /**
+   * esptool's classic download sequence (esp_pylib unix_tight_bootloader_reset, the one esptool's default-reset runs on
+   * a UART bridge) through the hub's own handle (design camera-c1 D4): EN low with IO0 high, 100 ms, then IO0 low and EN
+   * high in one TIOCMSET, 50 ms, IO0 high. The CAM-MB's transistor pair makes DTR and RTS both asserted a no-op on
+   * both lines, so the swap must be one call: a step through {dtr, rts} both true would release EN with IO0 high and
+   * the chip would boot its app. The chip is then in the ROM download mode (a chip whose IO0 is not on DTR, a bare
+   * FTDI, needs a hand on it). Refused on a chip's own USB (no EN/IO0 on its lines: esptool's USB-JTAG path does
+   * that, ops.ts).
+   */
+  async enterBootloader(selector: string, waitOpenMs = 3000): Promise<{ path: string; key: string; bridge: string }> {
+    const e = await this.resolveWait(selector);
+    if (!e.bridge) {
+      throw new FrError('INVALID_ARGS', `${e.path} is a chip's own USB, not a USB-UART bridge: its download mode is esptool's`);
+    }
+    const port = await this.#waitOpen(e, waitOpenMs, 'cannot reset through it');
+    const set = lines(port);
+    await set({ dtr: false, rts: true }); // IO0 high, EN low: chip in reset
+    await sleep(BRIDGE_RESET_HOLD_MS);
+    await set({ dtr: true, rts: false }); // IO0 low and EN high together: chip out of reset, into the ROM loader
+    await sleep(BOOTLOADER_IO0_HOLD_MS);
+    await set({ dtr: false, rts: false }); // IO0 high, done
+    return { path: e.path, key: e.key, bridge: e.bridge };
   }
 
   /**
@@ -664,10 +805,12 @@ export class SerialPortManager {
     return [...this.#entries.values()].map((e) => {
       // An open port another program has open too (D5) says so; a busy one names its holder.
       const holder = e.holder ?? (e.state === 'open' && e.external?.length ? `also ${holderText(e.external)}` : undefined);
+      const deviceId = e.deviceId ?? (DEVICE_ID.test(e.key) ? e.key : undefined);
       return {
         path: e.path,
-        ...(e.usbSerial ? { usb_serial: e.usbSerial } : {}),
-        ...(/^[0-9a-f]{12}$/.test(e.key) ? { device_id: e.key } : {}),
+        // A bridge port has no MAC in its USB serial: null (design camera-c1 D3); a chip's own USB names it.
+        ...(e.bridge ? { usb_serial: null, bridge: e.bridge } : e.usbSerial ? { usb_serial: e.usbSerial } : {}),
+        ...(deviceId ? { device_id: deviceId } : {}),
         ...(e.vid ? { vid: e.vid } : {}),
         ...(e.pid ? { pid: e.pid } : {}),
         state: e.state,
@@ -681,3 +824,8 @@ export class SerialPortManager {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** DTR and RTS set together on the hub's handle (serialport: true = asserted, the low level on a board's EN/IO0 circuit). */
+function lines(port: SerialPort): (v: { dtr: boolean; rts: boolean }) => Promise<void> {
+  return (v) => new Promise<void>((res, rej) => port.set(v, (err) => (err ? rej(err) : res())));
+}

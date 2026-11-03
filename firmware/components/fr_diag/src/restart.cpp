@@ -31,6 +31,9 @@ void restart(bool bootloader)
         REG_SET_BIT(LP_AON_SYS_CFG_REG, LP_AON_FORCE_DOWNLOAD_BOOT);
 #elif CONFIG_IDF_TARGET_ESP32C5
         REG_SET_FIELD(LP_AON_SYS_CFG_REG, LP_AON_FORCE_DOWNLOAD_BOOT, detail::kC5ForceDownloadBoot0);
+#elif CONFIG_IDF_TARGET_ESP32
+        // Design camera-c1 D1: the ESP32 has no FORCE_DOWNLOAD_BOOT bit (rtc_cntl_reg.h); can_enter_bootloader() is
+        // false, so diag refuses before this; a plain restart if it ever gets here.
 #endif
     }
     esp_restart();

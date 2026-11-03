@@ -95,6 +95,7 @@ describe('loading the committed schema', () => {
       [0x0008, 'fr.touch', 'Touch', 'standard'],
       [0x0009, 'fr.csi', 'Csi', 'standard'],
       [0x000a, 'fr.radio_tx', 'RadioTx', 'standard'],
+      [0x000b, 'fr.camera', 'Camera', 'standard'],
       [0x00f0, 'fr.node', 'Node', 'system'],
       [0x00f1, 'fr.ota', 'Ota', 'system'],
       [0x00f2, 'fr.diag', 'Diag', 'system'],
@@ -258,7 +259,7 @@ describe('validation errors name the file and path', () => {
   });
 
   it('capability ids missing from the registry or allocated to another name', () => {
-    expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x000b))), BUTTON, 'id', /0x000B is not allocated in schema\/registry\.yaml/);
+    expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x000c))), BUTTON, 'id', /0x000C is not allocated in schema\/registry\.yaml/);
     expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x0002))), BUTTON, 'id', /allocates 0x0002 to fr\.led, not fr\.button/);
   });
 
@@ -572,8 +573,8 @@ describe('capability message types and bulk commands (design m2-c5-display D1, D
     expect(d.properties.map((p) => p.name)).toEqual(['brightness']);
     // Every other command still fits the realtime budget.
     expect(d.commands.filter((c) => c.name !== 'ui_load').every((c) => c.maxArgs <= 200)).toBe(true);
-    // No other capability declares a bulk command (the hub's existing BULK callers pass the flag themselves).
-    expect(model().capabilities.filter((c) => c.name !== 'fr.display').flatMap((c) => c.commands.filter((x) => x.bulk))).toEqual([]);
+    // The only other bulk command is fr.camera's sd_list (design camera-c1 D7: a page of 64 recordings, over one realtime frame).
+    expect(model().capabilities.filter((c) => c.name !== 'fr.display').flatMap((c) => c.commands.filter((x) => x.bulk).map((x) => `${c.name}.${x.name}`))).toEqual(['fr.camera.sd_list']);
   });
 
   it('fr.touch is 0x0008; its down and up are realtime', () => {

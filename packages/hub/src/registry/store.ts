@@ -23,7 +23,7 @@ export const ADDR_MIN = 0x0001;
 export const ADDR_MAX = 0xefff;
 
 /** Image header chip ids (HELLO `chip`, manifest `chip_id`) and the registry's chip names. */
-export const CHIP_IDS: Readonly<Record<string, number>> = { esp32c3: 5, esp32s3: 9, esp32c6: 13, esp32c5: 23 };
+export const CHIP_IDS: Readonly<Record<string, number>> = { esp32: 0, esp32c3: 5, esp32s3: 9, esp32c6: 13, esp32c5: 23 };
 
 export function chipName(chipId: number): string | null {
   return Object.entries(CHIP_IDS).find(([, id]) => id === chipId)?.[0] ?? null;

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.camera.sd_delete.args",
+  "title": "fr.camera.sd_delete arguments",
+  "description": "Removes recording `recording` from the card (its directory and frames); OK when it is already gone. UNSUPPORTED without a card; BUSY while a stream writes to or reads from it.",
+  "type": "object",
+  "properties": {
+    "recording": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "recording": 3
+    }
+  ]
+}

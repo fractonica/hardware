@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.camera.set.args",
+  "title": "fr.camera.set arguments",
+  "description": "Changes the sensor's settings now and keeps them until reboot (absent fields stay). INVALID_ARGS for a frame_size above the trait max_frame_size. A running stream takes the new settings from its next frame.",
+  "type": "object",
+  "properties": {
+    "frame_size": {
+      "type": "string",
+      "enum": [
+        "qvga",
+        "vga",
+        "svga",
+        "xga",
+        "sxga",
+        "uxga"
+      ]
+    },
+    "quality": {
+      "type": "integer",
+      "minimum": 4,
+      "maximum": 63,
+      "description": "(4..63)"
+    },
+    "vflip": {
+      "type": "boolean"
+    },
+    "hmirror": {
+      "type": "boolean"
+    },
+    "brightness": {
+      "type": "integer",
+      "minimum": -2,
+      "maximum": 2,
+      "description": "(-2..2)"
+    },
+    "contrast": {
+      "type": "integer",
+      "minimum": -2,
+      "maximum": 2,
+      "description": "(-2..2)"
+    },
+    "saturation": {
+      "type": "integer",
+      "minimum": -2,
+      "maximum": 2,
+      "description": "(-2..2)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "frame_size": "xga",
+      "quality": 10
+    },
+    {
+      "vflip": true,
+      "hmirror": true
+    }
+  ]
+}

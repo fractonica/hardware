@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.camera.sd_fetch.args",
+  "title": "fr.camera.sd_fetch arguments",
+  "description": "Streams recording `recording`'s frames to the hub as an mjpg1 stream (flags b0 set), from frame `from_frame`; ends done after the last. BUSY while a stream runs; NOT_FOUND for a recording not on the card; UNSUPPORTED without a card.",
+  "type": "object",
+  "properties": {
+    "stream_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "issued by the hub; the POST path names it"
+    },
+    "recording": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "the recording's id (its stream_id when made)"
+    },
+    "from_frame": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "default": 0
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "stream_id": 9,
+      "recording": 3
+    }
+  ]
+}

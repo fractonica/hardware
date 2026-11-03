@@ -124,7 +124,13 @@ class Engine
 public:
     static constexpr uint32_t kAudioPriority = 5;
     static constexpr uint32_t kStreamPriority = 3;
-    static constexpr uint32_t kStackBytes = 4096;
+    /**
+     * Both tasks' stack. 6 KB for every profile: fr_stream's camera pass runs FAT I/O (FatFs's working buffers, the
+     * SDMMC host's bounce buffer), HttpPost's send and the driver's logging in one frame chain, which 4 KB did not
+     * leave room for (design camera-c1 §10; the lead measures the high-water mark on the bench). The 2 KB cost the
+     * smallest board (the C5, 95 KB of heap free) nothing it misses.
+     */
+    static constexpr uint32_t kStackBytes = 6144;
     /** The longest a pass waits on a converter, and the idle tasks' sleep between looks (they are woken anyway). */
     static constexpr uint32_t kWaitMs = 20;
     static constexpr uint32_t kIdleMs = 100;

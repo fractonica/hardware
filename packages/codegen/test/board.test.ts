@@ -9,6 +9,7 @@ import { parse, stringify } from 'yaml';
 import {
   ADC1_FULL_SCALE_MV,
   ADC_CONVERSIONS_HZ,
+  CONSOLES,
   generateFirmware,
   GLITCH_EXEMPT_DRIVES,
   headerPositions,
@@ -18,8 +19,10 @@ import {
   MAX_INSTANCES,
   PROFILE_ROLES,
   resolveProfile,
+  SENSOR_IDS,
   slotsLockFile,
   SMALL_MEMORY,
+  type BoardManifest,
   type FirmwareResult,
 } from '../src/board.ts';
 import { formatIssue, loadModel, SchemaError, type SchemaIssue } from '../src/model.ts';
@@ -432,7 +435,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, espnow_tx, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, ssd1306_i2c, st7789_spi, wifi_csi)",
+      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, ssd1306_i2c, st7789_spi, wifi_csi)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -460,7 +463,7 @@ describe('validation', () => {
     expect(messages(dir)).toEqual([
       "instance name 'node' is reserved (spec 03 §3.6)",
       "instance name 'Status' must be snake_case, at most 31 characters",
-      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx)',
+      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx, fr.camera)',
       'board esp32c6-supermini has no entry leds.nope',
     ]);
   });
@@ -571,12 +574,13 @@ describe('validation', () => {
 describe('driver manifests', () => {
   const drivers = listDrivers(ROOT);
 
-  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones, A2\'s adc_audio and CSI-1\'s radio drivers', () => {
+  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones, A2\'s adc_audio, CSI-1\'s radio drivers and CAM-1\'s camera and card', () => {
     expect(drivers).toEqual([
       'adc_audio',
       'adc_oneshot',
       'button_gpio',
       'cst816_i2c',
+      'dvp_camera',
       'espnow_tx',
       'fixture_gpio',
       'fixture_ws2812_rx',
@@ -584,6 +588,7 @@ describe('driver manifests', () => {
       'i2s_mic',
       'led_gpio',
       'led_ws2812',
+      'sdmmc_card',
       'ssd1306_i2c',
       'st7789_spi',
       'wifi_csi',
@@ -2002,6 +2007,245 @@ describe('CSI-1: the C5 target, doit-espc5-32 and c5d-csi (design csi-c1 D1, D3,
       const r = generateFirmware({ sourceDir: ROOT, profile: p, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
       expect(r.slotsLockChanged, p).toBe(false);
       expect(r.manifest.caps.at(-1), p).toEqual({ name: 'tx', port, cap: 'fr.radio_tx', cap_id: 10, version: '1.0', driver: 'espnow_tx', config: {}, traits: {} });
+    }
+  });
+});
+
+// ---- CAM-1: the classic ESP32, the AI-Thinker ESP32-CAM, fr.camera and its store (design camera-c1 D1, D2, D5, D6, D9, §10) ----
+
+describe('CAM-1: the esp32 target, aithinker-esp32-cam and e32a-cam (design camera-c1 D1, D2, D5, D6, D9, §10)', () => {
+  const CAM = 'e32a-cam';
+  const CAM_BOARD = 'hardware/boards/aithinker-esp32-cam.board.yaml';
+  const messages = (dir: string, profile = CAM) => issuesOf(() => gen(dir, profile, false)).map((i) => i.message);
+  const paths = (dir: string, profile = CAM) => issuesOf(() => gen(dir, profile, false)).map((i) => `${i.path}: ${i.message}`);
+
+  it('knows esp32 in the per-chip tables and the drivers whose peripherals it has', () => {
+    expect(ADC1_FULL_SCALE_MV.esp32).toBe(2450);
+    expect(ADC_CONVERSIONS_HZ.esp32).toBe(2_000_000);
+    for (const id of ['led_gpio', 'led_ws2812', 'button_gpio', 'adc_oneshot', 'i2s_mic', 'i2s_amp', 'espnow_tx', 'dvp_camera', 'sdmmc_card']) {
+      expect(loadDriver(ROOT, id).targets, id).toContain('esp32');
+    }
+    for (const id of ['adc_audio', 'wifi_csi', 'st7789_spi', 'ssd1306_i2c', 'cst816_i2c', 'fixture_gpio', 'fixture_ws2812_rx']) {
+      expect(loadDriver(ROOT, id).targets, id).not.toContain('esp32');
+    }
+    expect(CONSOLES).toEqual(['usb_serial_jtag', 'uart0']);
+    expect(SENSOR_IDS).toEqual({ ov2640: 1 });
+  });
+
+  it('the board manifest: the bench facts, the camera and card entries, every wired GPIO in one place', () => {
+    const b = loadBoardManifest(ROOT, 'aithinker-esp32-cam') as Yaml;
+    expect(b.idf_target).toBe('esp32');
+    expect(b.flash).toEqual({ size: '4MB', mode: 'dio', part_profile: 'fr-4mb-v1' });
+    expect(b.psram).toEqual({ size: '4MB', mode: 'quad', voltage: '3.3V' });
+    expect(b.usb).toBeNull();
+    expect(b.console).toBe('uart0');
+    expect(b.buttons).toEqual({});
+    expect(b.leds.flash).toMatchObject({ gpio: 4, kind: 'gpio', active_level: 'high' });
+    expect(b.leds.red).toMatchObject({ gpio: 33, kind: 'gpio', active_level: 'low' });
+    expect(b.cameras.main).toMatchObject({ kind: 'dvp', sensor: 'ov2640', xclk: 0, sda: 26, scl: 27, pwdn: 32, reset: null, d0: 5, d1: 18, d2: 19, d3: 21, d4: 36, d5: 39, d6: 34, d7: 35, vsync: 25, href: 23, pclk: 22, xclk_hz: 20_000_000 });
+    expect(b.sd_cards.card).toMatchObject({ kind: 'sdmmc', slot: 1, width: 1, clk: 14, cmd: 15, d0: 2, d1: 4, d2: 12, d3: 13 });
+    expect(b.pins.reserved).toEqual({ uart0: [1, 3], flash: [6, 7, 8, 9, 10, 11], psram: [16, 17], camera: [0, 5, 18, 19, 21, 22, 23, 25, 26, 27, 32, 34, 35, 36, 39], sd_card: [2, 14, 15] });
+    expect(b.pins.strapping).toEqual([0, 2, 5, 12, 15]);
+    expect(b.pins.strapping_levels).toEqual({ 0: 'high', 2: 'none', 5: 'high', 12: 'low', 15: 'high' });
+    expect(b.pins.free).toEqual([12, 13]);
+    expect(b.pins.adc1).toEqual([]);
+    expect(b.resources).toEqual({ rmt_tx: 8, rmt_rx: 8, ledc_timers: 8, ledc_channels: 16, i2c: 2, adc1_channel: 0, i2s: 2, sdmmc_slot: 1 });
+    expect(b.detection.usb).toEqual({ vid: 0x1a86, pid: 0x7523, serial_is_mac: false });
+    expect(new RegExp(b.detection.esptool.chip_type).test('ESP32-D0WD-V3 (revision v3.1)')).toBe(true);
+    expect(headerPositions(b as BoardManifest, 0)).toEqual(['right-3']);
+    expect(headerPositions(b as BoardManifest, 4)).toEqual(['left-8']);
+    // The camera's and the card's pins are the reserved groups' pins, exactly.
+    const cam = b.cameras.main;
+    const camPins = ['xclk', 'sda', 'scl', 'pwdn', 'd0', 'd1', 'd2', 'd3', 'd4', 'd5', 'd6', 'd7', 'vsync', 'href', 'pclk'].map((k) => cam[k] as number).sort((x, y) => x - y);
+    expect(camPins).toEqual(b.pins.reserved.camera);
+    expect([b.sd_cards.card.clk, b.sd_cards.card.cmd, b.sd_cards.card.d0].sort((x, y) => x - y)).toEqual(b.pins.reserved.sd_card);
+    // Every wired GPIO of the module once: reserved, free, or an LED's (37/38 are not bonded; 20, 24, 28-31 do not exist).
+    const all = [...Object.values(b.pins.reserved as Record<string, number[]>).flat(), ...b.pins.free, b.leds.flash.gpio, b.leds.red.gpio].sort((x, y) => x - y);
+    expect(all).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33, 34, 35, 36, 39]);
+  });
+
+  it('e32a-cam generates against the committed slots.lock: no boot button, the camera with its card as the store', () => {
+    const r = generateFirmware({ sourceDir: ROOT, profile: CAM, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+    expect(r.slotsLockChanged).toBe(false);
+    expect(r.manifest).toMatchObject({ board: 'aithinker-esp32-cam', target: 'esp32', test_pin: null });
+    expect(r.manifest.caps.map((c) => [c.name, c.port, c.cap, c.cap_id, c.driver])).toEqual([
+      ['status', 1, 'fr.led', 2, 'led_gpio'],
+      ['flash', 2, 'fr.led', 2, 'led_gpio'],
+      ['cam', 3, 'fr.camera', 11, 'dvp_camera'],
+    ]);
+    expect(r.manifest.caps.some((c) => c.cap === 'fr.button')).toBe(false);
+    const cam = r.manifest.caps[2];
+    expect(cam.config).toEqual({ frame_size: 'svga', max_frame_size: 'uxga', quality: 12, fb_count: 2, vflip: false, hmirror: false, brightness: 0, contrast: 0, saturation: 0, xclk_hz: 20_000_000, sd: true });
+    expect(cam.traits).toEqual({ sensor: 1, max_frame_size: 'uxga' });
+    expect(cam.store).toEqual({ driver: 'sdmmc_card', bind: 'sd_cards.card' });
+    expect(r.manifest.caps[0].store).toBeUndefined();
+    expect(r.instances.cam).toEqual({
+      bind: 'cameras.main',
+      pins: [0, 26, 27, 32, 5, 18, 19, 21, 36, 39, 34, 35, 25, 23, 22],
+      driverConfig: { xclk: 0, sda: 26, scl: 27, pwdn: 32, reset: -1, d0: 5, d1: 18, d2: 19, d3: 21, d4: 36, d5: 39, d6: 34, d7: 35, vsync: 25, href: 23, pclk: 22, port: 0 },
+      store: { driver: 'sdmmc_card', bind: 'sd_cards.card', pins: [14, 15, 2], driverConfig: { slot: 1, width: 1, clk: 14, cmd: 15, d0: 2, freq_khz: 20000 } },
+    });
+    const sdk = file(r, 'sdkconfig.board');
+    expect(sdk).toContain('CONFIG_IDF_TARGET="esp32"\n');
+    expect(sdk).toContain('\nCONFIG_FR_SERIAL_UART=y\n');
+    expect(sdk).not.toContain('CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG');
+    expect(sdk).toContain('CONFIG_SPIRAM=y\nCONFIG_SPIRAM_MODE_QUAD=y\nCONFIG_SPIRAM_USE_CAPS_ALLOC=y\n');
+    expect(sdk).toContain("# From the bound drivers' driver.yaml `sdkconfig` (design m2-c1-hil D5).\nCONFIG_CAMERA_CORE0=y\n");
+    expect(sdk).not.toMatch(/memory: small|CONFIG_FR_CORE_TASK_STACK/);
+    const cpp = file(r, 'fr_board/fr_board.cpp');
+    expect(cpp).toContain('#include "fr/drv/dvp_camera.hpp"\n#include "fr/drv/led_gpio.hpp"\n#include "fr/drv/sdmmc_card.hpp"\n');
+    expect(cpp).toContain('// cam: fr.camera on port 3, driver dvp_camera on cameras.main, store sdmmc_card on sd_cards.card\n');
+    expect(cpp).toContain('constexpr fr::drv::SdmmcCard::Config kStoreConfig = [] {\n    fr::drv::SdmmcCard::Config c{};\n    c.slot = 1;\n    c.width = 1;\n    c.clk = 14;\n    c.cmd = 15;\n    c.d0 = 2;\n    c.freq_khz = 20000;\n    return c;\n}();\n');
+    expect(cpp).toContain('    c.reset = -1;\n');
+    expect(cpp).toContain('    c.port = 0;\n');
+    expect(cpp).toContain('    c.frame_size = fr::cap::CameraFrameSize::svga;\n    c.max_frame_size = fr::cap::CameraFrameSize::uxga;\n');
+    expect(cpp).toContain('fr::drv::DvpCamera driver{kDriverConfig};\nfr::drv::SdmmcCard store{kStoreConfig};\nfr::CameraService service{driver, &store, kConfig};\n');
+    expect(cpp).toContain('fr::drv::LedGpio driver{kDriverConfig};\nfr::LedService service{driver, kConfig};\n');
+    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES dvp_camera led_gpio sdmmc_card)');
+    expect(file(r, 'fr_board/include/fr/board.hpp')).toContain('#include "fr/services/camera_service.hpp"\n#include "fr/services/led_service.hpp"\n');
+    expect(file(r, 'components.cmake')).toMatch(/hardware\/drivers\/dvp_camera"\n.*hardware\/drivers\/led_gpio"\n.*hardware\/drivers\/sdmmc_card"\n/);
+    // Four strapping pins under the camera and the card: warned, not refused (the spike booted with both).
+    expect(r.warnings).toEqual([
+      expect.stringMatching(/^cam: GPIO0 \(cameras\.main\) is a strapping pin and must be high at reset/),
+      expect.stringMatching(/^cam: GPIO5 \(cameras\.main\) is a strapping pin and must be high at reset/),
+      expect.stringMatching(/^cam: GPIO15 \(sd_cards\.card\) is a strapping pin and must be high at reset/),
+      expect.stringMatching(/^cam: GPIO2 \(sd_cards\.card\) is a strapping pin; with default eFuses/),
+    ]);
+    expect(resolveProfile(ROOT, CAM)).toMatchObject({ board: 'aithinker-esp32-cam', target: 'esp32', partProfile: 'fr-4mb-v1' });
+    expect(resolveProfile(ROOT, CAM).fragment).toContain('CONFIG_CAMERA_CORE0=y');
+  });
+
+  it('a camera without a store gets nullptr; a store on a capability without one, an unknown or wrong driver, and a bind of another section are refused', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, PROFILE(CAM), (y) => {
+      delete y.caps.cam.store;
+    });
+    const r = gen(dir, CAM, false);
+    expect(file(r, 'fr_board/fr_board.cpp')).toContain('fr::drv::DvpCamera driver{kDriverConfig};\nfr::CameraService service{driver, nullptr, kConfig};\n');
+    expect(file(r, 'fr_board/fr_board.cpp')).not.toContain('sdmmc_card');
+    expect(file(r, 'fr_board/CMakeLists.txt')).toContain('PRIV_REQUIRES dvp_camera led_gpio)');
+    expect(r.manifest.caps[2].store).toBeUndefined();
+    expect(r.instances.cam.store).toBeUndefined();
+
+    const bad = fixture({ locks: true });
+    edit(bad, PROFILE(CAM), (y) => {
+      y.caps.status.store = { driver: 'sdmmc_card', bind: 'sd_cards.card' };
+    });
+    expect(paths(bad)).toEqual(['caps.status.store: fr.led takes no store (capabilities with one: fr.camera)']);
+
+    const drv = fixture({ locks: true });
+    edit(drv, PROFILE(CAM), (y) => {
+      y.caps.cam.store = { driver: 'led_gpio', bind: 'sd_cards.card' };
+    });
+    expect(paths(drv)).toEqual([
+      'caps.cam.store.driver: driver led_gpio implements hal.LightOutput, but a store needs hal.BlockStore',
+      'caps.cam.store.driver: driver led_gpio binds board leds entries; a store binds sd_cards',
+      'caps.cam.store.driver: driver led_gpio does not accept sd_cards.card of kind \'sdmmc\' (accepts: gpio)',
+      "caps.cam.store.bind: sd_cards.card has no 'gpio', which driver led_gpio needs (no default)",
+    ]);
+
+    const unknown = fixture({ locks: true });
+    edit(unknown, PROFILE(CAM), (y) => {
+      y.caps.cam.store = { driver: 'no_such_card', bind: 'sd_cards.card' };
+    });
+    expect(messages(unknown)[0]).toMatch(/^unknown driver 'no_such_card'/);
+
+    const section = fixture({ locks: true });
+    edit(section, PROFILE(CAM), (y) => {
+      y.caps.cam.store = { driver: 'sdmmc_card', bind: 'leds.red' };
+    });
+    expect(paths(section).slice(0, 2)).toEqual(['caps.cam.store.bind: a store binds board sd_cards entries, not leds', "caps.cam.store.driver: driver sdmmc_card does not accept leds.red of kind 'gpio' (accepts: sdmmc)"]);
+    expect(paths(section).slice(2)).toEqual(['slot', 'clk', 'cmd', 'd0'].map((k) => `caps.cam.store.bind: leds.red has no '${k}', which driver sdmmc_card needs (no default)`));
+
+    const missing = fixture({ locks: true });
+    edit(missing, PROFILE(CAM), (y) => {
+      y.caps.cam.store = { driver: 'sdmmc_card', bind: 'sd_cards.other' };
+    });
+    expect(messages(missing)).toEqual(['board aithinker-esp32-cam has no entry sd_cards.other']);
+
+    // The store driver on the main bind: fr.camera needs hal.Camera.
+    const swapped = fixture({ locks: true });
+    edit(swapped, PROFILE(CAM), (y) => {
+      y.caps.cam.driver = 'sdmmc_card';
+    });
+    expect(messages(swapped)).toContain('driver sdmmc_card implements hal.BlockStore, but fr.camera needs hal.Camera');
+  });
+
+  it('the camera and card groups keep other instances off their pins; the entries themselves may use them', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, PROFILE(CAM), (y) => {
+      y.caps.probe = { cap: 'fr.led', driver: 'led_gpio', bind: 'leds.probe' };
+    });
+    edit(dir, CAM_BOARD, (y) => {
+      y.leds.probe = { gpio: 22, kind: 'gpio', active_level: 'high' }; // the camera's PCLK
+    });
+    expect(messages(dir)).toEqual(['GPIO22 (leds.probe) is reserved for camera on aithinker-esp32-cam', "GPIO22 (leds.probe) is already claimed by 'cam'"]);
+
+    const card = fixture({ locks: true });
+    edit(card, PROFILE(CAM), (y) => {
+      y.caps.probe = { cap: 'fr.led', driver: 'led_gpio', bind: 'leds.probe' };
+    });
+    edit(card, CAM_BOARD, (y) => {
+      y.leds.probe = { gpio: 14, kind: 'gpio', active_level: 'high' }; // the card's CLK
+    });
+    expect(messages(card)).toEqual(['GPIO14 (leds.probe) is reserved for sd_card on aithinker-esp32-cam', "GPIO14 (leds.probe) is already claimed by 'cam'"]);
+
+    // A store entry pin outside its group is reserved like any other: the card's CLK moved onto the flash's pins.
+    const moved = fixture({ locks: true });
+    edit(moved, CAM_BOARD, (y) => {
+      y.sd_cards.card.clk = 6;
+    });
+    expect(paths(moved)).toEqual(['caps.cam.store: GPIO6 (sd_cards.card) is reserved for flash on aithinker-esp32-cam']);
+
+    // The flash LED (GPIO4) is the card's unused D1: 1-bit, the store claims CLK, CMD and D0 only, so both fit.
+    const r = gen(fixture({ locks: true }), CAM, false);
+    expect(r.instances.flash.pins).toEqual([4]);
+    expect(r.instances.cam.store?.pins).not.toContain(4);
+  });
+
+  it('checks the board schema: console, the camera and card entries, a 4-bit card against the 1-bit driver', () => {
+    const dir = fixture({ locks: true });
+    edit(dir, CAM_BOARD, (y) => {
+      y.console = 'uart1';
+    });
+    expect(paths(dir)).toEqual(['console: Invalid option: expected one of "usb_serial_jtag"|"uart0"']);
+
+    const kind = fixture({ locks: true });
+    edit(kind, CAM_BOARD, (y) => {
+      y.cameras.main.kind = 'mipi';
+      y.sd_cards.card.width = 8;
+    });
+    expect(paths(kind)).toEqual(['cameras.main.kind: Invalid input: expected "dvp"', 'sd_cards.card.width: Invalid input']);
+
+    const wide = fixture({ locks: true });
+    edit(wide, CAM_BOARD, (y) => {
+      y.sd_cards.card.width = 4;
+    });
+    expect(paths(wide)).toEqual(['sd_cards.card.width: expected an integer in 1..1 (u8), got 4']);
+
+    const pwdn = fixture({ locks: true });
+    edit(pwdn, CAM_BOARD, (y) => {
+      y.cameras.main.pwdn = null;
+      y.pins.reserved.camera = y.pins.reserved.camera.filter((p: number) => p !== 32);
+    });
+    const r = gen(pwdn, CAM, false);
+    expect(r.instances.cam.driverConfig.pwdn).toBe(-1);
+    expect(r.instances.cam.pins).not.toContain(32);
+
+    // The classic ESP32 refuses the drivers that do not target it.
+    const csi = fixture({ locks: true });
+    edit(csi, PROFILE(CAM), (y) => {
+      y.caps.csi = { cap: 'fr.csi', driver: 'wifi_csi' };
+    });
+    expect(messages(csi)).toEqual(['driver wifi_csi does not support esp32 (targets: esp32c3, esp32c5, esp32c6, esp32s3)']);
+  });
+
+  it('a profile on a usb_serial_jtag board renders the USJ console and no UART line; the other profiles are unchanged', () => {
+    for (const p of ['c3o-pad', 'c6-pad', 's3l-pad', 's3t-pad', 's3a-audio', 's3k-fixture', 'c6g-gateway', 'c5d-csi']) {
+      const f = resolveProfile(ROOT, p).fragment;
+      expect(f, p).toContain('CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y\n');
+      expect(f, p).not.toContain('CONFIG_FR_SERIAL_UART');
+      expect(f, p).not.toContain('CONFIG_CAMERA_');
     }
   });
 });

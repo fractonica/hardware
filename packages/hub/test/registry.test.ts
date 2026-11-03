@@ -268,7 +268,7 @@ describe('selectors (09 §9.2)', () => {
   });
 
   it('rejects malformed terms', () => {
-    for (const bad of ['', 'a,,b', 'id:xyz', 'mac:1c:db', 'chip:esp32', 'role:boss', 'color:red', 'tag:', '!']) {
+    for (const bad of ['', 'a,,b', 'id:xyz', 'mac:1c:db', 'chip:esp8266', 'role:boss', 'color:red', 'tag:', '!']) {
       expect(() => parseSelector(bad), bad).toThrow(expect.objectContaining({ code: 'INVALID_ARGS' }));
     }
   });

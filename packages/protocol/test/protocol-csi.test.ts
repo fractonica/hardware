@@ -35,7 +35,7 @@ const hashOf = (ops: readonly { name: string; input: z.ZodType }[]) =>
 
 describe('CSI-1 ops (design csi-c1 D4, D5, D13)', () => {
   it('adds network_list, csi_stream and csi_status, and moves REGISTRY_HASH once for every op change', () => {
-    expect(OPS).toHaveLength(55);
+    expect(OPS.filter((o) => !o.name.startsWith('camera_'))).toHaveLength(55); // CAM-1 adds seven (protocol-camera.test.ts)
     expect(findOp('network_list')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['net', 'ls'] } });
     expect(findOp('csi_stream')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['csi', 'stream'], positional: ['device'] } });
     expect(findOp('csi_status')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['csi', 'status'], positional: ['device'] } });
@@ -44,8 +44,7 @@ describe('CSI-1 ops (design csi-c1 D4, D5, D13)', () => {
       expect(hashOf(OPS.filter((o) => o.name !== name)), name).not.toBe(REGISTRY_HASH);
     }
     expect(hashOf(OPS)).toBe(REGISTRY_HASH);
-    expect(REGISTRY_HASH).toBe('6dcd17ef8882');
-    expect(REGISTRY_HASH).not.toBe('ee5dc36bb005'); // A2's
+    expect(REGISTRY_HASH).not.toBe('ee5dc36bb005'); // A2's; CSI-1's was 6dcd17ef8882, CAM-1 pins the current one
     expect(JOB_KINDS).toContain('csi');
   });
 
@@ -100,7 +99,7 @@ describe('CSI-1 ops (design csi-c1 D4, D5, D13)', () => {
 
   it('adds the hub events stream.started and stream.ended (not csi.*: an instance named csi owns that space)', () => {
     expect(HUB_EVENT_TYPES.slice(-2)).toEqual(['stream.started', 'stream.ended']);
-    expect(STREAM_KINDS).toEqual(['csi']);
+    expect(STREAM_KINDS).toContain('csi'); // CAM-1 adds jpeg (protocol-camera.test.ts)
     const fields = (type: keyof typeof HUB_EVENT_FIELDS, f: unknown) => HUB_EVENT_FIELDS[type].safeParse(f).success;
     expect(fields('stream.started', { kind: 'csi', instance: 'csi', stream_id: 7, format: 'csi1', source: 'router', seconds: 0, live: true })).toBe(true);
     expect(fields('stream.ended', { kind: 'csi', instance: 'csi', stream_id: 7, reason: 'net_lost', records: 100, dropped: 3, blocks: 10, seconds: 1.2 })).toBe(true);
@@ -133,6 +132,6 @@ describe('CSI-1 capabilities and chip (design csi-c1 D1, D7, D9)', () => {
       [2, 'stop', []],
     ]);
     expect(RADIO_TX_CAP.commands.find((c) => c.name === 'stop')).toMatchObject({ idempotent: true, result: null });
-    expect(CATALOG_HASH).toBe(0xbdb52e7a);
+    expect(CATALOG_HASH).not.toBe(0x0fcffa34); // A2's; CSI-1's was 0xbdb52e7a, CAM-1 pins the current one
   });
 });

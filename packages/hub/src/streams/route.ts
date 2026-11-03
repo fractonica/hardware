@@ -2,7 +2,8 @@
 // chunked, `X-Fr-Device: <device_id>`, `X-Fr-Kind: <kind>`, `X-Fr-Format: <format>`. The listener (ota/http.ts) hands
 // a connection whose first bytes start such a POST over as a raw socket (as A1's audio route), since each HTTP chunk
 // is one block and node:http drops chunk boundaries; the body goes through A1's ChunkedParser into the ticket's sink
-// (a sink per kind: csi -> streams/csi.ts). The zero-size chunk ends the stream and is answered 200 with the sink's
+// (a sink per kind: csi -> streams/csi-sink.ts, jpeg -> streams/jpeg-sink.ts; the largest chunk is the ticket's,
+// design camera-c1 D10). The zero-size chunk ends the stream and is answered 200 with the sink's
 // JSON (`{"records":N}`); a connection that ends without it ends the stream net_lost; framing that is not chunked
 // blocks ends it with 400 and a failure of the hub's own (the disk full under the file) with 500 (error).
 // Tickets as A1's: each id (a u32, unique in this run) is accepted once, only from the device it was issued to, only
@@ -51,6 +52,8 @@ export interface StreamTicketOptions {
   kind: string;
   format: string;
   sink: StreamSink;
+  /** The largest HTTP chunk taken (default audio/chunked.ts MAX_CHUNK_BYTES, 128 KB; a jpeg stream takes 1 MB frames). */
+  maxChunkBytes?: number;
   /** The POST was accepted (its head checked), before any block. */
   onClaim?: () => void;
 }
@@ -273,6 +276,7 @@ class TicketImpl implements StreamTicket {
         this.#end('done');
         rawAnswer(socket, 200, json, 'application/json');
       },
+      this.#o.maxChunkBytes !== undefined ? { maxChunkBytes: this.#o.maxChunkBytes } : {},
     );
     const feed = (data: Buffer) => {
       if (this.#done) {

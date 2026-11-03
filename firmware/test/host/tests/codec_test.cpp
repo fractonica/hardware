@@ -289,7 +289,8 @@ TEST(codec_protocol_enums)
     CHECK(s == fr::proto::OtaState::pending_verify);
     CHECK(!fr::proto::from_name("bogus", s));
     CHECK(fr::proto::is_known(fr::proto::ChipId::esp32c6));
-    CHECK(!fr::proto::is_known(static_cast<fr::proto::ChipId>(0)));
+    CHECK(fr::proto::is_known(fr::proto::ChipId::esp32));  // 0: the classic ESP32 (design camera-c1 D1)
+    CHECK(!fr::proto::is_known(static_cast<fr::proto::ChipId>(1)));
     CHECK_EQ(fr::proto::PresenceHello::kCls, fr::wire::kClsPresence);
     CHECK_EQ(fr::proto::PresenceHello::kKind, 1);
     CHECK_EQ(fr::proto::kPortDiag, 241);

@@ -301,6 +301,9 @@ function renderJob(job: Job): string {
   if (job.kind === 'csi' && job.result && typeof job.result === 'object') {
     return [head, renderCsiStream(job.result as Row)].join('\n'); // fr csi stream (design csi-c1 D13)
   }
+  if (job.kind === 'camera' && job.result && typeof job.result === 'object') {
+    return [head, renderCameraJob(job.result as Row)].join('\n'); // fr camera snap | stream | sd fetch (design camera-c1 D11)
+  }
   if (job.kind === 'audio' && job.result && typeof job.result === 'object' && 'from' in job.result && 'to' in job.result) {
     return [head, renderMonitor(job.result as Row)].join('\n'); // fr audio monitor (design audio-a2 D5)
   }
@@ -322,6 +325,62 @@ function renderCsiStream(r: Row): string {
     `${n(r.records)} records in ${n(r.seconds).toFixed(1)} s (${n(r.rate_hz).toFixed(1)}/s), ${n(r.dropped)} dropped, ${n(r.blocks)} blocks, ${String(r.reason)}` +
     (where ? `; ${where}` : '')
   );
+}
+
+const kb = (v: unknown) => (typeof v === 'number' ? (v >= 1024 * 1024 ? `${(v / 1024 / 1024).toFixed(1)} MB` : v >= 1024 ? `${(v / 1024).toFixed(1)} KB` : `${v} B`) : String(v));
+
+/** camera_snap's answer (the file and the frame's figures) as one line. */
+function renderCameraSnap(r: Row): string {
+  const v = (x: unknown) => (x === null || x === undefined ? '-' : String(x));
+  return `${v(r.alias ?? r.device)} ${v(r.instance)} snap: ${v(r.path)} (${v(r.width)}x${v(r.height)} ${v(r.frame_size)} q${v(r.quality)}, ${kb(r.bytes)}, ${v(r.ms)} ms${r.flash ? ', flash' : ''})`;
+}
+
+/**
+ * camera_stream's and camera_sd_fetch's result as one summary line: frames, fps, drops, bytes, how it ended, where it
+ * went, and the first frame's pixels, size, quality and arrival time when one came.
+ */
+function renderCameraStream(r: Row): string {
+  const n = (v: unknown) => (typeof v === 'number' ? v : 0);
+  const v = (x: unknown) => (x === null || x === undefined ? '-' : String(x));
+  const where = [r.path ? `files ${String(r.path)}` : null, r.live ? 'live' : null].filter(Boolean).join(', ');
+  const pace = n(r.interval_ms) ? `every ${n(r.interval_ms)} ms` : 'as fast as possible';
+  const f = r.first_frame as Row | undefined;
+  return (
+    `${String(r.alias ?? r.device)} ${String(r.instance)} stream ${String(r.stream_id)} (to ${String(r.to)}, ${pace}): ` +
+    `${n(r.frames)} frames in ${n(r.seconds).toFixed(1)} s (${n(r.fps).toFixed(1)} fps), ${n(r.dropped)} dropped, ${kb(n(r.bytes))}, ${String(r.reason)}` +
+    (where ? `; ${where}` : '') +
+    (f ? `; first frame ${v(f.width)}x${v(f.height)} ${v(f.frame_size)} q${v(f.quality)} after ${v(f.ms)} ms` : '')
+  );
+}
+
+/** A camera job's result: camera_snap's answer (the frame's figures at the top) or a stream's summary (a snap's job included). */
+function renderCameraJob(r: Row): string {
+  return 'width' in r && 'height' in r ? renderCameraSnap(r) : renderCameraStream(r);
+}
+
+/** camera_status as two lines: the properties and traits, then the stream's counters (or none). */
+function renderCameraStatus(r: Row): string {
+  const v = (x: unknown) => (x === null || x === undefined ? '-' : String(x));
+  const fps = typeof r.fps_x10 === 'number' ? (r.fps_x10 / 10).toFixed(1) : '-';
+  const sd = r.sd === 'mounted' ? `sd mounted (${v(r.sd_free_mb)} MB free)` : `sd ${v(r.sd)}`;
+  const s = r.stream as Row | null;
+  return [
+    `${v(r.alias)} ${v(r.instance)}: ${v(r.frames)} frames, ${fps} fps, last ${r.last_bytes === null || r.last_bytes === undefined ? '-' : kb(r.last_bytes)}, ${r.streaming === null || r.streaming === undefined ? 'streaming -' : r.streaming ? 'streaming' : 'idle'}, ${sd}, sensor ${v(r.sensor)}, max ${v(r.max_frame_size)}`,
+    s
+      ? `stream ${v(s.stream_id)} (to ${v(s.to)}${s.job_id ? `, job ${v(s.job_id)}` : ''}): ${v(s.frames)} frames, ${v(s.dropped)} dropped, ${kb(s.bytes)}, ${v(s.subscribers)} subscribers, ${v(s.gaps)} gaps${s.path ? `, files ${v(s.path)}` : ''}`
+      : 'no stream',
+  ].join('\n');
+}
+
+/** camera_sd_list as a table of the card's recordings, after its state. */
+function renderCameraSdList(r: Row): string {
+  const v = (x: unknown) => (x === null || x === undefined ? '-' : String(x));
+  const rows = (r.recordings as Row[] | undefined) ?? [];
+  const head = `${v(r.alias)} ${v(r.instance)}: sd ${v(r.sd)}${r.sd === 'mounted' ? ` (${v(r.sd_free_mb)} MB free)` : ''}, ${rows.length} recording${rows.length === 1 ? '' : 's'}`;
+  if (!rows.length) {
+    return head;
+  }
+  return [head, ...aligned(['RECORDING', 'FRAMES', 'BYTES'], rows.map((x) => [v(x.id), v(x.frames), kb(x.bytes)]))].join('\n');
 }
 
 /** csi_status as two lines: the properties, then the stream's counters (or none). */
@@ -355,11 +414,19 @@ function renderMonitor(r: Row): string {
   return typeof r.warning === 'string' ? `${line}\nwarning: ${r.warning}` : line;
 }
 
+/**
+ * port_list as a table: the device id (a chip's own USB carries it in its USB serial; a USB-UART bridge port learns it
+ * from its board's HELLO, `-` before that), the path, VIA (`usb`, or the bridge: ch340, cp210x, ...; design camera-c1 D3),
+ * the state (with its holder) and the lines read.
+ */
 function renderPorts(ports: PortInfo[]): string {
   if (!ports.length) {
-    return 'no Espressif USB ports';
+    return 'no Espressif USB or USB-UART bridge ports';
   }
-  return ports.map((p) => `${p.device_id ?? '-'}  ${p.path}  ${p.state}${p.holder ? ` (${p.holder})` : ''}  lines=${p.lines}`).join('\n');
+  return aligned(
+    ['DEVICE', 'PATH', 'VIA', 'STATE', 'LINES'],
+    ports.map((p) => [p.device_id ?? '-', p.path, p.bridge ?? 'usb', `${p.state}${p.holder ? ` (${p.holder})` : ''}`, String(p.lines)]),
+  ).join('\n');
 }
 
 function renderLogs(lines: LogLine[]): string {
@@ -462,6 +529,15 @@ export function renderResult(op: string, r: Result): { out: string; err: string 
   }
   if (op === 'csi_status') {
     return { out: renderCsiStatus(data), err: '' };
+  }
+  if (op === 'camera_status') {
+    return { out: renderCameraStatus(data), err: '' };
+  }
+  if (op === 'camera_sd_list') {
+    return { out: renderCameraSdList(data), err: '' };
+  }
+  if (op === 'camera_snap' && !('job_id' in data)) {
+    return { out: renderCameraSnap(data), err: '' };
   }
   if (op === 'network_list' && Array.isArray((data as { networks?: unknown }).networks)) {
     return { out: renderNetworks((data as { networks: Row[] }).networks), err: '' };

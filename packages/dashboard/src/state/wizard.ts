@@ -26,7 +26,8 @@ export type WizardStep = 'closed' | 'detect' | 'network' | 'profile' | 'flash' |
 
 export interface WizardPort {
   path: string;
-  usb_serial?: string;
+  /** null on a USB-UART bridge port (design camera-c1 D3). */
+  usb_serial?: string | null;
   device_id?: string;
   state: string;
   holder?: string;

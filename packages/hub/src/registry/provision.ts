@@ -42,7 +42,7 @@ export const TCP_JOIN_MS = 30_000;
 const HELLO_LINE = '@fr1 PRESENCE kind=1 ';
 
 /** What the sidecar's `probe` reports (tools/pytools). */
-const ProbeSchema = z.looseObject({
+export const ProbeSchema = z.looseObject({
   chip: z.string(),
   mac: z.string(),
   description: z.string().optional(),
@@ -50,6 +50,8 @@ const ProbeSchema = z.looseObject({
   flash_size: z.string().nullable().optional(),
   secure_boot: z.boolean().optional(),
   flash_encryption: z.boolean().optional(),
+  /** `read`, or `unsupported` on a ROM without GET_SECURITY_INFO (the classic ESP32): secure_boot and flash_encryption are then false. */
+  security_info: z.enum(['read', 'unsupported']).optional(),
 });
 type Probe = z.infer<typeof ProbeSchema>;
 
@@ -328,7 +330,10 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
   let fwId: string;
   try {
     ctx.stage('probe');
-    const parsed = ProbeSchema.safeParse(await deps.pytools({ cmd: 'probe', port: lease.path }, ctx));
+    // A USB-UART bridge (design camera-c1 D4): esptool's classic DTR/RTS download sequence puts the chip in its loader
+    // (`default-reset`, as on a chip's own USB, where it is the USB-JTAG sequence); said so the sidecar's default never decides.
+    const before = lease.bridge ? { before: 'default-reset' } : {};
+    const parsed = ProbeSchema.safeParse(await deps.pytools({ cmd: 'probe', port: lease.path, ...before }, ctx));
     if (!parsed.success) {
       throw new FrError('FLASH_FAILED', 'the sidecar probe returned an unexpected result', { details: { issues: parsed.error.issues } });
     }
@@ -412,6 +417,7 @@ async function provisionJob(hub: HubContext, ctx: JobCtx, input: ProvisionInput,
         cmd: 'flash',
         port: lease.path,
         files: [...plan.files.map((f) => ({ offset: f.offset, path: f.path })), { offset: plan.ident!.offset, path: rendered.path }],
+        ...before,
         // The chip stays in the loader; the hub resets it on its own handle below (06 §6.4 step 8).
         after: 'no-reset',
         expect_chip_id: m.chip_id ?? CHIP_IDS[chip],

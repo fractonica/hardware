@@ -223,6 +223,8 @@ export interface RouterClock {
 }
 
 const REAL_CLOCK: RouterClock = { now: () => performance.now(), nowUs };
+/** A serial endpoint's remote that is a device id (a chip's own USB port, keyed by its MAC). */
+const DEVICE_ID = /^[0-9a-f]{12}$/;
 
 /** What the router is built from; main.ts passes the same objects the op handlers see in HubContext. */
 export interface RouterDeps {
@@ -232,7 +234,7 @@ export interface RouterDeps {
    * The hub's serial ports: ENV frames go out through its writeLine, and a port that disappears (USB
    * unplugged) ends its session at once through onPortGone (null: no serial link).
    */
-  serial: (Pick<SerialPortManager, 'writeLine'> & Partial<Pick<SerialPortManager, 'onPortGone'>>) | null;
+  serial: (Pick<SerialPortManager, 'writeLine'> & Partial<Pick<SerialPortManager, 'onPortGone' | 'learnDevice'>>) | null;
   seq: Seq;
   registry: Registry;
   events: Events;
@@ -1655,9 +1657,10 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
       this.#frame(left, from.kind, env);
       return;
     }
-    if (from.kind === 'serial' && (h.cls === CLS.EVENT || h.cls === CLS.STATE)) {
+    if (from.kind === 'serial' && (h.cls === CLS.EVENT || h.cls === CLS.STATE) && DEVICE_ID.test(from.remote)) {
       // A node without a session on its USB line (C2 firmware, or before its HELLO is answered): the port
-      // key is its MAC, so its events still reach the bus.
+      // key is its MAC, so its events still reach the bus. A bridge port's key is a path (design camera-c1 D3):
+      // its device is known only from its HELLO, so frames before it are dropped as on any other link.
       this.#frame(this.#peer(from.remote), 'serial', env);
       return;
     }
@@ -1797,6 +1800,10 @@ export class HubRouter implements Router, HubBroadcast, Lifecycle, LinkSink {
     };
     peer.hello = seen;
     if (ep.kind === 'serial') {
+      // A USB-UART bridge port is keyed by its path, not a MAC: the HELLO names its device (design camera-c1 D3).
+      if (ep.remote !== id) {
+        this.#deps.serial?.learnDevice?.(ep.remote, id);
+      }
       // A gateway's USB line carries its bridge (design m2-c4-gateway D13): LINK_PING from the next tick.
       if (seen.role === 'gateway') {
         this.#links.gateway.attach(ep.remote);

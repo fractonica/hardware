@@ -2386,13 +2386,14 @@ function diagJsonSource(model: Model): string {
   c.pp('#if FR_TEST_HOOKS').line();
   toJsonDefs(model.capabilities.flatMap(callStructs));
 
-  // JSON -> message types, in YAML order (a type's parser calls those of the types it holds).
+  // JSON -> message types, in YAML order (a type's parser calls those of the types it holds). A type held only by a
+  // result (fr.camera's Recording, design camera-c1 D7) is never parsed: maybe_unused keeps -Werror quiet.
   for (const cap of model.capabilities) {
     for (const t of cap.types) {
       if (t.fields.some((f) => f.type.kind === 'bytes')) {
         throw new Error(`${cap.file}: types.${t.name}: diag JSON cannot parse a bytes field inside a message type`);
       }
-      c.fn(`bool from_json_${snakeOf(structCpp(t))}(const cJSON *j, ${structCpp(t)} &v)`, () => {
+      c.fn(`[[maybe_unused]] bool from_json_${snakeOf(structCpp(t))}(const cJSON *j, ${structCpp(t)} &v)`, () => {
         c.open('if (!cJSON_IsObject(j))', () => c.line('return false;'));
         c.line('bool ok = true;');
         c.open('for (const cJSON *it = j->child; ok && it != nullptr; it = it->next)', () => {

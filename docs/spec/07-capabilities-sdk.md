@@ -28,7 +28,7 @@
 
 | Range | Use |
 |---|---|
-| `0x0001–0x00EF` | standard: `0x0001` fr.button, `0x0002` fr.led, `0x0003` fr.display (1.0 since M2-C5), `0x0004` fr.audio_out (1.0 since audio-a1), `0x0005` fr.analog_in, `0x0006` fr.fixture (since M2-C1, `test_only`: the HIL fixture's lines), `0x0007` fr.audio_in (1.0 since audio-a1, 1.1 since audio-a2: the on-board monitor), `0x0008` fr.touch (1.0 since M2-C5), `0x0009` fr.csi (1.0 since csi-c1: Wi-Fi channel state information), `0x000A` fr.radio_tx (1.0 since csi-c1: a fixed-rate ESP-NOW transmitter) |
+| `0x0001–0x00EF` | standard: `0x0001` fr.button, `0x0002` fr.led, `0x0003` fr.display (1.0 since M2-C5), `0x0004` fr.audio_out (1.0 since audio-a1), `0x0005` fr.analog_in, `0x0006` fr.fixture (since M2-C1, `test_only`: the HIL fixture's lines), `0x0007` fr.audio_in (1.0 since audio-a1, 1.1 since audio-a2: the on-board monitor), `0x0008` fr.touch (1.0 since M2-C5), `0x0009` fr.csi (1.0 since csi-c1: Wi-Fi channel state information), `0x000A` fr.radio_tx (1.0 since csi-c1: a fixed-rate ESP-NOW transmitter), `0x000B` fr.camera (1.0 since camera-c1: a JPEG camera with a micro-SD store) |
 | `0x00F0–0x00FF` | system: `0x00F0` fr.node (port 0), `0x00F1` fr.ota (port 240), `0x00F2` fr.diag (port 241) |
 | `0x8000–0xFFFE` | project and experimental |
 

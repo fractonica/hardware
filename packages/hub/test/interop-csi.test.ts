@@ -65,7 +65,7 @@ describe.skipIf(!CSI)('CSI on loopback: fr_net_node fake CSI against csi_stream 
     cleanups.push(() => client.close());
     const live: CsiBlock[] = [];
     let welcomed = false;
-    cleanups.push(client.streams.subscribe(ALIAS, undefined, (b) => live.push(b), { onEvent: (e) => (welcomed ||= e.type === 'welcome') }));
+    cleanups.push(client.streams.subscribe(ALIAS, undefined, (b) => live.push(b as CsiBlock), { onEvent: (e) => (welcomed ||= e.type === 'welcome') }));
     await until(() => welcomed, 5000, 'the /app/stream welcome');
 
     const out = join(home, 'csi', 'host.csi');

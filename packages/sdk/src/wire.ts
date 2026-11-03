@@ -312,31 +312,54 @@ export const APP_MAX_IN_FLIGHT = 64;
 /** The path, beside APP_PATH. */
 export const APP_STREAM_PATH = '/app/stream';
 
+/** The kinds of stream `/app/stream` carries (design csi-c1 D12, camera-c1 D12) and their formats. */
+export type StreamKind = 'csi' | 'jpeg';
+export type StreamFormat = 'csi1' | 'mjpg1';
+
+/** fr.camera's names, as the stream frames spell them. */
+export type CameraFrameSize = 'qvga' | 'vga' | 'svga' | 'xga' | 'sxga' | 'uxga';
+export type CameraTarget = 'hub' | 'sd' | 'both';
+
 /** The first frame on `/app/stream`. */
 export interface StreamHelloFrame {
   t: 'stream.hello';
   v: 1;
   token: string;
-  /** The device (alias or id) and its fr.csi instance (default: its only one). */
+  /** The device (alias or id) and its streaming instance, fr.csi or fr.camera (default: its only one). */
   device: string;
   instance?: string;
   /**
    * Start a live stream when none runs on the instance (seconds 0, ended when its last such subscriber leaves); a
-   * running stream (csi_stream's, or another app's) is joined as it is, whatever `start` says. Without `start` the
-   * socket waits for a stream to begin.
+   * running stream (csi_stream's, camera_stream's, or another app's) is joined as it is, whatever `start` says. Without
+   * `start` the socket waits for a stream to begin. source and peer are an fr.csi instance's; interval_ms, frame_size
+   * and quality an fr.camera's (design camera-c1 D12: a live view to the hub, `to` hub).
    */
-  start?: { source?: 'router' | 'peer' | 'any'; /** For source peer: the transmitter's device (alias or id) or MAC. */ peer?: string };
+  start?: {
+    source?: 'router' | 'peer' | 'any';
+    /** For source peer: the transmitter's device (alias or id) or MAC. */
+    peer?: string;
+    /** fr.camera: time between frames in ms (0: as fast as the path allows). */
+    interval_ms?: number;
+    frame_size?: CameraFrameSize;
+    quality?: number;
+  };
 }
 
-/** A stream as `/app/stream` describes it. */
+/** A stream as `/app/stream` describes it: a csi stream has source and peer_mac, a jpeg stream to, interval_ms, frame_size and quality. */
 export interface StreamInfo {
   stream_id: number;
-  /** X-Fr-Kind and X-Fr-Format of the node's POST: csi, csi1. */
-  kind: 'csi';
-  format: 'csi1';
-  source: 'router' | 'peer' | 'any';
+  /** X-Fr-Kind and X-Fr-Format of the node's POST: csi + csi1, or jpeg + mjpg1. */
+  kind: StreamKind;
+  format: StreamFormat;
+  /** fr.csi: the stream's source. */
+  source?: 'router' | 'peer' | 'any';
   /** The peer's MAC (12 lowercase hex) for source peer. */
   peer_mac?: string;
+  /** fr.camera: where the frames go (a live subscriber sees hub and both), the pacing and the settings asked for. */
+  to?: CameraTarget;
+  interval_ms?: number;
+  frame_size?: CameraFrameSize;
+  quality?: number;
   /** 0: until stopped. */
   seconds: number;
 }
@@ -357,13 +380,15 @@ export interface StreamStartedFrame {
   stream: StreamInfo;
 }
 
-/** The stream ended: the board's stream_ended reason and counts (`timeout` when it never came). */
+/** The stream ended: the board's stream_ended reason and counts (`timeout` when it never came); `records` are csi records or jpeg frames. */
 export interface StreamEndedFrame {
   t: 'stream.ended';
   stream_id: number;
   reason: 'stopped' | 'done' | 'net_lost' | 'overflow' | 'error' | 'timeout';
   records: number;
   dropped: number;
+  /** jpeg: the JPEG bytes the stream carried. */
+  bytes?: number;
 }
 
 /**
@@ -399,3 +424,29 @@ export const CSI_FLAG_GROUP = 0x02;
 export const CSI_FLAG_MATCHED = 0x04;
 /** bb_format: IDF wifi_rx_bb_format_t (fr::hal::CsiBbFormat). */
 export const CSI_BB_FORMATS = { b11: 0, legacy: 1, ht: 2, vht: 3, he_su: 4, he_mu: 5, he_ersu: 6, he_tb: 7, vht_mu: 11 } as const;
+
+// ---- mjpg1 (design camera-c1 D10, §10): the blocks of an fr.camera stream, all integers little-endian ----
+//
+// block := seq u32 | index u32 | t_us u32 | width u16 | height u16 | quality u8 | frame_size u8 | flags u16 | len u32
+//          | jpeg[len]                                   (one HTTP chunk; one /app/stream binary message; one frame)
+// seq counts the chunks of the stream from 0 without gaps; index is the frame's index in the stream, dropped ones counted
+// (a board drop is a jump of index); t_us the chip's µs clock at capture; frame_size a FrameSize (JPEG_FRAME_SIZES); flags
+// b0 the frame comes from the card (sd_fetch). The hub writes each frame as <dir>/<index 6 digits>.jpg.
+
+/** X-Fr-Format of an fr.camera stream. */
+export const JPEG_FORMAT = 'mjpg1';
+export const JPEG_BLOCK_HEAD_BYTES = 24;
+/** A frame is at most this (hal::kFrameMaxBytes); the hub's chunk parser takes 1 MB for this kind. */
+export const JPEG_FRAME_MAX_BYTES = 512 * 1024;
+/** flags bits; the others are zero. */
+export const JPEG_FLAG_FROM_CARD = 0x01;
+/** frame_size byte: fr.camera's FrameSize values, and each one's pixels. */
+export const JPEG_FRAME_SIZES: readonly CameraFrameSize[] = ['qvga', 'vga', 'svga', 'xga', 'sxga', 'uxga'];
+export const JPEG_FRAME_DIMS: Readonly<Record<CameraFrameSize, readonly [width: number, height: number]>> = {
+  qvga: [320, 240],
+  vga: [640, 480],
+  svga: [800, 600],
+  xga: [1024, 768],
+  sxga: [1280, 1024],
+  uxga: [1600, 1200],
+};

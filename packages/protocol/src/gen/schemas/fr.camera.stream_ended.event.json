@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.camera.stream_ended.event",
+  "title": "fr.camera.stream_ended event",
+  "description": "A stream (or sd_fetch) ended: stopped (stream_stop), done (`seconds` or `max_frames` reached), net_lost (a send stalled 3 s or the connection dropped), overflow (the card is full or failed mid-stream), error (the sensor failed).",
+  "type": "object",
+  "properties": {
+    "stream_id": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "stopped",
+        "done",
+        "net_lost",
+        "overflow",
+        "error"
+      ]
+    },
+    "frames": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "frames the stream covered, dropped ones included (the index it reached)"
+    },
+    "dropped": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "frames the sensor delivered that the stream could not take (the hub path behind)"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "JPEG bytes sent and/or written"
+    }
+  },
+  "additionalProperties": false
+}

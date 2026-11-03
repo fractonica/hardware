@@ -63,7 +63,7 @@ export const waitS = z.number().int().min(0).max(MAX_WAIT_S).optional().describe
 export const sourceDir = z
   .string()
   .describe('absolute path of the checkout containing firmware/idf-version.lock (the CLI fills it from its cwd)');
-export const portSel = z.string().describe('USB serial (MAC), 12-hex device id, or /dev path');
+export const portSel = z.string().describe('USB serial (MAC), 12-hex device id, /dev path, or path:<basename> (a USB-UART bridge port, design camera-c1 D3)');
 export const cursor = z.string().regex(/^c:\d+\.\d+$/, 'expected a cursor c:<run>.<seq>');
 /** The device selector of most ops (09 §9.2), as agents read it in a field description. */
 export const selector = z.string().min(1).describe('device selector (alias, id:<12hex>, tag:<t>, chip:<c>, online, all; comma-separated, ! negates)');

@@ -34,8 +34,13 @@ export function resolveOne(hub: Pick<HubContext, 'db'> & Partial<Pick<HubContext
   });
 }
 
-/** The USB port a registered device is attached on (its USB serial is its MAC, 04 §4.4). */
-export async function attachedPort(hub: Pick<HubContext, 'serial'>, d: Device): Promise<{ key: string; path: string }> {
+type PortEntry = Awaited<ReturnType<HubContext['serial']['resolveWait']>>;
+
+/**
+ * The USB port a registered device is attached on: a chip's own USB (its USB serial is its MAC, 04 §4.4), or a USB-UART
+ * bridge port that learned the device's id from its HELLO (design camera-c1 D3).
+ */
+export async function attachedPort(hub: Pick<HubContext, 'serial'>, d: Device): Promise<PortEntry> {
   try {
     return await hub.serial.resolveWait(d.device_id);
   } catch (e) {
@@ -47,6 +52,45 @@ export async function attachedPort(hub: Pick<HubContext, 'serial'>, d: Device): 
     }
     throw e;
   }
+}
+
+/**
+ * The port a `port` argument names (device_reset, diag_exec over serial): an attached port by its key, /dev path, USB
+ * serial or learned device id (SerialPortManager.resolve), else a registry selector naming one device (`cam-esp32`,
+ * id:<12hex>) and that device's port, a bridge port that learned its id included. NOT_FOUND names both lookups;
+ * AMBIGUOUS_SELECTOR when the selector names several devices or ports.
+ */
+export async function resolvePort(hub: Pick<HubContext, 'serial' | 'db'> & Partial<Pick<HubContext, 'registry' | 'router'>>, selector: string): Promise<PortEntry> {
+  try {
+    return await hub.serial.resolveWait(selector);
+  } catch (e) {
+    if (!(e instanceof FrError && e.code === 'NOT_FOUND')) {
+      throw e;
+    }
+  }
+  let found: Device[] = [];
+  try {
+    found = registryOf(hub).resolve(selector, presenceOf(hub));
+  } catch (e) {
+    if (!(e instanceof FrError && (e.code === 'NOT_FOUND' || e.code === 'INVALID_ARGS'))) {
+      throw e;
+    }
+  }
+  if (found.length > 1) {
+    throw new FrError('AMBIGUOUS_SELECTOR', `${JSON.stringify(selector)} matches ${found.length} devices; this op takes one port`, {
+      remediation: [{ tool: 'device_list', args: { selector }, cli: `fr devices ls '${selector}'` }],
+      details: { candidates: found.map((d) => ({ device_id: d.device_id, alias: d.alias })) },
+    });
+  }
+  if (!found.length) {
+    throw new FrError('NOT_FOUND', `no attached port or registered device matches ${selector}`, {
+      remediation: [
+        { tool: 'port_list', cli: 'fr ports ls' },
+        { tool: 'device_list', cli: 'fr devices ls' },
+      ],
+    });
+  }
+  return attachedPort(hub, found[0]);
 }
 
 /** A port key is the chip MAC for USB-Serial/JTAG boards; a bridge port is keyed by its path instead. */

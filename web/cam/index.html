@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Camera</title>
+  </head>
+  <body data-connected="false" data-streaming="false" data-recording="false">
+    <header class="bar">
+      <h1>Camera <small>fr.camera, the live view and the card</small></h1>
+      <div class="status">
+        <span id="conn" class="conn">connecting…</span>
+        <span id="stream-state" class="pill">idle</span>
+        <button id="theme" type="button" class="ghost" title="Theme: auto / light / dark">auto</button>
+      </div>
+    </header>
+    <p id="error" class="error" hidden></p>
+
+    <section class="controls" aria-label="Device">
+      <label class="field">
+        <span>Camera</span>
+        <select id="device"></select>
+      </label>
+      <label class="field narrow">
+        <span>Interval (ms) <small>0: as fast</small></span>
+        <input id="live-interval" type="number" min="0" max="3600000" step="100" value="0" />
+      </label>
+      <button id="live" type="button" class="primary" disabled>Start</button>
+      <button id="snap" type="button" disabled title="camera_snap: one frame saved on the hub">Snapshot</button>
+      <label class="field inline check">
+        <input id="snap-flash" type="checkbox" />
+        <span>with flash</span>
+      </label>
+      <button id="flash" type="button" disabled title="The board's flash LED (its `flash` fr.led)">Flash on</button>
+      <span id="flash-state" class="pill">flash off</span>
+      <p id="hint" class="hint wide"></p>
+    </section>
+
+    <main>
+      <section class="card live" aria-labelledby="live-h">
+        <div class="card-head">
+          <h2 id="live-h">Live <small id="live-stream">no stream</small></h2>
+          <span id="frame-size" class="pill" data-w="0" data-h="0">–</span>
+          <span id="fps" class="pill" data-fps="0">0 fps</span>
+        </div>
+        <div class="view" id="view">
+          <canvas id="frame" width="320" height="240" aria-label="The last frame"></canvas>
+          <p id="view-empty" class="view-empty">Start the live view, or take a snapshot.</p>
+        </div>
+        <dl class="counters">
+          <div><dt>frames</dt><dd id="frames" data-n="0">0</dd></div>
+          <div><dt>last frame</dt><dd id="bytes" data-n="0">–</dd></div>
+          <div><dt>age</dt><dd id="age" data-s="">–</dd></div>
+          <div><dt>board drops</dt><dd id="drops" data-n="0">0</dd></div>
+          <div><dt>hub gaps</dt><dd id="gaps" data-n="0">0</dd></div>
+          <div><dt>decode skips</dt><dd id="skips" data-n="0">0</dd></div>
+          <div><dt>received</dt><dd id="total-bytes" data-n="0">0 B</dd></div>
+          <div><dt>board</dt><dd id="board-fps">–</dd></div>
+          <div><dt>stream</dt><dd id="stream-id">–</dd></div>
+        </dl>
+        <div class="row">
+          <button id="download" type="button" disabled title="The frame shown, as a .jpg">Download frame</button>
+          <span id="snap-result" class="hint" data-path=""></span>
+        </div>
+      </section>
+
+      <section class="card settings" aria-labelledby="settings-h">
+        <div class="card-head">
+          <h2 id="settings-h">Settings <small>camera_set, until the board reboots</small></h2>
+          <button id="apply-all" type="button" class="ghost" disabled title="Send every setting (after a reboot)">Apply all</button>
+        </div>
+        <div class="settings-grid">
+          <label class="field">
+            <span>Frame size</span>
+            <select id="set-frame-size"></select>
+          </label>
+          <label class="field">
+            <span>Quality <small>4 best … 63</small> <output id="quality-out">12</output></span>
+            <input id="set-quality" type="range" min="4" max="63" step="1" value="12" />
+          </label>
+          <label class="field">
+            <span>Brightness <output id="brightness-out">0</output></span>
+            <input id="set-brightness" type="range" min="-2" max="2" step="1" value="0" />
+          </label>
+          <label class="field">
+            <span>Contrast <output id="contrast-out">0</output></span>
+            <input id="set-contrast" type="range" min="-2" max="2" step="1" value="0" />
+          </label>
+          <label class="field">
+            <span>Saturation <output id="saturation-out">0</output></span>
+            <input id="set-saturation" type="range" min="-2" max="2" step="1" value="0" />
+          </label>
+          <div class="field checks">
+            <span>Orientation</span>
+            <label class="check"><input id="set-vflip" type="checkbox" /> <span>flip vertically</span></label>
+            <label class="check"><input id="set-hmirror" type="checkbox" /> <span>mirror horizontally</span></label>
+          </div>
+        </div>
+        <p id="settings-state" class="hint">Each change is sent as it is made and remembered for this camera.</p>
+      </section>
+
+      <section class="card record" aria-labelledby="record-h">
+        <div class="card-head">
+          <h2 id="record-h">Record to the card <small>camera_stream, to sd or both</small></h2>
+          <span id="record-state" class="pill">idle</span>
+        </div>
+        <div class="record-form">
+          <label class="field narrow">
+            <span>Interval (s)</span>
+            <input id="rec-interval" type="number" min="0" max="3600" step="0.5" value="1" />
+          </label>
+          <label class="field narrow">
+            <span>Duration (s) <small>0: until stopped</small></span>
+            <input id="rec-duration" type="number" min="0" max="3600" step="1" value="60" />
+          </label>
+          <label class="field inline check">
+            <input id="rec-live" type="checkbox" checked />
+            <span>also live</span>
+          </label>
+          <button id="record" type="button" class="primary" disabled>Start recording</button>
+        </div>
+        <p id="record-result" class="hint">A recording is a directory of JPEGs on the micro-SD card, named by its stream id; the board writes it on its own, hub or not.</p>
+      </section>
+
+      <section class="card recordings" aria-labelledby="recordings-h">
+        <div class="card-head">
+          <h2 id="recordings-h">Recordings <small id="card-state">card: unknown</small></h2>
+          <span id="recordings-count" class="pill" data-n="0">0</span>
+          <button id="refresh" type="button" class="ghost" disabled>Refresh</button>
+        </div>
+        <table class="table" id="recordings-table">
+          <thead>
+            <tr><th>id</th><th class="num">frames</th><th class="num">bytes</th><th></th></tr>
+          </thead>
+          <tbody id="recordings"></tbody>
+        </table>
+        <p id="recordings-empty" class="hint">No recordings listed yet.</p>
+        <p id="recordings-result" class="hint" data-path=""></p>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
