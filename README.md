@@ -11,6 +11,7 @@ Fractonica is an agent-first framework for prototyping networks of ESP32 devices
 
 The spec is at v0.3. The toolchain is installed (ESP-IDF v6.1). M0 spikes are in progress.
 
+- **User manual: [`docs/user-manual.md`](docs/user-manual.md).** Step-by-step guides for every feature on the bench (camera, audio, CSI, pads, displays, updates, tests, apps, agents).
 - Spec: [`docs/spec/`](docs/spec/README.md). Start with the README there; it has the decisions and the roadmap.
 - Research behind the spec, with sources: [`docs/research/`](docs/research/).
 
