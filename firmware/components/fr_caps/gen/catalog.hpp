@@ -24,7 +24,7 @@ struct CapInfo {
 };
 
 /** FNV-1a 32 of the canonical catalog JSON (packages/protocol/src/gen/catalog.json); TS computes the same. */
-inline constexpr uint32_t kCatalogHash = 0x4F56E757;
+inline constexpr uint32_t kCatalogHash = 0xA9040FD4;
 
 uint32_t catalog_hash();
 /** Every capability of the catalog, by id. */

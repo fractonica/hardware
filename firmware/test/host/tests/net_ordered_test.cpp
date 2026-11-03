@@ -242,12 +242,12 @@ TEST(net_newer_state_supersedes_the_pending_repeat)
             p21.push_back(f);
         }
     }
-    // One repeat, at the first STATE's time, carrying the newer value: no copy of 08 01 after 08 02.
+    // One repeat, 20 ms after the newer STATE, carrying the newer value: no copy of 08 01 after 08 02.
     REQUIRE_EQ(p21.size(), 3u);
     CHECK_BYTES(p21[0].body, frt::from_hex("08 01"));
     CHECK_BYTES(p21[1].body, frt::from_hex("08 02"));
     CHECK_BYTES(p21[2].bytes, p21[1].bytes);
-    CHECK_EQ(p21[2].at - t0, 20'000);
+    CHECK_EQ(p21[2].at - t0, 25'000);
     CHECK_EQ(st.size(), 7u);  // 3 for (2, 1), 2 each for (2, 2) and (3, 1)
     CHECK_EQ(r.net.state().state_seq, 4u);
     // A STATE after the repeat went is a new stream step: its own repeat, nothing superseded.
@@ -262,8 +262,9 @@ TEST(net_newer_state_supersedes_the_pending_repeat)
 
 TEST(net_a_stream_keeps_one_pending_repeat)
 {
-    // A 1 kHz stream of one property: each STATE goes once at once, one repeat per 20 ms window carries the newest
-    // value, and the repeats never take more than one outbox slot, so Q1 input keeps its room.
+    // A 1 kHz stream of one property: each STATE goes once at once, no repeat while newer values keep coming sooner
+    // than 20 ms (each would only repeat a value already replaced), the last value repeated 20 ms after it, and the
+    // repeat never takes more than one outbox slot, so Q1 input keeps its room.
     NetRig r;
     r.udp_ok_session();
     r.clear_sent();
@@ -276,10 +277,36 @@ TEST(net_a_stream_keeps_one_pending_repeat)
         }
         r.core.advance_ms(1);
     }
+    const fr::TimeUs last = r.core.now() - 1000;  // the 100th STATE's time
     r.core.advance_ms(50);
     const auto st = r.udp.frames_of(wire::kClsState);
-    CHECK_EQ(st.size(), 105u);  // 100 firsts, and the repeats at 20, 40, 60, 80 and 100 ms
-    CHECK_EQ(r.net.state().state_repeats_superseded, 95u);
-    CHECK_BYTES(st.back().body, frt::from_hex("08 63"));  // the last repeat carries the last value
+    CHECK_EQ(st.size(), 101u);  // 100 firsts, and one repeat when the stream stopped
+    CHECK_EQ(r.net.state().state_repeats_superseded, 99u);
+    CHECK_BYTES(st.back().body, frt::from_hex("08 63"));  // the repeat carries the last value
+    CHECK_EQ(st.back().at - last, 20'000);                // 20 ms after it
     CHECK_EQ(r.net.state().delivery_failed, 0u);         // no input evicted for a repeat
+}
+
+TEST(net_a_stream_slower_than_the_repeat_repeats_every_value)
+{
+    // STATEs 25 ms apart (a 40 Hz stream, or any on-change STATE): each one's repeat goes 20 ms after it, before the
+    // next, as 05 §5.8's double send has it. 10.4 ms apart (fr.scale at ~96/s): one repeat, after the last.
+    NetRig r;
+    r.udp_ok_session();
+    r.clear_sent();
+    for (int i = 0; i < 10; ++i) {
+        r.net.property(2, 1, std::vector<uint8_t>{0x08, static_cast<uint8_t>(i)}, kNowUs);
+        r.core.advance_ms(25);
+    }
+    CHECK_EQ(r.udp.frames_of(wire::kClsState).size(), 20u);
+    CHECK_EQ(r.net.state().state_repeats_superseded, 0u);
+    r.clear_sent();
+    for (int i = 0; i < 96; ++i) {
+        r.net.property(2, 1, std::vector<uint8_t>{0x08, static_cast<uint8_t>(i)}, kNowUs);
+        r.core.advance_us(10'417);
+    }
+    r.core.advance_ms(50);
+    const auto st = r.udp.frames_of(wire::kClsState);
+    CHECK_EQ(st.size(), 97u);  // was 96 + 48 (a repeat every second STATE, each a copy of a value already sent)
+    CHECK_BYTES(st.back().body, frt::from_hex("08 5f"));
 }

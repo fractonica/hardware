@@ -48,7 +48,7 @@ constexpr bool is_known(ScaleGain v)
 
 // Config: profile-time service parameters (not on the wire); defaults from the YAML.
 struct ScaleConfig {
-    uint16_t report_hz = 10;  // Hz, 1..80, max STATE rate outside a watch
+    uint16_t report_hz = 10;  // Hz, 1..100, max STATE rate outside a watch; at or above the part's rate (96 at its 80 Hz setting) every conversion is reported
     uint32_t deadband_mg = 100;  // mg, a change smaller than this since the last report is not reported (outside a watch)
     ScaleFilter filter = ScaleFilter::ema;  // ema: alpha 1/4; median5: the median of the last 5 conversions
     ScaleGain gain = ScaleGain::a128;  // the channel and gain the clock train selects: a128 (channel A, 128), a64, b32 (channel B, 32)
@@ -136,7 +136,7 @@ bool valid(const ScaleReadResult &v);
 
 // fr.scale.watch_start arguments.
 struct ScaleWatchStartArgs {
-    uint8_t report_hz = 80;  // Hz, 1..80
+    uint8_t report_hz = 80;  // Hz, 1..100
     uint16_t seconds = 0;  // s, 1..3600
 
     static constexpr size_t kMaxSize = 7;

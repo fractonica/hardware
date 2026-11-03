@@ -7681,16 +7681,16 @@ void for_each(V &&v)
     // fr.scale.watch_start.args.sample (cap fr.scale.watch_start.args)
     {
         fr::cap::ScaleWatchStartArgs x{};
-        x.report_hz = 2;
+        x.report_hz = 62;
         x.seconds = 1923;
-        v.value("fr.scale.watch_start.args.sample", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "080210830f", true);
+        v.value("fr.scale.watch_start.args.sample", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "083e10830f", true);
     }
     // fr.scale.watch_start.args.max (cap fr.scale.watch_start.args)
     {
         fr::cap::ScaleWatchStartArgs x{};
-        x.report_hz = 80;
+        x.report_hz = 100;
         x.seconds = 3600;
-        v.value("fr.scale.watch_start.args.max", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "085010901c", true);
+        v.value("fr.scale.watch_start.args.max", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "086410901c", true);
     }
     // fr.scale.watch_start.args.example_0 (cap fr.scale.watch_start.args)
     {

@@ -400,7 +400,7 @@ bool operator==(const ScaleWatchStartArgs &a, const ScaleWatchStartArgs &b)
 
 bool valid(const ScaleWatchStartArgs &v)
 {
-    return v.report_hz >= 1 && v.report_hz <= 80 &&
+    return v.report_hz >= 1 && v.report_hz <= 100 &&
            (v.seconds == 0 || (v.seconds >= 1 && v.seconds <= 3600));
 }
 

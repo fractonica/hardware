@@ -2729,10 +2729,10 @@ export const CATALOG: Catalog = {
           "default": 10,
           "range": [
             1,
-            80
+            100
           ],
           "unit": "Hz",
-          "doc": "max STATE rate outside a watch"
+          "doc": "max STATE rate outside a watch; at or above the part's rate (96 at its 80 Hz setting) every conversion is reported"
         },
         {
           "name": "deadband_mg",
@@ -2962,7 +2962,7 @@ export const CATALOG: Catalog = {
               "default": 80,
               "range": [
                 1,
-                80
+                100
               ],
               "unit": "Hz"
             },
@@ -3430,4 +3430,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0x4f56e757;
+export const CATALOG_HASH = 0xa9040fd4;

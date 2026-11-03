@@ -17,7 +17,7 @@ traits:
   resolution_bits: { id: 1, type: u8 }      # from the driver: 24 on the HX711
   max_rate_hz:     { id: 2, type: u8 }      # from the driver: the part's fastest conversion rate, 80 on the HX711
 config:
-  report_hz:     { type: u16, default: 10, range: [1, 80], unit: Hz, doc: "max STATE rate outside a watch" }
+  report_hz:     { type: u16, default: 10, range: [1, 100], unit: Hz, doc: "max STATE rate outside a watch; at or above the part's rate (96 at its 80 Hz setting) every conversion is reported" }
   deadband_mg:   { type: u32, default: 100, unit: mg, doc: "a change smaller than this since the last report is not reported (outside a watch)" }
   filter:        { type: Filter, default: ema, doc: "ema: alpha 1/4; median5: the median of the last 5 conversions" }
   gain:          { type: Gain, default: a128, doc: "the channel and gain the clock train selects: a128 (channel A, 128), a64, b32 (channel B, 32)" }
@@ -78,7 +78,7 @@ commands:
     delivery: reliable
     doc: "Reports every change up to report_hz (no deadband) for `seconds`, then falls back to config by itself. A newer watch_start replaces the running one."
     fields:
-      report_hz: { id: 1, type: u8, default: 80, range: [1, 80], unit: Hz }
+      report_hz: { id: 1, type: u8, default: 80, range: [1, 100], unit: Hz }
       seconds:   { id: 2, type: u16, range: [1, 3600], unit: s }
     examples: [ { seconds: 10 }, { report_hz: 20, seconds: 60 } ]
   watch_stop:

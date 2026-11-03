@@ -112,6 +112,8 @@ Status ScaleService::init(Core &core)
         cpk_ = *v;
         calibrated_ = true;
     }
+    // Before the driver's context exists (its init creates it): the hook is never called half-set.
+    cell_.set_on_ready([this] { on_ready(); });
     if (auto st = cell_.init(core); !st) {
         return st;
     }
@@ -129,14 +131,46 @@ hal::Selftest ScaleService::selftest()
     return cell_.selftest();
 }
 
-void ScaleService::on_tick()
+void ScaleService::on_ready()
 {
-    const TimeUs now = core_->now();
-    tick_->start(kTickUs);
+    // The driver's context. One wake-up pending at most: a later conversion is drained by the pending one (it is
+    // cleared before the core drains, and the exchanges order the driver's push before that drain).
+    if (wake_pending_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    if (!core_->post([this] { on_wake(); })) {
+        wake_pending_.store(false, std::memory_order_release);
+        wakes_refused_.store(wakes_refused_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        // The tick drains it within kTickUs.
+    }
+}
+
+void ScaleService::on_wake()
+{
+    // Cleared first: a conversion pushed during the drain posts a new wake-up rather than waiting for the tick.
+    (void)wake_pending_.exchange(false, std::memory_order_acq_rel);
+    drain();
+}
+
+void ScaleService::drain()
+{
     hal::LoadCellSample s;
     while (cell_.take(s)) {
         on_conversion(s);
     }
+}
+
+TimeUs ScaleService::stamp(TimeUs &last, TimeUs at)
+{
+    last = at > last ? at : last + 1;
+    return last;
+}
+
+void ScaleService::on_tick()
+{
+    const TimeUs now = core_->now();
+    tick_->start(kTickUs);
+    drain();
     if (hold_until_ != 0) {
         if (now < hold_until_) {
             update(held_, now);
@@ -145,7 +179,7 @@ void ScaleService::on_tick()
             seeded_ = false;  // the filter's state is as old as the hold when real conversions resume
         }
     }
-    maybe_report(now);  // a change the rate limit held back (the trailing report)
+    maybe_report(now);  // a change the rate limit held back (the trailing report, at its conversion's time)
     if (watch_until_ != 0 && now >= watch_until_) {
         watch_until_ = 0;  // back to the config's rate and deadband
     }
@@ -213,6 +247,7 @@ int64_t ScaleService::filter(int32_t raw)
 void ScaleService::update(int32_t w, TimeUs at)
 {
     weight_ = w;
+    weight_at_ = at;
     stability(w, at);
     maybe_report(at);
 }
@@ -231,7 +266,7 @@ void ScaleService::set_stable(bool s, TimeUs at)
 {
     if (s != stable_) {
         stable_ = s;
-        report_stable(s, at);
+        report_stable(s, stamp(stable_stamp_, at));
     }
 }
 
@@ -291,7 +326,7 @@ void ScaleService::maybe_report(TimeUs at)
         reported_any_ = true;
         last_reported_ = weight_;
         next_report_ = at + period;
-        report_weight_mg(weight_, at);
+        report_weight_mg(weight_, stamp(weight_stamp_, weight_at_));
         return;
     }
     const int64_t moved = abs64(static_cast<int64_t>(weight_) - last_reported_);
@@ -301,7 +336,8 @@ void ScaleService::maybe_report(TimeUs at)
     }
     last_reported_ = weight_;
     next_report_ = std::max(next_report_, at - period / 2) + period;
-    report_weight_mg(weight_, at);
+    // Judged at `at` (the tick's time for a trailing report), stamped with the weight's own conversion time.
+    report_weight_mg(weight_, stamp(weight_stamp_, weight_at_));
 }
 
 void ScaleService::apply_calibration(int32_t offset, int32_t cpk, TimeUs now)
@@ -365,10 +401,7 @@ std::expected<cap::ScaleTareResult, Err> ScaleService::tare(const cap::ScaleTare
     if (core_ == nullptr) {
         return std::unexpected(Err::failed);
     }
-    hal::LoadCellSample s;
-    while (cell_.take(s)) {
-        on_conversion(s);  // the codes the driver holds count too
-    }
+    drain();  // the codes the driver holds count too
     const TimeUs now = core_->now();
     if (auto st = ready_for(args.samples, now); !st) {
         return std::unexpected(st.error());
@@ -389,10 +422,7 @@ std::expected<cap::ScaleCalibrateResult, Err> ScaleService::calibrate(const cap:
     if (core_ == nullptr) {
         return std::unexpected(Err::failed);
     }
-    hal::LoadCellSample s;
-    while (cell_.take(s)) {
-        on_conversion(s);
-    }
+    drain();
     const TimeUs now = core_->now();
     if (auto st = ready_for(args.samples, now); !st) {
         return std::unexpected(st.error());
@@ -426,10 +456,7 @@ std::expected<cap::ScaleReadResult, Err> ScaleService::read()
     if (core_ == nullptr) {
         return std::unexpected(Err::failed);
     }
-    hal::LoadCellSample s;
-    while (cell_.take(s)) {
-        on_conversion(s);
-    }
+    drain();
     return cap::ScaleReadResult{.raw = last_raw_,
                                 .weight_mg = weight_,
                                 .offset = offset_,

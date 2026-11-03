@@ -204,7 +204,9 @@ void Hx711Gpio::convert(TimeUs at)
         --drop_;  // settling: counted for the rate, not handed over
         return;
     }
-    (void)ring_.push({hx711::sign_extend24(code), at});  // a full ring counts the loss (overruns())
+    if (ring_.push({hx711::sign_extend24(code), at})) {  // a full ring counts the loss (overruns())
+        on_ready_();  // the consumer wakes the core task now (a post; it runs once this task blocks again)
+    }
 }
 
 hal::Selftest Hx711Gpio::selftest()

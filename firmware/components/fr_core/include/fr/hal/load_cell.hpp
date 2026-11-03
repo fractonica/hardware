@@ -1,9 +1,11 @@
 // L1 load cell contract (design scale-round-c1 D7): a bridge ADC (the HX711) converts at its own rate and hands each
-// conversion over through a small lock-free ring; ScaleService drains it on the core task and does everything else
-// (filter, tare and calibration, stability, `settled`, the reports).
+// conversion over through a small lock-free ring and calls the consumer's ready hook; ScaleService wakes the core task
+// from that hook, drains the ring there and does everything else (filter, tare and calibration, stability, `settled`,
+// the reports).
 //
-// Threading: init(), start(), stop() and take() run on the core task (init at board init); the driver's own context (a
-// task woken by the data-ready interrupt) pushes the conversions. rate_hz() and selftest() may run on any task.
+// Threading: set_on_ready() before init(); init(), start(), stop() and take() run on the core task (init at board init);
+// the driver's own context (a task woken by the data-ready interrupt) pushes the conversions and calls the hook.
+// rate_hz() and selftest() may run on any task.
 #pragma once
 
 #include <array>
@@ -29,7 +31,7 @@ struct LoadCellSample {
 /**
  * Single-producer single-consumer ring of conversions: the driver's context pushes, the core task pops. Lock-free
  * (two indices published with release, read with acquire); a push into a full ring is refused and counted, so the
- * oldest conversions stay and the newest is lost (the core drains every few ms; a full ring means it stalled).
+ * oldest conversions stay and the newest is lost (the core drains each one as it lands; a full ring means it stalled).
  */
 template <size_t N>
 class SampleRing
@@ -86,6 +88,12 @@ public:
     virtual Status start(LoadCellGain gain) = 0;
     /** Powers the part down (HX711: SCK held high); OK when stopped. Core task. */
     virtual Status stop() = 0;
+    /**
+     * The hook the driver's context calls right after each conversion it hands over (never from an ISR: Core::post is
+     * allowed there), so the consumer takes it at once instead of at its next poll. Set once, before init(); a driver
+     * that never calls it (the default) leaves the consumer to its poll.
+     */
+    virtual void set_on_ready(Callback<void(), 16> hook) { (void)hook; }
     /** The oldest conversion not taken yet; false when none. Core task (the ring's one consumer). */
     virtual bool take(LoadCellSample &out) = 0;
     /** Conversions completed over the last full second; 0 when the part does not answer. Any task. */

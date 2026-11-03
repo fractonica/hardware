@@ -1756,14 +1756,17 @@ void Net::schedule_repeat(std::span<const uint8_t> envelope)
     if (envelope.size() > kRtSize) {
         return;
     }
-    // Design m2-c3-inputs D6: a stream of STATEs (fr.analog_in value) changes faster than kStateRepeatMs. A second
-    // copy still pending for the same port and prop now carries this newer value, at the time it was due: no repeat
-    // of an older value ever follows a newer one, and the stream keeps one pending repeat per property.
+    // Design m2-c3-inputs D6: a stream of STATEs (fr.analog_in value, fr.scale weight_mg) changes faster than
+    // kStateRepeatMs. A second copy still pending for the same port and prop now carries this newer value, and goes
+    // kStateRepeatMs after it (design scale-round-c1 §11): no repeat of an older value ever follows a newer one, the
+    // stream keeps one pending repeat per property, and a stream faster than kStateRepeatMs sends no repeat until it
+    // pauses (each value is superseded by a newer one sooner than its repeat would go; the last one is repeated).
     for (Pending &q : outbox_) {
         if (q.used && q.repeat && q.bytes[kOffCls] == envelope[kOffCls] && q.bytes[kOffKind] == envelope[kOffKind] &&
             q.bytes[kOffPort] == envelope[kOffPort]) {
             q.len = static_cast<uint16_t>(envelope.size());
             std::memcpy(q.bytes, envelope.data(), envelope.size());
+            q.retry_at = core_.now() + ms_us(kStateRepeatMs);
             ++state_.state_repeats_superseded;
             return;
         }

@@ -1,7 +1,7 @@
-// Fakes for ScaleService's tests (design scale-round-c1 D9): a hal::LoadCell whose conversions the test pushes with
-// their times (its rate_hz counts the ones of the last second on the fake clock, as the driver's window does), and a
-// hal::Settings kept in a map that outlives a service (a reboot is a new service on the same FakeSettings). Both run on
-// the test's one thread.
+// Fakes for ScaleService's tests (design scale-round-c1 D9, §11): a hal::LoadCell whose conversions the test pushes with
+// their times, calling the ready hook after each as the driver's task does (its rate_hz counts the ones of the last
+// second on the fake clock, as the driver's window does), and a hal::Settings kept in a map that outlives a service (a
+// reboot is a new service on the same FakeSettings). Both run on the test's one thread.
 #pragma once
 
 #include <cstdint>
@@ -45,6 +45,7 @@ public:
         started = false;
         return {};
     }
+    void set_on_ready(fr::Callback<void(), 16> hook) override { on_ready = hook; }
     bool take(fr::hal::LoadCellSample &out) override
     {
         if (queue.empty()) {
@@ -68,13 +69,18 @@ public:
     uint8_t max_rate_hz() const override { return 80; }
     fr::hal::Selftest selftest() override { return {!times.empty(), times.empty() ? "no conversion" : "fake"}; }
 
-    /** A conversion that became ready at `at` (the service takes it at its next tick). */
+    /** A conversion that became ready at `at`, then the ready hook unless `notify` is off (a driver without it). */
     void push(int32_t raw, fr::TimeUs at)
     {
         queue.push_back({raw, at});
         times.push_back(at);
+        if (notify) {
+            on_ready();
+        }
     }
 
+    bool notify = true;
+    fr::Callback<void(), 16> on_ready;
     bool fail_init = false;
     bool started = false;
     fr::hal::LoadCellGain gain = fr::hal::LoadCellGain::a128;

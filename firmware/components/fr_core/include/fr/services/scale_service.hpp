@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <expected>
 
@@ -15,7 +16,11 @@
 namespace fr {
 
 /**
- * Everything on the core task, from one timer every kTickUs that drains the driver's conversions.
+ * Everything on the core task. Each conversion is taken the moment it lands: the driver's ready hook (its own task)
+ * posts one wake-up to the core task, coalesced (at most one pending, cleared when the core runs it, so a burst never
+ * fills the core's queue; a post the queue refuses is counted, wakes_refused()). A timer every kTickUs drains too (the
+ * fallback for a refused post or a driver without the hook) and keeps the time-driven rules: the trailing report, the
+ * rate, a dead part, the watch's end, inject's hold.
  *
  * A conversion: its raw code goes into a ring of the last kRawRing; the filter (none, EMA alpha 1/4 in Q16, or the
  * median of the last 5) runs on the raw code, and weight_mg = (filtered - offset) x 1,000,000 / counts_per_kg in int64,
@@ -33,8 +38,10 @@ namespace fr {
  * the next point is a period later; a report more than half a period late moves the grid to half a period before it),
  * judged at each conversion's time, so a part a little faster than report_hz still gets nearly every conversion through
  * during a watch at its rate and the average stays at most report_hz. A change held back by the
- * limit is reported by the first tick after its time (the trailing report). The first weight after init always
- * reports. `stable` and `calibrated` are reported on change, `rate_hz` (the driver's count over the last second) once
+ * limit is reported by the first tick after its time (the trailing report). Every weight_mg report carries the time
+ * of the conversion it comes from (the trailing one too, so it is never later than a conversion still on its way),
+ * and its times strictly increase (an inject's or a calibration's weight, stamped at the clock, cannot be followed by
+ * an older one: the hub drops a STATE older than the last it kept). The first weight after init always reports. `stable` and `calibrated` are reported on change, `rate_hz` (the driver's count over the last second) once
  * a second when it changed.
  *
  * tare and calibrate answer at once from the last `samples` raw codes held since the reading was last unstable (at
@@ -61,7 +68,7 @@ class ScaleService final : public cap::Scale
 public:
     ScaleService(hal::LoadCell &cell, hal::Settings &settings, const cap::ScaleConfig &cfg);
 
-    /** Err::invalid_args for a config codegen should have refused (report_hz 0 or above 80, counts_per_kg 0). */
+    /** Err::invalid_args for a config codegen should have refused (report_hz 0 or above 100, counts_per_kg 0). */
     Status init(Core &core);
     hal::Selftest selftest();
 
@@ -87,8 +94,10 @@ public:
     /** The settings keys of this port (valid after init): the offset and the scale factor. */
     const char *offset_key() const { return key_off_.data(); }
     const char *factor_key() const { return key_cpk_.data(); }
+    /** Wake-up posts the core's queue refused since boot (those conversions waited for the tick). Any task. */
+    uint32_t wakes_refused() const { return wakes_refused_.load(std::memory_order_relaxed); }
 
-    /** The drain tick. */
+    /** The housekeeping tick (and the drain's fallback). */
     static constexpr uint32_t kTickUs = 10'000;
     /** No conversion for this long: the part does not answer (tare and calibrate FAILED, stable false). */
     static constexpr TimeUs kDeadUs = 1'000'000;
@@ -98,7 +107,7 @@ public:
     static constexpr int64_t kEmptySigmas = 4;
     static constexpr uint16_t kDefaultHoldMs = 1000;
     static constexpr uint16_t kMaxHoldMs = 60000;
-    static constexpr uint16_t kMaxReportHz = 80;
+    static constexpr uint16_t kMaxReportHz = 100;
     /** A renewed stable run starts from the old run's mean, counted as this many weights. */
     static constexpr uint32_t kRenewAnchor = 8;
 
@@ -109,6 +118,12 @@ public:
 
 private:
     void on_tick();
+    /** The driver's context, after each conversion it hands over: one coalesced wake-up of the core task. */
+    void on_ready();
+    /** Core task: the posted wake-up. */
+    void on_wake();
+    /** Every conversion the driver holds. */
+    void drain();
     void on_conversion(const hal::LoadCellSample &s);
     /** Filters a raw code; the filtered code in Q16. */
     int64_t filter(int32_t raw);
@@ -117,7 +132,10 @@ private:
     void stability(int32_t w, TimeUs at);
     void start_run(int32_t w, TimeUs at);
     void set_stable(bool s, TimeUs at);
+    /** The report rule judged at `at` (a conversion's time, or the tick's for the trailing report). */
     void maybe_report(TimeUs at);
+    /** `at`, or just after `last` when it is not later: a property's report times strictly increase. */
+    static TimeUs stamp(TimeUs &last, TimeUs at);
     /** A new calibration in use: the weight, the last settled weight and the stability run follow it. */
     void apply_calibration(int32_t offset, int32_t cpk, TimeUs now);
     /** The mean of the last n raw codes, rounded. */
@@ -162,6 +180,7 @@ private:
 
     // weight and stability
     int32_t weight_ = 0;
+    TimeUs weight_at_ = 0;  // the time of the conversion (or the clock, for inject and a calibration) weight_ is of
     bool stable_ = false;
     bool run_active_ = false;
     TimeUs run_start_ = 0;
@@ -175,6 +194,8 @@ private:
     bool reported_any_ = false;
     int32_t last_reported_ = 0;
     TimeUs next_report_ = 0;  // the grid point from which the next report is allowed
+    TimeUs weight_stamp_ = 0;  // the last weight_mg report's time
+    TimeUs stable_stamp_ = 0;  // the last stable report's time
     uint8_t rate_ = 0;
     TimeUs next_rate_at_ = 0;
 
@@ -183,6 +204,10 @@ private:
     TimeUs watch_us_ = 0;     // 1/report_hz of the watch
     TimeUs hold_until_ = 0;   // 0: no hold
     int32_t held_ = 0;
+
+    // wake-ups (written by the driver's context)
+    std::atomic<bool> wake_pending_{false};      // a wake-up posted and not run yet
+    std::atomic<uint32_t> wakes_refused_{0};     // the driver's context alone writes it (no read-modify-write)
 };
 
 }  // namespace fr

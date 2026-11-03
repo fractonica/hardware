@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Force</title>
+  </head>
+  <body data-connected="false" data-sound="off" data-mode="bow">
+    <header class="bar">
+      <h1>Force <small>a load cell played as an instrument (fr.scale)</small></h1>
+      <div class="status">
+        <span id="conn" class="conn">connecting…</span>
+        <button id="theme" type="button" class="ghost" title="Theme: auto / light / dark">auto</button>
+      </div>
+    </header>
+    <p id="error" class="error" hidden></p>
+
+    <section class="controls" aria-label="Device and sound">
+      <label class="field">
+        <span>Load cell</span>
+        <select id="device"></select>
+      </label>
+      <button id="sound" type="button" class="primary" title="Starts the audio (a click is needed once)">Sound on</button>
+      <button id="mute" type="button" title="Mute (space)" disabled>Mute</button>
+      <label class="field">
+        <span>Volume <output id="volume-out">30 %</output></span>
+        <input id="volume" type="range" min="0" max="100" step="1" value="30" />
+      </label>
+      <div class="field">
+        <span>Level <output id="level-out" data-peak="">–</output></span>
+        <div class="meter" aria-hidden="true"><div id="meter-rms" class="meter-rms"></div><div id="meter-peak" class="meter-peak"></div></div>
+      </div>
+      <p id="hint" class="hint wide"></p>
+    </section>
+
+    <main>
+      <section class="card force-card" aria-labelledby="force-h">
+        <div class="card-head">
+          <h2 id="force-h">Force <small id="device-name">–</small></h2>
+          <span id="hits" class="pill" data-n="0" title="Onsets detected (string, drum)">0 hits</span>
+        </div>
+        <div class="readout">
+          <output id="force" data-mg="">–</output>
+          <span class="unit" title="weight_mg / 1000 at the board's factor: a relative force for this cell">g-units</span>
+        </div>
+        <div class="bar-wrap" title="The force as played: 0 at rest (inside the dead zone) to 1 at the range">
+          <div id="bar" class="force-bar"></div>
+          <output id="norm" data-norm="0">0 %</output>
+        </div>
+        <dl class="counters">
+          <div><dt>raw value</dt><dd id="raw">–</dd></div>
+          <div><dt>rest noise σ</dt><dd id="sigma">–</dd></div>
+          <div><dt>dead zone</dt><dd id="dead">–</dd></div>
+          <div><dt>range (full)</dt><dd id="span">–</dd></div>
+        </dl>
+        <div class="actions">
+          <button id="zero" type="button" class="primary" title="The current value becomes rest (z)">Zero</button>
+          <button id="tare" type="button" disabled title="scale_tare on the board: its offset becomes the current reading (kept across reboots)">Board tare</button>
+          <label class="field">
+            <span>Direction</span>
+            <select id="direction"></select>
+          </label>
+        </div>
+        <div class="actions">
+          <label class="field inline check" title="Learn the range from the largest excursion (it decays slowly); off: the slider sets it">
+            <input id="auto" type="checkbox" checked />
+            <span>auto range</span>
+          </label>
+          <label class="field grow">
+            <span>Range <output id="range-out">–</output></span>
+            <input id="range" type="range" min="0" max="1000" step="1" value="500" />
+          </label>
+        </div>
+        <p id="action-state" class="hint"></p>
+      </section>
+
+      <section class="card plot-card" aria-labelledby="plot-h">
+        <div class="card-head">
+          <h2 id="plot-h">Last 5 s <small>raw (faint), smoothed, dead zone, range, hits</small></h2>
+        </div>
+        <canvas id="plot" width="640" height="220" aria-label="The force over the last 5 seconds"></canvas>
+      </section>
+
+      <section class="card sound-card" aria-labelledby="sound-h">
+        <div class="card-head">
+          <h2 id="sound-h">Sound</h2>
+          <span id="sound-state" class="pill">off</span>
+        </div>
+        <div class="modes" role="radiogroup" aria-label="Mode" id="modes"></div>
+        <p id="mode-hint" class="hint"></p>
+        <div class="controls tight">
+          <label class="field" data-for="bow string theremin">
+            <span>Root</span>
+            <select id="root"></select>
+          </label>
+          <label class="field" data-for="theremin">
+            <span>Scale</span>
+            <select id="scale"></select>
+          </label>
+          <label class="field" data-for="theremin">
+            <span>Glide <output id="glide-out">40 ms</output></span>
+            <input id="glide" type="range" min="0" max="300" step="5" value="40" />
+          </label>
+          <label class="field" data-for="string drum" title="How far (in noise sds) the force must jump above the level just before to count as a hit">
+            <span>Hit threshold <output id="threshold-out">5 σ</output></span>
+            <input id="threshold" type="range" min="3" max="15" step="0.5" value="5" />
+          </label>
+          <label class="field">
+            <span>Room <output id="room-out">25 %</output></span>
+            <input id="room" type="range" min="0" max="100" step="1" value="25" />
+          </label>
+        </div>
+      </section>
+
+      <section class="card smooth-card" aria-labelledby="smooth-h">
+        <div class="card-head">
+          <h2 id="smooth-h">Smoothing <small>One Euro filter, in the page</small></h2>
+          <span id="cutoff" class="pill" title="The filter's cutoff right now">–</span>
+        </div>
+        <div class="controls tight">
+          <label class="field" title="The cutoff when still: lower is quieter at rest, slower on small moves">
+            <span>Min cutoff <output id="mincutoff-out">1.0 Hz</output></span>
+            <input id="mincutoff" type="range" min="0" max="1000" step="1" />
+          </label>
+          <label class="field" title="How much speed opens the cutoff: higher is less lag on fast moves, more noise passes">
+            <span>Beta <output id="beta-out">0.12</output></span>
+            <input id="beta" type="range" min="0" max="1000" step="1" />
+          </label>
+          <label class="field inline check" title="No smoothing: every conversion as it came (the dead zone widens)">
+            <input id="raw-toggle" type="checkbox" />
+            <span>raw</span>
+          </label>
+          <button id="smooth-reset" type="button" class="ghost">defaults</button>
+        </div>
+        <p class="hint">Onsets (string, drum) always read the unsmoothed values.</p>
+      </section>
+
+      <section class="card latency-card" aria-labelledby="latency-h">
+        <div class="card-head">
+          <h2 id="latency-h">Latency <small>where the time goes</small></h2>
+          <span id="total" class="pill" data-ms="" title="Board stamp to the speaker, typical">–</span>
+        </div>
+        <dl class="counters lat">
+          <div><dt>board → page p50</dt><dd id="net-p50" data-ms="">–</dd></div>
+          <div><dt>board → page p99</dt><dd id="net-p99" data-ms="">–</dd></div>
+          <div><dt>spread (p99 − p50)</dt><dd id="net-spread" data-ms="">–</dd></div>
+          <div><dt>values/s</dt><dd id="rate" data-hz="">–</dd></div>
+          <div><dt>largest gap, 5 s</dt><dd id="gap" data-ms="">–</dd></div>
+          <div><dt>page → worklet</dt><dd id="handler">–</dd></div>
+          <div><dt>worklet wait + slew</dt><dd id="quantum">–</dd></div>
+          <div><dt>audio out (base + output)</dt><dd id="audio-out" data-ms="">–</dd></div>
+          <div><dt>context</dt><dd id="ctx">–</dd></div>
+          <div><dt>hub clock − page clock</dt><dd id="offset" data-ms="">–</dd></div>
+        </dl>
+        <p class="hint">Board → page: the arrival here minus the board's stamp on the hub's clock (the Wi-Fi link, the hub, the socket). The stamp goes through the hub's sync of the board's clock, which can be off by a few ms either way (a negative p50 is that error); the spread does not depend on it. Gap: the largest step between arrivals (between the board's own stamps in brackets).</p>
+        <p id="clock" class="hint"></p>
+      </section>
+    </main>
+
+    <footer class="keys hint">Keys: <kbd>space</kbd> mute, <kbd>z</kbd> zero, <kbd>1</kbd>–<kbd>4</kbd> mode.</footer>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

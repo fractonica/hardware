@@ -9,7 +9,7 @@
   "scripts": {
     "fr": "node --conditions=@fractonica/source packages/cli/src/main.ts",
     "hub": "node --conditions=@fractonica/source packages/hub/src/main.ts --foreground",
-    "typecheck": "tsc -p tsconfig.json && tsc -p packages/dashboard && tsc -p web/demo && tsc -p web/csi && tsc -p web/cam && tsc -p web/scale",
+    "typecheck": "tsc -p tsconfig.json && tsc -p packages/dashboard && tsc -p web/demo && tsc -p web/csi && tsc -p web/cam && tsc -p web/scale && tsc -p web/force",
     "test": "vitest run",
     "test:host": "node tools/host-test.mjs",
     "test:fuzz": "mkdir -p build && rm -f build/fuzz-digests.ts.txt && FR_FUZZ_N=1000000 FR_FUZZ_DIGESTS=\"$PWD/build/fuzz-digests.ts.txt\" vitest run fuzz.test && node tools/host-test.mjs --fuzz 1000000 --expect build/fuzz-digests.ts.txt"

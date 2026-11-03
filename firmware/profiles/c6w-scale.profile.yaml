@@ -8,10 +8,11 @@ net: { link_profile: default }
 memory: default
 # round: the 1.28" GC9A01 module (240x240, RGB565, no backlight pin, RST not wired) on the C6's SPI2 by bare pins.
 # scale: an HX711 on a load cell; its RATE strap sets 10 or 80 conversions a second (the firmware reports which).
-# Used as a tension/force sensor for sound (the user, 2026-11-03), not as a kitchen scale: every change is reported at
-# 80 Hz with no deadband, so an app gets a continuous control stream without a watch; calibration in grams is optional.
+# Used as a tension/force sensor for sound (the user, 2026-11-03), not as a kitchen scale, as responsive as possible
+# (2026-11-04): every conversion is reported (report_hz 100, at or above the part's ~96/s), no deadband, no filter on
+# the node (an EMA costs ~3 conversions of lag; the app smooths adaptively instead); calibration in grams is optional.
 caps:
   boot:   { cap: fr.button,  driver: button_gpio, bind: buttons.boot }
   status: { cap: fr.led,     driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 32 } }
   round:  { cap: fr.display, driver: gc9a01_spi,  bind: { sclk: gpio.6, mosi: gpio.7, cs: gpio.10, dc: gpio.2 } }
-  scale:  { cap: fr.scale,   driver: hx711_gpio,  bind: { dout: gpio.18, sck: gpio.23 }, config: { report_hz: 80, deadband_mg: 0 } }
+  scale:  { cap: fr.scale,   driver: hx711_gpio,  bind: { dout: gpio.18, sck: gpio.23 }, config: { report_hz: 100, deadband_mg: 0, filter: none } }

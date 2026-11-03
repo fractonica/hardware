@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0x4f56e757;
+export const CATALOG_HASH = 0xa9040fd4;
 
 // ---- fr.button ----
 
@@ -774,7 +774,7 @@ export interface ScaleReadResult {
 
 /** fr.scale.watch_start arguments (all optional: the device applies the defaults). */
 export interface ScaleWatchStartArgs {
-  /** (Hz; 1..80; default 80) */
+  /** (Hz; 1..100; default 80) */
   reportHz?: number;
   /** (s; 1..3600) */
   seconds?: number;

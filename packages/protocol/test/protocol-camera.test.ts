@@ -187,8 +187,9 @@ describe('CAM-1 capability and chip (design camera-c1 D1, D7)', () => {
     for (const name of ['stream_stop', 'set', 'sd_delete']) {
       expect(CAMERA_CAP.commands.find((c) => c.name === name), name).toMatchObject({ idempotent: true });
     }
-    // The catalog as of SCALE-1 (fr.scale 0x000C, fr.display 1.1's `round`): CAM-1's own was 0x7df39e8e.
-    expect(CATALOG_HASH).toBe(0x4f56e757);
+    // The catalog as of SCALE-1 (fr.scale 0x000C with report_hz up to 100, fr.display 1.1's `round`): CAM-1's own
+    // was 0x7df39e8e, SCALE-1's first 0x4f56e757.
+    expect(CATALOG_HASH).toBe(0xa9040fd4);
     expect(CATALOG_HASH).not.toBe(0x7df39e8e); // CAM-1's
     expect(CATALOG_HASH).not.toBe(0xbdb52e7a); // CSI-1's
   });

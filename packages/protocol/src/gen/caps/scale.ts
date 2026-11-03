@@ -51,7 +51,7 @@ export function decodeScaleTraits(bytes: Uint8Array): Decoded<ScaleTraits> {
 
 /** Profile-time service parameters (`config:`); never on the wire. */
 export interface ScaleConfig {
-  /** max STATE rate outside a watch (Hz; 1..80; default 10) */
+  /** max STATE rate outside a watch; at or above the part's rate (96 at its 80 Hz setting) every conversion is reported (Hz; 1..100; default 10) */
   report_hz: number;
   /** a change smaller than this since the last report is not reported (outside a watch) (mg; default 100) */
   deadband_mg: number;
@@ -271,7 +271,7 @@ export function decodeScaleReadResult(bytes: Uint8Array): Decoded<ScaleReadResul
 
 /** fr.scale.watch_start arguments (command 5, reliable). Reports every change up to report_hz (no deadband) for `seconds`, then falls back to config by itself. A newer watch_start replaces the running one. */
 export interface ScaleWatchStartArgs {
-  /** (Hz; 1..80; default 80) */
+  /** (Hz; 1..100; default 80) */
   report_hz: number;
   /** (s; 1..3600) */
   seconds: number;
@@ -502,7 +502,7 @@ export const SCALE_CAP: $.CapInfo = {
     { id: 2, name: 'calibrate', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'known_mg' }, { name: 'samples', range: [1, 64] }], maxSize: 9, encode: encodeScaleCalibrateArgs, decode: decodeScaleCalibrateArgs }, result: { fields: [{ name: 'counts_per_kg' }, { name: 'raw' }], maxSize: 12, encode: encodeScaleCalibrateResult, decode: decodeScaleCalibrateResult } },
     { id: 3, name: 'read', delivery: 'reliable', idempotent: false, visibility: 'public', args: $.EMPTY_CODEC, result: { fields: [{ name: 'raw' }, { name: 'weight_mg' }, { name: 'offset' }, { name: 'counts_per_kg' }, { name: 'rate_hz' }, { name: 'calibrated' }, { name: 'injected' }], maxSize: 31, encode: encodeScaleReadResult, decode: decodeScaleReadResult } },
     { id: 4, name: 'reset_calibration', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: null },
-    { id: 5, name: 'watch_start', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'report_hz', range: [1, 80] }, { name: 'seconds', range: [1, 3600], zeroExempt: true }], maxSize: 7, encode: encodeScaleWatchStartArgs, decode: decodeScaleWatchStartArgs }, result: null },
+    { id: 5, name: 'watch_start', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'report_hz', range: [1, 100] }, { name: 'seconds', range: [1, 3600], zeroExempt: true }], maxSize: 7, encode: encodeScaleWatchStartArgs, decode: decodeScaleWatchStartArgs }, result: null },
     { id: 6, name: 'watch_stop', delivery: 'reliable', idempotent: true, visibility: 'public', args: $.EMPTY_CODEC, result: null },
     { id: 7, name: 'inject', delivery: 'reliable', idempotent: false, visibility: 'test', args: { fields: [{ name: 'weight_mg' }, { name: 'hold_ms' }], maxSize: 10, encode: encodeScaleInjectArgs, decode: decodeScaleInjectArgs }, result: null },
   ],
