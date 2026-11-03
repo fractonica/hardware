@@ -5,7 +5,7 @@
 // tools/display/README.md):
 //
 //   fr_display_render --width W --height H --format rgb565|mono1 --rotation 0..3 --ui 0|1
-//                     --script <file.jsonl | -> --out <file.png> [--window [--scale N]]
+//                     --script <file.jsonl | -> --out <file.png> [--round 0|1] [--window [--scale N]]
 //
 //   W, H      the panel's pixels after rotation (the profile's kPanels entry / fr.display traits), 1..4096.
 //   rotation  quarter turns (kPanels' rotation); the panel's native size is H x W for 1 and 3.
@@ -18,6 +18,8 @@
 //               C = touch: {"x", "y", "pressed": bool} is a raw pointer point into the panel's input (press, move,
 //                   release), {"x", "y"[, "gesture"]} is fr.touch inject (tap by default) through TouchService.
 //   out       the PNG: the frozen frame (snapshot + snapshot_read), encoded as the hub encodes a board's snapshot.
+//   round     1: trait round (design scale-round-c1 D5): the PNG and the window paint the pixels off the inscribed
+//             circle dim grey (rgb565 0x4208), as the glass shows them (not at all). crc stays the whole frame's.
 //   window    after the script, an SDL2 window (Homebrew SDL2) where the mouse is the finger; ui events print live as
 //             {"event": {"id", "kind", "value"}} lines; closing it (or Esc) writes the PNG of the last frame.
 //
@@ -25,7 +27,8 @@
 //   success: {"crc": u32, "width": W, "height": H, "format": "rgb565"|"mono1", "bytes": n, "png": "<absolute path>",
 //             "events": [{"id", "kind": "clicked|pressed|released|value_changed", "value"}...],
 //             "errors": [{"line", "cmd", "error"}...]   (commands the board would refuse: busy, not_found...),
-//             "lvgl_heap": {"total", "used", "max_used"}  (ui panels: LVGL's pool after the script)}
+//             "lvgl_heap": {"total", "used", "max_used"}  (ui panels: LVGL's pool after the script),
+//             "round": true  (only with --round 1)}
 //   failure: {"error": {"code": "INVALID_ARGS|SCRIPT|UNAVAILABLE|IO|INTERNAL", "message": "..."}}
 // Exit status: 0 success; 64 bad options; 65 a script line that is not a command (not JSON, unknown cmd, args the codec
 // refuses); 69 --window without SDL2; 73 the PNG cannot be written; 70 anything else. Device-side refusals are not
@@ -92,7 +95,7 @@ int main(int argc, char **argv)
     bool have[6] = {};  // width height format rotation ui script/out
     const char *usage =
         "usage: fr_display_render --width W --height H --format rgb565|mono1 --rotation 0..3 --ui 0|1 "
-        "--script <file.jsonl|-> --out <file.png> [--window [--scale N]]";
+        "--script <file.jsonl|-> --out <file.png> [--round 0|1] [--window [--scale N]]";
     for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
         if (a == "--window") {
@@ -131,6 +134,11 @@ int main(int argc, char **argv)
             }
             geo.ui = n == 1;
             have[4] = true;
+        } else if (a == "--round") {
+            if (!parse_uint(v, 0, 1, n)) {
+                return fail(kExitUsage, "INVALID_ARGS", "--round must be 0 or 1");
+            }
+            geo.round = n == 1;
         } else if (a == "--script") {
             script = v;
         } else if (a == "--out") {
@@ -200,10 +208,13 @@ int main(int argc, char **argv)
     if (!snap) {
         return fail(kExitInternal, "INTERNAL", std::string("snapshot failed: ") + fr::err_name(snap.error()));
     }
-    const std::vector<uint8_t> fb = s.frame();
+    std::vector<uint8_t> fb = s.frame();
     if (fb.size() != snap->bytes) {
         return fail(kExitInternal, "INTERNAL", "snapshot_read returned " + std::to_string(fb.size()) + " of " +
                                                    std::to_string(snap->bytes) + " bytes");
+    }
+    if (geo.round) {
+        frd::grey_off_glass(fb, snap->width, snap->height, geo.format);
     }
     std::error_code ec;
     const std::filesystem::path png = std::filesystem::absolute(out, ec);
@@ -233,6 +244,9 @@ int main(int argc, char **argv)
         cJSON_AddStringToObject(j, "cmd", e.cmd.c_str());
         cJSON_AddStringToObject(j, "error", e.error.c_str());
         cJSON_AddItemToArray(errors, j);
+    }
+    if (geo.round) {
+        cJSON_AddBoolToObject(o, "round", true);
     }
     if (fr::ui::LvglBackend *l = s.lvgl()) {
         const fr::ui::HeapStats h = l->heap();

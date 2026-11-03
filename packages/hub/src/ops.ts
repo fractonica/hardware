@@ -31,6 +31,7 @@ import { INVENTORY_HANDLERS } from './registry/catalog-ops.ts';
 import { type FlashStartInput, startFlash } from './registry/flashing.ts';
 import { isDeviceId, registryOf, resolvePort } from './registry/hub.ts';
 import { REGISTRY_HANDLERS } from './registry/ops.ts';
+import { SCALE_HANDLERS } from './scale/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
 import { routerStatus } from './router/index.ts';
 import { LINKS_HANDLERS } from './router/ops.ts';
@@ -579,4 +580,6 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...CSI_HANDLERS,
   // CAM-1 (design camera-c1 D11): camera_snap, camera_stream, camera_status, camera_set, camera_sd_* (H; placeholders).
   ...CAMERA_HANDLERS,
+  // SCALE-1 (design scale-round-c1 D10): scale_status, scale_read, scale_tare, scale_calibrate, scale_reset_calibration, scale_watch.
+  ...SCALE_HANDLERS,
 };

@@ -29,6 +29,7 @@
 #include "csi.hpp"
 #include "radio_tx.hpp"
 #include "camera.hpp"
+#include "scale.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -42,7 +43,7 @@ inline std::expected<fr::wire::SerialFrame, fr::wire::DecodeErr> decode_serial(s
     return fr::wire::decode_line({reinterpret_cast<const char *>(in.data()), in.size()}, scratch);
 }
 
-inline constexpr size_t kCount = 739;
+inline constexpr size_t kCount = 794;
 
 template <class V>
 void for_each(V &&v)
@@ -4479,6 +4480,7 @@ void for_each(V &&v)
         x.color = DisplayColorFormat::mono1;
         x.ui = false;
         x.touch = false;
+        x.round = false;
         v.value("fr.display.traits.defaults", "fr.display.traits", x, enc, fr::cap::decode_display_traits, "", true);
     }
     // fr.display.traits.sample (cap fr.display.traits)
@@ -4489,7 +4491,8 @@ void for_each(V &&v)
         x.color = DisplayColorFormat::rgb565;
         x.ui = true;
         x.touch = true;
-        v.value("fr.display.traits.sample", "fr.display.traits", x, enc, fr::cap::decode_display_traits, "08b1f30110e2e603180120012801", true);
+        x.round = true;
+        v.value("fr.display.traits.sample", "fr.display.traits", x, enc, fr::cap::decode_display_traits, "08b1f30110e2e6031801200128013001", true);
     }
     // fr.display.traits.max (cap fr.display.traits)
     {
@@ -4499,7 +4502,8 @@ void for_each(V &&v)
         x.color = DisplayColorFormat::rgb565;
         x.ui = true;
         x.touch = true;
-        v.value("fr.display.traits.max", "fr.display.traits", x, enc, fr::cap::decode_display_traits, "08ffff0310ffff03180120012801", true);
+        x.round = true;
+        v.value("fr.display.traits.max", "fr.display.traits", x, enc, fr::cap::decode_display_traits, "08ffff0310ffff031801200128013001", true);
     }
     // fr.display.clear.args.defaults (cap fr.display.clear.args)
     {
@@ -7473,6 +7477,387 @@ void for_each(V &&v)
         uint32_t x = 0;
         x = 4294967295u;
         v.value("fr.camera.sd_free_mb.state.max", "fr.camera.sd_free_mb.state", x, fr::cap::encode_camera_sd_free_mb_state, fr::cap::decode_camera_sd_free_mb_state, "08ffffffff0f", true);
+    }
+    // fr.scale.traits.defaults (cap fr.scale.traits)
+    {
+        fr::cap::ScaleTraits x{};
+        x.resolution_bits = 0;
+        x.max_rate_hz = 0;
+        v.value("fr.scale.traits.defaults", "fr.scale.traits", x, enc, fr::cap::decode_scale_traits, "", true);
+    }
+    // fr.scale.traits.sample (cap fr.scale.traits)
+    {
+        fr::cap::ScaleTraits x{};
+        x.resolution_bits = 177;
+        x.max_rate_hz = 98;
+        v.value("fr.scale.traits.sample", "fr.scale.traits", x, enc, fr::cap::decode_scale_traits, "08b1011062", true);
+    }
+    // fr.scale.traits.max (cap fr.scale.traits)
+    {
+        fr::cap::ScaleTraits x{};
+        x.resolution_bits = 255;
+        x.max_rate_hz = 255;
+        v.value("fr.scale.traits.max", "fr.scale.traits", x, enc, fr::cap::decode_scale_traits, "08ff0110ff01", true);
+    }
+    // fr.scale.tare.args.defaults (cap fr.scale.tare.args)
+    {
+        fr::cap::ScaleTareArgs x{};
+        x.samples = 16;
+        v.value("fr.scale.tare.args.defaults", "fr.scale.tare.args", x, enc, fr::cap::decode_scale_tare_args, "0810", true);
+    }
+    // fr.scale.tare.args.sample (cap fr.scale.tare.args)
+    {
+        fr::cap::ScaleTareArgs x{};
+        x.samples = 50;
+        v.value("fr.scale.tare.args.sample", "fr.scale.tare.args", x, enc, fr::cap::decode_scale_tare_args, "0832", true);
+    }
+    // fr.scale.tare.args.max (cap fr.scale.tare.args)
+    {
+        fr::cap::ScaleTareArgs x{};
+        x.samples = 64;
+        v.value("fr.scale.tare.args.max", "fr.scale.tare.args", x, enc, fr::cap::decode_scale_tare_args, "0840", true);
+    }
+    // fr.scale.tare.args.example_0 (cap fr.scale.tare.args)
+    {
+        fr::cap::ScaleTareArgs x{};
+        x.samples = 16;
+        v.value("fr.scale.tare.args.example_0", "fr.scale.tare.args", x, enc, fr::cap::decode_scale_tare_args, "0810", true);
+    }
+    // fr.scale.tare.args.example_1 (cap fr.scale.tare.args)
+    {
+        fr::cap::ScaleTareArgs x{};
+        x.samples = 32;
+        v.value("fr.scale.tare.args.example_1", "fr.scale.tare.args", x, enc, fr::cap::decode_scale_tare_args, "0820", true);
+    }
+    // fr.scale.tare.result.defaults (cap fr.scale.tare.result)
+    {
+        fr::cap::ScaleTareResult x{};
+        x.offset = 0;
+        x.raw = 0;
+        v.value("fr.scale.tare.result.defaults", "fr.scale.tare.result", x, enc, fr::cap::decode_scale_tare_result, "", true);
+    }
+    // fr.scale.tare.result.sample (cap fr.scale.tare.result)
+    {
+        fr::cap::ScaleTareResult x{};
+        x.offset = 506952113;
+        x.raw = -1133579422;
+        v.value("fr.scale.tare.result.sample", "fr.scale.tare.result", x, enc, fr::cap::decode_scale_tare_result, "08e2e6bbe30310bbb288b908", true);
+    }
+    // fr.scale.tare.result.max (cap fr.scale.tare.result)
+    {
+        fr::cap::ScaleTareResult x{};
+        x.offset = 2147483647;
+        x.raw = 2147483647;
+        v.value("fr.scale.tare.result.max", "fr.scale.tare.result", x, enc, fr::cap::decode_scale_tare_result, "08feffffff0f10feffffff0f", true);
+    }
+    // fr.scale.tare.result.min (cap fr.scale.tare.result)
+    {
+        fr::cap::ScaleTareResult x{};
+        x.offset = (-2147483647 - 1);
+        x.raw = (-2147483647 - 1);
+        v.value("fr.scale.tare.result.min", "fr.scale.tare.result", x, enc, fr::cap::decode_scale_tare_result, "08ffffffff0f10ffffffff0f", true);
+    }
+    // fr.scale.calibrate.args.defaults (cap fr.scale.calibrate.args)
+    {
+        fr::cap::ScaleCalibrateArgs x{};
+        x.known_mg = 0;
+        x.samples = 16;
+        v.value("fr.scale.calibrate.args.defaults", "fr.scale.calibrate.args", x, enc, fr::cap::decode_scale_calibrate_args, "1010", true);
+    }
+    // fr.scale.calibrate.args.sample (cap fr.scale.calibrate.args)
+    {
+        fr::cap::ScaleCalibrateArgs x{};
+        x.known_mg = 2654435761u;
+        x.samples = 35;
+        v.value("fr.scale.calibrate.args.sample", "fr.scale.calibrate.args", x, enc, fr::cap::decode_scale_calibrate_args, "08b1f3ddf1091023", true);
+    }
+    // fr.scale.calibrate.args.max (cap fr.scale.calibrate.args)
+    {
+        fr::cap::ScaleCalibrateArgs x{};
+        x.known_mg = 4294967295u;
+        x.samples = 64;
+        v.value("fr.scale.calibrate.args.max", "fr.scale.calibrate.args", x, enc, fr::cap::decode_scale_calibrate_args, "08ffffffff0f1040", true);
+    }
+    // fr.scale.calibrate.args.example_0 (cap fr.scale.calibrate.args)
+    {
+        fr::cap::ScaleCalibrateArgs x{};
+        x.known_mg = 500000;
+        x.samples = 16;
+        v.value("fr.scale.calibrate.args.example_0", "fr.scale.calibrate.args", x, enc, fr::cap::decode_scale_calibrate_args, "08a0c21e1010", true);
+    }
+    // fr.scale.calibrate.result.defaults (cap fr.scale.calibrate.result)
+    {
+        fr::cap::ScaleCalibrateResult x{};
+        x.counts_per_kg = 0;
+        x.raw = 0;
+        v.value("fr.scale.calibrate.result.defaults", "fr.scale.calibrate.result", x, enc, fr::cap::decode_scale_calibrate_result, "", true);
+    }
+    // fr.scale.calibrate.result.sample (cap fr.scale.calibrate.result)
+    {
+        fr::cap::ScaleCalibrateResult x{};
+        x.counts_per_kg = 506952113;
+        x.raw = -1133579422;
+        v.value("fr.scale.calibrate.result.sample", "fr.scale.calibrate.result", x, enc, fr::cap::decode_scale_calibrate_result, "08e2e6bbe30310bbb288b908", true);
+    }
+    // fr.scale.calibrate.result.max (cap fr.scale.calibrate.result)
+    {
+        fr::cap::ScaleCalibrateResult x{};
+        x.counts_per_kg = 2147483647;
+        x.raw = 2147483647;
+        v.value("fr.scale.calibrate.result.max", "fr.scale.calibrate.result", x, enc, fr::cap::decode_scale_calibrate_result, "08feffffff0f10feffffff0f", true);
+    }
+    // fr.scale.calibrate.result.min (cap fr.scale.calibrate.result)
+    {
+        fr::cap::ScaleCalibrateResult x{};
+        x.counts_per_kg = (-2147483647 - 1);
+        x.raw = (-2147483647 - 1);
+        v.value("fr.scale.calibrate.result.min", "fr.scale.calibrate.result", x, enc, fr::cap::decode_scale_calibrate_result, "08ffffffff0f10ffffffff0f", true);
+    }
+    // fr.scale.read.args.empty (cap fr.scale.read.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.scale.read.args.empty", "fr.scale.read.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.scale.read.result.defaults (cap fr.scale.read.result)
+    {
+        fr::cap::ScaleReadResult x{};
+        x.raw = 0;
+        x.weight_mg = 0;
+        x.offset = 0;
+        x.counts_per_kg = 0;
+        x.rate_hz = 0;
+        x.calibrated = false;
+        x.injected = false;
+        v.value("fr.scale.read.result.defaults", "fr.scale.read.result", x, enc, fr::cap::decode_scale_read_result, "", true);
+    }
+    // fr.scale.read.result.sample (cap fr.scale.read.result)
+    {
+        fr::cap::ScaleReadResult x{};
+        x.raw = 506952113;
+        x.weight_mg = -1133579422;
+        x.offset = 1520856339;
+        x.counts_per_kg = -119675196;
+        x.rate_hz = 117;
+        x.calibrated = true;
+        x.injected = true;
+        v.value("fr.scale.read.result.sample", "fr.scale.read.result", x, enc, fr::cap::decode_scale_read_result, "08e2e6bbe30310bbb288b90818a6b4b3aa0b20f7e49072287530013801", true);
+    }
+    // fr.scale.read.result.max (cap fr.scale.read.result)
+    {
+        fr::cap::ScaleReadResult x{};
+        x.raw = 2147483647;
+        x.weight_mg = 2147483647;
+        x.offset = 2147483647;
+        x.counts_per_kg = 2147483647;
+        x.rate_hz = 255;
+        x.calibrated = true;
+        x.injected = true;
+        v.value("fr.scale.read.result.max", "fr.scale.read.result", x, enc, fr::cap::decode_scale_read_result, "08feffffff0f10feffffff0f18feffffff0f20feffffff0f28ff0130013801", true);
+    }
+    // fr.scale.read.result.min (cap fr.scale.read.result)
+    {
+        fr::cap::ScaleReadResult x{};
+        x.raw = (-2147483647 - 1);
+        x.weight_mg = (-2147483647 - 1);
+        x.offset = (-2147483647 - 1);
+        x.counts_per_kg = (-2147483647 - 1);
+        x.rate_hz = 0;
+        x.calibrated = false;
+        x.injected = false;
+        v.value("fr.scale.read.result.min", "fr.scale.read.result", x, enc, fr::cap::decode_scale_read_result, "08ffffffff0f10ffffffff0f18ffffffff0f20ffffffff0f", true);
+    }
+    // fr.scale.reset_calibration.args.empty (cap fr.scale.reset_calibration.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.scale.reset_calibration.args.empty", "fr.scale.reset_calibration.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.scale.watch_start.args.defaults (cap fr.scale.watch_start.args)
+    {
+        fr::cap::ScaleWatchStartArgs x{};
+        x.report_hz = 80;
+        x.seconds = 0;
+        v.value("fr.scale.watch_start.args.defaults", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "0850", true);
+    }
+    // fr.scale.watch_start.args.sample (cap fr.scale.watch_start.args)
+    {
+        fr::cap::ScaleWatchStartArgs x{};
+        x.report_hz = 2;
+        x.seconds = 1923;
+        v.value("fr.scale.watch_start.args.sample", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "080210830f", true);
+    }
+    // fr.scale.watch_start.args.max (cap fr.scale.watch_start.args)
+    {
+        fr::cap::ScaleWatchStartArgs x{};
+        x.report_hz = 80;
+        x.seconds = 3600;
+        v.value("fr.scale.watch_start.args.max", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "085010901c", true);
+    }
+    // fr.scale.watch_start.args.example_0 (cap fr.scale.watch_start.args)
+    {
+        fr::cap::ScaleWatchStartArgs x{};
+        x.report_hz = 80;
+        x.seconds = 10;
+        v.value("fr.scale.watch_start.args.example_0", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "0850100a", true);
+    }
+    // fr.scale.watch_start.args.example_1 (cap fr.scale.watch_start.args)
+    {
+        fr::cap::ScaleWatchStartArgs x{};
+        x.report_hz = 20;
+        x.seconds = 60;
+        v.value("fr.scale.watch_start.args.example_1", "fr.scale.watch_start.args", x, enc, fr::cap::decode_scale_watch_start_args, "0814103c", true);
+    }
+    // fr.scale.watch_stop.args.empty (cap fr.scale.watch_stop.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.scale.watch_stop.args.empty", "fr.scale.watch_stop.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.scale.inject.args.defaults (cap fr.scale.inject.args)
+    {
+        fr::cap::ScaleInjectArgs x{};
+        x.weight_mg = 0;
+        x.hold_ms = 0;
+        v.value("fr.scale.inject.args.defaults", "fr.scale.inject.args", x, enc, fr::cap::decode_scale_inject_args, "", true);
+    }
+    // fr.scale.inject.args.sample (cap fr.scale.inject.args)
+    {
+        fr::cap::ScaleInjectArgs x{};
+        x.weight_mg = 506952113;
+        x.hold_ms = 62306;
+        v.value("fr.scale.inject.args.sample", "fr.scale.inject.args", x, enc, fr::cap::decode_scale_inject_args, "08e2e6bbe30310e2e603", true);
+    }
+    // fr.scale.inject.args.max (cap fr.scale.inject.args)
+    {
+        fr::cap::ScaleInjectArgs x{};
+        x.weight_mg = 2147483647;
+        x.hold_ms = 65535;
+        v.value("fr.scale.inject.args.max", "fr.scale.inject.args", x, enc, fr::cap::decode_scale_inject_args, "08feffffff0f10ffff03", true);
+    }
+    // fr.scale.inject.args.min (cap fr.scale.inject.args)
+    {
+        fr::cap::ScaleInjectArgs x{};
+        x.weight_mg = (-2147483647 - 1);
+        x.hold_ms = 0;
+        v.value("fr.scale.inject.args.min", "fr.scale.inject.args", x, enc, fr::cap::decode_scale_inject_args, "08ffffffff0f", true);
+    }
+    // fr.scale.inject.args.example_0 (cap fr.scale.inject.args)
+    {
+        fr::cap::ScaleInjectArgs x{};
+        x.weight_mg = 250000;
+        x.hold_ms = 0;
+        v.value("fr.scale.inject.args.example_0", "fr.scale.inject.args", x, enc, fr::cap::decode_scale_inject_args, "08a0c21e", true);
+    }
+    // fr.scale.inject.args.example_1 (cap fr.scale.inject.args)
+    {
+        fr::cap::ScaleInjectArgs x{};
+        x.weight_mg = 0;
+        x.hold_ms = 5000;
+        v.value("fr.scale.inject.args.example_1", "fr.scale.inject.args", x, enc, fr::cap::decode_scale_inject_args, "108827", true);
+    }
+    // fr.scale.settled.event.defaults (cap fr.scale.settled.event)
+    {
+        fr::cap::ScaleSettled x{};
+        x.weight_mg = 0;
+        x.delta_mg = 0;
+        v.value("fr.scale.settled.event.defaults", "fr.scale.settled.event", x, enc, fr::cap::decode_scale_settled, "", true);
+    }
+    // fr.scale.settled.event.sample (cap fr.scale.settled.event)
+    {
+        fr::cap::ScaleSettled x{};
+        x.weight_mg = 506952113;
+        x.delta_mg = -1133579422;
+        v.value("fr.scale.settled.event.sample", "fr.scale.settled.event", x, enc, fr::cap::decode_scale_settled, "08e2e6bbe30310bbb288b908", true);
+    }
+    // fr.scale.settled.event.max (cap fr.scale.settled.event)
+    {
+        fr::cap::ScaleSettled x{};
+        x.weight_mg = 2147483647;
+        x.delta_mg = 2147483647;
+        v.value("fr.scale.settled.event.max", "fr.scale.settled.event", x, enc, fr::cap::decode_scale_settled, "08feffffff0f10feffffff0f", true);
+    }
+    // fr.scale.settled.event.min (cap fr.scale.settled.event)
+    {
+        fr::cap::ScaleSettled x{};
+        x.weight_mg = (-2147483647 - 1);
+        x.delta_mg = (-2147483647 - 1);
+        v.value("fr.scale.settled.event.min", "fr.scale.settled.event", x, enc, fr::cap::decode_scale_settled, "08ffffffff0f10ffffffff0f", true);
+    }
+    // fr.scale.weight_mg.state.defaults (cap fr.scale.weight_mg.state)
+    {
+        int32_t x = 0;
+        x = 0;
+        v.value("fr.scale.weight_mg.state.defaults", "fr.scale.weight_mg.state", x, fr::cap::encode_scale_weight_mg_state, fr::cap::decode_scale_weight_mg_state, "", true);
+    }
+    // fr.scale.weight_mg.state.sample (cap fr.scale.weight_mg.state)
+    {
+        int32_t x = 0;
+        x = 506952113;
+        v.value("fr.scale.weight_mg.state.sample", "fr.scale.weight_mg.state", x, fr::cap::encode_scale_weight_mg_state, fr::cap::decode_scale_weight_mg_state, "08e2e6bbe303", true);
+    }
+    // fr.scale.weight_mg.state.max (cap fr.scale.weight_mg.state)
+    {
+        int32_t x = 0;
+        x = 2147483647;
+        v.value("fr.scale.weight_mg.state.max", "fr.scale.weight_mg.state", x, fr::cap::encode_scale_weight_mg_state, fr::cap::decode_scale_weight_mg_state, "08feffffff0f", true);
+    }
+    // fr.scale.weight_mg.state.min (cap fr.scale.weight_mg.state)
+    {
+        int32_t x = 0;
+        x = (-2147483647 - 1);
+        v.value("fr.scale.weight_mg.state.min", "fr.scale.weight_mg.state", x, fr::cap::encode_scale_weight_mg_state, fr::cap::decode_scale_weight_mg_state, "08ffffffff0f", true);
+    }
+    // fr.scale.stable.state.defaults (cap fr.scale.stable.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.scale.stable.state.defaults", "fr.scale.stable.state", x, fr::cap::encode_scale_stable_state, fr::cap::decode_scale_stable_state, "", true);
+    }
+    // fr.scale.stable.state.sample (cap fr.scale.stable.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.scale.stable.state.sample", "fr.scale.stable.state", x, fr::cap::encode_scale_stable_state, fr::cap::decode_scale_stable_state, "0801", true);
+    }
+    // fr.scale.stable.state.max (cap fr.scale.stable.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.scale.stable.state.max", "fr.scale.stable.state", x, fr::cap::encode_scale_stable_state, fr::cap::decode_scale_stable_state, "0801", true);
+    }
+    // fr.scale.calibrated.state.defaults (cap fr.scale.calibrated.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.scale.calibrated.state.defaults", "fr.scale.calibrated.state", x, fr::cap::encode_scale_calibrated_state, fr::cap::decode_scale_calibrated_state, "", true);
+    }
+    // fr.scale.calibrated.state.sample (cap fr.scale.calibrated.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.scale.calibrated.state.sample", "fr.scale.calibrated.state", x, fr::cap::encode_scale_calibrated_state, fr::cap::decode_scale_calibrated_state, "0801", true);
+    }
+    // fr.scale.calibrated.state.max (cap fr.scale.calibrated.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.scale.calibrated.state.max", "fr.scale.calibrated.state", x, fr::cap::encode_scale_calibrated_state, fr::cap::decode_scale_calibrated_state, "0801", true);
+    }
+    // fr.scale.rate_hz.state.defaults (cap fr.scale.rate_hz.state)
+    {
+        uint8_t x = 0;
+        x = 0;
+        v.value("fr.scale.rate_hz.state.defaults", "fr.scale.rate_hz.state", x, fr::cap::encode_scale_rate_hz_state, fr::cap::decode_scale_rate_hz_state, "", true);
+    }
+    // fr.scale.rate_hz.state.sample (cap fr.scale.rate_hz.state)
+    {
+        uint8_t x = 0;
+        x = 177;
+        v.value("fr.scale.rate_hz.state.sample", "fr.scale.rate_hz.state", x, fr::cap::encode_scale_rate_hz_state, fr::cap::decode_scale_rate_hz_state, "08b101", true);
+    }
+    // fr.scale.rate_hz.state.max (cap fr.scale.rate_hz.state)
+    {
+        uint8_t x = 0;
+        x = 255;
+        v.value("fr.scale.rate_hz.state.max", "fr.scale.rate_hz.state", x, fr::cap::encode_scale_rate_hz_state, fr::cap::decode_scale_rate_hz_state, "08ff01", true);
     }
     // fr.node.identify.args.defaults (cap fr.node.identify.args)
     {

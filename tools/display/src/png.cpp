@@ -74,6 +74,22 @@ std::vector<uint8_t> encode_png(std::span<const uint8_t> fb, uint16_t width, uin
     return out;
 }
 
+void grey_off_glass(std::span<uint8_t> fb, uint16_t width, uint16_t height, fr::hal::PixelFormat format)
+{
+    if (format != fr::hal::PixelFormat::rgb565 || fb.size() < static_cast<size_t>(width) * height * 2) {
+        return;
+    }
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            if (!on_round_glass(x, y, width, height)) {
+                const size_t i = (static_cast<size_t>(y) * width + x) * 2;
+                fb[i] = static_cast<uint8_t>(kOutsideGlass & 0xFF);
+                fb[i + 1] = static_cast<uint8_t>(kOutsideGlass >> 8);
+            }
+        }
+    }
+}
+
 bool write_png(const std::string &path, std::span<const uint8_t> fb, uint16_t width, uint16_t height,
                fr::hal::PixelFormat format)
 {

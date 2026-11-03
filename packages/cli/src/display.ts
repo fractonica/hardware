@@ -37,6 +37,8 @@ export interface RenderPanel {
   rotation: number;
   ui: boolean;
   touch: boolean;
+  /** Trait round (design scale-round-c1 D5): the PNG and the window grey the corners the glass does not show. */
+  round: boolean;
 }
 
 /** The panel `instance` of `profile` (its only fr.display instance when omitted); a string says why there is none. */
@@ -76,6 +78,7 @@ export async function resolveRenderPanel(sourceDir: string, profile: string, ins
     rotation: Math.max(0, ['r0', 'r90', 'r180', 'r270'].indexOf(String(p.config.rotation ?? 'r0'))),
     ui: p.traits.ui === true,
     touch: p.traits.touch === true,
+    round: p.traits.round === true,
   };
 }
 
@@ -154,7 +157,7 @@ export function runRenderer(
   opts: { window: boolean; live?: (e: NonNullable<RendererLine['event']>) => void },
 ): Promise<{ status: number; line: RendererLine | null; stderr: string }> {
   const args = ['--width', String(panel.width), '--height', String(panel.height), '--format', panel.format, '--rotation', String(panel.rotation)];
-  args.push('--ui', panel.ui ? '1' : '0', '--script', script, '--out', out, ...(opts.window ? ['--window'] : []));
+  args.push('--ui', panel.ui ? '1' : '0', '--script', script, '--out', out, ...(panel.round ? ['--round', '1'] : []), ...(opts.window ? ['--window'] : []));
   return new Promise((done) => {
     const child = spawn(bin, args, { stdio: [script === '-' ? 'inherit' : 'ignore', 'pipe', 'pipe'] });
     let buf = '';
@@ -248,6 +251,7 @@ export function addDisplayWindowCommand(display: Command, kit: CliKit): void {
           rotation: panel.rotation,
           ui: panel.ui,
           touch: panel.touch,
+          round: panel.round,
           ms: Date.now() - t0,
           ...(line.lvgl_heap ? { lvgl_heap: line.lvgl_heap } : {}),
         },

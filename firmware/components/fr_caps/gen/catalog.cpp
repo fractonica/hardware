@@ -66,6 +66,22 @@ constexpr MemberInfo kCameraProperties[] = {
     {5, "sd"},
     {6, "sd_free_mb"},
 };
+constexpr MemberInfo kScaleCommands[] = {
+    {1, "tare"},
+    {2, "calibrate"},
+    {3, "read"},
+    {4, "reset_calibration"},
+    {5, "watch_start"},
+    {6, "watch_stop"},
+    {7, "inject"},
+};
+constexpr MemberInfo kScaleEvents[] = {{1, "settled"}};
+constexpr MemberInfo kScaleProperties[] = {
+    {1, "weight_mg"},
+    {2, "stable"},
+    {3, "calibrated"},
+    {4, "rate_hz"},
+};
 constexpr MemberInfo kNodeCommands[] = {
     {1, "identify"},
     {2, "describe"},
@@ -85,7 +101,7 @@ constexpr MemberInfo kDiagEvents[] = {{1, "mark"}};
 constexpr CapInfo kCaps[] = {
     {0x0001, "fr.button", {1, 0}, kButtonCommands, kButtonEvents, kButtonProperties},
     {0x0002, "fr.led", {1, 0}, kLedCommands, kLedEvents, kLedProperties},
-    {0x0003, "fr.display", {1, 0}, kDisplayCommands, kDisplayEvents, kDisplayProperties},
+    {0x0003, "fr.display", {1, 1}, kDisplayCommands, kDisplayEvents, kDisplayProperties},
     {0x0004, "fr.audio_out", {1, 0}, kAudioOutCommands, kAudioOutEvents, kAudioOutProperties},
     {0x0005, "fr.analog_in", {1, 0}, kAnalogInCommands, kAnalogInEvents, kAnalogInProperties},
     {0x0006, "fr.fixture", {0, 2}, kFixtureCommands, kFixtureEvents, kFixtureProperties},
@@ -94,6 +110,7 @@ constexpr CapInfo kCaps[] = {
     {0x0009, "fr.csi", {1, 0}, kCsiCommands, kCsiEvents, kCsiProperties},
     {0x000A, "fr.radio_tx", {1, 0}, kRadioTxCommands, {}, kRadioTxProperties},
     {0x000B, "fr.camera", {1, 0}, kCameraCommands, kCameraEvents, kCameraProperties},
+    {0x000C, "fr.scale", {1, 0}, kScaleCommands, kScaleEvents, kScaleProperties},
     {0x00F0, "fr.node", {1, 0}, kNodeCommands, kNodeEvents, {}},
     {0x00F1, "fr.ota", {1, 0}, {}, {}, {}},
     {0x00F2, "fr.diag", {1, 0}, kDiagCommands, kDiagEvents, {}},

@@ -48,6 +48,11 @@ public:
      * pages: y a multiple of 8, and h one too or reaching the bottom row. Err::invalid_args for an area off the screen or a short buffer.
      */
     virtual Status flush(uint16_t x, uint16_t y, uint16_t w, uint16_t h, std::span<const uint8_t> pixels) = 0;
+    /**
+     * Whether the glass shows only the circle inscribed in width x height (fr.display trait round; design
+     * scale-round-c1 D5: the GC9A01). The framebuffer is still the full rectangle; the corners are simply not seen.
+     */
+    virtual bool round() const { return false; }
     /** Whether set_backlight changes anything (a backlight PWM, an OLED's contrast). */
     virtual bool has_backlight() const { return false; }
     /** 0 dark (or dimmest) .. 255 full. Accepted and ignored without backlight control. */

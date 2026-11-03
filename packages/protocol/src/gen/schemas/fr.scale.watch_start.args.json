@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.scale.watch_start.args",
+  "title": "fr.scale.watch_start arguments",
+  "description": "Reports every change up to report_hz (no deadband) for `seconds`, then falls back to config by itself. A newer watch_start replaces the running one.",
+  "type": "object",
+  "properties": {
+    "report_hz": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 80,
+      "description": "(Hz; 1..80)",
+      "default": 80
+    },
+    "seconds": {
+      "anyOf": [
+        {
+          "const": 0
+        },
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      ],
+      "description": "(s; 1..3600)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "seconds": 10
+    },
+    {
+      "report_hz": 20,
+      "seconds": 60
+    }
+  ]
+}

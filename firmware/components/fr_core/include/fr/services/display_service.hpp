@@ -23,7 +23,8 @@ namespace fr {
  * frame; set_brightness stores and reports a change and drives panel.set_backlight (a panel without backlight control
  * ignores it, the property still says what was asked).
  *
- * Traits come from the panel (size after config rotation, format) and the backend (ui); touch once bind_touch() ran.
+ * Traits come from the panel (size after config rotation, format, round) and the backend (ui); touch once bind_touch()
+ * ran.
  * ui events from the backend may come from any task: they are copied and posted to the core task, then emitted
  * (dropped when the post queue is full).
  *

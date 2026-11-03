@@ -3,7 +3,7 @@
 // `node tools/display-build.mjs` into build/host-display/fr_display_render), built when missing or stale.
 //
 // The renderer's command line (L's contract): fr_display_render --width W --height H --format rgb565|mono1
-// --rotation 0..3 --ui 0|1 --script <file.jsonl> --out <file.png>; width and height after rotation (the panel's
+// --rotation 0..3 --ui 0|1 --script <file.jsonl> --out <file.png> [--round 1]; width and height after rotation (the panel's
 // traits, as the generated kPanels table has them); it prints one JSON line {crc, width, height, format, bytes,
 // png, events}.
 
@@ -42,6 +42,8 @@ export interface Panel {
   rotation: number;
   ui: boolean;
   touch: boolean;
+  /** Trait round (design scale-round-c1 D5): the renderer greys the corners the glass does not show. */
+  round: boolean;
 }
 
 /** What the panel needs of a manifest instance (codegen's ManifestCap). */
@@ -119,6 +121,7 @@ export async function resolvePanel(sourceDir: string, profile: string, instance?
     rotation: Math.max(0, rotation),
     ui: p.traits.ui === true,
     touch: p.traits.touch === true,
+    round: p.traits.round === true,
   };
 }
 
@@ -387,6 +390,8 @@ export async function runRenderer(bin: string, panel: Panel, scriptFile: string,
     scriptFile,
     '--out',
     out,
+    // A round panel's PNG greys the corners its glass does not show; the crc stays the whole frame's.
+    ...(panel.round ? ['--round', '1'] : []),
   ];
   const r = await run(bin, args, opts);
   if (r.timedOut) {

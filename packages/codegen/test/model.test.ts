@@ -96,6 +96,7 @@ describe('loading the committed schema', () => {
       [0x0009, 'fr.csi', 'Csi', 'standard'],
       [0x000a, 'fr.radio_tx', 'RadioTx', 'standard'],
       [0x000b, 'fr.camera', 'Camera', 'standard'],
+      [0x000c, 'fr.scale', 'Scale', 'standard'],
       [0x00f0, 'fr.node', 'Node', 'system'],
       [0x00f1, 'fr.ota', 'Ota', 'system'],
       [0x00f2, 'fr.diag', 'Diag', 'system'],
@@ -259,7 +260,7 @@ describe('validation errors name the file and path', () => {
   });
 
   it('capability ids missing from the registry or allocated to another name', () => {
-    expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x000c))), BUTTON, 'id', /0x000C is not allocated in schema\/registry\.yaml/);
+    expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x000d))), BUTTON, 'id', /0x000D is not allocated in schema\/registry\.yaml/);
     expectIssue(issuesOf(edited(BUTTON, (y) => (y.id = 0x0002))), BUTTON, 'id', /allocates 0x0002 to fr\.led, not fr\.button/);
   });
 
@@ -541,7 +542,8 @@ describe('capability message types and bulk commands (design m2-c5-display D1, D
 
   it('fr.display: UiWidget, then UiLayout holding array<UiWidget> of 24, which ui_load holds directly', () => {
     const d = cap(model(), 'fr.display');
-    expect(d).toMatchObject({ id: 0x0003, section: 'standard', version: { major: 1, minor: 0 }, ordered: false });
+    // 1.1: trait round (design scale-round-c1 D5).
+    expect(d).toMatchObject({ id: 0x0003, section: 'standard', version: { major: 1, minor: 1 }, ordered: false });
     expect(d.types.map((t) => [t.name, t.scope])).toEqual([
       ['UiWidget', 'fr.display'],
       ['UiLayout', 'fr.display'],
@@ -568,7 +570,7 @@ describe('capability message types and bulk commands (design m2-c5-display D1, D
       ['snapshot', 7],
       ['snapshot_read', 8],
     ]);
-    expect(d.traits.map((t) => t.name)).toEqual(['width', 'height', 'color', 'ui', 'touch']);
+    expect(d.traits.map((t) => t.name)).toEqual(['width', 'height', 'color', 'ui', 'touch', 'round']);
     expect(d.events).toEqual([expect.objectContaining({ name: 'ui', priority: 'normal', requires: { trait: 'ui' } })]);
     expect(d.properties.map((p) => p.name)).toEqual(['brightness']);
     // Every other command still fits the realtime budget.

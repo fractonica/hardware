@@ -435,7 +435,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, ssd1306_i2c, st7789_spi, wifi_csi)",
+      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, gc9a01_spi, hx711_gpio, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, ssd1306_i2c, st7789_spi, wifi_csi)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -463,7 +463,7 @@ describe('validation', () => {
     expect(messages(dir)).toEqual([
       "instance name 'node' is reserved (spec 03 §3.6)",
       "instance name 'Status' must be snake_case, at most 31 characters",
-      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx, fr.camera)',
+      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx, fr.camera, fr.scale)',
       'board esp32c6-supermini has no entry leds.nope',
     ]);
   });
@@ -584,6 +584,8 @@ describe('driver manifests', () => {
       'espnow_tx',
       'fixture_gpio',
       'fixture_ws2812_rx',
+      'gc9a01_spi',
+      'hx711_gpio',
       'i2s_amp',
       'i2s_mic',
       'led_gpio',
@@ -1492,7 +1494,7 @@ describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => 
     const r = gen(dir, S3T, false);
     expect(r.manifest.caps.map((c) => [c.name, c.traits])).toEqual([
       ['boot', { long_press: true, multi_press_max: 2 }],
-      ['lcd', { width: 240, height: 320, color: 'rgb565', ui: true, touch: false }],
+      ['lcd', { width: 240, height: 320, color: 'rgb565', ui: true, touch: false, round: false }],
       ['touch', { width: 0, height: 0, display: 0 }],
       ['tx', {}],
     ]);

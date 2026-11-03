@@ -56,7 +56,7 @@ const MONO: PanelInfo = { width: 72, height: 40, format: 'mono1', ui: false, tou
 const LCD19: PanelInfo = { width: 170, height: 320, format: 'rgb565', ui: true, touch: false };
 const TOUCH2: PanelInfo = { width: 240, height: 320, format: 'rgb565', ui: true, touch: true };
 
-const panelOf = (p: PanelInfo, profile: string): Panel => ({ profile, name: 'lcd', port: 3, rotation: 0, ...p });
+const panelOf = (p: PanelInfo, profile: string): Panel => ({ profile, name: 'lcd', port: 3, rotation: 0, round: false, ...p });
 
 /** A PNG of raw pixel rows with the given filter per row (to exercise every unfilter), deflated at `level`. */
 function pngOf(width: number, height: number, colorType: 0 | 2, bitDepth: 1 | 8, rows: Buffer[], filters: number[], level = 9): Buffer {

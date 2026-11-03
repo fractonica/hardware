@@ -157,6 +157,19 @@ void Runtime::advance(LvglBackend &b, uint32_t ms)
     static_cast<void>(ms);
 }
 
+void Runtime::frames(bool available)
+{
+    static_cast<void>(available);
+}
+
+void Runtime::note_abandoned(const char *what)
+{
+    lv_mem_monitor_t m;
+    lv_mem_monitor(&m);
+    ESP_LOGW(TAG, "LVGL pool too full: %s not built (%u B free, %u B in one block)", what,
+             static_cast<unsigned>(m.free_size), static_cast<unsigned>(m.free_biggest_size));
+}
+
 void Runtime::hold(LvglBackend &b, bool hold)
 {
     static_cast<void>(b);

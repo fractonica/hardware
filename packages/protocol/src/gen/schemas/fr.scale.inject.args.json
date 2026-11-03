@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.scale.inject.args",
+  "title": "fr.scale.inject arguments",
+  "description": "Holds `weight_mg` in place of the part for hold_ms (0 means 1,000 ms; at most 60,000). A newer inject replaces it.",
+  "type": "object",
+  "properties": {
+    "weight_mg": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647,
+      "description": "(mg)"
+    },
+    "hold_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "weight_mg": 250000
+    },
+    {
+      "weight_mg": 0,
+      "hold_ms": 5000
+    }
+  ]
+}

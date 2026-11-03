@@ -6,6 +6,7 @@
 //   node tools/display-build.mjs
 //   node tools/display-build.mjs --test [filter]
 // The build directory is build/host-display, or FR_DISPLAY_BUILD_DIR (relative to the checkout, or absolute).
+// FR_DISPLAY_LV_MEM_SIZE=32768 (with its own FR_DISPLAY_BUILD_DIR) builds the tests with a board's 32 KB LVGL pool.
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, utimesSync } from 'node:fs';
@@ -50,7 +51,9 @@ if (test) {
 
 // Configuring every time is cheap and lets CONFIGURE_DEPENDS globs pick up new sources. stdout carries the build's
 // progress; callers that parse output read the renderer's own, never this script's.
-run(cmake, ['-S', source, '-B', build, '-G', 'Ninja', `-DCMAKE_CXX_COMPILER=${cxx}`, `-DCMAKE_C_COMPILER=${cc}`, '-DCMAKE_BUILD_TYPE=Debug', '--log-level=WARNING']);
+// FR_DISPLAY_LV_MEM_SIZE (bytes) builds with a board's LVGL pool instead of the Mac's (use its own build directory).
+const pool = `-DFR_LV_MEM_SIZE=${process.env.FR_DISPLAY_LV_MEM_SIZE ?? ''}`;
+run(cmake, ['-S', source, '-B', build, '-G', 'Ninja', `-DCMAKE_CXX_COMPILER=${cxx}`, `-DCMAKE_C_COMPILER=${cc}`, '-DCMAKE_BUILD_TYPE=Debug', pool, '--log-level=WARNING']);
 run(cmake, ['--build', build, '--target', 'fr_display_render', ...(test ? ['fr_display_tests'] : [])]);
 // The binary is current as of now even when ninja had nothing to relink (a newer source it does not depend on, say a
 // test or an IDF-only file), so the callers' staleness rule (a source newer than the binary) settles.

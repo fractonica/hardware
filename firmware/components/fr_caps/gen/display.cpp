@@ -391,6 +391,9 @@ size_t encode(const DisplayTraits &v, fr::wire::Writer &w)
     if (v.touch) {
         w.field_bool(5, v.touch);
     }
+    if (v.round) {
+        w.field_bool(6, v.round);
+    }
     return w.size() - start;
 }
 
@@ -415,6 +418,9 @@ std::expected<DisplayTraits, fr::wire::DecodeErr> decode_display_traits(std::spa
         case 5:
             v.touch = r.read_bool();
             break;
+        case 6:
+            v.round = r.read_bool();
+            break;
         default:
             r.skip();
             break;
@@ -432,7 +438,8 @@ bool operator==(const DisplayTraits &a, const DisplayTraits &b)
            a.height == b.height &&
            a.color == b.color &&
            a.ui == b.ui &&
-           a.touch == b.touch;
+           a.touch == b.touch &&
+           a.round == b.round;
 }
 
 bool valid(const DisplayTraits &v)

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.scale.watch_stop.args",
+  "title": "fr.scale.watch_stop arguments",
+  "description": "Ends a watch now; OK when none runs.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

@@ -576,7 +576,7 @@ describe('profiles (D7)', () => {
     });
     expect(problems(dir)).toEqual([
       `duts.${PAD_C6}.profile: profile c6-nope not found (firmware/profiles/c6-nope.profile.yaml)`,
-      "firmware/profiles/s3l-pad.profile.yaml: caps.boot.driver: unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, ssd1306_i2c, st7789_spi, wifi_csi)",
+      "firmware/profiles/s3l-pad.profile.yaml: caps.boot.driver: unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, gc9a01_spi, hx711_gpio, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, ssd1306_i2c, st7789_spi, wifi_csi)",
     ]);
   });
 

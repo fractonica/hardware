@@ -124,12 +124,14 @@ target_compile_options(fr_fixture_sim PRIVATE ${FR_CXX_WARNINGS})
 # drivers put on the bus.
 set(FR_PANEL_INCLUDES
     ${REPO_DIR}/hardware/drivers/st7789_spi/include
+    ${REPO_DIR}/hardware/drivers/gc9a01_spi/include
     ${REPO_DIR}/hardware/drivers/ssd1306_i2c/include
     ${REPO_DIR}/hardware/drivers/cst816_i2c/include)
 add_library(fr_panel_sim STATIC
     ${HOST_DIR}/shim/panel_sim.cpp
     ${COMPONENTS_DIR}/fr_core/src/i2c_bus.cpp
     ${REPO_DIR}/hardware/drivers/st7789_spi/src/st7789_spi.cpp
+    ${REPO_DIR}/hardware/drivers/gc9a01_spi/src/gc9a01_spi.cpp
     ${REPO_DIR}/hardware/drivers/ssd1306_i2c/src/ssd1306_i2c.cpp
     ${REPO_DIR}/hardware/drivers/cst816_i2c/src/cst816_i2c.cpp)
 target_include_directories(fr_panel_sim PRIVATE ${HOST_DIR}/shim/idf PUBLIC ${HOST_DIR}/shim ${FR_PANEL_INCLUDES})
@@ -186,10 +188,12 @@ target_compile_options(fr_sim PRIVATE ${FR_CXX_WARNINGS})
 
 # sdmmc_card's layout header (design camera-c1 §10: the card's path math, IDF-free) for its host test.
 set(FR_CARD_INCLUDES ${REPO_DIR}/hardware/drivers/sdmmc_card/include)
+# hx711_gpio's protocol header (design scale-round-c1 D9: the bit assembly, IDF-free) for its host test.
+set(FR_SCALE_INCLUDES ${REPO_DIR}/hardware/drivers/hx711_gpio/include)
 
 add_executable(fr_host_tests ${FR_TEST_SRCS} ${FR_FUZZ_TARGET_SRCS})
 target_link_libraries(fr_host_tests PRIVATE fr_sim fr_audio_sim fr_radio_sim fr_panel_sim fr_fixture_sim fr_host_lib)
-target_include_directories(fr_host_tests PRIVATE ${FR_FIXTURE_INCLUDES} ${FR_CARD_INCLUDES})
+target_include_directories(fr_host_tests PRIVATE ${FR_FIXTURE_INCLUDES} ${FR_CARD_INCLUDES} ${FR_SCALE_INCLUDES})
 target_compile_options(fr_host_tests PRIVATE ${FR_CXX_WARNINGS})
 
 add_executable(fr_host_fuzz ${FR_FUZZ_SRCS})

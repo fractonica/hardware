@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scale</title>
+  </head>
+  <body data-connected="false" data-stable="unknown" data-round="off">
+    <header class="bar">
+      <h1>Scale <small>fr.scale, the weight live and on the round display</small></h1>
+      <div class="status">
+        <span id="conn" class="conn">connecting…</span>
+        <button id="theme" type="button" class="ghost" title="Theme: auto / light / dark">auto</button>
+      </div>
+    </header>
+    <p id="error" class="error" hidden></p>
+
+    <section class="controls" aria-label="Device">
+      <label class="field">
+        <span>Scale</span>
+        <select id="device"></select>
+      </label>
+      <label class="field inline check" title="Asks the board for every conversion (watch_start at 80 Hz, renewed while this is on); off: the board's own pace (10 Hz, changes of 100 mg or more)">
+        <input id="fast" type="checkbox" />
+        <span>live at 80 Hz</span>
+      </label>
+      <p id="hint" class="hint wide"></p>
+    </section>
+
+    <main>
+      <section class="card readout-card" aria-labelledby="readout-h">
+        <div class="card-head">
+          <h2 id="readout-h">Weight <small id="device-name">–</small></h2>
+          <span id="calibrated" class="pill" data-calibrated="unknown">calibration –</span>
+        </div>
+        <div class="readout">
+          <span id="dot" class="dot" title="stability"></span>
+          <output id="value" data-mg="">–</output>
+          <span id="unit" class="unit">g</span>
+        </div>
+        <p id="state" class="state">no reading yet</p>
+        <dl class="counters">
+          <div><dt>HX711 rate</dt><dd id="rate" data-hz="">–</dd></div>
+          <div><dt>reports</dt><dd id="arrivals" data-hz="">–</dd></div>
+          <div><dt>noise (sd, 30 s)</dt><dd id="noise" data-mg="">–</dd></div>
+          <div><dt>min … max</dt><dd id="minmax">–</dd></div>
+        </dl>
+        <div class="actions">
+          <button id="tare" type="button" class="primary" disabled title="scale_tare: the empty scale reads zero (kept across reboots)">Tare</button>
+          <label class="field narrow">
+            <span>Known mass (g)</span>
+            <input id="known" type="text" inputmode="decimal" placeholder="500" />
+          </label>
+          <button id="calibrate" type="button" disabled title="scale_calibrate: with the known mass on the tared scale">Calibrate</button>
+          <button id="reset" type="button" class="danger ghost" disabled title="scale_reset_calibration: forget the tare and the calibration">Reset calibration</button>
+        </div>
+        <p id="action-state" class="hint"></p>
+      </section>
+
+      <section class="card plot-card" aria-labelledby="plot-h">
+        <div class="card-head">
+          <h2 id="plot-h">Last 30 s</h2>
+          <span id="samples" class="pill" data-n="0">0 samples</span>
+        </div>
+        <canvas id="plot" width="640" height="220" aria-label="The weight over the last 30 seconds"></canvas>
+      </section>
+
+      <section class="card round-card" aria-labelledby="round-h">
+        <div class="card-head">
+          <h2 id="round-h">Round display</h2>
+          <span id="round-state" class="pill">off</span>
+        </div>
+        <div class="controls tight">
+          <label class="field inline check">
+            <input id="round-on" type="checkbox" />
+            <span>Show on the round display</span>
+          </label>
+          <label class="field">
+            <span>Display</span>
+            <select id="display"></select>
+          </label>
+          <label class="field narrow">
+            <span>Gauge full scale (g)</span>
+            <input id="capacity" type="number" min="1" step="100" value="5000" />
+          </label>
+        </div>
+        <p class="hint">Loads a layout centred in the circle (ui_load), then updates it with ui_set up to 5 times a second while this page is open.</p>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

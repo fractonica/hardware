@@ -267,7 +267,7 @@ async function snapshotLocked(
  * The renderer's PNG written again through png.ts (decoded, checked against the renderer's own size, format and
  * CRC, encoded): the bytes display_snapshot writes for the same framebuffer. INTERNAL when it does not decode or match.
  */
-function reencodeRender(file: string, r: { crc: number; width: number; height: number; format: DisplayFormat }): Buffer {
+function reencodeRender(file: string, r: { crc: number; width: number; height: number; format: DisplayFormat }, round = false): Buffer {
   let d;
   try {
     d = pngToFramebuffer(readFileSync(file));
@@ -275,7 +275,9 @@ function reencodeRender(file: string, r: { crc: number; width: number; height: n
     throw new FrError('INTERNAL', `the desktop renderer's PNG does not decode: ${(e as Error).message}`);
   }
   const crc = crc32(d.fb);
-  if (d.width !== r.width || d.height !== r.height || d.format !== r.format || crc !== r.crc) {
+  // A round panel's PNG greys the corners its glass does not show (design scale-round-c1 D5), so its pixels differ
+  // from the framebuffer by design: only the size and format are checked; r.crc stays the whole frame's, as a board's.
+  if (d.width !== r.width || d.height !== r.height || d.format !== r.format || (!round && crc !== r.crc)) {
     throw new FrError(
       'INTERNAL',
       `the desktop renderer's PNG (${d.width}x${d.height} ${d.format}, CRC-32 ${crc.toString(16)}) is not the framebuffer it reported (${r.width}x${r.height} ${r.format}, ${r.crc.toString(16)})`,
@@ -316,7 +318,7 @@ export const DISPLAY_HANDLERS: Record<DisplayOpName, Handler> = {
       writeFileSync(script, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
       const drawn = join(dir, 'render.png');
       const { png: _drawn, ...r } = await runRenderer(bin, panel, script, drawn, { cwd: hub.hubSourceDir, timeoutMs: Math.max(5000, deadline - performance.now()) });
-      const png = reencodeRender(drawn, r);
+      const png = reencodeRender(drawn, r, panel.round);
       writePng(out, png);
       return {
         ...r,
@@ -326,6 +328,7 @@ export const DISPLAY_HANDLERS: Record<DisplayOpName, Handler> = {
         rotation: panel.rotation,
         ui: panel.ui,
         touch: panel.touch,
+        round: panel.round,
         built,
         ms: Math.round(performance.now() - t0),
         ...(input.inline ? { png_base64: png.toString('base64') } : {}),

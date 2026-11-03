@@ -6,7 +6,9 @@
 # on the Mac). The audio services stream through fr_ota's src/http clients (HttpPost, HttpGet), hence fr_ota below.
 # src/stream (design csi-c1 D11) is what every stream shares (fr/stream/stream.hpp), fr.csi's CsiService one of them;
 # src/services/csi_record.cpp its ring and motion feature (fr/csi/csi.hpp). Both IDF-free. src/services/camera_service.cpp
-# (design camera-c1 D8) is fr.camera over hal::Camera and its optional hal::BlockStore store, IDF-free too.
+# (design camera-c1 D8) is fr.camera over hal::Camera and its optional hal::BlockStore store, IDF-free too;
+# src/services/scale_service.cpp (design scale-round-c1 D7) fr.scale over hal::LoadCell and hal::Settings, IDF-free;
+# src/nvs_settings.cpp is hal::Settings in NVS (fr/platform/nvs_settings.hpp), its writes on fr_worker.
 idf_component_register(SRCS "src/adc1.cpp"
                             "src/app_desc.cpp"
                             "src/audio/dsp.cpp"
@@ -22,6 +24,7 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/gpio_isr.cpp"
                             "src/i2c_bus.cpp"
                             "src/input_slot_isr.cpp"
+                            "src/nvs_settings.cpp"
                             "src/services/analog_in_service.cpp"
                             "src/services/audio_in_service.cpp"
                             "src/services/audio_out_service.cpp"
@@ -34,6 +37,7 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/services/fixture_service.cpp"
                             "src/services/led_service.cpp"
                             "src/services/radio_tx_service.cpp"
+                            "src/services/scale_service.cpp"
                             "src/services/touch_service.cpp"
                             "src/s2_hooks.cpp"
                             "src/stream/stream.cpp"

@@ -9,20 +9,21 @@ Contents:
 1. [First-time setup](#1-first-time-setup)
 2. [Everyday basics](#2-everyday-basics)
 3. [Camera (ESP32-CAM)](#3-camera-esp32-cam)
-4. [Audio: microphone and speaker](#4-audio-microphone-and-speaker)
-5. [Electrosmog listener](#5-electrosmog-listener)
-6. [Wi-Fi sensing (CSI) and its sound modes](#6-wi-fi-sensing-csi-and-its-sound-modes)
-7. [Buttons, LEDs, bindings and messages](#7-buttons-leds-bindings-and-messages)
-8. [Displays and touch](#8-displays-and-touch)
-9. [Analog input](#9-analog-input)
-10. [The gateway](#10-the-gateway)
-11. [Adding a new board](#11-adding-a-new-board)
-12. [Firmware updates](#12-firmware-updates)
-13. [Testing](#13-testing)
-14. [Apps and the SDK](#14-apps-and-the-sdk)
-15. [AI agents](#15-ai-agents)
-16. [Troubleshooting](#16-troubleshooting)
-17. [The bench](#17-the-bench)
+4. [Weighing scale and round display](#4-weighing-scale-and-round-display)
+5. [Audio: microphone and speaker](#5-audio-microphone-and-speaker)
+6. [Electrosmog listener](#6-electrosmog-listener)
+7. [Wi-Fi sensing (CSI) and its sound modes](#7-wi-fi-sensing-csi-and-its-sound-modes)
+8. [Buttons, LEDs, bindings and messages](#8-buttons-leds-bindings-and-messages)
+9. [Displays and touch](#9-displays-and-touch)
+10. [Analog input](#10-analog-input)
+11. [The gateway](#11-the-gateway)
+12. [Adding a new board](#12-adding-a-new-board)
+13. [Firmware updates](#13-firmware-updates)
+14. [Testing](#14-testing)
+15. [Apps and the SDK](#15-apps-and-the-sdk)
+16. [AI agents](#16-ai-agents)
+17. [Troubleshooting](#17-troubleshooting)
+18. [The bench](#18-the-bench)
 
 Every `fr` command below runs from the checkout (`~/projects/fractonica-hardware`). Add `--json` to any of them for machine-readable output, and `--help` to see all options.
 
@@ -232,7 +233,96 @@ Without `--via wifi` the hub picks the USB route for a board on a USB bridge, an
 
 ---
 
-## 4. Audio: microphone and speaker
+## 4. Weighing scale and round display
+
+**The board:** scale-c6, an ESP32-C6 board (an ESP32-C6-WROOM-1-N8 module, 8 MB flash, no PSRAM) with two parts wired to it: an **HX711** load-cell amplifier with its load cell (DT on GPIO18, SCK on GPIO23) and a **1.28" round GC9A01 display**, 240×240 (CS 10, DC 2, SDA 7, SCL 6; RST not wired). The scale is the `scale` instance (`fr.scale`), the display the `round` instance (`fr.display`).
+
+**On this bench the load cell is a tension sensor for sound, not a kitchen scale.** The board streams every change at 80 a second; read the values as relative force (raw counts scaled by a default factor). Calibrating in grams (step 4) is optional.
+
+**What it does:** weight (or force) live in the browser and on the round display, tare and calibration that survive a reboot, a "settled" event when something is put on or taken off, recordings of every reading at up to 80 a second, and drawing or LVGL layouts on the round display.
+
+### 4.1 Test the scale, step by step
+
+1. **Connect the board** to the Mac with USB. Within about 10 s it joins Wi-Fi.
+
+2. **Check the scale answers:**
+
+   ```bash
+   fr scale status scale-c6
+   ```
+
+   You should see something like `scale-c6 scale: 0.10 g, stable, calibrated, 95 Hz`. The rate is the HX711's own: about 80–100 when its RATE pin is set to "80 Hz", 10–12 when set to "10 Hz", **0 when the chip does not answer** (check its VCC, GND, DT and SCK wires).
+
+3. **Zero it** with nothing on the scale:
+
+   ```bash
+   fr scale tare scale-c6
+   ```
+
+   The reading goes to about 0 g. The zero is kept across reboots.
+
+4. **Calibrate it once (optional)** with something whose weight you know (at least 100 g; a sealed food package is good). Put it on, wait a second, then give its weight in grams:
+
+   ```bash
+   fr scale calibrate scale-c6 500
+   ```
+
+   The scale factor is kept across reboots. `fr scale reset scale-c6` forgets the zero and the calibration. "BUSY" means the reading was not stable yet: wait a moment and repeat.
+
+5. **Watch it in the browser:** open <http://127.0.0.1:7420/apps/scale/>. You see the weight in grams with a stability dot, a 30 s plot, the HX711's rate and noise, and the Tare and Calibrate buttons. **Live at 80 Hz** shows every reading.
+
+6. **Show the weight on the round display:** on the same page, tick **Show on the round display**. The display shows the weight as a large number with a gauge arc, updated up to 5 times a second while the page is open. **Gauge full scale** sets the weight at which the arc is full.
+
+7. **Record every reading** for 10 s at 80 a second to a CSV file (`t_ms,weight_mg,stable`):
+
+   ```bash
+   fr scale watch scale-c6 --seconds 10
+   ```
+
+   The result gives the number of samples, the rate, and the mean, standard deviation, minimum and maximum.
+
+8. **Run the automated test** (about 20 s, no person needed). It checks the rate, the noise on the empty scale, that a tare survives a reboot, and the round display's layout:
+
+   ```bash
+   fr test run t-scale --tier target --args=--device --args=scale-c6
+   ```
+
+   You should see `T-SCALE PASS`. With a known weight at hand, add `--args=--known-g --args=500` (you are asked to put it on and take it off).
+
+### 4.2 The round display
+
+Drawing works as on the other panels (section 9), with the instance `round`:
+
+```bash
+fr send scale-c6 round.clear
+fr send scale-c6 round.text '{"x":60,"y":105,"text":"hello","size":3}'
+```
+
+Keep content inside the circle: the corners of the 240×240 frame are not on the glass. The display reports the trait `round: true`, so apps and agents know. Preview it on the Mac, corners greyed: `fr display render c6w-scale --commands '[{"cmd":"text","args":{"x":60,"y":105,"text":"123.4 g","size":3}}]'`. This board has no PSRAM, so `fr display snapshot` (reading the screen back) is not available on it.
+
+### 4.3 What to expect
+
+| Measure | Typical on scale-c6 |
+|---|---|
+| HX711 conversions | 95–96 a second (its "80 Hz" setting runs fast) |
+| Readings delivered in a watch | about 79 a second |
+| Noise on the empty scale | about 140–180 mg standard deviation |
+| Reports | every change, 80 a second (this profile; the capability's default is 10 a second with a 100 mg deadband) |
+| Free memory with Wi-Fi up | about 60 KB |
+
+### 4.4 Scale troubleshooting
+
+| You see | Do this |
+|---|---|
+| Rate 0 Hz | The HX711 does not answer: check its VCC and GND first (a broken VCC wire was the cause on the bench), then DT and SCK. |
+| Rate about 10 Hz | The module's RATE pin is set to 10 Hz; for 80 Hz it must be tied to VCC (a solder change on most modules). |
+| The weight drifts slowly | Load cells creep a little after a change and with temperature: tare again before an exact weighing. |
+| Calibrate says nothing is on the scale | Put the known weight on first; after a wrong calibration, `fr scale reset scale-c6`, tare, and calibrate again. |
+| The round display shows `--` | The page lost the board for a moment; it reloads the layout by itself. |
+
+---
+
+## 5. Audio: microphone and speaker
 
 **The board:** mic-s3, an ESP32-S3 with an INMP441 microphone (`mic`) and a MAX98357A amplifier with a small speaker (`spk`).
 
@@ -279,7 +369,7 @@ Note: the INMP441 picks up the board's own Wi-Fi transmissions as soft thumps. K
 
 ---
 
-## 5. Electrosmog listener
+## 6. Electrosmog listener
 
 **The board:** mic-s3 again, with a radio detector on GPIO1 (`rf`: a diode, a capacitor, a resistor and a short wire antenna) read by the ADC as an audio source.
 
@@ -299,7 +389,7 @@ A floating input hears 50 Hz mains loudly; the germanium diode is weak at 2.4 GH
 
 ---
 
-## 6. Wi-Fi sensing (CSI) and its sound modes
+## 7. Wi-Fi sensing (CSI) and its sound modes
 
 **The board:** csi-c5, an ESP32-C5 dev board that reads the Wi-Fi channel state information (CSI) of the router's traffic on 5 GHz. Movement in the room changes the signal.
 
@@ -327,7 +417,7 @@ csi-c5 joins the hub's `5ghz` network. Its source can also be a second board tra
 
 ---
 
-## 7. Buttons, LEDs, bindings and messages
+## 8. Buttons, LEDs, bindings and messages
 
 **The boards:** the pads (pad-c3, pad-c3b, pad-c6, pad-s3, pad-s3t): each has a BOOT button (`boot`) and a status LED (`status`), most have a display.
 
@@ -380,9 +470,9 @@ csi-c5 joins the hub's `5ghz` network. Its source can also be a second board tra
 
 ---
 
-## 8. Displays and touch
+## 9. Displays and touch
 
-**The boards:** pad-c3 and pad-c3b (a 0.42" OLED, `oled`), pad-s3 (a 1.9" LCD, `lcd`), pad-s3t (a 2" touch LCD, `lcd` and `touch`).
+**The boards:** pad-c3 and pad-c3b (a 0.42" OLED, `oled`), pad-s3 (a 1.9" LCD, `lcd`), pad-s3t (a 2" touch LCD, `lcd` and `touch`), scale-c6 (a 1.28" round LCD, `round`: see [4.2](#42-the-round-display)).
 
 1. **Write on a display:**
 
@@ -411,24 +501,24 @@ csi-c5 joins the hub's `5ghz` network. Its source can also be a second board tra
 
 ---
 
-## 9. Analog input
+## 10. Analog input
 
 **The profile:** c3o-analog (a pad-c3 board with `analog` on an ADC pin). It streams the value at 20 Hz by default.
 
-1. Put the profile on a C3 pad over USB: `fr build --profile c3o-analog`, then `fr flash pad-c3b --profile c3o-analog --plan full` (see [12](#12-firmware-updates)).
+1. Put the profile on a C3 pad over USB: `fr build --profile c3o-analog`, then `fr flash pad-c3b --profile c3o-analog --plan full` (see [13](#13-firmware-updates)).
 2. Read it: `fr send pad-c3b analog.read`.
 3. Watch it stream: `fr events pad-c3b --types 'analog.*'`.
 4. On a debug build, fake a value: `fr input pad-c3b analog --mv 1650`.
 
 ---
 
-## 10. The gateway
+## 11. The gateway
 
 **The board:** gw-c6, a nanoESP32-C6 on the Mac's USB. It bridges ESP-NOW nodes that have no Wi-Fi link to the hub over USB. It needs no setup: plug it in and the hub uses it for nodes it cannot reach over Wi-Fi. `fr devices get <node>` shows `gw` among its links when traffic goes through it.
 
 ---
 
-## 11. Adding a new board
+## 12. Adding a new board
 
 1. **Plug it in** and find its port:
 
@@ -456,7 +546,7 @@ For an ESP32-CAM, take the SD card out before provisioning (see 3.4).
 
 ---
 
-## 12. Firmware updates
+## 13. Firmware updates
 
 | What | Command |
 |---|---|
@@ -472,7 +562,7 @@ An update that fails its health check after reboot rolls back to the previous fi
 
 ---
 
-## 13. Testing
+## 14. Testing
 
 | Tier | What it covers | Command |
 |---|---|---|
@@ -486,6 +576,7 @@ The target gates, with whether they need a person or USB:
 | Gate | Checks | Needs |
 |---|---|---|
 | t-camera | Photos, live stream, card, settings, USB bridge | nothing |
+| t-scale | Scale rate, noise, tare across a reboot, the round display's layout | nothing (a person with `--known-g`) |
 | t-audio | Speaker-to-microphone loopback, quiet, level | nothing (a person with `--voice`) |
 | t-led | LED commands | nothing |
 | t-codec | The wire codec against golden vectors | nothing |
@@ -500,7 +591,7 @@ Pass extra flags to a gate with `--args=<flag>` once per word; add `--allow-huma
 
 ---
 
-## 14. Apps and the SDK
+## 15. Apps and the SDK
 
 Web apps live in `web/<name>/` and the hub serves each at `http://127.0.0.1:7420/apps/<name>/`, with an access token injected:
 
@@ -508,6 +599,7 @@ Web apps live in `web/<name>/` and the hub serves each at `http://127.0.0.1:7420
 |---|---|
 | [/apps/cam/](http://127.0.0.1:7420/apps/cam/) | The camera: live view, snapshots, flash, settings, card recordings |
 | [/apps/csi/](http://127.0.0.1:7420/apps/csi/) | Wi-Fi sensing: subcarriers, motion, the four sound modes |
+| [/apps/scale/](http://127.0.0.1:7420/apps/scale/) | The scale: live weight, plot, tare, calibration, the weight on the round display |
 | [/apps/demo/](http://127.0.0.1:7420/apps/demo/) | The M1 demo: two pads' button events, an app-level relay with its latency, a broadcast ping |
 
 To write your own, generate a typed device registry for `@fractonica/sdk` into your app:
@@ -520,17 +612,17 @@ The SDK gives you the devices by alias, their commands and events, and live stre
 
 ---
 
-## 15. AI agents
+## 16. AI agents
 
 Every `fr` command is also an MCP tool, served by `fr mcp`.
 
-- **Claude Code:** run `claude --plugin-dir ~/projects/fractonica-hardware/plugin`, or install it once with `/plugin marketplace add ~/projects/fractonica-hardware` then `/plugin install fractonica@fractonica`. Its skills teach the agent each area: fleet-ops, build-deploy, e2e-verify, hil-rig, audio and camera.
+- **Claude Code:** run `claude --plugin-dir ~/projects/fractonica-hardware/plugin`, or install it once with `/plugin marketplace add ~/projects/fractonica-hardware` then `/plugin install fractonica@fractonica`. Its skills teach the agent each area: fleet-ops, build-deploy, e2e-verify, hil-rig, audio, camera and scale.
 - **Other agents:** [`plugin/AGENTS.md`](../plugin/AGENTS.md) has the same guidance with CLI equivalents.
 - Ask in plain words, for example "take a photo with cam-esp32 and show it to me" or "record ten seconds from mic-s3".
 
 ---
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 | You see | Do this |
 |---|---|
@@ -544,11 +636,12 @@ Every `fr` command is also an MCP tool, served by `fr mcp`.
 
 ---
 
-## 17. The bench
+## 18. The bench
 
 | Alias | Board | Profile | What it is for |
 |---|---|---|---|
 | cam-esp32 | AI-Thinker ESP32-CAM (ESP32, OV2640, micro-SD) | e32a-cam | Camera |
+| scale-c6 | ESP32-C6-WROOM-1-N8 board with an HX711 and a round GC9A01 | c6w-scale | Weighing scale, round display |
 | mic-s3 | ESP32-S3 WROOM-1 N16R8 | s3a-audio | Microphone, speaker, electrosmog detector |
 | csi-c5 | DOIT ESPC5-32 (ESP32-C5) | c5d-csi | Wi-Fi sensing on 5 GHz |
 | pad-c3, pad-c3b | ESP32-C3 with a 0.42" OLED | c3o-pad | Button, LED, display |

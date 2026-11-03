@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.scale.reset_calibration.args",
+  "title": "fr.scale.reset_calibration arguments",
+  "description": "Offset 0 and config counts_per_kg again; the kept calibration is erased.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

@@ -109,6 +109,8 @@ expected to differ and are skipped. Run it after an LVGL upgrade or a change to 
 layer, the default theme pinned (light, blue/red, no transitions, no grow-on-press), no animations or scrolling on
 any object. The board renders in partial bands of 1/10 screen and so does the Mac, with the same buffers. What still
 differs: the board renders as commands arrive and the Mac renders at the snapshot (the final frame is the same:
-every invalidated area is redrawn from the final object tree); LVGL's pool is 64 KB in PSRAM on the board and
-128 KB static on the Mac (where it lives changes no pixel unless it runs out); compiled by GCC for Xtensa vs clang
-for arm64. T-DISPLAY 2 is where the parity is proven on the boards.
+every invalidated area is redrawn from the final object tree); LVGL's pool is 64 KB in PSRAM on the board (48 KB
+of internal RAM on a board without PSRAM) and 128 KB static on the Mac (where it lives changes no pixel; a full pool
+makes fr_ui refuse or skip commands, never draw differently); compiled by GCC for Xtensa vs clang for arm64.
+`FR_DISPLAY_LV_MEM_SIZE=<bytes>` with its own `FR_DISPLAY_BUILD_DIR` builds the renderer and its tests with a board's
+pool (`display_lvgl_heap_worst_case` prints how much of D2's worst case fit; 64-bit pointers make that conservative). T-DISPLAY 2 is where the parity is proven on the boards.

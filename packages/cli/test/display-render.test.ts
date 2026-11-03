@@ -78,6 +78,7 @@ describe('the desktop renderer from the CLI', () => {
       rotation: 0,
       ui: true,
       touch: true,
+      round: false,
     });
     expect(await resolveRenderPanel(REPO, 's3l-pad')).toMatchObject({ width: 170, height: 320, format: 'rgb565', ui: true, touch: false });
     expect(await resolveRenderPanel(REPO, 'c3o-pad')).toMatchObject({ instance: 'oled', width: 72, height: 40, format: 'mono1', ui: false });

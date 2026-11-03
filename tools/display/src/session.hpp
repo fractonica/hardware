@@ -34,6 +34,9 @@ struct Geometry {
     fr::hal::PixelFormat format = fr::hal::PixelFormat::rgb565;
     fr::hal::Rotation rotation = fr::hal::Rotation::r0;
     bool ui = false;  // LVGL (fr_ui); false: MonoBackend
+    // Trait round (design scale-round-c1 D5): the glass shows only the inscribed circle. The framebuffer and its CRC
+    // are the whole rectangle, as on the board; only the PNG and the window grey the corners.
+    bool round = false;
 };
 
 /** A hal::Display that keeps what it is sent: the glass, in the snapshot layout of fr/display/backend.hpp. */

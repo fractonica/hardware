@@ -45,7 +45,8 @@ cap::DisplayTraits DisplayService::traits() const
             .color = panel_.format() == hal::PixelFormat::rgb565 ? cap::DisplayColorFormat::rgb565
                                                                  : cap::DisplayColorFormat::mono1,
             .ui = backend_.ui(),
-            .touch = touch_};
+            .touch = touch_,
+            .round = panel_.round()};
 }
 
 Status DisplayService::clear(const cap::DisplayClearArgs &args)

@@ -104,6 +104,15 @@ std::string show_box(const Box &b)
     return buf;
 }
 
+/**
+ * Whether the session runs with the Mac's 128 KB pool. A build with a board's (FR_DISPLAY_LV_MEM_SIZE) refuses
+ * primitives once the pool is full (lvgl_pool_test.cpp), which the tests that count queue slots or primitives skip.
+ */
+bool mac_pool(Session &s)
+{
+    return s.lvgl()->heap().total >= 96 * 1024;
+}
+
 size_t count(const Session &s, const char *id, fr::cap::DisplayUiEventKind kind)
 {
     return static_cast<size_t>(std::count_if(s.events().begin(), s.events().end(),
@@ -273,6 +282,9 @@ TEST(display_lvgl_touch_survives_a_full_queue)
     // The board's renderer busy (host_hold): fr.display commands fill its 16-deep queue; touches must not be lost.
     Session s(kS3l);
     REQUIRE(load_all(s));
+    if (!mac_pool(s)) {
+        return;  // the pool, not the queue, would refuse the fill_rects
+    }
     fr::ui::LvglBackend &b = *s.lvgl();
     const fr::cap::DisplayFillRectArgs dot{.x = 0, .y = 0, .w = 1, .h = 1, .color = 0};
     const auto fill_queue = [&] {
@@ -352,6 +364,9 @@ TEST(display_lvgl_primitives_bounded_at_64)
 {
     Session s(kS3t);
     REQUIRE(s.start().has_value());
+    if (!mac_pool(s)) {
+        return;  // 64 primitives need more than a board's pool on 64-bit pointers
+    }
     for (size_t i = 0; i < fr::ui::LvglBackend::kMaxPrimitives; ++i) {
         const std::string line = i % 2 ? R"({"cmd":"text","args":{"x":)" + std::to_string(i) + R"(,"y":10,"text":"x"}})"
                                        : R"({"cmd":"fill_rect","args":{"x":)" + std::to_string(i) +
@@ -374,8 +389,12 @@ TEST(display_lvgl_primitives_bounded_at_64)
 
 TEST(display_lvgl_heap_worst_case)
 {
-    // D2's worst case: 24 widgets (the kinds in turn) plus 64 primitives on top; LV_MEM_SIZE must hold it.
-    for (const Geometry &g : {kS3l, kS3t}) {
+    // D2's worst case: 24 widgets (the kinds in turn) plus 64 primitives on top; LV_MEM_SIZE must hold it. A build
+    // with a board's pool (FR_DISPLAY_LV_MEM_SIZE, scale-round-c1 D4) prints how much of it fit: refused or abandoned
+    // parts are allowed there, a crash never. Pointers are 64-bit here: the board's 32-bit objects take about 0.72 of
+    // this (sizeof lv_obj_t 56 vs 80, lv_label_t 112 vs 144), so a pass on the Mac at N KB is one on the board.
+    const Geometry round{240, 240, PixelFormat::rgb565, Rotation::r0, true, true};
+    for (const Geometry &g : {kS3l, kS3t, round}) {
         Session s(g);
         REQUIRE(s.start().has_value());
         static const char *kinds[] = {"label", "button", "bar", "slider", "arc", "switch", "rect"};
@@ -393,12 +412,19 @@ TEST(display_lvgl_heap_worst_case)
                                      R"( of 64","size":)" + std::to_string(1 + i % 4) + "}}";
             REQUIRE(run(s, line.c_str()));
         }
+        // A second ui_load of the same layout: the old screen goes before the new one is built.
+        REQUIRE(run(s, layout.c_str()));
         REQUIRE(s.snapshot().has_value());
-        CHECK(s.errors().empty());
         const fr::ui::HeapStats h = s.lvgl()->heap();
-        std::printf("    lvgl heap %ux%u (64-bit): max_used %u B of %u B\n", g.width, g.height, h.max_used, h.total);
+        std::printf("    lvgl heap %ux%u (64-bit), pool %u B: max_used %u B, %zu refused, %u abandoned\n", g.width,
+                    g.height, h.total, h.max_used, s.errors().size(), h.abandoned);
         CHECK(h.max_used > 0);
-        CHECK(h.max_used < h.total * 3 / 4);
+        CHECK(h.max_used <= h.total);
+        if (h.total >= 96 * 1024) {  // the Mac's own pool holds all of it, with room to spare
+            CHECK(s.errors().empty());
+            CHECK_EQ(h.abandoned, 0u);
+            CHECK(h.max_used < h.total * 3 / 4);
+        }
     }
 }
 

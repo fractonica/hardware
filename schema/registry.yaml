@@ -11,6 +11,7 @@ standard:
   0x0009: fr.csi           # design csi-c1 D7
   0x000A: fr.radio_tx      # design csi-c1 D9
   0x000B: fr.camera        # design camera-c1 D7
+  0x000C: fr.scale         # design scale-round-c1 D6
 system:
   0x00F0: fr.node
   0x00F1: fr.ota

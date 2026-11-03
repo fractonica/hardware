@@ -355,7 +355,7 @@
     {
       "id": 3,
       "name": "fr.display",
-      "version": "1.0",
+      "version": "1.1",
       "section": "standard",
       "summary": "A pixel panel with drawing primitives everywhere and LVGL layouts where the panel's driver says so (trait ui).",
       "doc": "Colours are 0xRRGGBB on the wire; a mono panel (color mono1) lights a pixel whose colour is at least 50 % luminance.\nCommands are queued to the renderer and never draw inside dispatch; the panel is flushed at most every flush_ms.\nPrimitives (clear, text, fill_rect) work on every panel. ui_load and ui_set answer UNSUPPORTED where `ui` is false\n(the C3 OLED's built-in 1-bit renderer); on LVGL panels a layout replaces the screen and primitives sent after it\ndraw on top. snapshot and snapshot_read read back the framebuffer as drawn (test builds), so an agent sees the real\nscreen and compares it with the desktop render of the same commands (T-DISPLAY).\n",
@@ -531,6 +531,11 @@
         {
           "name": "touch",
           "id": 5,
+          "type": "bool"
+        },
+        {
+          "name": "round",
+          "id": 6,
           "type": "bool"
         }
       ],
@@ -2588,6 +2593,366 @@
               "id": 5,
               "type": "u32",
               "doc": "JPEG bytes sent and/or written"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "name": "fr.scale",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "A weighing scale - a load cell through a 24-bit bridge ADC (HX711), tared and calibrated on the node, reported in milligrams.",
+      "doc": "`weight_mg` is a LATEST property (latest wins, never retried) reported at most `report_hz` times a second when it\nmoved at least `deadband_mg`, so a fast stream never queues behind itself. `settled` is the reliable signal that\nsomething was put on or taken off. The part converts at its own rate (the HX711's RATE pin: 10 or 80 per second);\n`rate_hz` says what it does. `tare` and `calibrate` average the last `samples` conversions the node already holds,\nso they answer at once; they answer BUSY while the reading is not stable. The offset and the scale factor they set\nare kept across reboots (NVS) until `reset_calibration`. `watch_start` raises the report rate for a bounded time\n(a recording of every conversion) and falls back by itself.\n",
+      "types": {
+        "Filter": {
+          "none": 0,
+          "ema": 1,
+          "median5": 2
+        },
+        "Gain": {
+          "a128": 0,
+          "a64": 1,
+          "b32": 2
+        }
+      },
+      "traits": [
+        {
+          "name": "resolution_bits",
+          "id": 1,
+          "type": "u8"
+        },
+        {
+          "name": "max_rate_hz",
+          "id": 2,
+          "type": "u8"
+        }
+      ],
+      "config": [
+        {
+          "name": "report_hz",
+          "type": "u16",
+          "default": 10,
+          "range": [
+            1,
+            80
+          ],
+          "unit": "Hz",
+          "doc": "max STATE rate outside a watch"
+        },
+        {
+          "name": "deadband_mg",
+          "type": "u32",
+          "default": 100,
+          "unit": "mg",
+          "doc": "a change smaller than this since the last report is not reported (outside a watch)"
+        },
+        {
+          "name": "filter",
+          "type": "Filter",
+          "default": "ema",
+          "doc": "ema: alpha 1/4; median5: the median of the last 5 conversions"
+        },
+        {
+          "name": "gain",
+          "type": "Gain",
+          "default": "a128",
+          "doc": "the channel and gain the clock train selects: a128 (channel A, 128), a64, b32 (channel B, 32)"
+        },
+        {
+          "name": "counts_per_kg",
+          "type": "i32",
+          "default": 420000,
+          "doc": "the scale factor until a calibration is made: raw counts per kilogram (a typical 1-5 kg bar cell at gain 128, inferred)"
+        },
+        {
+          "name": "stable_mg",
+          "type": "u32",
+          "default": 500,
+          "unit": "mg",
+          "doc": "stable: the filtered weight stayed within this of its mean for stable_ms"
+        },
+        {
+          "name": "stable_ms",
+          "type": "u16",
+          "default": 500,
+          "unit": "ms"
+        },
+        {
+          "name": "settle_min_mg",
+          "type": "u32",
+          "default": 2000,
+          "unit": "mg",
+          "doc": "`settled` fires only for a stable weight at least this far from the last settled one"
+        }
+      ],
+      "properties": [
+        {
+          "name": "weight_mg",
+          "id": 1,
+          "type": "i32",
+          "unit": "mg",
+          "doc": "tared, calibrated and filtered"
+        },
+        {
+          "name": "stable",
+          "id": 2,
+          "type": "bool"
+        },
+        {
+          "name": "calibrated",
+          "id": 3,
+          "type": "bool",
+          "doc": "a calibration was made and is kept (else config counts_per_kg)"
+        },
+        {
+          "name": "rate_hz",
+          "id": 4,
+          "type": "u8",
+          "unit": "Hz",
+          "doc": "conversions over the last second: 80 or 10 by the part's RATE pin, 0 when the part does not answer"
+        }
+      ],
+      "commands": [
+        {
+          "name": "tare",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The mean raw reading of the last `samples` conversions becomes zero, and is kept across reboots. BUSY while the reading is not stable or fewer conversions are held; FAILED when the part does not answer.",
+          "fields": [
+            {
+              "name": "samples",
+              "id": 1,
+              "type": "u8",
+              "default": 16,
+              "range": [
+                1,
+                64
+              ]
+            }
+          ],
+          "result": [
+            {
+              "name": "offset",
+              "id": 1,
+              "type": "i32"
+            },
+            {
+              "name": "raw",
+              "id": 2,
+              "type": "i32"
+            }
+          ],
+          "examples": [
+            {},
+            {
+              "samples": 32
+            }
+          ]
+        },
+        {
+          "name": "calibrate",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "With a known mass on the tared scale: the scale factor from the mean of the last `samples` conversions, kept across reboots. BUSY while not stable; INVALID_ARGS for known_mg 0 or a reading at the offset (nothing on the scale).",
+          "fields": [
+            {
+              "name": "known_mg",
+              "id": 1,
+              "type": "u32",
+              "unit": "mg"
+            },
+            {
+              "name": "samples",
+              "id": 2,
+              "type": "u8",
+              "default": 16,
+              "range": [
+                1,
+                64
+              ]
+            }
+          ],
+          "result": [
+            {
+              "name": "counts_per_kg",
+              "id": 1,
+              "type": "i32"
+            },
+            {
+              "name": "raw",
+              "id": 2,
+              "type": "i32"
+            }
+          ],
+          "examples": [
+            {
+              "known_mg": 500000
+            }
+          ]
+        },
+        {
+          "name": "read",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The last conversion and the calibration in use. Answered from what the node holds; never touches the part.",
+          "fields": [],
+          "result": [
+            {
+              "name": "raw",
+              "id": 1,
+              "type": "i32",
+              "doc": "the last conversion, sign-extended from 24 bits"
+            },
+            {
+              "name": "weight_mg",
+              "id": 2,
+              "type": "i32",
+              "unit": "mg"
+            },
+            {
+              "name": "offset",
+              "id": 3,
+              "type": "i32"
+            },
+            {
+              "name": "counts_per_kg",
+              "id": 4,
+              "type": "i32"
+            },
+            {
+              "name": "rate_hz",
+              "id": 5,
+              "type": "u8",
+              "unit": "Hz"
+            },
+            {
+              "name": "calibrated",
+              "id": 6,
+              "type": "bool"
+            },
+            {
+              "name": "injected",
+              "id": 7,
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "name": "reset_calibration",
+          "id": 4,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Offset 0 and config counts_per_kg again; the kept calibration is erased.",
+          "fields": []
+        },
+        {
+          "name": "watch_start",
+          "id": 5,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Reports every change up to report_hz (no deadband) for `seconds`, then falls back to config by itself. A newer watch_start replaces the running one.",
+          "fields": [
+            {
+              "name": "report_hz",
+              "id": 1,
+              "type": "u8",
+              "default": 80,
+              "range": [
+                1,
+                80
+              ],
+              "unit": "Hz"
+            },
+            {
+              "name": "seconds",
+              "id": 2,
+              "type": "u16",
+              "range": [
+                1,
+                3600
+              ],
+              "unit": "s"
+            }
+          ],
+          "examples": [
+            {
+              "seconds": 10
+            },
+            {
+              "report_hz": 20,
+              "seconds": 60
+            }
+          ]
+        },
+        {
+          "name": "watch_stop",
+          "id": 6,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Ends a watch now; OK when none runs.",
+          "fields": []
+        },
+        {
+          "name": "inject",
+          "id": 7,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "test",
+          "doc": "Holds `weight_mg` in place of the part for hold_ms (0 means 1,000 ms; at most 60,000). A newer inject replaces it.",
+          "fields": [
+            {
+              "name": "weight_mg",
+              "id": 1,
+              "type": "i32",
+              "unit": "mg"
+            },
+            {
+              "name": "hold_ms",
+              "id": 2,
+              "type": "u16"
+            }
+          ],
+          "examples": [
+            {
+              "weight_mg": 250000
+            },
+            {
+              "weight_mg": 0,
+              "hold_ms": 5000
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "name": "settled",
+          "id": 1,
+          "priority": "normal",
+          "doc": "The weight became stable at least settle_min_mg away from the last settled weight: something was put on or taken off.",
+          "fields": [
+            {
+              "name": "weight_mg",
+              "id": 1,
+              "type": "i32",
+              "unit": "mg"
+            },
+            {
+              "name": "delta_mg",
+              "id": 2,
+              "type": "i32",
+              "unit": "mg",
+              "doc": "from the last settled weight (the first after boot: from 0)"
             }
           ]
         }

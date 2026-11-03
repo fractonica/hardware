@@ -37,6 +37,10 @@ struct Runtime {
     static void advance(LvglBackend &b, uint32_t ms);
     /** Mac: holds the renderer (commands queue, kQueueDepth at most) or lets it apply them. Board: nothing. */
     static void hold(LvglBackend &b, bool hold);
+    /** Mac: whether alloc_frame finds room (false: a board without PSRAM). Board: nothing (CONFIG_SPIRAM decides). */
+    static void frames(bool available);
+    /** The renderer skipped `what` for lack of LVGL pool (board: a warning in the log; Mac: nothing). */
+    static void note_abandoned(const char *what);
     /** The platform's handles kept in the backend (board: queue, task, semaphore). */
     static void *&slot(LvglBackend &b, size_t i) { return b.rt_[i]; }
 };

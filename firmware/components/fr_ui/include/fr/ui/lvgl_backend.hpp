@@ -27,8 +27,9 @@
 // flush is synchronous, so the second only lets LVGL start the next band), a shadow framebuffer that every flush also
 // writes and the frozen copy snapshot() takes, both in PSRAM (heap_caps MALLOC_CAP_SPIRAM; profiles with a ui panel have psram:
 // on), LVGL's own pool (LV_MEM_SIZE, allocated in PSRAM at start: config/fr_ui_pool.h; a static pool on the Mac)
-// and the renderer task's stack. Without PSRAM snapshot answers
-// Err::unsupported and drawing still works.
+// and the renderer task's stack. Without PSRAM (design scale-round-c1 D4: the C6's round panel) the pool is 48 KB of
+// internal RAM, the draw buffers stay 2 x 1/10 screen, there is no shadow framebuffer, snapshot and snapshot_read
+// answer Err::unsupported and drawing still works.
 //
 // Primitives are LVGL objects on the active screen: text is a label (Montserrat 14/20/28 for size 1/2/3, 28 for 4;
 // its box filled with bg, as MonoBackend fills its character cells), fill_rect a plain object (no border, no radius);
@@ -39,6 +40,16 @@
 // indicator); `bg` is the label's box (0: transparent), the button's face and the track of bar, slider, arc and
 // switch (0, the default, keeps the theme's). button, slider and switch emit pressed, released and clicked, slider
 // and switch also value_changed (value: the slider's value, the switch's 0/1; 0 for a button).
+//
+// The pool never runs out (an LVGL allocation that fails while drawing dereferences NULL; LV_USE_ASSERT_MALLOC is
+// off). The renderer keeps kRenderReserve of the pool free for drawing (draw tasks, masks, shadows: under 1 KB on the
+// Mac for D2's worst case): it builds an object only while lv_mem_monitor shows kObjectBytes more than that free, and
+// checks every lv_*_create. A primitive without room is skipped; a layout without room is abandoned whole (its widgets
+// deleted, the screen left in its bg colour) and the ui_sets that follow answer FAILED until the next ui_load or
+// clear; HeapStats::abandoned counts both, and the board logs them. Up front, on the core task: ui_load answers FAILED
+// when its widgets (kWidgetBytes each) do not fit the pool as an empty screen leaves it, less the reserve (ui_load
+// deletes the old screen before it builds, so only one layout is ever in the pool), and text and fill_rect answer
+// BUSY when the last measurement, less the primitives still queued, leaves no room for one more.
 #pragma once
 
 #include <atomic>
@@ -66,6 +77,8 @@ struct HeapStats {
     uint32_t total = 0;
     uint32_t used = 0;
     uint32_t max_used = 0;
+    /** Layouts abandoned and primitives or ui_set texts skipped by the renderer for lack of pool, since init. */
+    uint32_t abandoned = 0;
 };
 
 class LvglBackend final : public display::Backend
@@ -84,6 +97,14 @@ public:
     static constexpr uint32_t kStackBytes = 8 * 1024;
     /** How long snapshot() waits for the renderer before Err::busy. */
     static constexpr uint32_t kSyncTimeoutMs = 2000;
+    /** Pool bytes the renderer keeps free for drawing (D2's worst case drew with under 1 KB on the Mac). */
+    static constexpr uint32_t kRenderReserve = 4 * 1024;
+    /** Free pool (beyond the reserve) the renderer wants before it creates one object: the largest with its styles. */
+    static constexpr uint32_t kObjectBytes = 1024;
+    /** ui_load's up-front estimate per widget (the Mac's 64-bit average was about 510 B; the board's is less). */
+    static constexpr uint32_t kWidgetBytes = 512;
+    /** text/fill_rect's up-front estimate (about 430 B on the Mac for a label primitive). */
+    static constexpr uint32_t kPrimitiveBytes = 512;
 
     LvglBackend();
     ~LvglBackend() override;
@@ -112,6 +133,12 @@ public:
      * host_hold(false) applies them and the pending touch. For the tests of a busy renderer. No-op on the board.
      */
     void host_hold(bool hold);
+    /**
+     * Whether the next init() finds room for the shadow and frozen frames (default true). false: a board without
+     * PSRAM (design scale-round-c1 D4), whose snapshot and snapshot_read answer Err::unsupported. No-op on the board,
+     * where CONFIG_SPIRAM decides.
+     */
+    static void host_frames(bool available);
 
     // ---- The renderer's side (src/engine.cpp), public for the platform layer only. ----
     struct Command;
@@ -150,19 +177,28 @@ private:
     };
 
     bool submit(const Command &c);
+    /** Whether one more primitive fits the pool as last measured, the queued ones counted. Core task. */
+    bool primitive_room() const;
     std::expected<display::Snapshot, Err> sync();
 
     // Renderer side (src/engine.cpp).
     void apply_clear(uint32_t rgb);
     void apply_text(const Command &c);
     void apply_fill_rect(const Command &c);
-    void apply_ui_load(OwnedLayout &l);
+    void apply_ui_load(OwnedLayout &l, uint32_t gen);
+    /** Whether the pool has `bytes` free beyond kRenderReserve, in one block. Renderer only. */
+    bool room(uint32_t bytes) const;
+    /** Records a layout, primitive or text the renderer could not build (HeapStats::abandoned, the board's log). */
+    void abandon(const char *what);
     void apply_ui_set(const Command &c);
     /** One LVGL pointer read of (x, y, pressed). */
     void feed_touch(int16_t x, int16_t y, bool pressed);
     void apply_sync(uint32_t seq);
-    void build_widget(_lv_obj_t *scr, const OwnedWidget &w, Widget &out);
+    /** false: an LVGL object could not be created (what was made of this widget is deleted). */
+    bool build_widget(_lv_obj_t *scr, const OwnedWidget &w, Widget &out);
     void measure_heap();
+    /** Stores the pool free with the screen just emptied (ui_load's up-front check). Renderer only. */
+    void measure_empty();
     void on_flush(int32_t x1, int32_t y1, int32_t x2, int32_t y2, const uint8_t *px);
     void on_event(const Widget &w, uint32_t code);
 
@@ -186,6 +222,8 @@ private:
     OwnedLayout layouts_[kLayoutSlots] = {};
     std::atomic<bool> slot_busy_[kLayoutSlots] = {};
     uint32_t sync_seq_ = 0;
+    uint32_t load_gen_ = 0;          // ui_loads and clears accepted; the renderer's abandoned_gen_ names one
+    uint32_t prims_submitted_ = 0;   // primitives handed to the renderer (prims_applied_ counts those it took)
     bool frozen_valid_ = false;
     display::Snapshot frozen_info_{};
 
@@ -209,6 +247,10 @@ private:
     std::atomic<uint32_t> heap_total_{0};
     std::atomic<uint32_t> heap_used_{0};
     std::atomic<uint32_t> heap_max_{0};
+    std::atomic<uint32_t> empty_free_{0};     // pool free with an empty screen (0: not measured yet)
+    std::atomic<uint32_t> abandoned_gen_{0};  // the load_gen_ of the last layout abandoned
+    std::atomic<uint32_t> abandoned_{0};
+    std::atomic<uint32_t> prims_applied_{0};
 
     // Platform layer state (src/esp/runtime.cpp: queue, task, semaphore; src/host: unused).
     void *rt_[3] = {nullptr, nullptr, nullptr};
@@ -226,7 +268,7 @@ struct LvglBackend::Command {
     int16_t x = 0, y = 0;
     uint16_t w = 0, h = 0;
     uint32_t color = 0, bg = 0;
-    int32_t value = 0;  // ui_set: value; sync: sequence number
+    int32_t value = 0;  // ui_set: value; sync: sequence number; ui_load: its generation
     char id[17] = {};
     char text[65] = {};
 };

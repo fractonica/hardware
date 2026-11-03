@@ -53,6 +53,12 @@ target_include_directories(fr_lvgl PUBLIC ${lvgl_SOURCE_DIR})
 target_compile_definitions(fr_lvgl PUBLIC "LV_CONF_PATH=\"${FR_UI_DIR}/config/lv_conf.h\"" LV_KCONFIG_IGNORE)
 # Third-party C, optimised (the renderer's pixels do not depend on it: integer code only, D5).
 target_compile_options(fr_lvgl PRIVATE -w -O2)
+# FR_LV_MEM_SIZE (bytes): a pool of a board's size instead of the Mac's 128 KB, for the heap tests (scale-round-c1 D4:
+# 32768, the boards without PSRAM). Empty: the Mac's pool.
+set(FR_LV_MEM_SIZE "" CACHE STRING "LVGL pool size in bytes (empty: lv_conf.h's)")
+if(FR_LV_MEM_SIZE)
+    target_compile_definitions(fr_lvgl PUBLIC FR_LV_MEM_SIZE=${FR_LV_MEM_SIZE})
+endif()
 
 # ---- Our code: ASan + UBSan (the host suite's flags), not on LVGL. ----
 set(FR_SANITIZE -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)

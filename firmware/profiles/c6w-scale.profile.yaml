@@ -1,0 +1,17 @@
+profile: c6w-scale
+board: esp32c6-wroom1-n8
+app: node
+net: { link_profile: default }
+# Design scale-round-c1 D2. No PSRAM: LVGL's pool (32 KB) and draw buffers come from internal RAM, and the round panel
+# has no snapshot (D4). memory: default until the bench reads the heap with Wi-Fi, LVGL and the scale up; small is
+# acceptable here (nothing streams at Wi-Fi speed), unlike on the ESP32-CAM.
+memory: default
+# round: the 1.28" GC9A01 module (240x240, RGB565, no backlight pin, RST not wired) on the C6's SPI2 by bare pins.
+# scale: an HX711 on a load cell; its RATE strap sets 10 or 80 conversions a second (the firmware reports which).
+# Used as a tension/force sensor for sound (the user, 2026-11-03), not as a kitchen scale: every change is reported at
+# 80 Hz with no deadband, so an app gets a continuous control stream without a watch; calibration in grams is optional.
+caps:
+  boot:   { cap: fr.button,  driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,     driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 32 } }
+  round:  { cap: fr.display, driver: gc9a01_spi,  bind: { sclk: gpio.6, mosi: gpio.7, cs: gpio.10, dc: gpio.2 } }
+  scale:  { cap: fr.scale,   driver: hx711_gpio,  bind: { dout: gpio.18, sck: gpio.23 }, config: { report_hz: 80, deadband_mg: 0 } }

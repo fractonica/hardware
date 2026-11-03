@@ -42,7 +42,7 @@ const CAMERA_OP_NAMES = ['camera_snap', 'camera_stream', 'camera_status', 'camer
 
 describe('CAM-1 ops (design camera-c1 D11)', () => {
   it('adds the seven camera ops and moves REGISTRY_HASH once for every op change (and the selector texts)', () => {
-    expect(OPS).toHaveLength(62);
+    expect(OPS.filter((o) => !o.name.startsWith('scale_'))).toHaveLength(62); // SCALE-1 adds six (protocol-scale.test.ts)
     expect(findOp('camera_snap')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['camera', 'snap'], positional: ['device'] } });
     expect(findOp('camera_stream')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['camera', 'stream'], positional: ['device'] } });
     expect(findOp('camera_status')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['camera', 'status'], positional: ['device'] } });
@@ -55,7 +55,8 @@ describe('CAM-1 ops (design camera-c1 D11)', () => {
       expect(hashOf(OPS.filter((o) => o.name !== name)), name).not.toBe(REGISTRY_HASH);
     }
     expect(hashOf(OPS)).toBe(REGISTRY_HASH);
-    expect(REGISTRY_HASH).toBe('b62397012231'); // the fix round's camera_stream `out` text; '45d33d0f924f' was stream C's
+    // CAM-1's own hash, with SCALE-1's ops left out (protocol-scale.test.ts pins the current one).
+    expect(hashOf(OPS.filter((o) => !o.name.startsWith('scale_')))).toBe('b62397012231'); // the fix round's camera_stream `out` text; '45d33d0f924f' was stream C's
     expect(REGISTRY_HASH).not.toBe('6dcd17ef8882'); // CSI-1's
     expect(JOB_KINDS).toContain('camera');
     // The selector texts name the new target and the bridge ports (D1, D3).
@@ -186,7 +187,9 @@ describe('CAM-1 capability and chip (design camera-c1 D1, D7)', () => {
     for (const name of ['stream_stop', 'set', 'sd_delete']) {
       expect(CAMERA_CAP.commands.find((c) => c.name === name), name).toMatchObject({ idempotent: true });
     }
-    expect(CATALOG_HASH).toBe(0x7df39e8e);
+    // The catalog as of SCALE-1 (fr.scale 0x000C, fr.display 1.1's `round`): CAM-1's own was 0x7df39e8e.
+    expect(CATALOG_HASH).toBe(0x4f56e757);
+    expect(CATALOG_HASH).not.toBe(0x7df39e8e); // CAM-1's
     expect(CATALOG_HASH).not.toBe(0xbdb52e7a); // CSI-1's
   });
 });

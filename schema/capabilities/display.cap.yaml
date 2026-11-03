@@ -1,6 +1,6 @@
 capability: fr.display
 id: 0x0003
-version: "1.0"
+version: "1.1"
 summary: A pixel panel with drawing primitives everywhere and LVGL layouts where the panel's driver says so (trait ui).
 doc: |
   Colours are 0xRRGGBB on the wire; a mono panel (color mono1) lights a pixel whose colour is at least 50 % luminance.
@@ -45,6 +45,7 @@ traits:
   color:  { id: 3, type: ColorFormat }      # from the driver: ssd1306_i2c mono1, st7789_spi rgb565
   ui:     { id: 4, type: bool }             # LVGL layouts (ui_load, ui_set): the driver renders through LVGL
   touch:  { id: 5, type: bool }             # an fr.touch instance of the profile is bound to this panel
+  round:  { id: 6, type: bool }             # the visible area is the circle inscribed in width x height (gc9a01_spi; design scale-round-c1 D5)
 config:
   rotation:   { type: Rotation, default: r0, doc: "panel rotation; a board entry's `rotation` (0, 90, 180, 270) is its default" }
   brightness: { type: u8, default: 255, doc: "backlight level at boot; ignored on panels without backlight control" }

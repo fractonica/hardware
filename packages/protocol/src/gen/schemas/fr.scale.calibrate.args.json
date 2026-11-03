@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.scale.calibrate.args",
+  "title": "fr.scale.calibrate arguments",
+  "description": "With a known mass on the tared scale: the scale factor from the mean of the last `samples` conversions, kept across reboots. BUSY while not stable; INVALID_ARGS for known_mg 0 or a reading at the offset (nothing on the scale).",
+  "type": "object",
+  "properties": {
+    "known_mg": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295,
+      "description": "(mg)"
+    },
+    "samples": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "description": "(1..64)",
+      "default": 16
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "known_mg": 500000
+    }
+  ]
+}

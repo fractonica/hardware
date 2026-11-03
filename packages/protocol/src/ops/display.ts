@@ -75,6 +75,8 @@ export const DisplayRenderSchema = z.looseObject({
   rotation: z.number().int(),
   ui: z.boolean(),
   touch: z.boolean(),
+  /** Trait round (design scale-round-c1 D5): the PNG's corners, which the round glass does not show, are dim grey. */
+  round: z.boolean().optional(),
   ms: z.number(),
   png_base64: z.string().optional(),
 });
@@ -108,7 +110,7 @@ export const DISPLAY_OPS = [
     kind: 'query',
     tier: 'read',
     summary:
-      "Preview on the Mac what a profile's panel would show, without a board: the desktop renderer (LVGL and the mono renderer, built like the firmware) draws a script of fr.display commands at the panel's size, format and rotation (from the profile and its board) and writes a PNG under FR_HOME/renders (or `out`). Give `commands` [{cmd, args}] or `script` (JSON lines, or the absolute path of a .jsonl file); cmd is clear, text, fill_rect, set_brightness, ui_load, ui_set (ui panels) or touch {x, y, gesture} (touch panels). Returns the PNG path, the framebuffer CRC (equal to the board's display_snapshot crc for the same commands; the PNG is then byte-identical to the snapshot's) and the ui events touches caused. Builds the renderer first when it is missing or stale.",
+      "Preview on the Mac what a profile's panel would show, without a board: the desktop renderer (LVGL and the mono renderer, built like the firmware) draws a script of fr.display commands at the panel's size, format and rotation (from the profile and its board) and writes a PNG under FR_HOME/renders (or `out`). Give `commands` [{cmd, args}] or `script` (JSON lines, or the absolute path of a .jsonl file); cmd is clear, text, fill_rect, set_brightness, ui_load, ui_set (ui panels) or touch {x, y, gesture} (touch panels). Returns the PNG path, the framebuffer CRC (equal to the board's display_snapshot crc for the same commands; the PNG is then byte-identical to the snapshot's) and the ui events touches caused. A round panel (trait round, e.g. gc9a01_spi) gets its corners, which the glass does not show, painted dim grey in the PNG (round: true; the crc is still the whole frame's): keep content inside the inscribed circle. Builds the renderer first when it is missing or stale.",
     input: z.object({
       profile: z.string().min(1).describe('profile name, e.g. s3t-pad'),
       instance: z.string().min(1).optional().describe("the profile's fr.display instance (default: its only one)"),

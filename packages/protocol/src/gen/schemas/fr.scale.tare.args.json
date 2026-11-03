@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.scale.tare.args",
+  "title": "fr.scale.tare arguments",
+  "description": "The mean raw reading of the last `samples` conversions becomes zero, and is kept across reboots. BUSY while the reading is not stable or fewer conversions are held; FAILED when the part does not answer.",
+  "type": "object",
+  "properties": {
+    "samples": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64,
+      "description": "(1..64)",
+      "default": 16
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {},
+    {
+      "samples": 32
+    }
+  ]
+}

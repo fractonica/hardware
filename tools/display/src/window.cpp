@@ -1,6 +1,8 @@
 // See window.hpp. Built with SDL2 when CMake finds Homebrew's (pkg-config sdl2), else a clear error.
 #include "window.hpp"
 
+#include "png.hpp"
+
 #include <cJSON.h>
 #include <cstdio>
 #include <vector>
@@ -32,7 +34,7 @@ void print_events(const Session &s, size_t &printed)
     }
 }
 
-/** The glass as RGB565 pixels (a mono panel lit white on black). */
+/** The glass as RGB565 pixels (a mono panel lit white on black; a round panel's corners dim grey). */
 void to_rgb565(Session &s, std::vector<uint16_t> &px)
 {
     const Geometry &g = s.geometry();
@@ -41,6 +43,14 @@ void to_rgb565(Session &s, std::vector<uint16_t> &px)
     if (g.format == fr::hal::PixelFormat::rgb565) {
         for (size_t i = 0; i < px.size(); ++i) {
             px[i] = static_cast<uint16_t>(glass[i * 2] | (glass[i * 2 + 1] << 8));
+        }
+        if (g.round) {
+            for (size_t i = 0; i < px.size(); ++i) {
+                if (!on_round_glass(static_cast<uint32_t>(i % g.width), static_cast<uint32_t>(i / g.width), g.width,
+                                    g.height)) {
+                    px[i] = kOutsideGlass;
+                }
+            }
         }
         return;
     }

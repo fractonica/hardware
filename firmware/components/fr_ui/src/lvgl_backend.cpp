@@ -94,12 +94,27 @@ Status LvglBackend::clear(uint32_t rgb)
     }
     primitives_ = 0;
     ids_count_ = 0;
+    ++load_gen_;
     return {};
+}
+
+bool LvglBackend::primitive_room() const
+{
+    // The renderer's last measurement less what is still queued for it (the header's "The pool never runs out").
+    const uint32_t total = heap_total_.load(std::memory_order_relaxed);
+    if (total == 0) {
+        return true;  // not measured yet: the renderer's own check decides
+    }
+    const uint32_t used = heap_used_.load(std::memory_order_relaxed);
+    const uint32_t pending = prims_submitted_ - prims_applied_.load(std::memory_order_acquire);
+    // As the renderer's own check (kObjectBytes beyond the reserve), after the queued ones have taken theirs.
+    const uint64_t need = static_cast<uint64_t>(pending) * kPrimitiveBytes + kObjectBytes + kRenderReserve;
+    return used <= total && total - used >= need;
 }
 
 Status LvglBackend::text(const cap::DisplayTextArgs &a)
 {
-    if (primitives_ >= kMaxPrimitives) {
+    if (primitives_ >= kMaxPrimitives || !primitive_room()) {
         return std::unexpected(Err::busy);
     }
     Command c;
@@ -114,12 +129,13 @@ Status LvglBackend::text(const cap::DisplayTextArgs &a)
         return std::unexpected(Err::busy);
     }
     ++primitives_;
+    ++prims_submitted_;
     return {};
 }
 
 Status LvglBackend::fill_rect(const cap::DisplayFillRectArgs &a)
 {
-    if (primitives_ >= kMaxPrimitives) {
+    if (primitives_ >= kMaxPrimitives || !primitive_room()) {
         return std::unexpected(Err::busy);
     }
     Command c;
@@ -133,6 +149,7 @@ Status LvglBackend::fill_rect(const cap::DisplayFillRectArgs &a)
         return std::unexpected(Err::busy);
     }
     ++primitives_;
+    ++prims_submitted_;
     return {};
 }
 
@@ -152,9 +169,15 @@ std::expected<uint8_t, Err> LvglBackend::ui_load(const cap::DisplayUiLayout &l)
     if (slot == kLayoutSlots) {
         return std::unexpected(Err::busy);
     }
+    // Up front: the layout must fit the pool an empty screen leaves (the renderer deletes the old screen first).
+    const uint32_t empty = empty_free_.load(std::memory_order_relaxed);
+    const size_t count = std::min(l.widgets.size(), kMaxWidgets);
+    if (empty != 0 && static_cast<uint64_t>(count) * kWidgetBytes + kRenderReserve > empty) {
+        return std::unexpected(Err::failed);
+    }
     OwnedLayout &o = layouts_[slot];
     o.bg = l.bg;
-    o.count = static_cast<uint8_t>(std::min(l.widgets.size(), kMaxWidgets));
+    o.count = static_cast<uint8_t>(count);
     for (size_t i = 0; i < o.count; ++i) {
         const cap::DisplayUiWidget &w = l.widgets[i];
         OwnedWidget &d = o.widgets[i];
@@ -177,10 +200,12 @@ std::expected<uint8_t, Err> LvglBackend::ui_load(const cap::DisplayUiLayout &l)
     Command c;
     c.kind = Command::Kind::ui_load;
     c.a = static_cast<uint8_t>(slot);
+    c.value = static_cast<int32_t>(load_gen_ + 1);
     if (!submit(c)) {
         slot_busy_[slot].store(false, std::memory_order_release);
         return std::unexpected(Err::busy);
     }
+    ++load_gen_;
     primitives_ = 0;
     ids_count_ = o.count;
     for (size_t i = 0; i < o.count; ++i) {
@@ -197,6 +222,10 @@ Status LvglBackend::ui_set(const cap::DisplayUiSetArgs &a)
     }
     if (!found) {
         return std::unexpected(Err::not_found);
+    }
+    // The renderer abandoned this layout for lack of pool: nothing to update until the next ui_load.
+    if (abandoned_gen_.load(std::memory_order_acquire) == load_gen_) {
+        return std::unexpected(Err::failed);
     }
     Command c;
     c.kind = Command::Kind::ui_set;
@@ -267,6 +296,9 @@ std::expected<display::Snapshot, Err> LvglBackend::snapshot()
 
 std::expected<size_t, Err> LvglBackend::snapshot_read(uint32_t offset, std::span<uint8_t> out)
 {
+    if (panel_ != nullptr && shadow_ == nullptr) {
+        return std::unexpected(Err::unsupported);  // no shadow framebuffer (no PSRAM): nothing was ever frozen
+    }
     if (!frozen_valid_) {
         return std::unexpected(Err::failed);
     }
@@ -281,7 +313,7 @@ std::expected<size_t, Err> LvglBackend::snapshot_read(uint32_t offset, std::span
 HeapStats LvglBackend::heap() const
 {
     return HeapStats{heap_total_.load(std::memory_order_relaxed), heap_used_.load(std::memory_order_relaxed),
-                     heap_max_.load(std::memory_order_relaxed)};
+                     heap_max_.load(std::memory_order_relaxed), abandoned_.load(std::memory_order_relaxed)};
 }
 
 void LvglBackend::host_advance(uint32_t ms)
@@ -289,6 +321,11 @@ void LvglBackend::host_advance(uint32_t ms)
     if (panel_ != nullptr) {
         Runtime::advance(*this, ms);
     }
+}
+
+void LvglBackend::host_frames(bool available)
+{
+    Runtime::frames(available);
 }
 
 void LvglBackend::host_hold(bool hold)

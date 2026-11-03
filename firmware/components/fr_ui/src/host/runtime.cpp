@@ -14,6 +14,8 @@ uint32_t g_virtual_ms = 0;
 // host_hold: the renderer is busy; commands wait here as in the board's queue.
 bool g_held = false;
 std::deque<LvglBackend::Command> g_queue;
+// host_frames(false): alloc_frame finds no room, as on a board without PSRAM (design scale-round-c1 D4).
+bool g_frames = true;
 
 }  // namespace
 
@@ -24,7 +26,12 @@ uint8_t *Runtime::alloc_draw(size_t bytes)
 
 uint8_t *Runtime::alloc_frame(size_t bytes)
 {
-    return alloc_draw(bytes);
+    return g_frames ? alloc_draw(bytes) : nullptr;
+}
+
+void Runtime::frames(bool available)
+{
+    g_frames = available;
 }
 
 void Runtime::release(uint8_t *p)
@@ -58,6 +65,11 @@ bool Runtime::submit(LvglBackend &b, const LvglBackend::Command &c)
     }
     b.apply(c);
     return true;
+}
+
+void Runtime::note_abandoned(const char *what)
+{
+    static_cast<void>(what);  // HeapStats::abandoned counts it; the tests read that
 }
 
 void Runtime::hold(LvglBackend &b, bool hold)

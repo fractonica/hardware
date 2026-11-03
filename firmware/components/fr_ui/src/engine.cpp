@@ -73,10 +73,13 @@ void settle(lv_obj_t *o)
     lv_obj_set_style_anim_duration(o, 0, LV_PART_MAIN);
 }
 
-/** A screen of our own: no theme style, a solid background, no scrolling. */
+/** A screen of our own: no theme style, a solid background, no scrolling. nullptr when the pool has no room. */
 lv_obj_t *bare_screen(uint32_t bg)
 {
     lv_obj_t *scr = lv_obj_create(nullptr);
+    if (scr == nullptr) {
+        return nullptr;
+    }
     lv_obj_remove_style_all(scr);
     lv_obj_set_style_bg_color(scr, rgb(bg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
@@ -150,6 +153,9 @@ Status LvglBackend::renderer_setup()
 
     lv_obj_t *old = lv_screen_active();
     screen_ = bare_screen(0x000000);
+    if (screen_ == nullptr) {
+        return std::unexpected(Err::failed);
+    }
     lv_screen_load(screen_);
     if (old != nullptr && old != screen_) {
         lv_obj_delete(old);
@@ -158,6 +164,7 @@ Status LvglBackend::renderer_setup()
     lv_obj_invalidate(screen_);
     lv_refr_now(disp_);
     measure_heap();
+    measure_empty();
     return {};
 }
 
@@ -194,7 +201,7 @@ void LvglBackend::apply(const Command &c)
         break;
     case Command::Kind::ui_load: {
         const size_t slot = std::min<size_t>(c.a, kLayoutSlots - 1);
-        apply_ui_load(layouts_[slot]);
+        apply_ui_load(layouts_[slot], static_cast<uint32_t>(c.value));
         slot_busy_[slot].store(false, std::memory_order_release);
         break;
     }
@@ -214,16 +221,42 @@ void LvglBackend::apply(const Command &c)
     measure_heap();
 }
 
+bool LvglBackend::room(uint32_t bytes) const
+{
+    lv_mem_monitor_t m;
+    lv_mem_monitor(&m);
+    return m.free_size >= static_cast<size_t>(bytes) + kRenderReserve && m.free_biggest_size >= bytes;
+}
+
+void LvglBackend::abandon(const char *what)
+{
+    abandoned_.fetch_add(1, std::memory_order_relaxed);
+    Runtime::note_abandoned(what);
+}
+
+void LvglBackend::measure_empty()
+{
+    lv_mem_monitor_t m;
+    lv_mem_monitor(&m);
+    empty_free_.store(static_cast<uint32_t>(std::max<size_t>(m.free_size, 1)), std::memory_order_relaxed);
+}
+
 void LvglBackend::apply_clear(uint32_t color)
 {
     lv_obj_clean(screen_);
     widgets_count_ = 0;
     lv_obj_set_style_bg_color(screen_, rgb(color), LV_PART_MAIN);
+    measure_empty();
 }
 
 void LvglBackend::apply_text(const Command &c)
 {
-    lv_obj_t *l = lv_label_create(screen_);
+    prims_applied_.fetch_add(1, std::memory_order_release);
+    lv_obj_t *l = room(kObjectBytes) ? lv_label_create(screen_) : nullptr;
+    if (l == nullptr) {
+        abandon("text");
+        return;
+    }
     lv_obj_remove_style_all(l);
     settle(l);
     lv_obj_set_style_text_font(l, font_for_size(c.a), LV_PART_MAIN);
@@ -237,7 +270,12 @@ void LvglBackend::apply_text(const Command &c)
 
 void LvglBackend::apply_fill_rect(const Command &c)
 {
-    lv_obj_t *r = lv_obj_create(screen_);
+    prims_applied_.fetch_add(1, std::memory_order_release);
+    lv_obj_t *r = room(kObjectBytes) ? lv_obj_create(screen_) : nullptr;
+    if (r == nullptr) {
+        abandon("fill_rect");
+        return;
+    }
     lv_obj_remove_style_all(r);
     settle(r);
     lv_obj_set_clickable(r, false);
@@ -247,7 +285,7 @@ void LvglBackend::apply_fill_rect(const Command &c)
     lv_obj_set_size(r, c.w, c.h);
 }
 
-void LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
+bool LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
 {
     std::memcpy(out.id, w.id, sizeof(out.id));
     out.kind = w.kind;
@@ -259,6 +297,9 @@ void LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
     switch (w.kind) {
     case cap::DisplayUiWidgetKind::label:
         o = lv_label_create(scr);
+        if (o == nullptr) {
+            return false;
+        }
         lv_label_set_text(o, w.text);
         lv_obj_set_style_text_font(o, font_for_widget(w.font), LV_PART_MAIN);
         lv_obj_set_style_text_color(o, rgb(w.color), LV_PART_MAIN);
@@ -270,7 +311,14 @@ void LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
         break;
     case cap::DisplayUiWidgetKind::button:
         o = lv_button_create(scr);
-        out.label = lv_label_create(o);
+        if (o == nullptr) {
+            return false;
+        }
+        out.label = room(kObjectBytes) ? lv_label_create(o) : nullptr;
+        if (out.label == nullptr) {
+            lv_obj_delete(o);
+            return false;
+        }
         lv_label_set_text(out.label, w.text);
         lv_obj_set_style_text_font(out.label, font_for_widget(w.font), LV_PART_MAIN);
         lv_obj_set_style_text_color(out.label, rgb(w.color), LV_PART_MAIN);
@@ -281,11 +329,17 @@ void LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
         break;
     case cap::DisplayUiWidgetKind::bar:
         o = lv_bar_create(scr);
+        if (o == nullptr) {
+            return false;
+        }
         lv_bar_set_range(o, w.min, w.max);
         lv_bar_set_value(o, w.value, LV_ANIM_OFF);
         break;
     case cap::DisplayUiWidgetKind::slider:
         o = lv_slider_create(scr);
+        if (o == nullptr) {
+            return false;
+        }
         lv_slider_set_range(o, w.min, w.max);
         lv_slider_set_value(o, w.value, LV_ANIM_OFF);
         if (indicator) {
@@ -294,6 +348,9 @@ void LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
         break;
     case cap::DisplayUiWidgetKind::arc:
         o = lv_arc_create(scr);
+        if (o == nullptr) {
+            return false;
+        }
         lv_arc_set_range(o, w.min, w.max);
         lv_arc_set_value(o, w.value);
         // A display arc: no knob, not touchable (D2 events come from button, slider and switch).
@@ -308,6 +365,9 @@ void LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
         break;
     case cap::DisplayUiWidgetKind::switch_:
         o = lv_switch_create(scr);
+        if (o == nullptr) {
+            return false;
+        }
         if (w.value != 0) {
             lv_obj_set_checked(o, true);
         }
@@ -317,11 +377,17 @@ void LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
         break;
     case cap::DisplayUiWidgetKind::rect:
         o = lv_obj_create(scr);
+        if (o == nullptr) {
+            return false;
+        }
         lv_obj_remove_style_all(o);
         lv_obj_set_clickable(o, false);
         lv_obj_set_style_bg_color(o, rgb(w.color), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(o, LV_OPA_COVER, LV_PART_MAIN);
         break;
+    }
+    if (o == nullptr) {
+        return false;  // a kind this build does not know
     }
     out.obj = o;
     settle(o);
@@ -352,20 +418,43 @@ void LvglBackend::build_widget(lv_obj_t *scr, const OwnedWidget &w, Widget &out)
         w.kind == cap::DisplayUiWidgetKind::switch_) {
         lv_obj_add_event_cb(o, &Hooks::event, LV_EVENT_ALL, &out);
     }
+    return true;
 }
 
-void LvglBackend::apply_ui_load(OwnedLayout &l)
+void LvglBackend::apply_ui_load(OwnedLayout &l, uint32_t gen)
 {
-    lv_obj_t *scr = bare_screen(l.bg);
-    widgets_count_ = 0;
-    for (size_t i = 0; i < l.count; ++i) {
-        build_widget(scr, l.widgets[i], widgets_[widgets_count_++]);
+    // The old screen goes before the new widgets are built (nothing renders in between, so the frame is the same):
+    // one layout in the pool at a time.
+    lv_obj_t *scr = room(kObjectBytes) ? bare_screen(l.bg) : nullptr;
+    if (scr == nullptr && screen_ != nullptr) {
+        lv_obj_clean(screen_);  // the old widgets go first to make room for the new screen
+        scr = room(kObjectBytes) ? bare_screen(l.bg) : nullptr;
+    }
+    if (scr == nullptr) {
+        // Not even a screen: the old one stays; its widgets are gone for ui_set, as the layout replaced them.
+        widgets_count_ = 0;
+        abandoned_gen_.store(gen, std::memory_order_release);
+        abandon("layout (no room for its screen)");
+        return;
     }
     lv_obj_t *old = screen_;
     screen_ = scr;
     lv_screen_load(scr);
+    widgets_count_ = 0;
     if (old != nullptr) {
         lv_obj_delete(old);
+    }
+    measure_empty();
+    for (size_t i = 0; i < l.count; ++i) {
+        if (!room(kObjectBytes) || !build_widget(scr, l.widgets[i], widgets_[widgets_count_])) {
+            // Abandoned whole: a layout half built would answer ui_set for some widgets and not others.
+            lv_obj_clean(scr);
+            widgets_count_ = 0;
+            abandoned_gen_.store(gen, std::memory_order_release);
+            abandon("layout");
+            return;
+        }
+        ++widgets_count_;
     }
 }
 
@@ -382,7 +471,9 @@ void LvglBackend::apply_ui_set(const Command &c)
     }
     lv_obj_t *o = w->obj;
     const uint8_t fields = c.a;
-    if (fields & 1) {  // text
+    if ((fields & 1) && !room(sizeof(c.text))) {
+        abandon("ui_set text");  // the other fields still apply; the text keeps its old value
+    } else if (fields & 1) {  // text
         if (w->kind == cap::DisplayUiWidgetKind::label) {
             lv_label_set_text(o, c.text);
         } else if (w->label != nullptr) {

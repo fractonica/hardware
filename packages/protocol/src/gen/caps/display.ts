@@ -216,6 +216,7 @@ export interface DisplayTraits {
   color: DisplayColorFormat | number;
   ui: boolean;
   touch: boolean;
+  round: boolean;
 }
 
 /** Absent fields take their defaults; throws RangeError on a value the field type cannot carry. */
@@ -231,12 +232,14 @@ export function encodeDisplayTraits(v: Partial<DisplayTraits> = {}): Uint8Array 
   if (f4) w.fieldBool(4, f4);
   const f5 = $.bool(v.touch ?? false, 'touch');
   if (f5) w.fieldBool(5, f5);
+  const f6 = $.bool(v.round ?? false, 'round');
+  if (f6) w.fieldBool(6, f6);
   return w.finish();
 }
 
 export function decodeDisplayTraits(bytes: Uint8Array): Decoded<DisplayTraits> {
   const r = new Reader(bytes);
-  const v: DisplayTraits = { width: 0, height: 0, color: 'mono1', ui: false, touch: false };
+  const v: DisplayTraits = { width: 0, height: 0, color: 'mono1', ui: false, touch: false, round: false };
   while (r.next()) {
     switch (r.field) {
       case 1:
@@ -253,6 +256,9 @@ export function decodeDisplayTraits(bytes: Uint8Array): Decoded<DisplayTraits> {
         break;
       case 5:
         v.touch = r.readBool();
+        break;
+      case 6:
+        v.round = r.readBool();
         break;
       default:
         r.skip();
@@ -758,9 +764,9 @@ export function decodeDisplayBrightnessState(bytes: Uint8Array): Decoded<Display
 export const DISPLAY_CAP: $.CapInfo = {
   id: 0x0003,
   name: 'fr.display',
-  version: { major: 1, minor: 0 },
+  version: { major: 1, minor: 1 },
   section: 'standard',
-  traits: { fields: [{ name: 'width' }, { name: 'height' }, { name: 'color', members: DisplayColorFormat }, { name: 'ui' }, { name: 'touch' }], maxSize: 15, encode: encodeDisplayTraits, decode: decodeDisplayTraits },
+  traits: { fields: [{ name: 'width' }, { name: 'height' }, { name: 'color', members: DisplayColorFormat }, { name: 'ui' }, { name: 'touch' }, { name: 'round' }], maxSize: 17, encode: encodeDisplayTraits, decode: decodeDisplayTraits },
   commands: [
     { id: 1, name: 'clear', delivery: 'reliable', idempotent: true, visibility: 'public', args: { fields: [{ name: 'color' }], maxSize: 6, encode: encodeDisplayClearArgs, decode: decodeDisplayClearArgs }, result: null },
     { id: 2, name: 'text', delivery: 'reliable', idempotent: false, visibility: 'public', args: { fields: [{ name: 'x' }, { name: 'y' }, { name: 'text' }, { name: 'color' }, { name: 'bg' }, { name: 'size', range: [1, 4] }], maxSize: 89, encode: encodeDisplayTextArgs, decode: decodeDisplayTextArgs }, result: null },

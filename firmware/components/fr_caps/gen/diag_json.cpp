@@ -21,6 +21,7 @@
 #include "csi.hpp"
 #include "radio_tx.hpp"
 #include "camera.hpp"
+#include "scale.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -39,6 +40,7 @@ cJSON *to_json(const FixtureTraits &v);
 cJSON *to_json(const AudioInTraits &v);
 cJSON *to_json(const TouchTraits &v);
 cJSON *to_json(const CameraTraits &v);
+cJSON *to_json(const ScaleTraits &v);
 #if FR_TEST_HOOKS
 cJSON *to_json(const ButtonInjectArgs &v);
 cJSON *to_json(const ButtonDown &v);
@@ -99,6 +101,14 @@ cJSON *to_json(const CameraSdListResult &v);
 cJSON *to_json(const CameraSdFetchArgs &v);
 cJSON *to_json(const CameraSdDeleteArgs &v);
 cJSON *to_json(const CameraStreamEnded &v);
+cJSON *to_json(const ScaleTareArgs &v);
+cJSON *to_json(const ScaleTareResult &v);
+cJSON *to_json(const ScaleCalibrateArgs &v);
+cJSON *to_json(const ScaleCalibrateResult &v);
+cJSON *to_json(const ScaleReadResult &v);
+cJSON *to_json(const ScaleWatchStartArgs &v);
+cJSON *to_json(const ScaleInjectArgs &v);
+cJSON *to_json(const ScaleSettled &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
 cJSON *to_json(const NodeDescribeResult &v);
 cJSON *to_json(const NodeRebootArgs &v);
@@ -428,6 +438,7 @@ cJSON *to_json(const DisplayTraits &v)
     ok = ok && add(o, "color", json_enum(v.color));
     ok = ok && add(o, "ui", json_bool(v.ui));
     ok = ok && add(o, "touch", json_bool(v.touch));
+    ok = ok && add(o, "round", json_bool(v.round));
     return finish(o, ok);
 }
 
@@ -483,6 +494,15 @@ cJSON *to_json(const CameraTraits &v)
     bool ok = o != nullptr;
     ok = ok && add(o, "sensor", json_number(v.sensor));
     ok = ok && add(o, "max_frame_size", json_enum(v.max_frame_size));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "resolution_bits", json_number(v.resolution_bits));
+    ok = ok && add(o, "max_rate_hz", json_number(v.max_rate_hz));
     return finish(o, ok);
 }
 
@@ -1092,6 +1112,82 @@ cJSON *to_json(const CameraStreamEnded &v)
     ok = ok && add(o, "frames", json_number(v.frames));
     ok = ok && add(o, "dropped", json_number(v.dropped));
     ok = ok && add(o, "bytes", json_number(v.bytes));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleTareArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "samples", json_number(v.samples));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleTareResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "offset", json_number(v.offset));
+    ok = ok && add(o, "raw", json_number(v.raw));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleCalibrateArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "known_mg", json_number(v.known_mg));
+    ok = ok && add(o, "samples", json_number(v.samples));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleCalibrateResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "counts_per_kg", json_number(v.counts_per_kg));
+    ok = ok && add(o, "raw", json_number(v.raw));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleReadResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "raw", json_number(v.raw));
+    ok = ok && add(o, "weight_mg", json_number(v.weight_mg));
+    ok = ok && add(o, "offset", json_number(v.offset));
+    ok = ok && add(o, "counts_per_kg", json_number(v.counts_per_kg));
+    ok = ok && add(o, "rate_hz", json_number(v.rate_hz));
+    ok = ok && add(o, "calibrated", json_bool(v.calibrated));
+    ok = ok && add(o, "injected", json_bool(v.injected));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleWatchStartArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "report_hz", json_number(v.report_hz));
+    ok = ok && add(o, "seconds", json_number(v.seconds));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleInjectArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "weight_mg", json_number(v.weight_mg));
+    ok = ok && add(o, "hold_ms", json_number(v.hold_ms));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ScaleSettled &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "weight_mg", json_number(v.weight_mg));
+    ok = ok && add(o, "delta_mg", json_number(v.delta_mg));
     return finish(o, ok);
 }
 
@@ -2072,6 +2168,112 @@ Status args_camera_sd_delete(const cJSON *obj, fr::wire::Writer &w)
     return encoded(w);
 }
 
+Status args_scale_tare(const cJSON *obj, fr::wire::Writer &w)
+{
+    ScaleTareArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "samples") {
+            ok = from_json_uint(it, 0xFF, v.samples);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_scale_calibrate(const cJSON *obj, fr::wire::Writer &w)
+{
+    ScaleCalibrateArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "known_mg") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.known_mg);
+        } else if (key == "samples") {
+            ok = from_json_uint(it, 0xFF, v.samples);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_scale_read(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_scale_reset_calibration(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_scale_watch_start(const cJSON *obj, fr::wire::Writer &w)
+{
+    ScaleWatchStartArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "report_hz") {
+            ok = from_json_uint(it, 0xFF, v.report_hz);
+        } else if (key == "seconds") {
+            ok = from_json_uint(it, 0xFFFF, v.seconds);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_scale_watch_stop(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_scale_inject(const cJSON *obj, fr::wire::Writer &w)
+{
+    ScaleInjectArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "weight_mg") {
+            ok = from_json_sint(it, INT32_MIN, INT32_MAX, v.weight_mg);
+        } else if (key == "hold_ms") {
+            ok = from_json_uint(it, 0xFFFF, v.hold_ms);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
 Status args_node_identify(const cJSON *obj, fr::wire::Writer &w)
 {
     NodeIdentifyArgs v{};
@@ -2935,6 +3137,93 @@ cJSON *camera_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
     return nullptr;
 }
 
+cJSON *scale_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Scale::kCmdTare:
+            return json_of(decode_scale_tare_args(body));
+        case Scale::kCmdCalibrate:
+            return json_of(decode_scale_calibrate_args(body));
+        case Scale::kCmdRead:
+            return json_empty(body);
+        case Scale::kCmdResetCalibration:
+            return json_empty(body);
+        case Scale::kCmdWatchStart:
+            return json_of(decode_scale_watch_start_args(body));
+        case Scale::kCmdWatchStop:
+            return json_empty(body);
+        case Scale::kCmdInject:
+            return json_of(decode_scale_inject_args(body));
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Scale::kCmdTare:
+            return json_of(decode_scale_tare_result(body));
+        case Scale::kCmdCalibrate:
+            return json_of(decode_scale_calibrate_result(body));
+        case Scale::kCmdRead:
+            return json_of(decode_scale_read_result(body));
+        case Scale::kCmdResetCalibration:
+            return json_empty(body);
+        case Scale::kCmdWatchStart:
+            return json_empty(body);
+        case Scale::kCmdWatchStop:
+            return json_empty(body);
+        case Scale::kCmdInject:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Scale::kEventSettled:
+            return json_of(decode_scale_settled(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Scale::kPropWeightMg: {
+            const auto v = decode_scale_weight_mg_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "weight_mg", json_number(*v)));
+        }
+        case Scale::kPropStable: {
+            const auto v = decode_scale_stable_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "stable", json_bool(*v)));
+        }
+        case Scale::kPropCalibrated: {
+            const auto v = decode_scale_calibrated_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "calibrated", json_bool(*v)));
+        }
+        case Scale::kPropRateHz: {
+            const auto v = decode_scale_rate_hz_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "rate_hz", json_number(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
 cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
 {
     switch (cls) {
@@ -3064,6 +3353,8 @@ cJSON *traits_to_json(uint16_t cap_id, std::span<const uint8_t> traits)
         return json_empty(traits);
     case Camera::kId:
         return json_of(decode_camera_traits(traits));
+    case Scale::kId:
+        return json_of(decode_scale_traits(traits));
     case Node::kId:
         return json_empty(traits);
     case Ota::kId:
@@ -3258,6 +3549,30 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_camera_sd_delete(obj, w);
         }
         break;
+    case Scale::kId:
+        if (name == "tare") {
+            id = Scale::kCmdTare;
+            s = args_scale_tare(obj, w);
+        } else if (name == "calibrate") {
+            id = Scale::kCmdCalibrate;
+            s = args_scale_calibrate(obj, w);
+        } else if (name == "read") {
+            id = Scale::kCmdRead;
+            s = args_scale_read(obj);
+        } else if (name == "reset_calibration") {
+            id = Scale::kCmdResetCalibration;
+            s = args_scale_reset_calibration(obj);
+        } else if (name == "watch_start") {
+            id = Scale::kCmdWatchStart;
+            s = args_scale_watch_start(obj, w);
+        } else if (name == "watch_stop") {
+            id = Scale::kCmdWatchStop;
+            s = args_scale_watch_stop(obj);
+        } else if (name == "inject") {
+            id = Scale::kCmdInject;
+            s = args_scale_inject(obj, w);
+        }
+        break;
     case Node::kId:
         if (name == "identify") {
             id = Node::kCmdIdentify;
@@ -3333,6 +3648,8 @@ cJSON *decode_to_json(uint16_t cap_id, uint8_t cls, uint8_t member_id, std::span
         return radio_tx_to_json(cls, member_id, body);
     case Camera::kId:
         return camera_to_json(cls, member_id, body);
+    case Scale::kId:
+        return scale_to_json(cls, member_id, body);
     case Node::kId:
         return node_to_json(cls, member_id, body);
     case Ota::kId:

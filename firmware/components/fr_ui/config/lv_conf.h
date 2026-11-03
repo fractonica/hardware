@@ -31,16 +31,30 @@
 #define LV_USE_STDLIB_STRING LV_STDLIB_BUILTIN
 #define LV_USE_STDLIB_SPRINTF LV_STDLIB_BUILTIN
 // Measured on the Mac (tools/display's display_lvgl_heap_worst_case: D2's worst case, 24 widgets of every kind plus
-// 64 primitives of every size on top): 45 KB high-water with 64-bit pointers, a 24 KB draw layer included; the board's
-// 32-bit objects take less, and its log reports the high-water after each layout (T-DISPLAY 7). 64 KB on the board;
-// the Mac gets twice that for its wider pointers.
-#if defined(UINTPTR_MAX) && UINTPTR_MAX > 0xFFFFFFFFu
+// 64 primitives of every size on top): 45 KB high-water with 64-bit pointers, all of it objects (no draw layer: none
+// of D2's widgets needs one; drawing took under 1 KB more). The board's 32-bit objects take about 0.72 of that
+// (sizeof lv_obj_t 56 vs 80, lv_label_t 112 vs 144), about 33 KB, and its log reports the high-water after each
+// layout (T-DISPLAY 7). 64 KB on a board with PSRAM (where the pool lives, fr_ui_pool.h); 48 KB of internal RAM on a
+// board without (design scale-round-c1 D4: 32 KB held only the layout and 14 of the 64 primitives on the Mac; 48 KB
+// holds the worst case on the board with fr_ui's 5 KB reserve to spare, and leaves the C6 about 44 KB of internal
+// heap; 64 KB beside Wi-Fi would not fit). However full the pool, fr_ui refuses or skips what does not fit rather
+// than let LVGL fail an allocation (fr/ui/lvgl_backend.hpp). The Mac gets 128 KB for its wider pointers.
+#if defined(ESP_PLATFORM) && !defined(__ASSEMBLY__)
+#include "sdkconfig.h"
+#endif
+#if defined(FR_LV_MEM_SIZE)
+// A Mac build that tries a board's pool (tools/display: FR_DISPLAY_LV_MEM_SIZE=32768 node tools/display-build.mjs).
+#define LV_MEM_SIZE (FR_LV_MEM_SIZE)
+#elif defined(UINTPTR_MAX) && UINTPTR_MAX > 0xFFFFFFFFu
 #define LV_MEM_SIZE (128U * 1024U)
+#elif defined(ESP_PLATFORM) && !defined(CONFIG_SPIRAM)
+#define LV_MEM_SIZE (48U * 1024U)
 #else
 #define LV_MEM_SIZE (64U * 1024U)
 #endif
 #define LV_MEM_ADR 0
-// The board allocates the pool at lv_init, in PSRAM (fr_ui_pool.h): a static 64 KB would fill the S3's internal RAM.
+// The board allocates the pool at lv_init, in PSRAM when it has some (fr_ui_pool.h): a static 64 KB would fill the S3's
+// internal RAM.
 #if defined(ESP_PLATFORM)
 #define LV_MEM_POOL_INCLUDE "fr_ui_pool.h"
 #define LV_MEM_POOL_ALLOC fr_ui_pool_alloc

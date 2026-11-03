@@ -165,7 +165,7 @@ describe('MCP limits (09 §9.4, §9.6)', () => {
 
 describe('the plugin (09 §9.8)', () => {
   const read = (p: string) => readFileSync(join(PLUGIN, p), 'utf8');
-  const skills = ['audio', 'build-deploy', 'camera', 'e2e-verify', 'fleet-ops', 'hil-rig'];
+  const skills = ['audio', 'build-deploy', 'camera', 'e2e-verify', 'fleet-ops', 'hil-rig', 'scale'];
   const docs = () => [...skills.map((s) => `skills/${s}/SKILL.md`), 'AGENTS.md'].map((p) => ({ p, text: read(p) }));
 
   it('defines one MCP server, the fr shim, and nothing in .mcp.json or bin/', () => {
@@ -178,7 +178,7 @@ describe('the plugin (09 §9.8)', () => {
     expect(market.plugins).toEqual([expect.objectContaining({ name: manifest.name, source: './plugin' })]);
   });
 
-  it('has the six skills, with only name and description in their frontmatter', () => {
+  it('has the seven skills, with only name and description in their frontmatter', () => {
     expect(readdirSync(join(PLUGIN, 'skills')).sort()).toEqual(skills);
     for (const s of skills) {
       const m = /^---\n([\s\S]*?)\n---\n/.exec(read(`skills/${s}/SKILL.md`));

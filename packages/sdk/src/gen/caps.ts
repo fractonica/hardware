@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0x7df39e8e;
+export const CATALOG_HASH = 0x4f56e757;
 
 // ---- fr.button ----
 
@@ -726,6 +726,108 @@ export interface CameraProps {
   sd_free_mb: number;
 }
 
+// ---- fr.scale ----
+
+export type ScaleFilter = 'none' | 'ema' | 'median5';
+
+export type ScaleGain = 'a128' | 'a64' | 'b32';
+
+/** fr.scale.tare arguments (all optional: the device applies the defaults). */
+export interface ScaleTareArgs {
+  /** (1..64; default 16) */
+  samples?: number;
+}
+
+/** fr.scale.tare RESULT fields. */
+export interface ScaleTareResult {
+  offset: number;
+  raw: number;
+}
+
+/** fr.scale.calibrate arguments (all optional: the device applies the defaults). */
+export interface ScaleCalibrateArgs {
+  /** (mg) */
+  knownMg?: number;
+  /** (1..64; default 16) */
+  samples?: number;
+}
+
+/** fr.scale.calibrate RESULT fields. */
+export interface ScaleCalibrateResult {
+  countsPerKg: number;
+  raw: number;
+}
+
+/** fr.scale.read RESULT fields. */
+export interface ScaleReadResult {
+  /** the last conversion, sign-extended from 24 bits */
+  raw: number;
+  /** (mg) */
+  weightMg: number;
+  offset: number;
+  countsPerKg: number;
+  /** (Hz) */
+  rateHz: number;
+  calibrated: boolean;
+  injected: boolean;
+}
+
+/** fr.scale.watch_start arguments (all optional: the device applies the defaults). */
+export interface ScaleWatchStartArgs {
+  /** (Hz; 1..80; default 80) */
+  reportHz?: number;
+  /** (s; 1..3600) */
+  seconds?: number;
+}
+
+/** fr.scale commands, as methods of an instance. */
+export interface ScaleClient {
+  /** The mean raw reading of the last `samples` conversions becomes zero, and is kept across reboots. BUSY while the reading is not stable or fewer conversions are held; FAILED when the part does not answer. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  tare(args?: ScaleTareArgs, opts?: CallOptions): Promise<CmdResult<ScaleTareResult>>;
+  /** With a known mass on the tared scale: the scale factor from the mean of the last `samples` conversions, kept across reboots. BUSY while not stable; INVALID_ARGS for known_mg 0 or a reading at the offset (nothing on the scale). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  calibrate(args?: ScaleCalibrateArgs, opts?: CallOptions): Promise<CmdResult<ScaleCalibrateResult>>;
+  /** The last conversion and the calibration in use. Answered from what the node holds; never touches the part. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  read(opts?: CallOptions): Promise<CmdResult<ScaleReadResult>>;
+  /** Offset 0 and config counts_per_kg again; the kept calibration is erased. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  resetCalibration(opts?: CallOptions): Promise<CmdResult>;
+  /** Reports every change up to report_hz (no deadband) for `seconds`, then falls back to config by itself. A newer watch_start replaces the running one. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  watchStart(args?: ScaleWatchStartArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Ends a watch now; OK when none runs. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  watchStop(opts?: CallOptions): Promise<CmdResult>;
+}
+
+/** fr.scale.settled event fields (normal). The weight became stable at least settle_min_mg away from the last settled weight: something was put on or taken off. */
+export interface ScaleSettledFields {
+  /** (mg) */
+  weightMg: number;
+  /** from the last settled weight (the first after boot: from 0) (mg) */
+  deltaMg: number;
+}
+
+/** fr.scale events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface ScaleEvents {
+  settled: ScaleSettledFields;
+}
+
+/** fr.scale properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface ScaleState {
+  /** tared, calibrated and filtered (mg) */
+  weightMg: number;
+  stable: boolean;
+  /** a calibration was made and is kept (else config counts_per_kg) */
+  calibrated: boolean;
+  /** conversions over the last second: 80 or 10 by the part's RATE pin, 0 when the part does not answer (Hz) */
+  rateHz: number;
+}
+
+/** fr.scale property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface ScaleProps {
+  weight_mg: number;
+  stable: boolean;
+  calibrated: boolean;
+  rate_hz: number;
+}
+
 // ---- fr.node ----
 
 /** fr.node.identify arguments (all optional: the device applies the defaults). */
@@ -928,6 +1030,7 @@ export interface CapClients {
   'fr.csi': CsiClient;
   'fr.radio_tx': RadioTxClient;
   'fr.camera': CameraClient;
+  'fr.scale': ScaleClient;
   'fr.node': NodeClient;
   'fr.ota': OtaClient;
   'fr.diag': DiagClient;
@@ -945,6 +1048,7 @@ export interface CapEvents {
   'fr.csi': CsiEvents;
   'fr.radio_tx': RadioTxEvents;
   'fr.camera': CameraEvents;
+  'fr.scale': ScaleEvents;
   'fr.node': NodeEvents;
   'fr.ota': OtaEvents;
   'fr.diag': DiagEvents;
@@ -962,6 +1066,7 @@ export interface CapState {
   'fr.csi': CsiState;
   'fr.radio_tx': RadioTxState;
   'fr.camera': CameraState;
+  'fr.scale': ScaleState;
   'fr.node': NodeState;
   'fr.ota': OtaState;
   'fr.diag': DiagState;
@@ -979,6 +1084,7 @@ export interface CapProps {
   'fr.csi': CsiProps;
   'fr.radio_tx': RadioTxProps;
   'fr.camera': CameraProps;
+  'fr.scale': ScaleProps;
   'fr.node': NodeProps;
   'fr.ota': OtaProps;
   'fr.diag': DiagProps;
@@ -999,6 +1105,7 @@ export const CAP_META: Readonly<Record<string, CapMeta>> = {
   'fr.csi': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, baseline_reset: { method: 'baselineReset', delivery: 'reliable' } }, events: ['stream_ended'], props: ['motion', 'rssi', 'rate'] },
   'fr.radio_tx': { commands: { start: { method: 'start', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' } }, events: [], props: ['sending'] },
   'fr.camera': { commands: { stream_start: { method: 'streamStart', delivery: 'reliable', args: true }, stream_stop: { method: 'streamStop', delivery: 'reliable', args: true }, set: { method: 'set', delivery: 'reliable', args: true }, sd_list: { method: 'sdList', delivery: 'reliable', args: true }, sd_fetch: { method: 'sdFetch', delivery: 'reliable', args: true }, sd_delete: { method: 'sdDelete', delivery: 'reliable', args: true } }, events: ['stream_ended'], props: ['frames', 'fps_x10', 'last_bytes', 'streaming', 'sd', 'sd_free_mb'] },
+  'fr.scale': { commands: { tare: { method: 'tare', delivery: 'reliable', args: true }, calibrate: { method: 'calibrate', delivery: 'reliable', args: true }, read: { method: 'read', delivery: 'reliable' }, reset_calibration: { method: 'resetCalibration', delivery: 'reliable' }, watch_start: { method: 'watchStart', delivery: 'reliable', args: true }, watch_stop: { method: 'watchStop', delivery: 'reliable' }, inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['settled'], props: ['weight_mg', 'stable', 'calibrated', 'rate_hz'] },
   'fr.node': { commands: { identify: { method: 'identify', delivery: 'reliable', args: true }, describe: { method: 'describe', delivery: 'reliable' }, reboot: { method: 'reboot', delivery: 'reliable', args: true }, set_alias: { method: 'setAlias', delivery: 'reliable', args: true }, set_groups: { method: 'setGroups', delivery: 'reliable', args: true }, net_set: { method: 'netSet', delivery: 'reliable', args: true }, get_state: { method: 'getState', delivery: 'reliable' }, bind_set: { method: 'bindSet', delivery: 'reliable', args: true }, bind_clear: { method: 'bindClear', delivery: 'reliable', args: true }, bind_list: { method: 'bindList', delivery: 'reliable' } }, events: ['boot', 'binding_fired'], props: [] },
   'fr.ota': { commands: {}, events: [], props: [] },
   'fr.diag': { commands: { exec: { method: 'exec', delivery: 'reliable', args: true } }, events: ['mark'], props: [] },

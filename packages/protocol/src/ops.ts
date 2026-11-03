@@ -11,6 +11,8 @@
 // csi_status), network_list, and network names and bands (ops/network.ts) on network_set, network_get,
 // device_provision and flash_start. CAM-1 (design camera-c1 D11) adds ops/camera.ts (camera_snap, camera_stream,
 // camera_status, camera_set, camera_sd_list, camera_sd_fetch, camera_sd_delete) and the bridge ports' `path:` selector.
+// SCALE-1 (design scale-round-c1 D10) adds ops/scale.ts (scale_status, scale_read, scale_tare, scale_calibrate,
+// scale_reset_calibration, scale_watch).
 // This module loads no Node builtin: the browser entry (browser.ts) exports it, and REGISTRY_HASH,
 // which hashes it with node:crypto, lives in registry-hash.ts.
 
@@ -20,6 +22,26 @@ import { APPS_OPS } from './ops/apps.ts';
 import { AUDIO_OPS } from './ops/audio.ts';
 import { BENCH_OPS } from './ops/bench.ts';
 import { CAMERA_OPS } from './ops/camera.ts';
+export {
+  SCALE_MAX_KNOWN_G,
+  SCALE_MAX_REPORT_HZ,
+  SCALE_WATCH_MAX_S,
+  SCALE_WATCH_REASONS,
+  ScaleCalibrateSchema,
+  ScaleReadSchema,
+  ScaleResetSchema,
+  ScaleStatusSchema,
+  ScaleTareSchema,
+  ScaleWatchSchema,
+  type ScaleCalibrate,
+  type ScaleOpName,
+  type ScaleRead,
+  type ScaleReset,
+  type ScaleStatus,
+  type ScaleTare,
+  type ScaleWatch,
+  type ScaleWatchReason,
+} from './ops/scale.ts';
 import { CSI_OPS } from './ops/csi.ts';
 import { DISPLAY_OPS } from './ops/display.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
@@ -31,6 +53,7 @@ import { DEFAULT_NETWORK, NETWORK_BANDS, NetworkSchema, networkName } from './op
 import { OTA_OPS } from './ops/ota.ts';
 import { PORTS_OPS } from './ops/ports.ts';
 import { INVENTORY_OPS, REGISTRY_OPS } from './ops/registry.ts';
+import { SCALE_OPS } from './ops/scale.ts';
 import { TESTS_OPS } from './ops/tests.ts';
 import { JOB_ORIGINS, JobSchema, PortInfoSchema } from './types.ts';
 
@@ -362,6 +385,8 @@ export const OPS = [
   ...CSI_OPS,
   // CAM-1 (design camera-c1 D11): a board's camera: a photo, a live view or timelapse, its settings, its card's recordings.
   ...CAMERA_OPS,
+  // SCALE-1 (design scale-round-c1 D10): a board's weighing scale: its reading, tare, calibration, a recording.
+  ...SCALE_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

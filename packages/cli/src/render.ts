@@ -4,6 +4,7 @@ import type { Check } from '@fractonica/host';
 import { cliFlag, exitCodeForResult, findOp, type Job, type LogLine, type PortInfo, type Remediation, type Result, type ToolError } from '@fractonica/protocol';
 
 import { renderProbe } from './render-latency.ts';
+import { renderScaleWatch, scaleRenderer } from './render-scale.ts';
 import { renderGateReport, targetReport } from './render-tests.ts';
 
 function yamlish(v: unknown, indent = ''): string {
@@ -301,6 +302,9 @@ function renderJob(job: Job): string {
   if (job.kind === 'csi' && job.result && typeof job.result === 'object') {
     return [head, renderCsiStream(job.result as Row)].join('\n'); // fr csi stream (design csi-c1 D13)
   }
+  if (job.kind === 'scale' && job.result && typeof job.result === 'object') {
+    return [head, renderScaleWatch(job.result as Row)].join('\n'); // fr scale watch (design scale-round-c1 D10)
+  }
   if (job.kind === 'camera' && job.result && typeof job.result === 'object') {
     return [head, renderCameraJob(job.result as Row)].join('\n'); // fr camera snap | stream | sd fetch (design camera-c1 D11)
   }
@@ -535,6 +539,10 @@ export function renderResult(op: string, r: Result): { out: string; err: string 
   }
   if (op === 'camera_sd_list') {
     return { out: renderCameraSdList(data), err: '' };
+  }
+  const scale = scaleRenderer(op); // fr scale status|read|tare|calibrate|reset (design scale-round-c1 D10)
+  if (scale && data && typeof data === 'object') {
+    return { out: scale(data), err: '' };
   }
   if (op === 'camera_snap' && !('job_id' in data)) {
     return { out: renderCameraSnap(data), err: '' };

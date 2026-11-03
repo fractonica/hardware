@@ -73,6 +73,12 @@ export interface ServiceFacts {
    * service a pointer to it (nullptr when the profile has none: a board without the part).
    */
   store?: { implements: string; binds: string };
+  /**
+   * State the service keeps across reboots (design scale-round-c1 D6: fr.scale's tare and calibration): the NVS
+   * namespace. The glue builds an fr::platform::NvsSettings on it per instance and hands it to the service after the
+   * driver (and the store); the service keys its values by its port.
+   */
+  settings?: string;
 }
 
 /**
@@ -83,6 +89,8 @@ export interface TraitContext {
   target: string;
   driverTraits: Readonly<Record<string, JsonScalar>>;
   entry: Readonly<Record<string, unknown>>;
+  /** The driver's resolved Config by field name (design scale-round-c1 D3: a bare-pin panel's width and height). */
+  driverConfig: Readonly<Record<string, JsonScalar>>;
 }
 
 /**
@@ -146,9 +154,10 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
     service: 'fr::DisplayService',
     header: 'fr/services/display_service.hpp',
     timers: 1,
-    traits: (c, { entry }) => {
-      const w = Number(entry.width ?? 0);
-      const h = Number(entry.height ?? 0);
+    // A panel on bare pins (design scale-round-c1 D3: gc9a01_spi) has no board entry: its driver's width and height.
+    traits: (c, { entry, driverConfig }) => {
+      const w = Number(entry.width ?? driverConfig.width ?? 0);
+      const h = Number(entry.height ?? driverConfig.height ?? 0);
       const quarter = c.rotation === 'r90' || c.rotation === 'r270';
       return { width: quarter ? h : w, height: quarter ? w : h };
     },
@@ -177,6 +186,16 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
     timers: 1,
     store: { implements: 'hal.BlockStore', binds: 'sd_cards' },
     traits: (c, { entry }) => ({ sensor: SENSOR_IDS[String(entry.sensor ?? '')] ?? 0, max_frame_size: String(c.max_frame_size ?? 'uxga') }),
+  },
+  // Design scale-round-c1 D6-D8: one timer (the 10 ms drain of the driver's conversions, the reports, the watch and
+  // inject ends); resolution_bits and max_rate_hz come from driver.yaml `traits:`. The tare and calibration are kept in
+  // NVS namespace fr_scale (ServiceFacts.settings).
+  'fr.scale': {
+    implements: 'hal.LoadCell',
+    service: 'fr::ScaleService',
+    header: 'fr/services/scale_service.hpp',
+    timers: 1,
+    settings: 'fr_scale',
   },
 };
 
@@ -1820,7 +1839,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       traits[key] = value;
     }
     if (service?.traits) {
-      const ctx: TraitContext = { target: board.idf_target, driverTraits: ownTraits ?? {}, entry };
+      const ctx: TraitContext = { target: board.idf_target, driverTraits: ownTraits ?? {}, entry, driverConfig: Object.fromEntries(driverConfig.map((x) => [x.name, x.value])) };
       Object.assign(traits, service.traits(Object.fromEntries(capConfig.map((x) => [x.entry.name, x.value])), ctx));
     }
     // A fixture line's drive, decode and pull must be ones its driver takes (design m2-c1-hil D4). The
@@ -2324,6 +2343,7 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
     '',
     ...driverIds.map((d) => `#include "fr/drv/${d}.hpp"`),
     ...[...new Set(insts.map((i) => displayBackend(i)?.header).filter((h): h is string => h !== undefined))].sort().map((h) => `#include "${h}"`),
+    ...(insts.some((i) => i.service.settings) ? ['#include "fr/platform/nvs_settings.hpp"'] : []),
     '',
     'namespace fr::board {',
     '',
@@ -2373,9 +2393,19 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
     if (i.store) {
       lines.push(`${i.store.driver.class} store{kStoreConfig};`);
     }
+    if (i.service.settings) {
+      // Design scale-round-c1 D6: the state the service keeps across reboots, in its NVS namespace.
+      lines.push(`fr::platform::NvsSettings settings{"${i.service.settings}"};`);
+    }
     // The service takes its driver, then the renderer (a panel), then its store's address (design camera-c1 §10:
-    // nullptr when the profile names none), then its config.
-    const args = ['driver', ...(backend ? ['backend'] : []), ...(i.service.store ? [i.store ? '&store' : 'nullptr'] : []), ...(hasConfig ? ['kConfig'] : [])];
+    // nullptr when the profile names none), then its settings, then its config.
+    const args = [
+      'driver',
+      ...(backend ? ['backend'] : []),
+      ...(i.service.store ? [i.store ? '&store' : 'nullptr'] : []),
+      ...(i.service.settings ? ['settings'] : []),
+      ...(hasConfig ? ['kConfig'] : []),
+    ];
     lines.push(`${i.service.service} service{${args.join(', ')}};`, '');
     lines.push(`}  // namespace ${ns}`, '');
   }

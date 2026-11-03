@@ -1,0 +1,19 @@
+# Driver manifest (design scale-round-c1 D8; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::Hx711Gpio::Config from the instance's multi-pin bind, `bind: { dout: gpio.<n>, sck: gpio.<n> }` (each in the
+# board's pins.free).
+schema: fractonica/driver@1
+id: hx711_gpio
+summary: An HX711 24-bit bridge ADC (a load cell) on two GPIOs; DOUT's falling edge wakes a task that clocks each conversion out with interrupts masked.
+implements: hal.LoadCell
+class: fr::drv::Hx711Gpio               # header: include/fr/drv/hx711_gpio.hpp
+targets: [esp32c6, esp32c3, esp32s3]
+binds: gpio                             # bare pins: bind { dout: gpio.<n>, sck: gpio.<n> } (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as Hx711Gpio::Config
+  dout: { type: gpio, from: bind.dout, doc: "the part's DOUT (DT): low when a conversion is ready" }
+  sck:  { type: gpio, from: bind.sck, doc: "the part's PD_SCK: the clock train; held high, the part powers down" }
+# fr.scale traits its service reports (resolution_bits(), max_rate_hz()): 24-bit codes, 80 conversions a second with
+# the part's RATE pin high (10 with it low; the firmware measures which: property rate_hz).
+traits: { resolution_bits: 24, max_rate_hz: 80 }
+resources: { gpio: 2 }
+dependencies: {}

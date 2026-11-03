@@ -523,10 +523,11 @@ function node(args: string[], env: Record<string, string>): Promise<{ code: numb
   });
 }
 
-/** Every target-tier gate module (spec 11 §11.1; T-VBAT since M2-C3, T-GW-LINK since M2-C4, T-DISPLAY since M2-C5, T-AUDIO since A1), what it needs, and one of its own flags its --help must name. */
+/** Every target-tier gate module (spec 11 §11.1; T-VBAT since M2-C3, T-GW-LINK since M2-C4, T-DISPLAY since M2-C5, T-AUDIO since A1, T-CAMERA since CAM-1, T-SCALE since SCALE-1), what it needs, and one of its own flags its --help must name. */
 const GATES = [
   ['t-agent.ts', 'T-AGENT', { human: true, usb: true }, '--since c:<run>.<seq>'],
   ['t-audio.ts', 'T-AUDIO', {}, '--voice'],
+  ['t-camera.ts', 'T-CAMERA', {}, '--card-frames 10'],
   ['t-codec.ts', 'T-CODEC', {}, '--cases 1000000'],
   ['t-display.ts', 'T-DISPLAY', { human: true }, '--no-human'],
   ['t-flood-b.ts', 'T-FLOOD-B', { usb: true }, '--router-off'],
@@ -540,6 +541,7 @@ const GATES = [
   ['t-ports.ts', 'T-PORTS', { human: true, usb: true }, '--no-reprovision'],
   ['t-pres.ts', 'T-PRES', { human: true, usb: true }, '--udp-block-s 30'],
   ['t-prov.ts', 'T-PROV', { usb: true }, '--allow-erase'],
+  ['t-scale.ts', 'T-SCALE', {}, '--known-g 500'],
   ['t-vbat.ts', 'T-VBAT', { human: true }, '--meter-mv'],
 ] as const;
 

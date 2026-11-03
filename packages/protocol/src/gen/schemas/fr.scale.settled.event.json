@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.scale.settled.event",
+  "title": "fr.scale.settled event",
+  "description": "The weight became stable at least settle_min_mg away from the last settled weight: something was put on or taken off.",
+  "type": "object",
+  "properties": {
+    "weight_mg": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647,
+      "description": "(mg)"
+    },
+    "delta_mg": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647,
+      "description": "from the last settled weight (the first after boot: from 0) (mg)"
+    }
+  },
+  "additionalProperties": false
+}

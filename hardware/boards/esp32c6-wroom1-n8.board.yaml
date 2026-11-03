@@ -1,0 +1,48 @@
+schema: fractonica/board@1
+id: esp32c6-wroom1-n8
+name: ESP32-C6 board on an ESP32-C6-WROOM-1-N8 module (8 MB flash, the scale board)
+# SCALE-1 / ROUND-1 (design scale-round-c1 §0, D1). Read with esptool on 2026-11-03: ESP32-C6 (QFN40) rev v0.2,
+# 40 MHz crystal, 8 MB external flash (manufacturer 0x68), no PSRAM, USB-Serial/JTAG. A QFN40 C6 with 8 MB external
+# flash is the WROOM-1-N8 module (inferred); the carrier (Espressif's DevKitC-1, MuseLab's nanoESP32-C6 N8, ...) is not
+# known yet, so the LED is inferred from both (GPIO8) and the headers are not recorded. The scale's HX711 and the round
+# GC9A01 display are wired to free pins and bound in the profile (c6w-scale), as mic-s3's INMP441 is.
+idf_target: esp32c6
+flash: { size: 8MB, mode: dio, part_profile: fr-4mb-v1 }
+psram: null
+usb: { kind: usb_serial_jtag, vid: 0x303A, pid: 0x1001, bcd_device: 0x0102, serial_is_mac: true, pins: [12, 13] }
+console: usb_serial_jtag
+buttons:
+  boot: { gpio: 9, active_level: low, pull: external, strapping: true, deep_sleep_wake: false, confidence: M }
+leds:
+  # Inferred: GPIO8 on Espressif's C6 DevKitC-1 and on MuseLab's nanoESP32-C6; the bench blinks it to confirm.
+  rgb: { gpio: 8, kind: ws2812, color_order: GRB, count: 1, strapping: true, confidence: L }
+pins:
+  # 16/17: UART0 (the ROM log; a bridge chip on carriers that have one); 24-30: the module's SPI flash.
+  reserved: { usb: [12, 13], uart0: [16, 17], flash: [24, 25, 26, 27, 28, 29, 30] }
+  strapping: [4, 5, 8, 9, 15]
+  # As on every C6 (spec 04 §4.1): GPIO9 low selects download mode, which needs GPIO8 high; 4, 5 (SDIO timing) and
+  # 15 (JTAG source) matter only with non-default eFuses.
+  strapping_levels: { 4: none, 5: none, 8: high, 9: high, 15: none }
+  # The module's GPIOs less USB, UART0, flash and the strapping pins the carrier uses (8 LED, 9 BOOT). 6 and 7 are
+  # JTAG's MTCK/MTDO, free while USB-Serial/JTAG carries the console. In use on the bench: 2, 6, 7, 10 (the display),
+  # 18, 23 (the HX711).
+  free: [0, 1, 2, 3, 6, 7, 10, 11, 14, 18, 19, 20, 21, 22, 23]
+  adc1: [0, 1, 2, 3, 4, 5, 6]
+# headers: not recorded (the carrier is not identified); en_access unknown.
+boot_uart_tx: 16              # U0TXD: the ROM log prints on it at every boot
+en_access: null
+rf: { max_tx_power_qdbm: null, antenna: pcb }
+test_pin: null
+resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1, spi_host: 1, adc1_channel: 7, i2s: 1 }   # ADC1: GPIO0-6; spi_host: SPI2 (the round panel's)
+defaults:
+  boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb }
+detection:
+  # Same USB IDs as every C6 on USB-Serial/JTAG; esptool tells them apart (the nanoESP32-C6 N4 is the same chip with
+  # 4 MB, the Super Mini a QFN32 C6FH4).
+  usb: { vid: 0x303A, pid: 0x1001, bcd_device: 0x0102 }
+  esptool: { chip_type: '^ESP32-C6 \(QFN40\)', flash_size: 8MB }
+  probe: { leds: [rgb] }
+sources:
+  - https://documentation.espressif.com/esp32-c6_datasheet_en.pdf
+  - https://documentation.espressif.com/esp32-c6-wroom-1_wroom-1u_datasheet_en.pdf

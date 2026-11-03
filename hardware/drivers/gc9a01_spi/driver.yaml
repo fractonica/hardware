@@ -1,0 +1,29 @@
+# Driver manifest (design scale-round-c1 D3; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::Gc9a01Spi::Config from the instance's multi-pin bind, `bind: { sclk: gpio.<n>, mosi: gpio.<n>, dc: gpio.<n>
+# [, cs: gpio.<n>][, rst: gpio.<n>] }` (each in the board's pins.free): a module wired to free pins, no board section.
+schema: fractonica/driver@1
+id: gc9a01_spi
+summary: GC9A01 round RGB565 panel (240x240) on an SPI master (DMA), no backlight control; rendered through LVGL.
+implements: hal.Display
+class: fr::drv::Gc9a01Spi               # header: include/fr/drv/gc9a01_spi.hpp
+targets: [esp32c6, esp32s3, esp32c3]
+binds: gpio                             # bare pins: bind { sclk, mosi, cs?, dc, rst? } (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as Gc9a01Spi::Config
+  sclk:    { type: gpio, from: bind.sclk, doc: "the module's SCL" }
+  mosi:    { type: gpio, from: bind.mosi, doc: "the module's SDA" }
+  cs:      { type: gpio, from: bind.cs, optional: true, doc: "absent: CS tied low on the module (its R8)" }
+  dc:      { type: gpio, from: bind.dc }
+  rst:     { type: gpio, from: bind.rst, optional: true, doc: "absent: power-up reset and SWRESET at init" }
+  width:   { type: u16, default: 240, range: [1, 240], doc: "native (rotation 0) pixels" }
+  height:  { type: u16, default: 240, range: [1, 240] }
+  spi_mhz: { type: u8, default: 40, range: [1, 80], doc: "the datasheet's write cycle is 100 ns (10 MHz); 40 is common practice on these modules (inferred, the bench checks)" }
+  # Colours (design scale-round-c1 D3, §7: both inferred, the bench checks white is white and red is red).
+  invert:  { type: bool, default: true, doc: "INVON at init (these panels need it for true colours); false: INVOFF" }
+  bgr:     { type: bool, default: true, doc: "MADCTL BGR bit: the panel's colour filter is BGR" }
+# fr.display traits its service reports (design scale-round-c1 D3, D5): RGB565 through the LVGL backend (fr_ui), and
+# the visible area is the circle inscribed in width x height.
+traits: { color: rgb565, ui: true, round: true }
+# gpio counts every pin field (cs and rst included, claimed only when bound); no LEDC: there is no backlight pin.
+resources: { gpio: 5, spi_host: 1 }
+dependencies: {}
