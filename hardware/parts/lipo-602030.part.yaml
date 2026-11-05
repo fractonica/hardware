@@ -1,0 +1,18 @@
+schema: fractonica/part@1
+id: lipo-602030
+name: LiPo pouch cell 3.7 V, 30 × 20 × 6 mm
+category: cell
+summary: Single-cell lithium-polymer pouch, about 250–300 mAh, usually with a small protection board on its leads.
+specs:
+  nominal: 3.7 V
+  full: 4.2 V
+  floor: 3.0 V (the firmware's floor for liion)
+  capacity: about 250–300 mAh
+  size: 30 × 20 × 6 mm ("602030")
+inferred: [capacity]
+pins:
+  - { name: "+ (red)", desc: cell + }
+  - { name: "− (black)", desc: cell − }
+notes:
+  - "Never short it; never solder directly onto the pouch."
+  - "Register it in the hub (fr cell add) to learn its real capacity with a test-load run."

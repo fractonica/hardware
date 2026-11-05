@@ -31,6 +31,8 @@ import { INVENTORY_HANDLERS } from './registry/catalog-ops.ts';
 import { type FlashStartInput, startFlash } from './registry/flashing.ts';
 import { isDeviceId, registryOf, resolvePort } from './registry/hub.ts';
 import { REGISTRY_HANDLERS } from './registry/ops.ts';
+import { POWER_HANDLERS } from './power/ops.ts';
+import { WIRING_HANDLERS } from './wiring/ops.ts';
 import { SCALE_HANDLERS } from './scale/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
 import { routerStatus } from './router/index.ts';
@@ -582,4 +584,8 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...CAMERA_HANDLERS,
   // SCALE-1 (design scale-round-c1 D10): scale_status, scale_read, scale_tare, scale_calibrate, scale_reset_calibration, scale_watch.
   ...SCALE_HANDLERS,
+  // POWER-1 (design power-p1 D11): battery_*, cell_*, haptic_*.
+  ...POWER_HANDLERS,
+  // WIRING-1 (design wiring-w1 D3): wiring_*, part_*.
+  ...WIRING_HANDLERS,
 };

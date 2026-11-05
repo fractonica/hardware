@@ -79,6 +79,12 @@ export interface ServiceFacts {
    * driver (and the store); the service keys its values by its port.
    */
   settings?: string;
+  /**
+   * Another instance the service draws on (design power-p1 D6: fr.haptic's supply, an fr.battery): its config entry
+   * `config` names that instance (empty: none), which must be one of capability `cap`; the glue calls
+   * `service.<method>(<that instance's service>)` before init.
+   */
+  peer?: { config: string; cap: string; method: string };
 }
 
 /**
@@ -196,6 +202,28 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
     header: 'fr/services/scale_service.hpp',
     timers: 1,
     settings: 'fr_scale',
+  },
+  // Design power-p1 D2-D5: one timer (the 10 Hz sample, the load's end, the inject hold); the divider calibration kept
+  // in NVS namespace fr_battery. The traits say what the bind wired: both status pins, a test load, a charge gate.
+  'fr.battery': {
+    implements: 'hal.PowerCell',
+    service: 'fr::BatteryService',
+    header: 'fr/services/battery_service.hpp',
+    timers: 1,
+    settings: 'fr_battery',
+    traits: (_c, { driverConfig }) => {
+      const wired = (k: string) => driverConfig[k] !== undefined && Number(driverConfig[k]) >= 0;
+      return { status_pins: wired('chrg') && wired('stdby'), test_load: wired('load'), charge_gate: wired('gate') };
+    },
+  },
+  // Design power-p1 D6, D7: one timer (the program's steps and the 10 ms compensation); pwm from driver.yaml `traits:`;
+  // config `supply` names the fr.battery instance it draws from (ServiceFacts.peer).
+  'fr.haptic': {
+    implements: 'hal.HapticOutput',
+    service: 'fr::HapticService',
+    header: 'fr/services/haptic_service.hpp',
+    timers: 1,
+    peer: { config: 'supply', cap: 'fr.battery', method: 'bind_supply' },
   },
 };
 
@@ -609,6 +637,16 @@ const RawDriverField = z.strictObject({
    * is -1 in the Config, and no pin is claimed. resources.gpio still counts the field.
    */
   optional: z.boolean().optional(),
+  /**
+   * The pin an ADC1 channel samples (design power-p1 D4: tp4056's sense among its status and output pins): with any
+   * field marked, only those pins must be in the board's pins.adc1; without, every pin of a driver drawing adc1_channel.
+   */
+  adc1: z.boolean().optional(),
+  /**
+   * A pin that switches a load (design power-p1 review m6: haptic_ledc's out, tp4056's load and gate): it must be off
+   * from power-up, so it may not sit on a board pin that drives a level at power-up (pins.power_up_glitch).
+   */
+  output: z.boolean().optional(),
   /** Inclusive bounds of an integer field (design audio-a2 D2: adc_audio's oversample 1..8), for its default and a profile. */
   range: z.tuple([int, int]).optional(),
   default: jsonScalar.optional(),
@@ -633,6 +671,11 @@ const RawDriver = z.strictObject({
   /** Kconfig lines for sdkconfig.board of every profile that binds the driver (design m2-c1-hil D5). */
   sdkconfig: z.array(z.string().regex(/^CONFIG_[A-Z0-9_]+=\S.*$/, 'expected CONFIG_<NAME>=<value>')).optional(),
   dependencies: z.record(z.string(), z.string()).optional(),
+  /**
+   * Other driver components this one builds on (design power-p1 D4: tp5000 is tp4056's ChargerGpio): they go on the
+   * component path and the composition root's PRIV_REQUIRES with it.
+   */
+  uses: z.array(ident).optional(),
 });
 export type DriverManifest = z.infer<typeof RawDriver>;
 
@@ -1212,6 +1255,17 @@ function checkCapValue(e: Pick<ConfigEntry, 'type' | 'typeName' | 'range'>, v: u
   if (t.kind === 'enum') {
     return typeof v === 'string' && t.def.members.some((m) => m.name === v) ? null : `expected one of ${t.def.members.map((m) => m.name).join(', ')}, got ${JSON.stringify(v)}`;
   }
+  // A string (design power-p1 D6: fr.haptic's supply, an instance name): printable ASCII without quotes or backslashes,
+  // so the C++ literal needs no escaping.
+  if (t.kind === 'string') {
+    if (typeof v !== 'string') {
+      return `expected a string, got ${JSON.stringify(v)}`;
+    }
+    if (v.length > t.max) {
+      return `${JSON.stringify(v)} is longer than ${t.max} characters`;
+    }
+    return /^[\x20-\x7e]*$/.test(v) && !/["\\]/.test(v) ? null : `${JSON.stringify(v)}: printable ASCII only, no quotes or backslashes`;
+  }
   if (t.kind !== 'scalar') {
     return `${e.typeName} config is not settable from a profile`;
   }
@@ -1257,6 +1311,9 @@ function capLiteral(cap: Capability, e: ConfigEntry, v: CapValue): string {
   if (t.kind === 'enum') {
     return `fr::cap::${cap.pascalName}${t.def.name}::${cppIdent(String(v))}`;
   }
+  if (t.kind === 'string') {
+    return JSON.stringify(String(v)); // checkCapValue allowed nothing that needs escaping
+  }
   if (typeof v === 'boolean') {
     return v ? 'true' : 'false';
   }
@@ -1290,6 +1347,10 @@ interface ResolvedInstance {
   entryPins: number[];
   /** GPIOs of its gpio_mask fields (GPIO_MASK): driven at a fixed level by the driver, not claimed. */
   heldPins: number[];
+  /** The pins of driver fields marked `adc1` (design power-p1 D4); empty: the ADC1 rule covers every pin. */
+  adcPins: number[];
+  /** The pins of driver fields marked `output` (design power-p1 review m6): never on a power-up glitch pin. */
+  outPins: number[];
   /** The service's store (ServiceFacts.store), when the profile names one. */
   store: ResolvedStore | null;
 }
@@ -1701,6 +1762,8 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     const pins: number[] = [];
     const entryPins: number[] = [];
     const heldPins: number[] = [];
+    const adcPins: number[] = [];
+    const outPins: number[] = [];
     for (const [fname, field] of Object.entries(driverFields)) {
       // `from: bind` is the pin of the gpio.<n> bind, which the profile cannot override (design m2-c1-hil D5).
       if (field.from === 'bind') {
@@ -1711,6 +1774,9 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         } else {
           driverConfig.push({ name: fname, field, value: bindPin });
           pins.push(bindPin);
+          if (field.output) {
+            outPins.push(bindPin);
+          }
         }
         continue;
       }
@@ -1723,6 +1789,12 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         } else if (pin !== undefined) {
           driverConfig.push({ name: fname, field, value: pin });
           pins.push(pin);
+          if (field.adc1) {
+            adcPins.push(pin);
+          }
+          if (field.output) {
+            outPins.push(pin);
+          }
         } else if (field.optional) {
           driverConfig.push({ name: fname, field, value: -1 });
         } else if (bindMap) {
@@ -1891,7 +1963,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     }
 
     if (ok && cap && service) {
-      out.push({ name, port: 0, bind: bindText, bare: bindMap !== null || bindPin !== undefined, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins, store });
+      out.push({ name, port: 0, bind: bindText, bare: bindMap !== null || bindPin !== undefined, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins, adcPins, outPins, store });
     }
   }
 
@@ -1934,7 +2006,11 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         issues.add(pf, where, `GPIO${pin} (${bind}) is already claimed by '${other}'`);
       }
       claimed.set(pin, inst.name);
-      if (barePin && strapping.has(pin)) {
+      // A strapping pin that needs no level at reset (pins.strapping_levels `none`: the C6's GPIO4/5 with default
+      // eFuses) may take a bare bind, with the warning (design power-p1 D1: scale-c6's solenoid on GPIO5, a 10 kOhm
+      // pull-down keeping its output off through reset); every other strapping pin stays refused.
+      const strapLevel = board.pins.strapping_levels?.[String(pin)];
+      if (barePin && strapping.has(pin) && strapLevel !== 'none') {
         issues.add(pf, where, `GPIO${pin} (${bind}) is a strapping pin; a gpio.<n> bind may not use one`);
       } else if (strapping.has(pin)) {
         issues.warnings.push(strapWarning(inst.name, pin, bind, board.pins.strapping_levels?.[String(pin)]));
@@ -1945,7 +2021,12 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
       if (typeof drive === 'string' && DRIVING.includes(drive) && !GLITCH_EXEMPT_DRIVES.includes(drive) && glitch.has(pin)) {
         issues.add(pf, where, `GPIO${pin} (${bind}) drives a level at power-up (pins.power_up_glitch), so no line with drive ${drive} may use it`);
       }
-      if (bind === inst.bind && (inst.driver.resources?.[ADC1_RESOURCE] ?? 0) > 0) {
+      if (bind === inst.bind && inst.outPins.includes(pin) && glitch.has(pin)) {
+        issues.add(pf, where, `GPIO${pin} (${bind}) drives a level at power-up (pins.power_up_glitch); driver ${inst.driver.id} switches a load on it, which must stay off from power-up`);
+      }
+      // With fields marked adc1 (design power-p1 D4) only their pins sample ADC1; else every pin of the bind does.
+      const sampled = inst.adcPins.length > 0 ? inst.adcPins.includes(pin) : true;
+      if (bind === inst.bind && sampled && (inst.driver.resources?.[ADC1_RESOURCE] ?? 0) > 0) {
         if (pin === batteryPin) {
           issues.add(pf, where, `GPIO${pin} (${bind}) is the battery input of ${board.id} (battery.gpio); driver ${inst.driver.id} may not sample it`);
         } else if (adc2.includes(pin)) {
@@ -2076,6 +2157,44 @@ function bindTouch(profile: string, insts: ResolvedInstance[], issues: Issues): 
 }
 
 /**
+ * A service's peer once ports are known (design power-p1 D6: fr.haptic's `supply`): the config entry names an instance
+ * of the profile of the peer's capability, or is empty (none). The traits record it as that instance's port.
+ */
+function bindPeers(profile: string, insts: ResolvedInstance[], issues: Issues): void {
+  const pf = profileFile(profile);
+  for (const i of insts) {
+    const peer = i.service.peer;
+    if (!peer) {
+      continue;
+    }
+    const name = String(i.capConfig.find((c) => c.entry.name === peer.config)?.value ?? '');
+    if (name === '') {
+      // A solenoid with no supply has no protection and no compensation (design power-p1 review m6).
+      if (i.cap.name === 'fr.haptic' && i.capConfig.find((c) => c.entry.name === 'kind')?.value === 'solenoid') {
+        issues.warnings.push(`${i.name}: a solenoid with no ${peer.config}: nothing refuses or cuts it on a low cell`);
+      }
+      continue;
+    }
+    const other = insts.find((x) => x.name === name);
+    const at = ['caps', i.name, 'config', peer.config];
+    if (!other || other.cap.name !== peer.cap) {
+      const of = insts.filter((x) => x.cap.name === peer.cap).map((x) => x.name);
+      issues.add(pf, at, `${other ? `'${name}' is an ${other.cap.name} instance` : `no instance '${name}' in this profile`}; ${peer.config} names an ${peer.cap} instance (${of.join(', ') || 'none in this profile'})`);
+    }
+  }
+}
+
+/** The instance a service's peer names (bindPeers checked it), or undefined. */
+function peerOf(i: ResolvedInstance, insts: readonly ResolvedInstance[]): ResolvedInstance | undefined {
+  const peer = i.service.peer;
+  if (!peer) {
+    return undefined;
+  }
+  const name = String(i.capConfig.find((c) => c.entry.name === peer.config)?.value ?? '');
+  return insts.find((x) => x.name === name && x.cap.name === peer.cap);
+}
+
+/**
  * The I2S controllers once ports are known (design audio-a1 D6). An `instance` field names another instance of the
  * profile and becomes its port. `share_with` on an instance drawing an I2S controller (the follower) puts it on its
  * partner's controller in shared-clock duplex: the follower binds no bclk or ws (it takes the partner's, unclaimed),
@@ -2198,7 +2317,8 @@ function header(profile: string): string {
 
 /** The driver components a profile binds, main drivers and stores alike (design camera-c1 §10), sorted. */
 function driverIdsOf(insts: readonly ResolvedInstance[]): string[] {
-  return [...new Set(insts.flatMap((i) => [i.driver.id, ...(i.store ? [i.store.driver.id] : [])]))].sort();
+  // A driver's `uses` (design power-p1 D4) come along: their components hold its code.
+  return [...new Set(insts.flatMap((i) => [i.driver.id, ...(i.driver.uses ?? []), ...(i.store ? [i.store.driver.id, ...(i.store.driver.uses ?? [])] : [])]))].sort();
 }
 
 function emitComponentCmake(profile: string, insts: ResolvedInstance[]): string {
@@ -2440,6 +2560,13 @@ function emitBoardCpp(inp: Inputs, insts: ResolvedInstance[], driverIds: string[
         lines.push(`    inst_${panel.name}::service.bind_touch(inst_${t.name}::service);`);
       }
     }
+    // Design power-p1 D6: a service's peer (fr.haptic's supply) before init.
+    for (const i of insts) {
+      const p = peerOf(i, insts);
+      if (p && i.service.peer) {
+        lines.push(`    inst_${i.name}::service.${i.service.peer.method}(inst_${p.name}::service);`);
+      }
+    }
     insts.forEach((i, n) => lines.push(`    s_init[${n}] = inst_${i.name}::service.init(core);`));
     lines.push('    for (const Status &s : s_init) {', '        if (!s) {', '            return s;', '        }', '    }', '    return {};');
   }
@@ -2536,6 +2663,7 @@ export function generateFirmware(opts: FirmwareOptions): FirmwareResult {
   }
   insts.sort((a, b) => a.port - b.port);
   bindTouch(opts.profile, insts, issues);
+  bindPeers(opts.profile, insts, issues);
   bindI2s(opts.profile, inp!.board, insts, issues);
   issues.throwIfAny();
 

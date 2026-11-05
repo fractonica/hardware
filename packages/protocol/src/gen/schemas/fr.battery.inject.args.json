@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.inject.args",
+  "title": "fr.battery.inject arguments",
+  "description": "Holds mv (and the charger state when charger_set) in place of the hardware for hold_ms (0 means 1,000; at most 60,000). Protection acts on injected values as on real ones.",
+  "type": "object",
+  "properties": {
+    "mv": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(mV)"
+    },
+    "charger": {
+      "type": "string",
+      "enum": [
+        "none",
+        "unplugged",
+        "charging",
+        "charged",
+        "no_cell",
+        "fault"
+      ]
+    },
+    "charger_set": {
+      "type": "boolean",
+      "description": "false: the charger keeps reading the pins"
+    },
+    "hold_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "mv": 2750
+    },
+    {
+      "mv": 3900,
+      "charger": "charging",
+      "charger_set": true,
+      "hold_ms": 5000
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+capability: fr.haptic
+id: 0x000E
+version: "1.0"
+summary: A vibration motor (ERM) or a solenoid on one switched output, compensated for and protected by the cell it draws from.
+doc: |
+  Design power-p1 D6-D7. The duty is level% x rated_mv / supply_mv (capped at 100 %), recomputed every 10 ms from the
+  supply's (an fr.battery instance named by `supply`) latest sample, so an ERM feels the same across the cell's range
+  and never sees more than its rating on average. A solenoid pulls in at 100 % for kick_ms, then holds at hold_pct.
+  `pulse` and `play` answer BUSY at or below the supply's critical voltage (a solenoid below critical + 300 mV), with
+  no fresh supply reading, or past the cooldown budget (cooldown_pct of any 10 s); a running one is stopped by the
+  supply falling to critical or its floor, or by max_on_ms of on-time without a break, with `cut`. A program started
+  while a hub session existed stops (no `cut`) 10 s after that hub's newest frame or at a new hub run.
+types:
+  Kind:      { enum: { erm: 0, solenoid: 1 } }
+  CutReason: { enum: { low_supply: 0, floor: 1, max_on: 2 } }
+traits:
+  pwm: { id: 1, type: bool, doc: "the output is PWM (level and compensation); else on/off only" }
+config:
+  kind:         { type: Kind, default: erm }
+  rated_mv:     { type: u16, default: 3000, unit: mV, doc: "the load's rated voltage: 100 % level averages this" }
+  supply:       { type: string, max: 16, doc: "the fr.battery instance it draws from; empty = none (no compensation, no protection)" }
+  max_on_ms:    { type: u16, default: 0, unit: ms, doc: "longest on-time without a break (steps that run into each other count as one); 0 = 10,000 for erm, 1,000 for solenoid" }
+  kick_ms:      { type: u16, default: 30, unit: ms, doc: "solenoid: full power for this long; at most max_on_ms" }
+  hold_pct:     { type: u8, default: 40, range: [1, 100], doc: "solenoid: the level after the kick" }
+  cooldown_pct: { type: u8, default: 0, range: [0, 100], doc: "most of any 10 s the load may be on; 0 = 100 for erm, 30 for solenoid" }
+properties:
+  active:    { id: 1, type: bool }
+  supply_mv: { id: 2, type: u16, unit: mV, doc: "the supply's voltage, reported while active and at its end" }
+events:
+  cut:
+    id: 1
+    priority: normal
+    doc: A running pulse or pattern was stopped by the supply or by max_on_ms.
+    fields: { reason: { id: 1, type: CutReason }, supply_mv: { id: 2, type: u16, unit: mV } }
+commands:
+  pulse:
+    id: 1
+    delivery: reliable
+    doc: "On for `ms` at `level` % (1-100, default 100), replacing whatever runs. BUSY at or below the supply's critical, or past the cooldown budget; INVALID_ARGS above max_on_ms."
+    fields: { ms: { id: 1, type: u16, unit: ms }, level: { id: 2, type: u8, default: 100, range: [1, 100] } }
+    examples: [ { ms: 200 }, { ms: 500, level: 60 } ]
+  play:
+    id: 2
+    delivery: reliable
+    doc: "A pattern: steps are on, off, on, off... in ms (at most 32), played `repeat` times (default 1), replacing whatever runs. BUSY as pulse; INVALID_ARGS for no steps or an on-step above max_on_ms, and for a solenoid a zero off-step or an odd number of steps with repeat > 1."
+    fields:
+      steps:  { id: 1, type: "array<u16>", max: 32 }
+      level:  { id: 2, type: u8, default: 100, range: [1, 100] }
+      repeat: { id: 3, type: u8, default: 1, range: [1, 100] }
+    examples: [ { steps: [100, 80, 100] }, { steps: [40, 40], level: 70, repeat: 5 } ]
+  stop:
+    id: 3
+    delivery: reliable
+    idempotent: true
+    doc: Off now; OK when nothing runs.

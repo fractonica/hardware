@@ -1,0 +1,107 @@
+capability: fr.battery
+id: 0x000D
+version: "1.0"
+summary: A rechargeable cell (Li-ion, LiFePO4 or a lithium-ion capacitor) - its voltage, its charger's state, levels and a floor the node enforces.
+doc: |
+  Design power-p1 D2-D5. `mv` is a LATEST property reported at most `report_hz` times a second when it moved at least
+  `deadband_mv`; `charger` and `level` change with reliable events (`charge`, `level_change`) so they are never missed. The
+  node samples 10 times a second whatever report_hz is, and protects the cell on its own: at `floor_mv` the test load
+  goes off, every fr.haptic drawing from this instance stops and `protect` fires; fr.haptic refuses to start at or
+  below `critical_mv`. The voltages default by chemistry (0 = the chemistry's value): liion 4200/3500/3300/3000,
+  lifepo4 3600/3000/2800/2500, lic 4000/3000/2800/2700 (full/low/critical/floor); full_mv above the chemistry's
+  maximum (4250/3650/4200) is refused. `calibrate` takes a multimeter reading and keeps the divider in NVS until
+  `reset_calibration`. Ten failed readings in a row make the reading stale: the test load goes off and loads are
+  refused until one succeeds. While an inject holds, levels follow the lower of the held and the real voltage.
+types:
+  Chemistry: { enum: { liion: 0, lifepo4: 1, lic: 2 } }
+  ChargerMode: { enum: { none: 0, unplugged: 1, charging: 2, charged: 3, no_cell: 4, fault: 5 } }
+  CellLevel: { enum: { ok: 0, low: 1, critical: 2, empty: 3 } }
+  ProtectReason: { enum: { floor: 0, ceiling: 1 } }
+traits:
+  status_pins: { id: 1, type: bool, doc: "CHRG and STDBY are wired (else charger is always none)" }
+  test_load:   { id: 2, type: bool, doc: "a switched test load is wired (the load command)" }
+  charge_gate: { id: 3, type: bool, doc: "a charge gate is wired (the gate command, charge_to_mv)" }
+config:
+  chemistry:     { type: Chemistry, default: liion }
+  full_mv:       { type: u16, default: 0, unit: mV, doc: "100 %; 0 = the chemistry's" }
+  low_mv:        { type: u16, default: 0, unit: mV, doc: "level low below this; 0 = the chemistry's" }
+  critical_mv:   { type: u16, default: 0, unit: mV, doc: "level critical below this, loads refused; 0 = the chemistry's" }
+  floor_mv:      { type: u16, default: 0, unit: mV, doc: "level empty below this, loads cut; 0 = the chemistry's" }
+  divider_milli: { type: u16, default: 2000, range: [1000, 20000], doc: "the sense divider x1000 until a calibration is made" }
+  charge_to_mv:  { type: u16, default: 0, unit: mV, doc: "with a gate: charging stops here; 0 = full_mv" }
+  load_ohm:      { type: u16, default: 0, unit: ohm, doc: "the test load's resistance, for the hub's capacity arithmetic; 0 = unknown" }
+  report_hz:     { type: u8, default: 1, range: [1, 10], unit: Hz }
+  deadband_mv:   { type: u16, default: 5, unit: mV }
+properties:
+  mv:      { id: 1, type: u16, unit: mV, doc: "calibrated, 8 conversions, EMA 1/4" }
+  percent: { id: 2, type: u8, doc: "from the chemistry's table (the hub refines it from a cell's learned curve)" }
+  charger: { id: 3, type: ChargerMode }
+  level:   { id: 4, type: CellLevel, doc: "50 mV hysteresis upward" }
+  load_on:   { id: 5, type: bool, doc: "the test load is on" }
+  gate_open: { id: 6, type: bool, doc: "the charge gate is open" }
+events:
+  charge:
+    id: 1
+    priority: normal
+    doc: The charger's state changed (held 300 ms before it counts).
+    fields: { state: { id: 1, type: ChargerMode }, mv: { id: 2, type: u16, unit: mV } }
+  level_change:
+    id: 2
+    priority: normal
+    doc: The level changed (low, critical, empty, or back to ok).
+    fields: { level: { id: 1, type: CellLevel }, mv: { id: 2, type: u16, unit: mV } }
+  protect:
+    id: 3
+    priority: realtime
+    doc: "The node cut loads at the floor (floor) or closed the gate above full (ceiling) on its own."
+    fields: { reason: { id: 1, type: ProtectReason }, mv: { id: 2, type: u16, unit: mV } }
+commands:
+  read:
+    id: 1
+    delivery: reliable
+    doc: The last sample and the calibration in use. Never touches the ADC.
+    result:
+      mv:            { id: 1, type: u16, unit: mV }
+      adc_mv:        { id: 2, type: u16, unit: mV, doc: "at the pin, before the divider" }
+      percent:       { id: 3, type: u8 }
+      charger:       { id: 4, type: ChargerMode }
+      level:         { id: 5, type: CellLevel }
+      divider_milli: { id: 6, type: u16 }
+      calibrated:    { id: 7, type: bool }
+      load:          { id: 8, type: bool }
+      gate:          { id: 9, type: bool }
+      injected:      { id: 10, type: bool }
+  calibrate:
+    id: 2
+    delivery: reliable
+    doc: "The divider becomes meter_mv / adc_mv (a multimeter on the cell), kept across reboots. BUSY with no sample yet; INVALID_ARGS when the result is more than 15 % from config divider_milli (a typo in the reading)."
+    fields: { meter_mv: { id: 1, type: u16, unit: mV } }
+    result: { divider_milli: { id: 1, type: u16 }, adc_mv: { id: 2, type: u16, unit: mV } }
+    examples: [ { meter_mv: 3912 } ]
+  reset_calibration:
+    id: 3
+    delivery: reliable
+    idempotent: true
+    doc: Config divider_milli again; the kept calibration is erased.
+  load:
+    id: 4
+    delivery: reliable
+    doc: "The test load on for at most `seconds` (0 means 60), or off; while it is on, `on` renews its time at any level above empty. It also goes off at the floor, on a stale reading, at boot, and 60 s after the newest frame of the hub that turned it on (or at a new hub run). UNSUPPORTED without a load; BUSY turning it on at or below critical."
+    fields: { on: { id: 1, type: bool }, seconds: { id: 2, type: u32, range: [0, 86400], unit: s } }
+    examples: [ { on: true, seconds: 600 }, { on: false } ]
+  gate:
+    id: 5
+    delivery: reliable
+    doc: "Opens or closes the charge gate by hand. An open gate still closes at charge_to_mv; a hand close stands until the charger's state changes. UNSUPPORTED without a gate; BUSY opening it at or above charge_to_mv."
+    fields: { open: { id: 1, type: bool } }
+  inject:
+    id: 6
+    visibility: test
+    delivery: reliable
+    doc: "Holds mv (and the charger state when charger_set) in place of the hardware for hold_ms (0 means 1,000; at most 60,000). Protection acts on injected values as on real ones."
+    fields:
+      mv:          { id: 1, type: u16, unit: mV }
+      charger:     { id: 2, type: ChargerMode }
+      charger_set: { id: 3, type: bool, doc: "false: the charger keeps reading the pins" }
+      hold_ms:     { id: 4, type: u16 }
+    examples: [ { mv: 2750 }, { mv: 3900, charger: charging, charger_set: true, hold_ms: 5000 } ]

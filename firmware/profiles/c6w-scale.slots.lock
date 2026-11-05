@@ -4,3 +4,7 @@ boot: 1
 status: 2
 round: 3
 scale: 4
+battery: 5
+cap: 6
+buzz: 7
+kick: 8

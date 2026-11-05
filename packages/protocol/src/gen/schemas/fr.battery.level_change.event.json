@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.level_change.event",
+  "title": "fr.battery.level_change event",
+  "description": "The level changed (low, critical, empty, or back to ok).",
+  "type": "object",
+  "properties": {
+    "level": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "low",
+        "critical",
+        "empty"
+      ]
+    },
+    "mv": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(mV)"
+    }
+  },
+  "additionalProperties": false
+}

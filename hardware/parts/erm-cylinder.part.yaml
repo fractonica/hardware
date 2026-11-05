@@ -1,0 +1,12 @@
+schema: fractonica/part@1
+id: erm-cylinder
+name: Cylinder vibration motor (ERM) with JST lead
+category: actuator
+summary: Small cylinder ERM with an off-centre weight, 3 V, about 80–120 mA.
+specs: { rated: 3 V, current: about 80–120 mA }
+inferred: [rated, current]
+pins:
+  - { name: "red", desc: + }
+  - { name: "black", desc: − }
+notes:
+  - "Swaps in for the coin motor on the same transistor (adjust rated_mv if its rating differs)."

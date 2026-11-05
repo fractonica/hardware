@@ -1,0 +1,8 @@
+schema: fractonica/part@1
+id: resistor
+name: Resistor
+category: passive
+summary: A through-hole resistor, 1/4 W.
+values: ["470 Ω", "10 kΩ", "1 MΩ"]
+specs: { power: 0.25 W, tolerance: 1 % }
+inferred: [tolerance]

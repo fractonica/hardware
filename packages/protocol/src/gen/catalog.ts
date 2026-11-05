@@ -3052,6 +3052,647 @@ export const CATALOG: Catalog = {
       ]
     },
     {
+      "id": 13,
+      "name": "fr.battery",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "A rechargeable cell (Li-ion, LiFePO4 or a lithium-ion capacitor) - its voltage, its charger's state, levels and a floor the node enforces.",
+      "doc": "Design power-p1 D2-D5. `mv` is a LATEST property reported at most `report_hz` times a second when it moved at least\n`deadband_mv`; `charger` and `level` change with reliable events (`charge`, `level_change`) so they are never missed. The\nnode samples 10 times a second whatever report_hz is, and protects the cell on its own: at `floor_mv` the test load\ngoes off, every fr.haptic drawing from this instance stops and `protect` fires; fr.haptic refuses to start at or\nbelow `critical_mv`. The voltages default by chemistry (0 = the chemistry's value): liion 4200/3500/3300/3000,\nlifepo4 3600/3000/2800/2500, lic 4000/3000/2800/2700 (full/low/critical/floor); full_mv above the chemistry's\nmaximum (4250/3650/4200) is refused. `calibrate` takes a multimeter reading and keeps the divider in NVS until\n`reset_calibration`. Ten failed readings in a row make the reading stale: the test load goes off and loads are\nrefused until one succeeds. While an inject holds, levels follow the lower of the held and the real voltage.\n",
+      "types": {
+        "Chemistry": {
+          "liion": 0,
+          "lifepo4": 1,
+          "lic": 2
+        },
+        "ChargerMode": {
+          "none": 0,
+          "unplugged": 1,
+          "charging": 2,
+          "charged": 3,
+          "no_cell": 4,
+          "fault": 5
+        },
+        "CellLevel": {
+          "ok": 0,
+          "low": 1,
+          "critical": 2,
+          "empty": 3
+        },
+        "ProtectReason": {
+          "floor": 0,
+          "ceiling": 1
+        }
+      },
+      "traits": [
+        {
+          "name": "status_pins",
+          "id": 1,
+          "type": "bool",
+          "doc": "CHRG and STDBY are wired (else charger is always none)"
+        },
+        {
+          "name": "test_load",
+          "id": 2,
+          "type": "bool",
+          "doc": "a switched test load is wired (the load command)"
+        },
+        {
+          "name": "charge_gate",
+          "id": 3,
+          "type": "bool",
+          "doc": "a charge gate is wired (the gate command, charge_to_mv)"
+        }
+      ],
+      "config": [
+        {
+          "name": "chemistry",
+          "type": "Chemistry",
+          "default": "liion"
+        },
+        {
+          "name": "full_mv",
+          "type": "u16",
+          "default": 0,
+          "unit": "mV",
+          "doc": "100 %; 0 = the chemistry's"
+        },
+        {
+          "name": "low_mv",
+          "type": "u16",
+          "default": 0,
+          "unit": "mV",
+          "doc": "level low below this; 0 = the chemistry's"
+        },
+        {
+          "name": "critical_mv",
+          "type": "u16",
+          "default": 0,
+          "unit": "mV",
+          "doc": "level critical below this, loads refused; 0 = the chemistry's"
+        },
+        {
+          "name": "floor_mv",
+          "type": "u16",
+          "default": 0,
+          "unit": "mV",
+          "doc": "level empty below this, loads cut; 0 = the chemistry's"
+        },
+        {
+          "name": "divider_milli",
+          "type": "u16",
+          "default": 2000,
+          "range": [
+            1000,
+            20000
+          ],
+          "doc": "the sense divider x1000 until a calibration is made"
+        },
+        {
+          "name": "charge_to_mv",
+          "type": "u16",
+          "default": 0,
+          "unit": "mV",
+          "doc": "with a gate: charging stops here; 0 = full_mv"
+        },
+        {
+          "name": "load_ohm",
+          "type": "u16",
+          "default": 0,
+          "unit": "ohm",
+          "doc": "the test load's resistance, for the hub's capacity arithmetic; 0 = unknown"
+        },
+        {
+          "name": "report_hz",
+          "type": "u8",
+          "default": 1,
+          "range": [
+            1,
+            10
+          ],
+          "unit": "Hz"
+        },
+        {
+          "name": "deadband_mv",
+          "type": "u16",
+          "default": 5,
+          "unit": "mV"
+        }
+      ],
+      "properties": [
+        {
+          "name": "mv",
+          "id": 1,
+          "type": "u16",
+          "unit": "mV",
+          "doc": "calibrated, 8 conversions, EMA 1/4"
+        },
+        {
+          "name": "percent",
+          "id": 2,
+          "type": "u8",
+          "doc": "from the chemistry's table (the hub refines it from a cell's learned curve)"
+        },
+        {
+          "name": "charger",
+          "id": 3,
+          "type": "ChargerMode"
+        },
+        {
+          "name": "level",
+          "id": 4,
+          "type": "CellLevel",
+          "doc": "50 mV hysteresis upward"
+        },
+        {
+          "name": "load_on",
+          "id": 5,
+          "type": "bool",
+          "doc": "the test load is on"
+        },
+        {
+          "name": "gate_open",
+          "id": 6,
+          "type": "bool",
+          "doc": "the charge gate is open"
+        }
+      ],
+      "commands": [
+        {
+          "name": "read",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The last sample and the calibration in use. Never touches the ADC.",
+          "fields": [],
+          "result": [
+            {
+              "name": "mv",
+              "id": 1,
+              "type": "u16",
+              "unit": "mV"
+            },
+            {
+              "name": "adc_mv",
+              "id": 2,
+              "type": "u16",
+              "unit": "mV",
+              "doc": "at the pin, before the divider"
+            },
+            {
+              "name": "percent",
+              "id": 3,
+              "type": "u8"
+            },
+            {
+              "name": "charger",
+              "id": 4,
+              "type": "ChargerMode"
+            },
+            {
+              "name": "level",
+              "id": 5,
+              "type": "CellLevel"
+            },
+            {
+              "name": "divider_milli",
+              "id": 6,
+              "type": "u16"
+            },
+            {
+              "name": "calibrated",
+              "id": 7,
+              "type": "bool"
+            },
+            {
+              "name": "load",
+              "id": 8,
+              "type": "bool"
+            },
+            {
+              "name": "gate",
+              "id": 9,
+              "type": "bool"
+            },
+            {
+              "name": "injected",
+              "id": 10,
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "name": "calibrate",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The divider becomes meter_mv / adc_mv (a multimeter on the cell), kept across reboots. BUSY with no sample yet; INVALID_ARGS when the result is more than 15 % from config divider_milli (a typo in the reading).",
+          "fields": [
+            {
+              "name": "meter_mv",
+              "id": 1,
+              "type": "u16",
+              "unit": "mV"
+            }
+          ],
+          "result": [
+            {
+              "name": "divider_milli",
+              "id": 1,
+              "type": "u16"
+            },
+            {
+              "name": "adc_mv",
+              "id": 2,
+              "type": "u16",
+              "unit": "mV"
+            }
+          ],
+          "examples": [
+            {
+              "meter_mv": 3912
+            }
+          ]
+        },
+        {
+          "name": "reset_calibration",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Config divider_milli again; the kept calibration is erased.",
+          "fields": []
+        },
+        {
+          "name": "load",
+          "id": 4,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The test load on for at most `seconds` (0 means 60), or off; while it is on, `on` renews its time at any level above empty. It also goes off at the floor, on a stale reading, at boot, and 60 s after the newest frame of the hub that turned it on (or at a new hub run). UNSUPPORTED without a load; BUSY turning it on at or below critical.",
+          "fields": [
+            {
+              "name": "on",
+              "id": 1,
+              "type": "bool"
+            },
+            {
+              "name": "seconds",
+              "id": 2,
+              "type": "u32",
+              "range": [
+                0,
+                86400
+              ],
+              "unit": "s"
+            }
+          ],
+          "examples": [
+            {
+              "on": true,
+              "seconds": 600
+            },
+            {
+              "on": false
+            }
+          ]
+        },
+        {
+          "name": "gate",
+          "id": 5,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Opens or closes the charge gate by hand. An open gate still closes at charge_to_mv; a hand close stands until the charger's state changes. UNSUPPORTED without a gate; BUSY opening it at or above charge_to_mv.",
+          "fields": [
+            {
+              "name": "open",
+              "id": 1,
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "name": "inject",
+          "id": 6,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "test",
+          "doc": "Holds mv (and the charger state when charger_set) in place of the hardware for hold_ms (0 means 1,000; at most 60,000). Protection acts on injected values as on real ones.",
+          "fields": [
+            {
+              "name": "mv",
+              "id": 1,
+              "type": "u16",
+              "unit": "mV"
+            },
+            {
+              "name": "charger",
+              "id": 2,
+              "type": "ChargerMode"
+            },
+            {
+              "name": "charger_set",
+              "id": 3,
+              "type": "bool",
+              "doc": "false: the charger keeps reading the pins"
+            },
+            {
+              "name": "hold_ms",
+              "id": 4,
+              "type": "u16"
+            }
+          ],
+          "examples": [
+            {
+              "mv": 2750
+            },
+            {
+              "mv": 3900,
+              "charger": "charging",
+              "charger_set": true,
+              "hold_ms": 5000
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "name": "charge",
+          "id": 1,
+          "priority": "normal",
+          "doc": "The charger's state changed (held 300 ms before it counts).",
+          "fields": [
+            {
+              "name": "state",
+              "id": 1,
+              "type": "ChargerMode"
+            },
+            {
+              "name": "mv",
+              "id": 2,
+              "type": "u16",
+              "unit": "mV"
+            }
+          ]
+        },
+        {
+          "name": "level_change",
+          "id": 2,
+          "priority": "normal",
+          "doc": "The level changed (low, critical, empty, or back to ok).",
+          "fields": [
+            {
+              "name": "level",
+              "id": 1,
+              "type": "CellLevel"
+            },
+            {
+              "name": "mv",
+              "id": 2,
+              "type": "u16",
+              "unit": "mV"
+            }
+          ]
+        },
+        {
+          "name": "protect",
+          "id": 3,
+          "priority": "realtime",
+          "doc": "The node cut loads at the floor (floor) or closed the gate above full (ceiling) on its own.",
+          "fields": [
+            {
+              "name": "reason",
+              "id": 1,
+              "type": "ProtectReason"
+            },
+            {
+              "name": "mv",
+              "id": 2,
+              "type": "u16",
+              "unit": "mV"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "name": "fr.haptic",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "A vibration motor (ERM) or a solenoid on one switched output, compensated for and protected by the cell it draws from.",
+      "doc": "Design power-p1 D6-D7. The duty is level% x rated_mv / supply_mv (capped at 100 %), recomputed every 10 ms from the\nsupply's (an fr.battery instance named by `supply`) latest sample, so an ERM feels the same across the cell's range\nand never sees more than its rating on average. A solenoid pulls in at 100 % for kick_ms, then holds at hold_pct.\n`pulse` and `play` answer BUSY at or below the supply's critical voltage (a solenoid below critical + 300 mV), with\nno fresh supply reading, or past the cooldown budget (cooldown_pct of any 10 s); a running one is stopped by the\nsupply falling to critical or its floor, or by max_on_ms of on-time without a break, with `cut`. A program started\nwhile a hub session existed stops (no `cut`) 10 s after that hub's newest frame or at a new hub run.\n",
+      "types": {
+        "Kind": {
+          "erm": 0,
+          "solenoid": 1
+        },
+        "CutReason": {
+          "low_supply": 0,
+          "floor": 1,
+          "max_on": 2
+        }
+      },
+      "traits": [
+        {
+          "name": "pwm",
+          "id": 1,
+          "type": "bool",
+          "doc": "the output is PWM (level and compensation); else on/off only"
+        }
+      ],
+      "config": [
+        {
+          "name": "kind",
+          "type": "Kind",
+          "default": "erm"
+        },
+        {
+          "name": "rated_mv",
+          "type": "u16",
+          "default": 3000,
+          "unit": "mV",
+          "doc": "the load's rated voltage: 100 % level averages this"
+        },
+        {
+          "name": "supply",
+          "type": "string",
+          "max": 16,
+          "doc": "the fr.battery instance it draws from; empty = none (no compensation, no protection)"
+        },
+        {
+          "name": "max_on_ms",
+          "type": "u16",
+          "default": 0,
+          "unit": "ms",
+          "doc": "longest on-time without a break (steps that run into each other count as one); 0 = 10,000 for erm, 1,000 for solenoid"
+        },
+        {
+          "name": "kick_ms",
+          "type": "u16",
+          "default": 30,
+          "unit": "ms",
+          "doc": "solenoid: full power for this long; at most max_on_ms"
+        },
+        {
+          "name": "hold_pct",
+          "type": "u8",
+          "default": 40,
+          "range": [
+            1,
+            100
+          ],
+          "doc": "solenoid: the level after the kick"
+        },
+        {
+          "name": "cooldown_pct",
+          "type": "u8",
+          "default": 0,
+          "range": [
+            0,
+            100
+          ],
+          "doc": "most of any 10 s the load may be on; 0 = 100 for erm, 30 for solenoid"
+        }
+      ],
+      "properties": [
+        {
+          "name": "active",
+          "id": 1,
+          "type": "bool"
+        },
+        {
+          "name": "supply_mv",
+          "id": 2,
+          "type": "u16",
+          "unit": "mV",
+          "doc": "the supply's voltage, reported while active and at its end"
+        }
+      ],
+      "commands": [
+        {
+          "name": "pulse",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "On for `ms` at `level` % (1-100, default 100), replacing whatever runs. BUSY at or below the supply's critical, or past the cooldown budget; INVALID_ARGS above max_on_ms.",
+          "fields": [
+            {
+              "name": "ms",
+              "id": 1,
+              "type": "u16",
+              "unit": "ms"
+            },
+            {
+              "name": "level",
+              "id": 2,
+              "type": "u8",
+              "default": 100,
+              "range": [
+                1,
+                100
+              ]
+            }
+          ],
+          "examples": [
+            {
+              "ms": 200
+            },
+            {
+              "ms": 500,
+              "level": 60
+            }
+          ]
+        },
+        {
+          "name": "play",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "A pattern: steps are on, off, on, off... in ms (at most 32), played `repeat` times (default 1), replacing whatever runs. BUSY as pulse; INVALID_ARGS for no steps or an on-step above max_on_ms, and for a solenoid a zero off-step or an odd number of steps with repeat > 1.",
+          "fields": [
+            {
+              "name": "steps",
+              "id": 1,
+              "type": "array<u16>",
+              "max": 32
+            },
+            {
+              "name": "level",
+              "id": 2,
+              "type": "u8",
+              "default": 100,
+              "range": [
+                1,
+                100
+              ]
+            },
+            {
+              "name": "repeat",
+              "id": 3,
+              "type": "u8",
+              "default": 1,
+              "range": [
+                1,
+                100
+              ]
+            }
+          ],
+          "examples": [
+            {
+              "steps": [
+                100,
+                80,
+                100
+              ]
+            },
+            {
+              "steps": [
+                40,
+                40
+              ],
+              "level": 70,
+              "repeat": 5
+            }
+          ]
+        },
+        {
+          "name": "stop",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "Off now; OK when nothing runs.",
+          "fields": []
+        }
+      ],
+      "events": [
+        {
+          "name": "cut",
+          "id": 1,
+          "priority": "normal",
+          "doc": "A running pulse or pattern was stopped by the supply or by max_on_ms.",
+          "fields": [
+            {
+              "name": "reason",
+              "id": 1,
+              "type": "CutReason"
+            },
+            {
+              "name": "supply_mv",
+              "id": 2,
+              "type": "u16",
+              "unit": "mV"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": 240,
       "name": "fr.node",
       "version": "1.0",
@@ -3430,4 +4071,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0xa9040fd4;
+export const CATALOG_HASH = 0xa9d281fe;

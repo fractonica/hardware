@@ -30,6 +30,8 @@
 #include "radio_tx.hpp"
 #include "camera.hpp"
 #include "scale.hpp"
+#include "battery.hpp"
+#include "haptic.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -43,7 +45,7 @@ inline std::expected<fr::wire::SerialFrame, fr::wire::DecodeErr> decode_serial(s
     return fr::wire::decode_line({reinterpret_cast<const char *>(in.data()), in.size()}, scratch);
 }
 
-inline constexpr size_t kCount = 794;
+inline constexpr size_t kCount = 872;
 
 template <class V>
 void for_each(V &&v)
@@ -7858,6 +7860,554 @@ void for_each(V &&v)
         uint8_t x = 0;
         x = 255;
         v.value("fr.scale.rate_hz.state.max", "fr.scale.rate_hz.state", x, fr::cap::encode_scale_rate_hz_state, fr::cap::decode_scale_rate_hz_state, "08ff01", true);
+    }
+    // fr.battery.traits.defaults (cap fr.battery.traits)
+    {
+        fr::cap::BatteryTraits x{};
+        x.status_pins = false;
+        x.test_load = false;
+        x.charge_gate = false;
+        v.value("fr.battery.traits.defaults", "fr.battery.traits", x, enc, fr::cap::decode_battery_traits, "", true);
+    }
+    // fr.battery.traits.sample (cap fr.battery.traits)
+    {
+        fr::cap::BatteryTraits x{};
+        x.status_pins = true;
+        x.test_load = true;
+        x.charge_gate = true;
+        v.value("fr.battery.traits.sample", "fr.battery.traits", x, enc, fr::cap::decode_battery_traits, "080110011801", true);
+    }
+    // fr.battery.traits.max (cap fr.battery.traits)
+    {
+        fr::cap::BatteryTraits x{};
+        x.status_pins = true;
+        x.test_load = true;
+        x.charge_gate = true;
+        v.value("fr.battery.traits.max", "fr.battery.traits", x, enc, fr::cap::decode_battery_traits, "080110011801", true);
+    }
+    // fr.battery.read.args.empty (cap fr.battery.read.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.battery.read.args.empty", "fr.battery.read.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.battery.read.result.defaults (cap fr.battery.read.result)
+    {
+        fr::cap::BatteryReadResult x{};
+        x.mv = 0;
+        x.adc_mv = 0;
+        x.percent = 0;
+        x.charger = BatteryChargerMode::none;
+        x.level = BatteryCellLevel::ok;
+        x.divider_milli = 0;
+        x.calibrated = false;
+        x.load = false;
+        x.gate = false;
+        x.injected = false;
+        v.value("fr.battery.read.result.defaults", "fr.battery.read.result", x, enc, fr::cap::decode_battery_read_result, "", true);
+    }
+    // fr.battery.read.result.sample (cap fr.battery.read.result)
+    {
+        fr::cap::BatteryReadResult x{};
+        x.mv = 31153;
+        x.adc_mv = 62306;
+        x.percent = 19;
+        x.charger = BatteryChargerMode::fault;
+        x.level = BatteryCellLevel::empty;
+        x.divider_milli = 55846;
+        x.calibrated = true;
+        x.load = true;
+        x.gate = true;
+        x.injected = true;
+        v.value("fr.battery.read.result.sample", "fr.battery.read.result", x, enc, fr::cap::decode_battery_read_result, "08b1f30110e2e60318132005280330a6b4033801400148015001", true);
+    }
+    // fr.battery.read.result.max (cap fr.battery.read.result)
+    {
+        fr::cap::BatteryReadResult x{};
+        x.mv = 65535;
+        x.adc_mv = 65535;
+        x.percent = 255;
+        x.charger = BatteryChargerMode::fault;
+        x.level = BatteryCellLevel::empty;
+        x.divider_milli = 65535;
+        x.calibrated = true;
+        x.load = true;
+        x.gate = true;
+        x.injected = true;
+        v.value("fr.battery.read.result.max", "fr.battery.read.result", x, enc, fr::cap::decode_battery_read_result, "08ffff0310ffff0318ff012005280330ffff033801400148015001", true);
+    }
+    // fr.battery.calibrate.args.defaults (cap fr.battery.calibrate.args)
+    {
+        fr::cap::BatteryCalibrateArgs x{};
+        x.meter_mv = 0;
+        v.value("fr.battery.calibrate.args.defaults", "fr.battery.calibrate.args", x, enc, fr::cap::decode_battery_calibrate_args, "", true);
+    }
+    // fr.battery.calibrate.args.sample (cap fr.battery.calibrate.args)
+    {
+        fr::cap::BatteryCalibrateArgs x{};
+        x.meter_mv = 31153;
+        v.value("fr.battery.calibrate.args.sample", "fr.battery.calibrate.args", x, enc, fr::cap::decode_battery_calibrate_args, "08b1f301", true);
+    }
+    // fr.battery.calibrate.args.max (cap fr.battery.calibrate.args)
+    {
+        fr::cap::BatteryCalibrateArgs x{};
+        x.meter_mv = 65535;
+        v.value("fr.battery.calibrate.args.max", "fr.battery.calibrate.args", x, enc, fr::cap::decode_battery_calibrate_args, "08ffff03", true);
+    }
+    // fr.battery.calibrate.args.example_0 (cap fr.battery.calibrate.args)
+    {
+        fr::cap::BatteryCalibrateArgs x{};
+        x.meter_mv = 3912;
+        v.value("fr.battery.calibrate.args.example_0", "fr.battery.calibrate.args", x, enc, fr::cap::decode_battery_calibrate_args, "08c81e", true);
+    }
+    // fr.battery.calibrate.result.defaults (cap fr.battery.calibrate.result)
+    {
+        fr::cap::BatteryCalibrateResult x{};
+        x.divider_milli = 0;
+        x.adc_mv = 0;
+        v.value("fr.battery.calibrate.result.defaults", "fr.battery.calibrate.result", x, enc, fr::cap::decode_battery_calibrate_result, "", true);
+    }
+    // fr.battery.calibrate.result.sample (cap fr.battery.calibrate.result)
+    {
+        fr::cap::BatteryCalibrateResult x{};
+        x.divider_milli = 31153;
+        x.adc_mv = 62306;
+        v.value("fr.battery.calibrate.result.sample", "fr.battery.calibrate.result", x, enc, fr::cap::decode_battery_calibrate_result, "08b1f30110e2e603", true);
+    }
+    // fr.battery.calibrate.result.max (cap fr.battery.calibrate.result)
+    {
+        fr::cap::BatteryCalibrateResult x{};
+        x.divider_milli = 65535;
+        x.adc_mv = 65535;
+        v.value("fr.battery.calibrate.result.max", "fr.battery.calibrate.result", x, enc, fr::cap::decode_battery_calibrate_result, "08ffff0310ffff03", true);
+    }
+    // fr.battery.reset_calibration.args.empty (cap fr.battery.reset_calibration.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.battery.reset_calibration.args.empty", "fr.battery.reset_calibration.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.battery.load.args.defaults (cap fr.battery.load.args)
+    {
+        fr::cap::BatteryLoadArgs x{};
+        x.on = false;
+        x.seconds = 0;
+        v.value("fr.battery.load.args.defaults", "fr.battery.load.args", x, enc, fr::cap::decode_battery_load_args, "", true);
+    }
+    // fr.battery.load.args.sample (cap fr.battery.load.args)
+    {
+        fr::cap::BatteryLoadArgs x{};
+        x.on = true;
+        x.seconds = 48478;
+        v.value("fr.battery.load.args.sample", "fr.battery.load.args", x, enc, fr::cap::decode_battery_load_args, "080110defa02", true);
+    }
+    // fr.battery.load.args.max (cap fr.battery.load.args)
+    {
+        fr::cap::BatteryLoadArgs x{};
+        x.on = true;
+        x.seconds = 86400;
+        v.value("fr.battery.load.args.max", "fr.battery.load.args", x, enc, fr::cap::decode_battery_load_args, "08011080a305", true);
+    }
+    // fr.battery.load.args.example_0 (cap fr.battery.load.args)
+    {
+        fr::cap::BatteryLoadArgs x{};
+        x.on = true;
+        x.seconds = 600;
+        v.value("fr.battery.load.args.example_0", "fr.battery.load.args", x, enc, fr::cap::decode_battery_load_args, "080110d804", true);
+    }
+    // fr.battery.load.args.example_1 (cap fr.battery.load.args)
+    {
+        fr::cap::BatteryLoadArgs x{};
+        x.on = false;
+        x.seconds = 0;
+        v.value("fr.battery.load.args.example_1", "fr.battery.load.args", x, enc, fr::cap::decode_battery_load_args, "", true);
+    }
+    // fr.battery.gate.args.defaults (cap fr.battery.gate.args)
+    {
+        fr::cap::BatteryGateArgs x{};
+        x.open = false;
+        v.value("fr.battery.gate.args.defaults", "fr.battery.gate.args", x, enc, fr::cap::decode_battery_gate_args, "", true);
+    }
+    // fr.battery.gate.args.sample (cap fr.battery.gate.args)
+    {
+        fr::cap::BatteryGateArgs x{};
+        x.open = true;
+        v.value("fr.battery.gate.args.sample", "fr.battery.gate.args", x, enc, fr::cap::decode_battery_gate_args, "0801", true);
+    }
+    // fr.battery.gate.args.max (cap fr.battery.gate.args)
+    {
+        fr::cap::BatteryGateArgs x{};
+        x.open = true;
+        v.value("fr.battery.gate.args.max", "fr.battery.gate.args", x, enc, fr::cap::decode_battery_gate_args, "0801", true);
+    }
+    // fr.battery.inject.args.defaults (cap fr.battery.inject.args)
+    {
+        fr::cap::BatteryInjectArgs x{};
+        x.mv = 0;
+        x.charger = BatteryChargerMode::none;
+        x.charger_set = false;
+        x.hold_ms = 0;
+        v.value("fr.battery.inject.args.defaults", "fr.battery.inject.args", x, enc, fr::cap::decode_battery_inject_args, "", true);
+    }
+    // fr.battery.inject.args.sample (cap fr.battery.inject.args)
+    {
+        fr::cap::BatteryInjectArgs x{};
+        x.mv = 31153;
+        x.charger = BatteryChargerMode::charged;
+        x.charger_set = true;
+        x.hold_ms = 59076;
+        v.value("fr.battery.inject.args.sample", "fr.battery.inject.args", x, enc, fr::cap::decode_battery_inject_args, "08b1f3011003180120c4cd03", true);
+    }
+    // fr.battery.inject.args.max (cap fr.battery.inject.args)
+    {
+        fr::cap::BatteryInjectArgs x{};
+        x.mv = 65535;
+        x.charger = BatteryChargerMode::fault;
+        x.charger_set = true;
+        x.hold_ms = 65535;
+        v.value("fr.battery.inject.args.max", "fr.battery.inject.args", x, enc, fr::cap::decode_battery_inject_args, "08ffff031005180120ffff03", true);
+    }
+    // fr.battery.inject.args.example_0 (cap fr.battery.inject.args)
+    {
+        fr::cap::BatteryInjectArgs x{};
+        x.mv = 2750;
+        x.charger = BatteryChargerMode::none;
+        x.charger_set = false;
+        x.hold_ms = 0;
+        v.value("fr.battery.inject.args.example_0", "fr.battery.inject.args", x, enc, fr::cap::decode_battery_inject_args, "08be15", true);
+    }
+    // fr.battery.inject.args.example_1 (cap fr.battery.inject.args)
+    {
+        fr::cap::BatteryInjectArgs x{};
+        x.mv = 3900;
+        x.charger = BatteryChargerMode::charging;
+        x.charger_set = true;
+        x.hold_ms = 5000;
+        v.value("fr.battery.inject.args.example_1", "fr.battery.inject.args", x, enc, fr::cap::decode_battery_inject_args, "08bc1e10021801208827", true);
+    }
+    // fr.battery.charge.event.defaults (cap fr.battery.charge.event)
+    {
+        fr::cap::BatteryCharge x{};
+        x.state = BatteryChargerMode::none;
+        x.mv = 0;
+        v.value("fr.battery.charge.event.defaults", "fr.battery.charge.event", x, enc, fr::cap::decode_battery_charge, "", true);
+    }
+    // fr.battery.charge.event.sample (cap fr.battery.charge.event)
+    {
+        fr::cap::BatteryCharge x{};
+        x.state = BatteryChargerMode::charging;
+        x.mv = 62306;
+        v.value("fr.battery.charge.event.sample", "fr.battery.charge.event", x, enc, fr::cap::decode_battery_charge, "080210e2e603", true);
+    }
+    // fr.battery.charge.event.max (cap fr.battery.charge.event)
+    {
+        fr::cap::BatteryCharge x{};
+        x.state = BatteryChargerMode::fault;
+        x.mv = 65535;
+        v.value("fr.battery.charge.event.max", "fr.battery.charge.event", x, enc, fr::cap::decode_battery_charge, "080510ffff03", true);
+    }
+    // fr.battery.level_change.event.defaults (cap fr.battery.level_change.event)
+    {
+        fr::cap::BatteryLevelChange x{};
+        x.level = BatteryCellLevel::ok;
+        x.mv = 0;
+        v.value("fr.battery.level_change.event.defaults", "fr.battery.level_change.event", x, enc, fr::cap::decode_battery_level_change, "", true);
+    }
+    // fr.battery.level_change.event.sample (cap fr.battery.level_change.event)
+    {
+        fr::cap::BatteryLevelChange x{};
+        x.level = BatteryCellLevel::critical;
+        x.mv = 62306;
+        v.value("fr.battery.level_change.event.sample", "fr.battery.level_change.event", x, enc, fr::cap::decode_battery_level_change, "080210e2e603", true);
+    }
+    // fr.battery.level_change.event.max (cap fr.battery.level_change.event)
+    {
+        fr::cap::BatteryLevelChange x{};
+        x.level = BatteryCellLevel::empty;
+        x.mv = 65535;
+        v.value("fr.battery.level_change.event.max", "fr.battery.level_change.event", x, enc, fr::cap::decode_battery_level_change, "080310ffff03", true);
+    }
+    // fr.battery.protect.event.defaults (cap fr.battery.protect.event)
+    {
+        fr::cap::BatteryProtect x{};
+        x.reason = BatteryProtectReason::floor;
+        x.mv = 0;
+        v.value("fr.battery.protect.event.defaults", "fr.battery.protect.event", x, enc, fr::cap::decode_battery_protect, "", true);
+    }
+    // fr.battery.protect.event.sample (cap fr.battery.protect.event)
+    {
+        fr::cap::BatteryProtect x{};
+        x.reason = BatteryProtectReason::ceiling;
+        x.mv = 62306;
+        v.value("fr.battery.protect.event.sample", "fr.battery.protect.event", x, enc, fr::cap::decode_battery_protect, "080110e2e603", true);
+    }
+    // fr.battery.protect.event.max (cap fr.battery.protect.event)
+    {
+        fr::cap::BatteryProtect x{};
+        x.reason = BatteryProtectReason::ceiling;
+        x.mv = 65535;
+        v.value("fr.battery.protect.event.max", "fr.battery.protect.event", x, enc, fr::cap::decode_battery_protect, "080110ffff03", true);
+    }
+    // fr.battery.mv.state.defaults (cap fr.battery.mv.state)
+    {
+        uint16_t x = 0;
+        x = 0;
+        v.value("fr.battery.mv.state.defaults", "fr.battery.mv.state", x, fr::cap::encode_battery_mv_state, fr::cap::decode_battery_mv_state, "", true);
+    }
+    // fr.battery.mv.state.sample (cap fr.battery.mv.state)
+    {
+        uint16_t x = 0;
+        x = 31153;
+        v.value("fr.battery.mv.state.sample", "fr.battery.mv.state", x, fr::cap::encode_battery_mv_state, fr::cap::decode_battery_mv_state, "08b1f301", true);
+    }
+    // fr.battery.mv.state.max (cap fr.battery.mv.state)
+    {
+        uint16_t x = 0;
+        x = 65535;
+        v.value("fr.battery.mv.state.max", "fr.battery.mv.state", x, fr::cap::encode_battery_mv_state, fr::cap::decode_battery_mv_state, "08ffff03", true);
+    }
+    // fr.battery.percent.state.defaults (cap fr.battery.percent.state)
+    {
+        uint8_t x = 0;
+        x = 0;
+        v.value("fr.battery.percent.state.defaults", "fr.battery.percent.state", x, fr::cap::encode_battery_percent_state, fr::cap::decode_battery_percent_state, "", true);
+    }
+    // fr.battery.percent.state.sample (cap fr.battery.percent.state)
+    {
+        uint8_t x = 0;
+        x = 177;
+        v.value("fr.battery.percent.state.sample", "fr.battery.percent.state", x, fr::cap::encode_battery_percent_state, fr::cap::decode_battery_percent_state, "08b101", true);
+    }
+    // fr.battery.percent.state.max (cap fr.battery.percent.state)
+    {
+        uint8_t x = 0;
+        x = 255;
+        v.value("fr.battery.percent.state.max", "fr.battery.percent.state", x, fr::cap::encode_battery_percent_state, fr::cap::decode_battery_percent_state, "08ff01", true);
+    }
+    // fr.battery.charger.state.defaults (cap fr.battery.charger.state)
+    {
+        BatteryChargerMode x = BatteryChargerMode::none;
+        x = BatteryChargerMode::none;
+        v.value("fr.battery.charger.state.defaults", "fr.battery.charger.state", x, fr::cap::encode_battery_charger_state, fr::cap::decode_battery_charger_state, "", true);
+    }
+    // fr.battery.charger.state.sample (cap fr.battery.charger.state)
+    {
+        BatteryChargerMode x = BatteryChargerMode::none;
+        x = BatteryChargerMode::charging;
+        v.value("fr.battery.charger.state.sample", "fr.battery.charger.state", x, fr::cap::encode_battery_charger_state, fr::cap::decode_battery_charger_state, "0802", true);
+    }
+    // fr.battery.charger.state.max (cap fr.battery.charger.state)
+    {
+        BatteryChargerMode x = BatteryChargerMode::none;
+        x = BatteryChargerMode::fault;
+        v.value("fr.battery.charger.state.max", "fr.battery.charger.state", x, fr::cap::encode_battery_charger_state, fr::cap::decode_battery_charger_state, "0805", true);
+    }
+    // fr.battery.level.state.defaults (cap fr.battery.level.state)
+    {
+        BatteryCellLevel x = BatteryCellLevel::ok;
+        x = BatteryCellLevel::ok;
+        v.value("fr.battery.level.state.defaults", "fr.battery.level.state", x, fr::cap::encode_battery_level_state, fr::cap::decode_battery_level_state, "", true);
+    }
+    // fr.battery.level.state.sample (cap fr.battery.level.state)
+    {
+        BatteryCellLevel x = BatteryCellLevel::ok;
+        x = BatteryCellLevel::critical;
+        v.value("fr.battery.level.state.sample", "fr.battery.level.state", x, fr::cap::encode_battery_level_state, fr::cap::decode_battery_level_state, "0802", true);
+    }
+    // fr.battery.level.state.max (cap fr.battery.level.state)
+    {
+        BatteryCellLevel x = BatteryCellLevel::ok;
+        x = BatteryCellLevel::empty;
+        v.value("fr.battery.level.state.max", "fr.battery.level.state", x, fr::cap::encode_battery_level_state, fr::cap::decode_battery_level_state, "0803", true);
+    }
+    // fr.battery.load_on.state.defaults (cap fr.battery.load_on.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.battery.load_on.state.defaults", "fr.battery.load_on.state", x, fr::cap::encode_battery_load_on_state, fr::cap::decode_battery_load_on_state, "", true);
+    }
+    // fr.battery.load_on.state.sample (cap fr.battery.load_on.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.battery.load_on.state.sample", "fr.battery.load_on.state", x, fr::cap::encode_battery_load_on_state, fr::cap::decode_battery_load_on_state, "0801", true);
+    }
+    // fr.battery.load_on.state.max (cap fr.battery.load_on.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.battery.load_on.state.max", "fr.battery.load_on.state", x, fr::cap::encode_battery_load_on_state, fr::cap::decode_battery_load_on_state, "0801", true);
+    }
+    // fr.battery.gate_open.state.defaults (cap fr.battery.gate_open.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.battery.gate_open.state.defaults", "fr.battery.gate_open.state", x, fr::cap::encode_battery_gate_open_state, fr::cap::decode_battery_gate_open_state, "", true);
+    }
+    // fr.battery.gate_open.state.sample (cap fr.battery.gate_open.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.battery.gate_open.state.sample", "fr.battery.gate_open.state", x, fr::cap::encode_battery_gate_open_state, fr::cap::decode_battery_gate_open_state, "0801", true);
+    }
+    // fr.battery.gate_open.state.max (cap fr.battery.gate_open.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.battery.gate_open.state.max", "fr.battery.gate_open.state", x, fr::cap::encode_battery_gate_open_state, fr::cap::decode_battery_gate_open_state, "0801", true);
+    }
+    // fr.haptic.traits.defaults (cap fr.haptic.traits)
+    {
+        fr::cap::HapticTraits x{};
+        x.pwm = false;
+        v.value("fr.haptic.traits.defaults", "fr.haptic.traits", x, enc, fr::cap::decode_haptic_traits, "", true);
+    }
+    // fr.haptic.traits.sample (cap fr.haptic.traits)
+    {
+        fr::cap::HapticTraits x{};
+        x.pwm = true;
+        v.value("fr.haptic.traits.sample", "fr.haptic.traits", x, enc, fr::cap::decode_haptic_traits, "0801", true);
+    }
+    // fr.haptic.traits.max (cap fr.haptic.traits)
+    {
+        fr::cap::HapticTraits x{};
+        x.pwm = true;
+        v.value("fr.haptic.traits.max", "fr.haptic.traits", x, enc, fr::cap::decode_haptic_traits, "0801", true);
+    }
+    // fr.haptic.pulse.args.defaults (cap fr.haptic.pulse.args)
+    {
+        fr::cap::HapticPulseArgs x{};
+        x.ms = 0;
+        x.level = 100;
+        v.value("fr.haptic.pulse.args.defaults", "fr.haptic.pulse.args", x, enc, fr::cap::decode_haptic_pulse_args, "1064", true);
+    }
+    // fr.haptic.pulse.args.sample (cap fr.haptic.pulse.args)
+    {
+        fr::cap::HapticPulseArgs x{};
+        x.ms = 31153;
+        x.level = 23;
+        v.value("fr.haptic.pulse.args.sample", "fr.haptic.pulse.args", x, enc, fr::cap::decode_haptic_pulse_args, "08b1f3011017", true);
+    }
+    // fr.haptic.pulse.args.max (cap fr.haptic.pulse.args)
+    {
+        fr::cap::HapticPulseArgs x{};
+        x.ms = 65535;
+        x.level = 100;
+        v.value("fr.haptic.pulse.args.max", "fr.haptic.pulse.args", x, enc, fr::cap::decode_haptic_pulse_args, "08ffff031064", true);
+    }
+    // fr.haptic.pulse.args.example_0 (cap fr.haptic.pulse.args)
+    {
+        fr::cap::HapticPulseArgs x{};
+        x.ms = 200;
+        x.level = 100;
+        v.value("fr.haptic.pulse.args.example_0", "fr.haptic.pulse.args", x, enc, fr::cap::decode_haptic_pulse_args, "08c8011064", true);
+    }
+    // fr.haptic.pulse.args.example_1 (cap fr.haptic.pulse.args)
+    {
+        fr::cap::HapticPulseArgs x{};
+        x.ms = 500;
+        x.level = 60;
+        v.value("fr.haptic.pulse.args.example_1", "fr.haptic.pulse.args", x, enc, fr::cap::decode_haptic_pulse_args, "08f403103c", true);
+    }
+    // fr.haptic.play.args.defaults (cap fr.haptic.play.args)
+    {
+        fr::cap::HapticPlayArgs x{};
+        x.steps = fr::proto::Array<uint16_t, 32>{};
+        x.level = 100;
+        x.repeat = 1;
+        v.value("fr.haptic.play.args.defaults", "fr.haptic.play.args", x, enc, fr::cap::decode_haptic_play_args, "10641801", true);
+    }
+    // fr.haptic.play.args.sample (cap fr.haptic.play.args)
+    {
+        fr::cap::HapticPlayArgs x{};
+        x.steps = fr::proto::Array<uint16_t, 32>{31153, 62306, 27923};
+        x.level = 23;
+        x.repeat = 84;
+        v.value("fr.haptic.play.args.sample", "fr.haptic.play.args", x, enc, fr::cap::decode_haptic_play_args, "0a09b1f301e2e60393da0110171854", true);
+    }
+    // fr.haptic.play.args.max (cap fr.haptic.play.args)
+    {
+        fr::cap::HapticPlayArgs x{};
+        x.steps = fr::proto::Array<uint16_t, 32>{65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535};
+        x.level = 100;
+        x.repeat = 100;
+        v.value("fr.haptic.play.args.max", "fr.haptic.play.args", x, enc, fr::cap::decode_haptic_play_args, "0a60ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff03ffff0310641864", true);
+    }
+    // fr.haptic.play.args.example_0 (cap fr.haptic.play.args)
+    {
+        fr::cap::HapticPlayArgs x{};
+        x.steps = fr::proto::Array<uint16_t, 32>{100, 80, 100};
+        x.level = 100;
+        x.repeat = 1;
+        v.value("fr.haptic.play.args.example_0", "fr.haptic.play.args", x, enc, fr::cap::decode_haptic_play_args, "0a0364506410641801", true);
+    }
+    // fr.haptic.play.args.example_1 (cap fr.haptic.play.args)
+    {
+        fr::cap::HapticPlayArgs x{};
+        x.steps = fr::proto::Array<uint16_t, 32>{40, 40};
+        x.level = 70;
+        x.repeat = 5;
+        v.value("fr.haptic.play.args.example_1", "fr.haptic.play.args", x, enc, fr::cap::decode_haptic_play_args, "0a02282810461805", true);
+    }
+    // fr.haptic.stop.args.empty (cap fr.haptic.stop.args)
+    {
+        fr::proto::Empty x{};
+        v.value("fr.haptic.stop.args.empty", "fr.haptic.stop.args", x, enc, fr::proto::decode_empty, "", true);
+    }
+    // fr.haptic.cut.event.defaults (cap fr.haptic.cut.event)
+    {
+        fr::cap::HapticCut x{};
+        x.reason = HapticCutReason::low_supply;
+        x.supply_mv = 0;
+        v.value("fr.haptic.cut.event.defaults", "fr.haptic.cut.event", x, enc, fr::cap::decode_haptic_cut, "", true);
+    }
+    // fr.haptic.cut.event.sample (cap fr.haptic.cut.event)
+    {
+        fr::cap::HapticCut x{};
+        x.reason = HapticCutReason::max_on;
+        x.supply_mv = 62306;
+        v.value("fr.haptic.cut.event.sample", "fr.haptic.cut.event", x, enc, fr::cap::decode_haptic_cut, "080210e2e603", true);
+    }
+    // fr.haptic.cut.event.max (cap fr.haptic.cut.event)
+    {
+        fr::cap::HapticCut x{};
+        x.reason = HapticCutReason::max_on;
+        x.supply_mv = 65535;
+        v.value("fr.haptic.cut.event.max", "fr.haptic.cut.event", x, enc, fr::cap::decode_haptic_cut, "080210ffff03", true);
+    }
+    // fr.haptic.active.state.defaults (cap fr.haptic.active.state)
+    {
+        bool x = false;
+        x = false;
+        v.value("fr.haptic.active.state.defaults", "fr.haptic.active.state", x, fr::cap::encode_haptic_active_state, fr::cap::decode_haptic_active_state, "", true);
+    }
+    // fr.haptic.active.state.sample (cap fr.haptic.active.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.haptic.active.state.sample", "fr.haptic.active.state", x, fr::cap::encode_haptic_active_state, fr::cap::decode_haptic_active_state, "0801", true);
+    }
+    // fr.haptic.active.state.max (cap fr.haptic.active.state)
+    {
+        bool x = false;
+        x = true;
+        v.value("fr.haptic.active.state.max", "fr.haptic.active.state", x, fr::cap::encode_haptic_active_state, fr::cap::decode_haptic_active_state, "0801", true);
+    }
+    // fr.haptic.supply_mv.state.defaults (cap fr.haptic.supply_mv.state)
+    {
+        uint16_t x = 0;
+        x = 0;
+        v.value("fr.haptic.supply_mv.state.defaults", "fr.haptic.supply_mv.state", x, fr::cap::encode_haptic_supply_mv_state, fr::cap::decode_haptic_supply_mv_state, "", true);
+    }
+    // fr.haptic.supply_mv.state.sample (cap fr.haptic.supply_mv.state)
+    {
+        uint16_t x = 0;
+        x = 31153;
+        v.value("fr.haptic.supply_mv.state.sample", "fr.haptic.supply_mv.state", x, fr::cap::encode_haptic_supply_mv_state, fr::cap::decode_haptic_supply_mv_state, "08b1f301", true);
+    }
+    // fr.haptic.supply_mv.state.max (cap fr.haptic.supply_mv.state)
+    {
+        uint16_t x = 0;
+        x = 65535;
+        v.value("fr.haptic.supply_mv.state.max", "fr.haptic.supply_mv.state", x, fr::cap::encode_haptic_supply_mv_state, fr::cap::decode_haptic_supply_mv_state, "08ffff03", true);
     }
     // fr.node.identify.args.defaults (cap fr.node.identify.args)
     {

@@ -12,11 +12,13 @@ standard:
   0x000A: fr.radio_tx      # design csi-c1 D9
   0x000B: fr.camera        # design camera-c1 D7
   0x000C: fr.scale         # design scale-round-c1 D6
+  0x000D: fr.battery       # design power-p1 D2
+  0x000E: fr.haptic        # design power-p1 D6
 system:
   0x00F0: fr.node
   0x00F1: fr.ota
   0x00F2: fr.diag
-planned: [fr.haptic, fr.encoder]
+planned: [fr.encoder]
 ranges:
   standard: [0x0001, 0x00EF]
   system: [0x00F0, 0x00FF]

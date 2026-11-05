@@ -435,7 +435,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, gc9a01_spi, hx711_gpio, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, ssd1306_i2c, st7789_spi, wifi_csi)",
+      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, gc9a01_spi, haptic_ledc, hx711_gpio, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, ssd1306_i2c, st7789_spi, tp4056, tp5000, wifi_csi)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -463,7 +463,7 @@ describe('validation', () => {
     expect(messages(dir)).toEqual([
       "instance name 'node' is reserved (spec 03 §3.6)",
       "instance name 'Status' must be snake_case, at most 31 characters",
-      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx, fr.camera, fr.scale)',
+      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx, fr.camera, fr.scale, fr.battery, fr.haptic)',
       'board esp32c6-supermini has no entry leds.nope',
     ]);
   });
@@ -574,7 +574,7 @@ describe('validation', () => {
 describe('driver manifests', () => {
   const drivers = listDrivers(ROOT);
 
-  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones, A2\'s adc_audio, CSI-1\'s radio drivers and CAM-1\'s camera and card', () => {
+  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones, A2\'s adc_audio, CSI-1\'s radio drivers, CAM-1\'s camera and card, SCALE-1\'s HX711 and ROUND-1\'s panel, and POWER-1\'s chargers and haptic output', () => {
     expect(drivers).toEqual([
       'adc_audio',
       'adc_oneshot',
@@ -585,6 +585,7 @@ describe('driver manifests', () => {
       'fixture_gpio',
       'fixture_ws2812_rx',
       'gc9a01_spi',
+      'haptic_ledc',
       'hx711_gpio',
       'i2s_amp',
       'i2s_mic',
@@ -593,6 +594,8 @@ describe('driver manifests', () => {
       'sdmmc_card',
       'ssd1306_i2c',
       'st7789_spi',
+      'tp4056',
+      'tp5000',
       'wifi_csi',
     ]);
   });
@@ -600,7 +603,12 @@ describe('driver manifests', () => {
   it.each(drivers)('%s: driver.yaml matches its header and idf_component.yml', (id) => {
     const d = loadDriver(ROOT, id);
     const dir = join(ROOT, 'hardware', 'drivers', id);
-    const hpp = readFileSync(join(dir, 'include', 'fr', 'drv', `${id}.hpp`), 'utf8');
+    // A header may only include the class's own (design power-p1 D4: tp4056.hpp and tp5000.hpp include ChargerGpio's
+    // charger_gpio.hpp, in tp4056's component, which tp5000 `uses`).
+    const own = readFileSync(join(dir, 'include', 'fr', 'drv', `${id}.hpp`), 'utf8');
+    const included = [...own.matchAll(/#include "fr\/drv\/(\w+)\.hpp"/g)].map((m) => m[1]);
+    const homes = [id, ...(d.uses ?? [])].map((u) => join(ROOT, 'hardware', 'drivers', u, 'include', 'fr', 'drv'));
+    const hpp = [own, ...included.flatMap((h) => homes.map((home) => join(home, `${h}.hpp`)).filter((f) => existsSync(f)).slice(0, 1).map((f) => readFileSync(f, 'utf8')))].join('\n');
     const cls = d.class.split('::').at(-1)!;
     expect(hpp).toMatch(new RegExp(`class ${cls} final : public ${d.implements.replace('.', '::')}\\b`));
     // Every config field is a Config member, in the same order, and every enum value an enumerator.
@@ -2249,5 +2257,78 @@ describe('CAM-1: the esp32 target, aithinker-esp32-cam and e32a-cam (design came
       expect(f, p).not.toContain('CONFIG_FR_SERIAL_UART');
       expect(f, p).not.toContain('CONFIG_CAMERA_');
     }
+  });
+});
+
+describe('POWER-1 (design power-p1 D4, D6, D8)', () => {
+  const messages = (dir: string) => issuesOf(() => gen(dir, 'c6w-scale', false)).map((i) => i.message);
+
+  it('c6w-scale binds the supply before init, derives fr.battery traits from the bind and warns on GPIO5', () => {
+    const r = gen(fixture(), 'c6w-scale', false);
+    const cpp = file(r, 'fr_board/fr_board.cpp');
+    const bind = cpp.indexOf('inst_buzz::service.bind_supply(inst_cap::service);');
+    expect(bind).toBeGreaterThan(-1);
+    expect(cpp).toContain('inst_kick::service.bind_supply(inst_cap::service);');
+    expect(bind).toBeLessThan(cpp.indexOf('inst_buzz::service.init(core)'));
+    const caps = r.manifest.caps as { name: string; traits: Record<string, unknown> }[];
+    expect(caps.find((c) => c.name === 'battery')?.traits).toEqual({ status_pins: true, test_load: true, charge_gate: false });
+    expect(caps.find((c) => c.name === 'cap')?.traits).toEqual({ status_pins: true, test_load: false, charge_gate: false });
+    expect(r.warnings.some((w) => /kick: GPIO5 .* strapping pin; with default eFuses no level is required/.test(w))).toBe(true);
+  });
+
+  it('refuses a supply that is not an fr.battery instance', () => {
+    const dir = fixture();
+    edit(dir, PROFILE('c6w-scale'), (y) => {
+      y.caps.buzz.config.supply = 'nope';
+      y.caps.kick.config.supply = 'scale';
+    });
+    const m = messages(dir);
+    expect(m).toContainEqual(expect.stringMatching(/no instance 'nope' in this profile; supply names an fr\.battery instance \(battery, cap\)/));
+    expect(m).toContainEqual(expect.stringMatching(/'scale' is an fr\.scale instance; supply names an fr\.battery instance/));
+  });
+
+  it('checks only the sense pin against ADC1 and refuses a strapping pin that needs a level', () => {
+    const dir = fixture();
+    edit(dir, PROFILE('c6w-scale'), (y) => {
+      y.caps.cap.bind.sense = 'gpio.11';
+      y.caps.battery.bind.load = 'gpio.9';
+    });
+    expect(messages(dir)).toEqual([
+      expect.stringMatching(/^GPIO9 .* is already claimed by 'boot'$/),
+      expect.stringMatching(/^GPIO9 .* is a strapping pin; a gpio.<n> bind may not use one$/),
+      expect.stringMatching(/^GPIO11 .* is not in pins\.adc1 of esp32c6-wroom1-n8, which driver tp4056 needs/),
+    ]);
+  });
+
+  it('refuses a load output on a pin that drives a level at power-up, and warns on a solenoid without a supply', () => {
+    const dir = fixture();
+    edit(dir, 'hardware/boards/esp32c6-wroom1-n8.board.yaml', (y) => {
+      y.pins.power_up_glitch = [11, 14, 19];
+    });
+    edit(dir, PROFILE('c6w-scale'), (y) => {
+      y.caps.kick.config.supply = '';
+    });
+    const m = messages(dir);
+    // The test load (11) and the ERM (14) are outputs; CHRG (19) is an input, which a glitch does not harm.
+    expect(m).toContainEqual(expect.stringMatching(/^GPIO11 .*power_up_glitch.*driver tp4056 switches a load on it/));
+    expect(m).toContainEqual(expect.stringMatching(/^GPIO14 .*power_up_glitch.*driver haptic_ledc switches a load on it/));
+    expect(m.some((x) => /^GPIO19 /.test(x))).toBe(false);
+    const ok = fixture();
+    edit(ok, PROFILE('c6w-scale'), (y) => {
+      y.caps.kick.config.supply = '';
+    });
+    const r = gen(ok, 'c6w-scale', false);
+    expect(r.warnings).toContainEqual(expect.stringMatching(/^kick: a solenoid with no supply/));
+  });
+
+  it('refuses a supply name a C++ literal would need escaping for, or longer than 16', () => {
+    const dir = fixture();
+    edit(dir, PROFILE('c6w-scale'), (y) => {
+      y.caps.buzz.config.supply = 'ca"p';
+      y.caps.kick.config.supply = 'x'.repeat(17);
+    });
+    const m = messages(dir);
+    expect(m).toContainEqual(expect.stringMatching(/printable ASCII only, no quotes or backslashes/));
+    expect(m).toContainEqual(expect.stringMatching(/is longer than 16 characters/));
   });
 });

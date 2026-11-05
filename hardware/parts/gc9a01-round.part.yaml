@@ -1,0 +1,15 @@
+schema: fractonica/part@1
+id: gc9a01-round
+name: GC9A01 1.28" round display, 240 × 240
+category: display
+summary: Round RGB565 TFT over SPI; no backlight pin.
+pins:
+  - { name: VCC, desc: 3.3 V }
+  - { name: GND, desc: ground }
+  - { name: SCL, desc: SPI clock (GPIO6) }
+  - { name: SDA, desc: SPI MOSI (GPIO7) }
+  - { name: DC, desc: data/command (GPIO2) }
+  - { name: CS, desc: chip select (GPIO10) }
+  - { name: RST, desc: not wired on scale-c6 }
+notes:
+  - "Colours need MADCTL 0x48 and INVON (fixed in the gc9a01_spi driver)."

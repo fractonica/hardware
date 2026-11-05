@@ -22,6 +22,8 @@
 #include "radio_tx.hpp"
 #include "camera.hpp"
 #include "scale.hpp"
+#include "battery.hpp"
+#include "haptic.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -41,6 +43,8 @@ cJSON *to_json(const AudioInTraits &v);
 cJSON *to_json(const TouchTraits &v);
 cJSON *to_json(const CameraTraits &v);
 cJSON *to_json(const ScaleTraits &v);
+cJSON *to_json(const BatteryTraits &v);
+cJSON *to_json(const HapticTraits &v);
 #if FR_TEST_HOOKS
 cJSON *to_json(const ButtonInjectArgs &v);
 cJSON *to_json(const ButtonDown &v);
@@ -109,6 +113,18 @@ cJSON *to_json(const ScaleReadResult &v);
 cJSON *to_json(const ScaleWatchStartArgs &v);
 cJSON *to_json(const ScaleInjectArgs &v);
 cJSON *to_json(const ScaleSettled &v);
+cJSON *to_json(const BatteryReadResult &v);
+cJSON *to_json(const BatteryCalibrateArgs &v);
+cJSON *to_json(const BatteryCalibrateResult &v);
+cJSON *to_json(const BatteryLoadArgs &v);
+cJSON *to_json(const BatteryGateArgs &v);
+cJSON *to_json(const BatteryInjectArgs &v);
+cJSON *to_json(const BatteryCharge &v);
+cJSON *to_json(const BatteryLevelChange &v);
+cJSON *to_json(const BatteryProtect &v);
+cJSON *to_json(const HapticPulseArgs &v);
+cJSON *to_json(const HapticPlayArgs &v);
+cJSON *to_json(const HapticCut &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
 cJSON *to_json(const NodeDescribeResult &v);
 cJSON *to_json(const NodeRebootArgs &v);
@@ -503,6 +519,24 @@ cJSON *to_json(const ScaleTraits &v)
     bool ok = o != nullptr;
     ok = ok && add(o, "resolution_bits", json_number(v.resolution_bits));
     ok = ok && add(o, "max_rate_hz", json_number(v.max_rate_hz));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "status_pins", json_bool(v.status_pins));
+    ok = ok && add(o, "test_load", json_bool(v.test_load));
+    ok = ok && add(o, "charge_gate", json_bool(v.charge_gate));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const HapticTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "pwm", json_bool(v.pwm));
     return finish(o, ok);
 }
 
@@ -1188,6 +1222,123 @@ cJSON *to_json(const ScaleSettled &v)
     bool ok = o != nullptr;
     ok = ok && add(o, "weight_mg", json_number(v.weight_mg));
     ok = ok && add(o, "delta_mg", json_number(v.delta_mg));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryReadResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "mv", json_number(v.mv));
+    ok = ok && add(o, "adc_mv", json_number(v.adc_mv));
+    ok = ok && add(o, "percent", json_number(v.percent));
+    ok = ok && add(o, "charger", json_enum(v.charger));
+    ok = ok && add(o, "level", json_enum(v.level));
+    ok = ok && add(o, "divider_milli", json_number(v.divider_milli));
+    ok = ok && add(o, "calibrated", json_bool(v.calibrated));
+    ok = ok && add(o, "load", json_bool(v.load));
+    ok = ok && add(o, "gate", json_bool(v.gate));
+    ok = ok && add(o, "injected", json_bool(v.injected));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryCalibrateArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "meter_mv", json_number(v.meter_mv));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryCalibrateResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "divider_milli", json_number(v.divider_milli));
+    ok = ok && add(o, "adc_mv", json_number(v.adc_mv));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryLoadArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "on", json_bool(v.on));
+    ok = ok && add(o, "seconds", json_number(v.seconds));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryGateArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "open", json_bool(v.open));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryInjectArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "mv", json_number(v.mv));
+    ok = ok && add(o, "charger", json_enum(v.charger));
+    ok = ok && add(o, "charger_set", json_bool(v.charger_set));
+    ok = ok && add(o, "hold_ms", json_number(v.hold_ms));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryCharge &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "state", json_enum(v.state));
+    ok = ok && add(o, "mv", json_number(v.mv));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryLevelChange &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "level", json_enum(v.level));
+    ok = ok && add(o, "mv", json_number(v.mv));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const BatteryProtect &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "reason", json_enum(v.reason));
+    ok = ok && add(o, "mv", json_number(v.mv));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const HapticPulseArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "ms", json_number(v.ms));
+    ok = ok && add(o, "level", json_number(v.level));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const HapticPlayArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "steps", json_array(v.steps, [](uint16_t e) { return json_number(e); }));
+    ok = ok && add(o, "level", json_number(v.level));
+    ok = ok && add(o, "repeat", json_number(v.repeat));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const HapticCut &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "reason", json_enum(v.reason));
+    ok = ok && add(o, "supply_mv", json_number(v.supply_mv));
     return finish(o, ok);
 }
 
@@ -2274,6 +2425,159 @@ Status args_scale_inject(const cJSON *obj, fr::wire::Writer &w)
     return encoded(w);
 }
 
+Status args_battery_read(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_battery_calibrate(const cJSON *obj, fr::wire::Writer &w)
+{
+    BatteryCalibrateArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "meter_mv") {
+            ok = from_json_uint(it, 0xFFFF, v.meter_mv);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_battery_reset_calibration(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_battery_load(const cJSON *obj, fr::wire::Writer &w)
+{
+    BatteryLoadArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "on") {
+            ok = from_json_bool(it, v.on);
+        } else if (key == "seconds") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.seconds);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_battery_gate(const cJSON *obj, fr::wire::Writer &w)
+{
+    BatteryGateArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "open") {
+            ok = from_json_bool(it, v.open);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_battery_inject(const cJSON *obj, fr::wire::Writer &w)
+{
+    BatteryInjectArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "mv") {
+            ok = from_json_uint(it, 0xFFFF, v.mv);
+        } else if (key == "charger") {
+            ok = from_json_enum(it, v.charger);
+        } else if (key == "charger_set") {
+            ok = from_json_bool(it, v.charger_set);
+        } else if (key == "hold_ms") {
+            ok = from_json_uint(it, 0xFFFF, v.hold_ms);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_haptic_pulse(const cJSON *obj, fr::wire::Writer &w)
+{
+    HapticPulseArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "ms") {
+            ok = from_json_uint(it, 0xFFFF, v.ms);
+        } else if (key == "level") {
+            ok = from_json_uint(it, 0xFF, v.level);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_haptic_play(const cJSON *obj, fr::wire::Writer &w)
+{
+    HapticPlayArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "steps") {
+            ok = from_json_array(it, v.steps,
+                [](const cJSON *e, uint16_t &out) { return from_json_uint(e, 0xFFFF, out); });
+        } else if (key == "level") {
+            ok = from_json_uint(it, 0xFF, v.level);
+        } else if (key == "repeat") {
+            ok = from_json_uint(it, 0xFF, v.repeat);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_haptic_stop(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
 Status args_node_identify(const cJSON *obj, fr::wire::Writer &w)
 {
     NodeIdentifyArgs v{};
@@ -3224,6 +3528,164 @@ cJSON *scale_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
     return nullptr;
 }
 
+cJSON *battery_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Battery::kCmdRead:
+            return json_empty(body);
+        case Battery::kCmdCalibrate:
+            return json_of(decode_battery_calibrate_args(body));
+        case Battery::kCmdResetCalibration:
+            return json_empty(body);
+        case Battery::kCmdLoad:
+            return json_of(decode_battery_load_args(body));
+        case Battery::kCmdGate:
+            return json_of(decode_battery_gate_args(body));
+        case Battery::kCmdInject:
+            return json_of(decode_battery_inject_args(body));
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Battery::kCmdRead:
+            return json_of(decode_battery_read_result(body));
+        case Battery::kCmdCalibrate:
+            return json_of(decode_battery_calibrate_result(body));
+        case Battery::kCmdResetCalibration:
+            return json_empty(body);
+        case Battery::kCmdLoad:
+            return json_empty(body);
+        case Battery::kCmdGate:
+            return json_empty(body);
+        case Battery::kCmdInject:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Battery::kEventCharge:
+            return json_of(decode_battery_charge(body));
+        case Battery::kEventLevelChange:
+            return json_of(decode_battery_level_change(body));
+        case Battery::kEventProtect:
+            return json_of(decode_battery_protect(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Battery::kPropMv: {
+            const auto v = decode_battery_mv_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "mv", json_number(*v)));
+        }
+        case Battery::kPropPercent: {
+            const auto v = decode_battery_percent_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "percent", json_number(*v)));
+        }
+        case Battery::kPropCharger: {
+            const auto v = decode_battery_charger_state(body);
+            if (!v || !(is_known(*v))) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "charger", json_enum(*v)));
+        }
+        case Battery::kPropLevel: {
+            const auto v = decode_battery_level_state(body);
+            if (!v || !(is_known(*v))) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "level", json_enum(*v)));
+        }
+        case Battery::kPropLoadOn: {
+            const auto v = decode_battery_load_on_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "load_on", json_bool(*v)));
+        }
+        case Battery::kPropGateOpen: {
+            const auto v = decode_battery_gate_open_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "gate_open", json_bool(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
+cJSON *haptic_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Haptic::kCmdPulse:
+            return json_of(decode_haptic_pulse_args(body));
+        case Haptic::kCmdPlay:
+            return json_of(decode_haptic_play_args(body));
+        case Haptic::kCmdStop:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Haptic::kCmdPulse:
+            return json_empty(body);
+        case Haptic::kCmdPlay:
+            return json_empty(body);
+        case Haptic::kCmdStop:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Haptic::kEventCut:
+            return json_of(decode_haptic_cut(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Haptic::kPropActive: {
+            const auto v = decode_haptic_active_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "active", json_bool(*v)));
+        }
+        case Haptic::kPropSupplyMv: {
+            const auto v = decode_haptic_supply_mv_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "supply_mv", json_number(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
 cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
 {
     switch (cls) {
@@ -3355,6 +3817,10 @@ cJSON *traits_to_json(uint16_t cap_id, std::span<const uint8_t> traits)
         return json_of(decode_camera_traits(traits));
     case Scale::kId:
         return json_of(decode_scale_traits(traits));
+    case Battery::kId:
+        return json_of(decode_battery_traits(traits));
+    case Haptic::kId:
+        return json_of(decode_haptic_traits(traits));
     case Node::kId:
         return json_empty(traits);
     case Ota::kId:
@@ -3573,6 +4039,39 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_scale_inject(obj, w);
         }
         break;
+    case Battery::kId:
+        if (name == "read") {
+            id = Battery::kCmdRead;
+            s = args_battery_read(obj);
+        } else if (name == "calibrate") {
+            id = Battery::kCmdCalibrate;
+            s = args_battery_calibrate(obj, w);
+        } else if (name == "reset_calibration") {
+            id = Battery::kCmdResetCalibration;
+            s = args_battery_reset_calibration(obj);
+        } else if (name == "load") {
+            id = Battery::kCmdLoad;
+            s = args_battery_load(obj, w);
+        } else if (name == "gate") {
+            id = Battery::kCmdGate;
+            s = args_battery_gate(obj, w);
+        } else if (name == "inject") {
+            id = Battery::kCmdInject;
+            s = args_battery_inject(obj, w);
+        }
+        break;
+    case Haptic::kId:
+        if (name == "pulse") {
+            id = Haptic::kCmdPulse;
+            s = args_haptic_pulse(obj, w);
+        } else if (name == "play") {
+            id = Haptic::kCmdPlay;
+            s = args_haptic_play(obj, w);
+        } else if (name == "stop") {
+            id = Haptic::kCmdStop;
+            s = args_haptic_stop(obj);
+        }
+        break;
     case Node::kId:
         if (name == "identify") {
             id = Node::kCmdIdentify;
@@ -3650,6 +4149,10 @@ cJSON *decode_to_json(uint16_t cap_id, uint8_t cls, uint8_t member_id, std::span
         return camera_to_json(cls, member_id, body);
     case Scale::kId:
         return scale_to_json(cls, member_id, body);
+    case Battery::kId:
+        return battery_to_json(cls, member_id, body);
+    case Haptic::kId:
+        return haptic_to_json(cls, member_id, body);
     case Node::kId:
         return node_to_json(cls, member_id, body);
     case Ota::kId:

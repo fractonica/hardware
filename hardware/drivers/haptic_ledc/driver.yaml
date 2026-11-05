@@ -1,0 +1,22 @@
+# Driver manifest (design power-p1 D7; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::HapticLedc::Config from the instance's bind, `bind: { out: gpio.<n> }` (a pin in the board's pins.free): the
+# base of a low-side NPN (an ERM up to ~150 mA), or the input of a gate driver for an N-MOSFET (a solenoid; scale-c6:
+# a non-inverting two-NPN level shifter to an IRF530N's 5 V gate), active high.
+schema: fractonica/driver@1
+id: haptic_ledc
+summary: A haptic load (ERM motor or solenoid) behind a low-side transistor on one GPIO, LEDC PWM at 20 kHz, 10 bits; off at init.
+implements: hal.HapticOutput
+class: fr::drv::HapticLedc              # header: include/fr/drv/haptic_ledc.hpp
+targets: [esp32c6, esp32c3, esp32c5, esp32s3]
+binds: gpio                             # bare pins: bind { out: gpio.<n> } (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as HapticLedc::Config
+  out:     { type: gpio, from: bind.out, output: true, doc: "the transistor's base (through 470 Ohm) or gate; high is on" }
+  pwm_hz:  { type: u16, default: 20000, range: [500, 40000], doc: "PWM frequency; 20 kHz is above hearing. A slow gate drive (a level shifter's pull-up onto a MOSFET's gate) may want less. Instances at one frequency share an LEDC timer" }
+# fr.haptic traits its service reports (pwm()): the duty is PWM.
+traits: { pwm: true }
+# One LEDC channel each; a timer per distinct pwm_hz, timers 1 and 2 (fixture_gpio takes timer 0 and channels from 0 up,
+# st7789_spi timer 3 and channels from the top down, haptic_ledc channels from the middle up). The budget counts a timer
+# per instance (an upper bound: instances at one frequency share theirs).
+resources: { gpio: 1, ledc_channels: 1, ledc_timers: 1 }
+dependencies: {}

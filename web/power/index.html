@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Power</title>
+  </head>
+  <body data-connected="false">
+    <header class="bar">
+      <h1>Power <small>fr.battery and fr.haptic: cells, chargers, capacity tests, haptics</small></h1>
+      <div class="status">
+        <span id="conn" class="conn">connecting…</span>
+        <button id="theme" type="button" class="ghost" title="Theme: auto / light / dark">auto</button>
+      </div>
+    </header>
+    <p id="error" class="error" hidden></p>
+
+    <main>
+      <section id="cells-grid" class="cells-grid" aria-label="Cells on the boards">
+        <p id="no-cells" class="hint">No board with fr.battery yet: provision one with profile c6w-scale (design power-p1).</p>
+      </section>
+
+      <section class="card" aria-labelledby="haptic-h">
+        <div class="card-head">
+          <h2 id="haptic-h">Haptics <small id="haptic-name">–</small></h2>
+          <span id="haptic-state" class="pill">idle</span>
+        </div>
+        <div class="controls tight">
+          <label class="field">
+            <span>Motor or solenoid</span>
+            <select id="haptic"></select>
+          </label>
+          <label class="field">
+            <span>Level <output id="level-out">100 %</output></span>
+            <input id="level" type="range" min="1" max="100" value="100" />
+          </label>
+        </div>
+        <div class="actions">
+          <label class="field">
+            <span>ms</span>
+            <input id="pulse-ms" type="text" inputmode="numeric" value="200" />
+          </label>
+          <button id="pulse" type="button" class="primary" disabled title="haptic_pulse">Pulse</button>
+          <button id="stop" type="button" class="danger" disabled title="haptic_stop">Stop</button>
+        </div>
+        <div id="patterns" class="actions" aria-label="Patterns"></div>
+        <div class="actions">
+          <label class="field">
+            <span>Steps (on,off,… ms)</span>
+            <input id="steps" type="text" value="100,50,100" />
+          </label>
+          <button id="play" type="button" disabled title="haptic_play">Play</button>
+        </div>
+        <p class="supply">Supply: <span id="supply" data-mv="">–</span> V <span id="supply-min" class="hint"></span></p>
+        <p id="haptic-msg" class="hint"></p>
+      </section>
+
+      <section class="card" aria-labelledby="events-h">
+        <div class="card-head">
+          <h2 id="events-h">Events</h2>
+        </div>
+        <ul id="events" class="events"></ul>
+      </section>
+
+      <section class="card wide-card" aria-labelledby="registry-h">
+        <div class="card-head">
+          <h2 id="registry-h">Registered cells</h2>
+          <button id="refresh" type="button" class="ghost">refresh</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Cell</th><th>Chemistry</th><th>Nominal</th><th>Installed</th><th>Cycles</th><th>Capacity</th><th>Health</th><th>R_int</th><th>Last charge</th><th>Last discharge</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="cell-rows"></tbody>
+        </table>
+        <div class="actions">
+          <label class="field">
+            <span>New cell</span>
+            <input id="new-name" type="text" placeholder="lipo-a" />
+          </label>
+          <label class="field">
+            <span>Chemistry</span>
+            <select id="new-chem">
+              <option value="liion">Li-ion / LiPo</option>
+              <option value="lifepo4">LiFePO4</option>
+              <option value="lic">Lithium-ion capacitor</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>mAh</span>
+            <input id="new-mah" type="text" inputmode="decimal" placeholder="300" />
+          </label>
+          <button id="add" type="button">Add</button>
+        </div>
+        <div class="actions">
+          <label class="field">
+            <span>Install</span>
+            <select id="install-cell"></select>
+          </label>
+          <label class="field">
+            <span>in</span>
+            <select id="install-place"></select>
+          </label>
+          <button id="install" type="button">Install</button>
+        </div>
+        <p id="registry-msg" class="hint"></p>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

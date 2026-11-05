@@ -16,3 +16,15 @@ caps:
   status: { cap: fr.led,     driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 32 } }
   round:  { cap: fr.display, driver: gc9a01_spi,  bind: { sclk: gpio.6, mosi: gpio.7, cs: gpio.10, dc: gpio.2 } }
   scale:  { cap: fr.scale,   driver: hx711_gpio,  bind: { dout: gpio.18, sck: gpio.23 }, config: { report_hz: 100, deadband_mg: 0, filter: none } }
+  # POWER-1 (design power-p1 D1, D8): the LiPo on TP4056 #1 (sense GPIO0 through 1 MOhm / 1 MOhm + 100 nF, CHRG 19, STDBY 20
+  # through 10 kOhm, a 100 Ohm test load on an NPN at GPIO11), the 90 F lithium-ion capacitor on TP4056 #2 (sense GPIO1,
+  # CHRG 21, STDBY 22; no gate until a P-MOSFET is wired, so it charges to TP4056's 4.2 V: full_mv 4200), the coin ERM on
+  # an NPN at GPIO14 drawing from the capacitor, and the push-pull solenoid on GPIO5 through a non-inverting two-NPN level
+  # shifter to an IRF530N's 5 V gate (GPIO5 is a strapping pin with level `none` on the C6; a 10 kOhm pull-down holds it
+  # off through reset), also from the capacitor.
+  battery: { cap: fr.battery, driver: tp4056, bind: { sense: gpio.0, chrg: gpio.19, stdby: gpio.20, load: gpio.11 },
+             config: { chemistry: liion, load_ohm: 100 } }
+  cap:     { cap: fr.battery, driver: tp4056, bind: { sense: gpio.1, chrg: gpio.21, stdby: gpio.22 },
+             config: { chemistry: lic, full_mv: 4200, report_hz: 10 } }
+  buzz:    { cap: fr.haptic,  driver: haptic_ledc, bind: { out: gpio.14 }, config: { kind: erm, rated_mv: 3000, supply: cap } }
+  kick:    { cap: fr.haptic,  driver: haptic_ledc, bind: { out: gpio.5 }, config: { kind: solenoid, rated_mv: 5000, supply: cap } }

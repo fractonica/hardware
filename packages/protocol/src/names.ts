@@ -12,6 +12,10 @@
 export const RESERVED_INSTANCE_NAMES: readonly string[] = [
   'node', 'ota', 'diag', 'msg', 'confirm', 'broadcast', 'device', 'hub', 'job', 'port', 'crash', 'rule', 'binding', 'registry',
   'id', 'alias', 'online', 'on', 'off', 'once', 'next', 'raw', 'state', 'has',
+  // POWER-1 (design power-p1 D11): the hub's own power.* and cell.* events.
+  'power', 'cell',
+  // WIRING-1 (design wiring-w1 D3): the hub's wiring.step events.
+  'wiring',
 ];
 
 /** Names an alias may not take: the reserved instance names plus the selector keywords (09 §9.2). */

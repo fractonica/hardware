@@ -82,6 +82,26 @@ constexpr MemberInfo kScaleProperties[] = {
     {3, "calibrated"},
     {4, "rate_hz"},
 };
+constexpr MemberInfo kBatteryCommands[] = {
+    {1, "read"},
+    {2, "calibrate"},
+    {3, "reset_calibration"},
+    {4, "load"},
+    {5, "gate"},
+    {6, "inject"},
+};
+constexpr MemberInfo kBatteryEvents[] = {{1, "charge"}, {2, "level_change"}, {3, "protect"}};
+constexpr MemberInfo kBatteryProperties[] = {
+    {1, "mv"},
+    {2, "percent"},
+    {3, "charger"},
+    {4, "level"},
+    {5, "load_on"},
+    {6, "gate_open"},
+};
+constexpr MemberInfo kHapticCommands[] = {{1, "pulse"}, {2, "play"}, {3, "stop"}};
+constexpr MemberInfo kHapticEvents[] = {{1, "cut"}};
+constexpr MemberInfo kHapticProperties[] = {{1, "active"}, {2, "supply_mv"}};
 constexpr MemberInfo kNodeCommands[] = {
     {1, "identify"},
     {2, "describe"},
@@ -111,6 +131,8 @@ constexpr CapInfo kCaps[] = {
     {0x000A, "fr.radio_tx", {1, 0}, kRadioTxCommands, {}, kRadioTxProperties},
     {0x000B, "fr.camera", {1, 0}, kCameraCommands, kCameraEvents, kCameraProperties},
     {0x000C, "fr.scale", {1, 0}, kScaleCommands, kScaleEvents, kScaleProperties},
+    {0x000D, "fr.battery", {1, 0}, kBatteryCommands, kBatteryEvents, kBatteryProperties},
+    {0x000E, "fr.haptic", {1, 0}, kHapticCommands, kHapticEvents, kHapticProperties},
     {0x00F0, "fr.node", {1, 0}, kNodeCommands, kNodeEvents, {}},
     {0x00F1, "fr.ota", {1, 0}, {}, {}, {}},
     {0x00F2, "fr.diag", {1, 0}, kDiagCommands, kDiagEvents, {}},

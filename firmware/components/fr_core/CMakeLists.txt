@@ -9,6 +9,8 @@
 # (design camera-c1 D8) is fr.camera over hal::Camera and its optional hal::BlockStore store, IDF-free too;
 # src/services/scale_service.cpp (design scale-round-c1 D7) fr.scale over hal::LoadCell and hal::Settings, IDF-free;
 # src/nvs_settings.cpp is hal::Settings in NVS (fr/platform/nvs_settings.hpp), its writes on fr_worker.
+# src/services/battery_service.cpp and haptic_service.cpp (design power-p1 D2-D7) are fr.battery over hal::PowerCell
+# and hal::Settings, and fr.haptic over hal::HapticOutput drawing from an fr.battery; both IDF-free.
 idf_component_register(SRCS "src/adc1.cpp"
                             "src/app_desc.cpp"
                             "src/audio/dsp.cpp"
@@ -28,6 +30,7 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/services/analog_in_service.cpp"
                             "src/services/audio_in_service.cpp"
                             "src/services/audio_out_service.cpp"
+                            "src/services/battery_service.cpp"
                             "src/services/button_service.cpp"
                             "src/services/camera_service.cpp"
                             "src/services/csi_record.cpp"
@@ -35,11 +38,13 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/services/descriptor.cpp"
                             "src/services/display_service.cpp"
                             "src/services/fixture_service.cpp"
+                            "src/services/haptic_service.cpp"
                             "src/services/led_service.cpp"
                             "src/services/radio_tx_service.cpp"
                             "src/services/scale_service.cpp"
                             "src/services/touch_service.cpp"
                             "src/s2_hooks.cpp"
+                            "src/safe_off.cpp"
                             "src/stream/stream.cpp"
                             "src/test_pin.cpp"
                        INCLUDE_DIRS "include"
@@ -65,3 +70,8 @@ idf_component_register(SRCS "src/adc1.cpp"
 # fr_app_desc is referenced by nothing: without this the linker would leave app_desc.cpp's object out of
 # the image, and the hub's ingest would fail on a missing descriptor at offset 288 (spec 06 §6.8).
 target_link_libraries(${COMPONENT_LIB} INTERFACE "-u fr_app_desc")
+
+# The panic hook (src/safe_off.cpp, fr/platform/safe_off.hpp; design power-p1 review B1, m2-c1-hil D11 item 1): every
+# image wraps esp_panic_handler so the drivers' registered outputs (fixture lines, haptic PWM, test loads, charge gates)
+# go off before the backtrace, the coredump and the CPU reset that would keep them running; -u keeps the object linked.
+target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler" "-Wl,-u,__wrap_esp_panic_handler")

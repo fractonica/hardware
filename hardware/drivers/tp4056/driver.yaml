@@ -1,0 +1,23 @@
+# Driver manifest (design power-p1 D4; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::ChargerGpio::Config from the instance's multi-pin bind, `bind: { sense: gpio.<n> [, chrg: gpio.<n>,
+# stdby: gpio.<n>][, load: gpio.<n>][, gate: gpio.<n>] }` (each in the board's pins.free; sense in pins.adc1): a charger
+# module and a cell wired to free pins, no board section. tp5000 is the same class (its driver.yaml `uses: [tp4056]`).
+schema: fractonica/driver@1
+id: tp4056
+summary: A cell on a TP4056 linear charger module (Li-ion, 4.2 V) - its divided voltage on ADC1, the CHRG/STDBY status pins, an optional test load and charge gate.
+implements: hal.PowerCell
+class: fr::drv::ChargerGpio             # header: include/fr/drv/charger_gpio.hpp (fr/drv/tp4056.hpp includes it)
+targets: [esp32c6, esp32c3, esp32c5, esp32s3]
+binds: gpio                             # bare pins: bind { sense, chrg?, stdby?, load?, gate? } (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as ChargerGpio::Config
+  sense:       { type: gpio, from: bind.sense, adc1: true, doc: "the divided cell voltage (an ADC1 pin): 1 MOhm / 1 MOhm and 100 nF to GND" }
+  chrg:        { type: gpio, from: bind.chrg, optional: true, doc: "the module's CHRG (open drain, low while charging) through 10 kOhm; input with pull-up" }
+  stdby:       { type: gpio, from: bind.stdby, optional: true, doc: "the module's STDBY (open drain, low when charged) through 10 kOhm; input with pull-up" }
+  load:        { type: gpio, from: bind.load, optional: true, output: true, doc: "the test load's NPN base (active high), off at init" }
+  gate:        { type: gpio, from: bind.gate, optional: true, output: true, doc: "the charge gate's driver (an NPN pulling a P-MOSFET's gate), closed at init" }
+  gate_active: { type: enum, values: [low, high], default: high, doc: "the level that opens the gate" }
+# fr.battery traits come from the bind (codegen SERVICES: status_pins with chrg and stdby, test_load, charge_gate).
+# gpio counts every pin field (the optional ones claimed only when bound); one ADC1 channel of the unit adc_oneshot shares.
+resources: { gpio: 5, adc1_channel: 1 }
+dependencies: {}

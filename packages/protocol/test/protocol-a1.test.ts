@@ -18,7 +18,7 @@ describe('A1 ops (design audio-a1 D8)', () => {
   it('adds audio_record and audio_play as mutate jobs and audio_level as a read query, and moves REGISTRY_HASH once', () => {
     // A2 (design audio-a2 D5) adds audio_monitor: protocol-a2.test.ts; CSI-1 network_list and the csi_ ops
     // (protocol-csi.test.ts).
-    const a1 = OPS.filter((o) => o.name !== 'audio_monitor' && o.name !== 'network_list' && !/^(csi|camera|scale)_/.test(o.name)); // CAM-1 adds seven camera_ ops
+    const a1 = OPS.filter((o) => o.name !== 'audio_monitor' && o.name !== 'network_list' && !/^(csi|camera|scale|battery|cell|haptic|wiring|part)_/.test(o.name)); // CAM-1 adds seven camera_ ops
     expect(a1).toHaveLength(51);
     expect(findOp('audio_record')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['audio', 'record'], positional: ['device', 'out'] } });
     expect(findOp('audio_play')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['audio', 'play'], positional: ['device', 'file'] } });

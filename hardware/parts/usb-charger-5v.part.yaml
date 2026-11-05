@@ -1,0 +1,5 @@
+schema: fractonica/part@1
+id: usb-charger-5v
+name: USB charger, 5 V ≥ 2 A, with a cable to the modules
+category: misc
+summary: A phone charger feeding the TP4056 modules, separate from the Mac's USB, so plugging it in and out tests the charger events.

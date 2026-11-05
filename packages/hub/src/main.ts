@@ -37,6 +37,8 @@ import { createRegistry, sweepIdentAtStart } from './registry/index.ts';
 import { RingRetention } from './ring.ts';
 import { createRouter } from './router/index.ts';
 import { createScaleCounters } from './router/scale.ts';
+import { settlePowerTests } from './power/test.ts';
+import { cellTracker, stopCellTracker } from './power/tracker.ts';
 import { CursorSeq } from './seq.ts';
 import { SerialPortManager } from './serial.ts';
 import { listenLoopbackV6 } from './web/guard.ts';
@@ -229,6 +231,7 @@ async function main(): Promise<void> {
   eventsRing.start();
   await router.start(); // node links (TCP/UDP :7421) once the API is up
   bindings.start(); // its router hooks and event subscriptions, once the router runs
+  cellTracker(hub); // POWER-1 (design power-p1 D9): cells' samples and sessions, power.* events, once the router runs
   hub.fixture!.start(); // the HIL fixture module (design m2-c1-hil): its bus subscription, once the router runs
   await ota.start(); // the node HTTP listener (:7422) serves only nodes with a session, so after the router
   // The rest of C6: prompts, the lease sweeper, the LAN self-test, the advert (of :7421, so after the
@@ -272,6 +275,8 @@ async function main(): Promise<void> {
     // Jobs still running here (`fr hub stop --force`, or a signal from elsewhere) are aborted: that
     // kills their build groups and sidecars, and lets them record "cancelled" while the db is open.
     jobs.cancelAll();
+    // A capacity test switches its load off (retried) and keeps its session while the router still runs (power-p1 D10).
+    await settlePowerTests(hub).catch(() => undefined);
     // C6 parts first: their sockets close (1001) before the API does, leases end (hub_stop) and reopen
     // nothing, the advert's dns-sd is killed, pending prompts are cancelled while the bus still runs.
     for (const part of [hub.appServer, hub.wsServer, hub.staticSite, hub.latencyProbe, hub.advert, hub.lnp, hub.leases, hub.prompts]) {
@@ -282,6 +287,7 @@ async function main(): Promise<void> {
     // Before the router: it releases every driven line over the fixture's session.
     await Promise.resolve(hub.fixture?.stop()).catch(() => undefined);
     bindings.stop();
+    stopCellTracker(hub);
     await Promise.resolve(router.stop()).catch(() => undefined);
     frames.attach(null);
     sleepGuard.stop();

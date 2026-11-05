@@ -1,0 +1,12 @@
+schema: fractonica/part@1
+id: esp32c6-wroom1-n8-board
+name: ESP32-C6 dev board (WROOM-1-N8), "scale-c6"
+category: board
+summary: The bench's ESP32-C6 with 8 MB flash, USB-Serial/JTAG; carries the HX711, the round display and the power bench.
+specs:
+  adc1_pins: GPIO0–6
+  free_pins: "0, 1, 2, 3, 6, 7, 10, 11, 14, 18–23 (less what the profile uses)"
+  strapping: "4, 5, 8, 9, 15"
+  power_pins: "5V (USB VBUS through the board), 3V3, GND"
+notes:
+  - "Hardware manifest: hardware/boards/esp32c6-wroom1-n8.board.yaml; profile c6w-scale."

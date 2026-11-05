@@ -52,7 +52,7 @@ function vectorsBody(cases: VectorCase[]): string {
 describe('emitCpp', () => {
   it('writes every C++ output with the generated banner', () => {
     const out = files();
-    const caps = ['button', 'led', 'display', 'audio_out', 'analog_in', 'fixture', 'audio_in', 'touch', 'csi', 'radio_tx', 'camera', 'scale', 'node', 'ota', 'diag'];
+    const caps = ['button', 'led', 'display', 'audio_out', 'analog_in', 'fixture', 'audio_in', 'touch', 'csi', 'radio_tx', 'camera', 'scale', 'battery', 'haptic', 'node', 'ota', 'diag'];
     expect([...out.keys()].sort()).toEqual(
       [
         ...['codec_support.hpp', 'protocol.hpp', 'protocol.cpp', 'messages.hpp', 'messages.cpp', 'serial.hpp', 'serial.cpp'].map((f) => `${CPP_PROTO_GEN_DIR}/${f}`),

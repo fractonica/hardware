@@ -1,0 +1,12 @@
+schema: fractonica/part@1
+id: resistor
+name: Resistor (¼ W through-hole)
+category: passive
+summary: Carbon or metal-film resistor, ¼ W unless noted.
+values: ["100 Ω", "470 Ω", "1 kΩ", "10 kΩ", "100 kΩ", "1 MΩ"]
+specs:
+  power: 0.25 W
+  tolerance: 1 % (metal film, blue) or 5 % (carbon, beige)
+notes:
+  - "Colour codes: 100 Ω brown-black-brown; 470 Ω yellow-violet-brown; 1 kΩ brown-black-red; 10 kΩ brown-black-orange; 100 kΩ brown-black-yellow; 1 MΩ brown-black-green (4-band)."
+  - "Measure with the multimeter when unsure: 5-band metal-film codes are easy to misread."

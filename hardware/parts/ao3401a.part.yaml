@@ -1,0 +1,14 @@
+schema: fractonica/part@1
+id: ao3401a
+name: AO3401A P-channel MOSFET (SOT-23)
+category: semiconductor
+summary: 30 V, 4 A P-MOSFET; the capacitor's charge gate (high-side switch driven by an NPN).
+specs:
+  vds: −30 V
+  rds_on: about 50 mΩ at V_GS −4.5 V
+pins:
+  - { name: G, desc: "gate (pin 1)" }
+  - { name: S, desc: "source (pin 2): to the TP4056's OUT+" }
+  - { name: D, desc: "drain (pin 3): to the capacitor's + (and its sense divider)" }
+notes:
+  - "Gate pull-up 100 kΩ to the source; an NPN on GPIO4 pulls the gate down to open it."

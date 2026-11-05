@@ -1,0 +1,14 @@
+schema: fractonica/part@1
+id: ht7333-a
+name: HT7333-A LDO regulator, 3.3 V
+category: power
+summary: Low-quiescent (about 4 µA) 3.3 V LDO, 250 mA; for running a board from a cell.
+specs: { output: 3.3 V, current: 250 mA, quiescent: about 4 µA, dropout: about 90 mV at light load }
+inferred: [dropout]
+pins:
+  - { name: VIN, desc: input }
+  - { name: GND, desc: ground }
+  - { name: VOUT, desc: 3.3 V out }
+pinout: "Check the package (TO-92 or SOT-89): the pin order differs between them."
+notes:
+  - "250 mA is below an ESP32's Wi-Fi peaks: add a large capacitor on VOUT and test for brown-outs before relying on it."

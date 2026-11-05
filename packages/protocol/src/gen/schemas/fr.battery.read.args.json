@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.read.args",
+  "title": "fr.battery.read arguments",
+  "description": "The last sample and the calibration in use. Never touches the ADC.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

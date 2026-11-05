@@ -1,0 +1,34 @@
+schema: fractonica/wiring@1
+id: demo-bench
+title: Demo bench
+summary: A charger and a motor on demo-c6.
+profile: demo-power
+device: demo-dev
+covers: [battery, buzz]
+safety: ["Unplug everything first."]
+bom:
+  - { part: tp4056-protected, qty: 1 }
+  - { part: resistor, value: 1 MΩ, qty: 2 }
+  - { part: resistor, value: 10 kΩ, qty: 2 }
+diagrams:
+  - { id: divider, title: Sense divider, file: divider.svg }
+connections:
+  - { pin: gpio.0, instance: battery, bind: sense, to: "OUT+ through the divider", via: "1 MΩ / 1 MΩ" }
+  - { pin: gpio.19, instance: battery, bind: chrg, to: "CHRG", via: "10 kΩ" }
+  - { pin: gpio.20, instance: battery, bind: stdby, to: "STDBY", via: "10 kΩ" }
+  - { pin: gpio.11, instance: battery, bind: load, to: "test-load NPN base", via: "1 kΩ" }
+  - { pin: gpio.14, instance: buzz, bind: out, to: "motor NPN base", via: "470 Ω" }
+  - { pin: gpio.5, instance: kick, bind: out, to: "solenoid driver" }
+  - { pin: gnd, to: "every ground" }
+sections:
+  - id: sense
+    title: Sense
+    diagram: divider
+    steps:
+      - { id: sense-divider, text: "Solder the divider.", pins: [gpio.0], check: "GPIO0 reads half the cell." }
+      - { id: sense-status, text: "Tap CHRG and STDBY.", pins: [gpio.19, gpio.20] }
+  - id: drive
+    title: Drive
+    steps:
+      - { id: drive-load, text: "The test load.", pins: [gpio.11] }
+      - { id: drive-motor, text: "The motor.", pins: [gpio.14], note: "Diode stripe to +." }

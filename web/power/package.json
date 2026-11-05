@@ -1,0 +1,17 @@
+{
+  "name": "@fractonica/web-power",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@fractonica/protocol": "workspace:*",
+    "@fractonica/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "vite": "8.3.4"
+  }
+}

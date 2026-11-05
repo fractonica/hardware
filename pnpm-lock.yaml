@@ -156,6 +156,9 @@ importers:
       serialport:
         specifier: 13.0.0
         version: 13.0.0
+      yaml:
+        specifier: 2.9.1
+        version: 2.9.1
       zod:
         specifier: 4.6.7
         version: 4.6.7
@@ -174,6 +177,19 @@ importers:
       ws:
         specifier: 8.22.0
         version: 8.22.0
+
+  web/bench:
+    dependencies:
+      '@fractonica/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vite:
+        specifier: 8.3.4
+        version: 8.3.4(@types/node@26.6.5)(jiti@2.7.0)(yaml@2.9.1)
 
   web/cam:
     dependencies:
@@ -218,6 +234,22 @@ importers:
         version: 8.3.4(@types/node@26.6.5)(jiti@2.7.0)(yaml@2.9.1)
 
   web/force:
+    dependencies:
+      '@fractonica/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@fractonica/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.5
+        version: 26.6.5
+      vite:
+        specifier: 8.3.4
+        version: 8.3.4(@types/node@26.6.5)(jiti@2.7.0)(yaml@2.9.1)
+
+  web/power:
     dependencies:
       '@fractonica/protocol':
         specifier: workspace:*

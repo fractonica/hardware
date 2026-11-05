@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.gate.args",
+  "title": "fr.battery.gate arguments",
+  "description": "Opens or closes the charge gate by hand. An open gate still closes at charge_to_mv; a hand close stands until the charger's state changes. UNSUPPORTED without a gate; BUSY opening it at or above charge_to_mv.",
+  "type": "object",
+  "properties": {
+    "open": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}
