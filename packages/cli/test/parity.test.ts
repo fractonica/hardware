@@ -165,7 +165,7 @@ describe('MCP limits (09 §9.4, §9.6)', () => {
 
 describe('the plugin (09 §9.8)', () => {
   const read = (p: string) => readFileSync(join(PLUGIN, p), 'utf8');
-  const skills = ['audio', 'build-deploy', 'camera', 'e2e-verify', 'fleet-ops', 'hil-rig', 'scale', 'wiring'];
+  const skills = ['audio', 'build-deploy', 'camera', 'e2e-verify', 'fleet-ops', 'hil-rig', 'scale', 'storage-clock', 'wiring'];
   const docs = () => [...skills.map((s) => `skills/${s}/SKILL.md`), 'AGENTS.md'].map((p) => ({ p, text: read(p) }));
 
   it('defines one MCP server, the fr shim, and nothing in .mcp.json or bin/', () => {

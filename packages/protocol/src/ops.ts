@@ -107,6 +107,8 @@ export {
   type PowerOpName,
 } from './ops/power.ts';
 export * from './ops/wiring.ts';
+export * from './ops/storage.ts';
+export * from './ops/clock.ts';
 import { CSI_OPS } from './ops/csi.ts';
 import { DISPLAY_OPS } from './ops/display.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
@@ -119,6 +121,8 @@ import { OTA_OPS } from './ops/ota.ts';
 import { PORTS_OPS } from './ops/ports.ts';
 import { POWER_OPS } from './ops/power.ts';
 import { WIRING_OPS } from './ops/wiring.ts';
+import { STORAGE_OPS } from './ops/storage.ts';
+import { CLOCK_OPS } from './ops/clock.ts';
 import { INVENTORY_OPS, REGISTRY_OPS } from './ops/registry.ts';
 import { SCALE_OPS } from './ops/scale.ts';
 import { TESTS_OPS } from './ops/tests.ts';
@@ -458,6 +462,9 @@ export const OPS = [
   ...POWER_OPS,
   // WIRING-1 (design wiring-w1 D3): wiring guides, steps done, the parts catalogue and what is on hand.
   ...WIRING_OPS,
+  // LCD-1 / CLOCK-1 (design lcd-clock-c1 D9): a board's card (files to and from the Mac, a bench) and its real-time clock.
+  ...STORAGE_OPS,
+  ...CLOCK_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

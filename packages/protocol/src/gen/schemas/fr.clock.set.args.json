@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.clock.set.args",
+  "title": "fr.clock.set arguments",
+  "description": "Second `unix` (2000-2099) begins at node time `at_us` (0 = now): the node waits until then and writes the time in one burst, which restarts the chip's 1 Hz chain, and clears the oscillator-stop flag. INVALID_ARGS for a target more than 2 s ahead or 1 s behind, or a unix outside 2000-2099. It answers at once; the write follows, and `set` fires only when it succeeded (a hub waits for it).",
+  "type": "object",
+  "properties": {
+    "unix": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "at_us": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]{0,19})$"
+        }
+      ],
+      "default": 0
+    },
+    "by": {
+      "type": "string",
+      "enum": [
+        "command",
+        "sync"
+      ],
+      "default": "command"
+    }
+  },
+  "additionalProperties": false
+}

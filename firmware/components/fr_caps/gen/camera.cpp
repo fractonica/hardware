@@ -902,28 +902,28 @@ Status Camera::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &re
     switch (cmd_id) {
     case kCmdStreamStart: {
         const auto a = decode_camera_stream_start_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return stream_start(*a);
     }
     case kCmdStreamStop: {
         const auto a = decode_camera_stream_stop_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return stream_stop(*a);
     }
     case kCmdSet: {
         const auto a = decode_camera_set_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return set(*a);
     }
     case kCmdSdList: {
         const auto a = decode_camera_sd_list_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = sd_list(*a);
@@ -940,14 +940,14 @@ Status Camera::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &re
     }
     case kCmdSdFetch: {
         const auto a = decode_camera_sd_fetch_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return sd_fetch(*a);
     }
     case kCmdSdDelete: {
         const auto a = decode_camera_sd_delete_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return sd_delete(*a);

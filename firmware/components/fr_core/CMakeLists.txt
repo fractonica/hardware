@@ -11,6 +11,8 @@
 # src/nvs_settings.cpp is hal::Settings in NVS (fr/platform/nvs_settings.hpp), its writes on fr_worker.
 # src/services/battery_service.cpp and haptic_service.cpp (design power-p1 D2-D7) are fr.battery over hal::PowerCell
 # and hal::Settings, and fr.haptic over hal::HapticOutput drawing from an fr.battery; both IDF-free.
+# src/services/storage_service.cpp and clock_service.cpp (design lcd-clock-c1 D5-D8) are fr.storage over hal::FileStore
+# and fr.clock over hal::Rtc; both IDF-free.
 idf_component_register(SRCS "src/adc1.cpp"
                             "src/app_desc.cpp"
                             "src/audio/dsp.cpp"
@@ -33,6 +35,7 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/services/battery_service.cpp"
                             "src/services/button_service.cpp"
                             "src/services/camera_service.cpp"
+                            "src/services/clock_service.cpp"
                             "src/services/csi_record.cpp"
                             "src/services/csi_service.cpp"
                             "src/services/descriptor.cpp"
@@ -42,9 +45,11 @@ idf_component_register(SRCS "src/adc1.cpp"
                             "src/services/led_service.cpp"
                             "src/services/radio_tx_service.cpp"
                             "src/services/scale_service.cpp"
+                            "src/services/storage_service.cpp"
                             "src/services/touch_service.cpp"
                             "src/s2_hooks.cpp"
                             "src/safe_off.cpp"
+                            "src/spi_bus.cpp"
                             "src/stream/stream.cpp"
                             "src/test_pin.cpp"
                        INCLUDE_DIRS "include"
@@ -62,9 +67,11 @@ idf_component_register(SRCS "src/adc1.cpp"
                        # only (requirements cannot follow CONFIG_FR_ROLE, so every image compiles it; others link none
                        # of it). It requires fr_core in turn, a cycle like fr_net's.
                        # esp_driver_i2c: the shared I2C buses (src/i2c_bus.cpp, fr/platform/i2c_bus.hpp, design
-                       # m2-c5-display D4, D8); its includers (ssd1306_i2c, cst816_i2c) require it themselves.
+                       # m2-c5-display D4, D8); its includers (ssd1306_i2c, cst816_i2c) require it themselves. esp_driver_spi: the shared
+                       # SPI buses (src/spi_bus.cpp, fr/platform/spi_bus.hpp, design lcd-clock-c1 D3), likewise.
                        PRIV_REQUIRES fr_serial fr_diag fr_net fr_gw fr_ota app_update esp_app_format esp_partition
                                      esp_system esp_timer espcoredump nvs_flash esp_driver_gpio esp_adc esp_driver_i2c
+                                     esp_driver_spi
                        LDFRAGMENTS "linker.lf")
 
 # fr_app_desc is referenced by nothing: without this the linker would leave app_desc.cpp's object out of

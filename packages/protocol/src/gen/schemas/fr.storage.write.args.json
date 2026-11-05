@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.storage.write.args",
+  "title": "fr.storage.write arguments",
+  "description": "Writes `data` at `offset` (creating the file and the directories on the way); `truncate` cuts the file at offset + its length. The data must not exceed config chunk; an offset past the file's end, or a card too full for the data, is INVALID_ARGS.",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 96,
+      "description": "(<= 96 UTF-8 bytes)"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "data": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{2}){0,1024}$",
+      "contentEncoding": "base16",
+      "description": "(<= 1024 bytes)"
+    },
+    "truncate": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "additionalProperties": false
+}

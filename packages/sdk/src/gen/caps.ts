@@ -6,7 +6,7 @@
 import type { CallOptions, CapMeta, CmdResult, Sent } from '../types.ts';
 
 /** FNV-1a 32 of the canonical catalog JSON (the hub's CATALOG_HASH): what an app's hello says it was built against. */
-export const CATALOG_HASH = 0xa9d281fe;
+export const CATALOG_HASH = 0x95782421;
 
 // ---- fr.button ----
 
@@ -1005,6 +1005,243 @@ export interface HapticProps {
   supply_mv: number;
 }
 
+// ---- fr.storage ----
+
+export type StorageStoreState = 'none' | 'mounted' | 'error';
+
+export type StorageCardType = 'unknown' | 'sdsc' | 'sdhc' | 'sdxc';
+
+export type StorageUnmountReason = 'removed' | 'error' | 'command';
+
+/** fr.storage.info RESULT fields. */
+export interface StorageInfoResult {
+  state: StorageStoreState | number;
+  cardType: StorageCardType | number;
+  totalMb: number;
+  freeMb: number;
+  /** the card's product name from its CID (<= 8 UTF-8 bytes) */
+  name: string;
+  speedKhz: number;
+}
+
+/** fr.storage.list arguments (all optional: the device applies the defaults). */
+export interface StorageListArgs {
+  /** (<= 96 UTF-8 bytes) */
+  path?: string;
+  /** (default 0) */
+  offset?: number;
+}
+
+/** fr.storage.list RESULT fields. */
+export interface StorageListResult {
+  /** (<= 16 items) */
+  entries: { name: string; size: number; dir: boolean; mtime: number }[];
+  more: boolean;
+}
+
+/** fr.storage.stat arguments (all optional: the device applies the defaults). */
+export interface StorageStatArgs {
+  /** (<= 96 UTF-8 bytes) */
+  path?: string;
+}
+
+/** fr.storage.stat RESULT fields. */
+export interface StorageStatResult {
+  entry: { name: string; size: number; dir: boolean; mtime: number };
+}
+
+/** fr.storage.read arguments (all optional: the device applies the defaults). */
+export interface StorageReadArgs {
+  /** (<= 96 UTF-8 bytes) */
+  path?: string;
+  offset?: number;
+  len?: number;
+}
+
+/** fr.storage.read RESULT fields. */
+export interface StorageReadResult {
+  /** (hex, <= 1024 bytes) */
+  data: string;
+  eof: boolean;
+}
+
+/** fr.storage.write arguments (all optional: the device applies the defaults). */
+export interface StorageWriteArgs {
+  /** (<= 96 UTF-8 bytes) */
+  path?: string;
+  offset?: number;
+  /** (hex, <= 1024 bytes) */
+  data?: string;
+  /** (default false) */
+  truncate?: boolean;
+}
+
+/** fr.storage.write RESULT fields. */
+export interface StorageWriteResult {
+  /** the file's size after the write */
+  size: number;
+}
+
+/** fr.storage.remove arguments (all optional: the device applies the defaults). */
+export interface StorageRemoveArgs {
+  /** (<= 96 UTF-8 bytes) */
+  path?: string;
+}
+
+/** fr.storage.mkdir arguments (all optional: the device applies the defaults). */
+export interface StorageMkdirArgs {
+  /** (<= 96 UTF-8 bytes) */
+  path?: string;
+}
+
+/** fr.storage.rename arguments (all optional: the device applies the defaults). */
+export interface StorageRenameArgs {
+  /** (<= 96 UTF-8 bytes) */
+  from?: string;
+  /** (<= 96 UTF-8 bytes) */
+  to?: string;
+}
+
+/** fr.storage.remount RESULT fields. */
+export interface StorageRemountResult {
+  state: StorageStoreState | number;
+}
+
+/** fr.storage commands, as methods of an instance. */
+export interface StorageClient {
+  /** The card's state and sizes (the cached ones; a refresh follows in the reports when they are old). With no card it starts a mount and answers BUSY while it runs; an attempt that ended under 3 s ago is not repeated. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  info(opts?: CallOptions): Promise<CmdResult<StorageInfoResult>>;
+  /** A directory's entries from `offset`, at most 16; `more` when there are others. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  list(args?: StorageListArgs, opts?: CallOptions): Promise<CmdResult<StorageListResult>>;
+  /** One path's entry; NOT_FOUND when there is none. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  stat(args?: StorageStatArgs, opts?: CallOptions): Promise<CmdResult<StorageStatResult>>;
+  /** Up to `len` bytes (at most config chunk) from `offset`; `eof` when the file ends within them. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  read(args?: StorageReadArgs, opts?: CallOptions): Promise<CmdResult<StorageReadResult>>;
+  /** Writes `data` at `offset` (creating the file and the directories on the way); `truncate` cuts the file at offset + its length. The data must not exceed config chunk; an offset past the file's end, or a card too full for the data, is INVALID_ARGS. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  write(args?: StorageWriteArgs, opts?: CallOptions): Promise<CmdResult<StorageWriteResult>>;
+  /** A file, or an empty directory. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  remove(args?: StorageRemoveArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  mkdir(args?: StorageMkdirArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  rename(args?: StorageRenameArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** Unmounts (if mounted) and starts a mount in the background; answers the state now (none), `mounted` follows when it succeeds. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  remount(opts?: CallOptions): Promise<CmdResult<StorageRemountResult>>;
+}
+
+/** fr.storage.mounted event fields (normal). */
+export interface StorageMountedFields {
+  totalMb: number;
+  freeMb: number;
+}
+
+/** fr.storage.unmounted event fields (normal). */
+export interface StorageUnmountedFields {
+  reason: StorageUnmountReason | number;
+}
+
+/** fr.storage events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface StorageEvents {
+  mounted: StorageMountedFields;
+  unmounted: StorageUnmountedFields;
+}
+
+/** fr.storage properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface StorageState {
+  state: StorageStoreState | number;
+  /** (MB) */
+  totalMb: number;
+  /** refreshed after writes, at most every 10 s (MB) */
+  freeMb: number;
+  cardType: StorageCardType | number;
+  busy: boolean;
+}
+
+/** fr.storage property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface StorageProps {
+  state: StorageStoreState | number;
+  total_mb: number;
+  free_mb: number;
+  card_type: StorageCardType | number;
+  busy: boolean;
+}
+
+// ---- fr.clock ----
+
+export type ClockSetBy = 'command' | 'sync';
+
+/** fr.clock.read RESULT fields. */
+export interface ClockReadResult {
+  unix: number;
+  valid: boolean;
+  /** the oscillator-stop flag */
+  osf: boolean;
+  tempC10: number;
+  aging: number;
+  offsetMs: number;
+  /** node time (esp_timer us) of the last seconds rollover seen (decimal string) */
+  rolloverUs: string;
+  injected: boolean;
+}
+
+/** fr.clock.set arguments (all optional: the device applies the defaults). */
+export interface ClockSetArgs {
+  unix?: number;
+  /** (decimal string; default 0) */
+  atUs?: number | string;
+  /** (default command) */
+  by?: ClockSetBy;
+}
+
+/** fr.clock.set_aging arguments (all optional: the device applies the defaults). */
+export interface ClockSetAgingArgs {
+  offset?: number;
+}
+
+/** fr.clock commands, as methods of an instance. */
+export interface ClockClient {
+  /** The latest reading (never waits for the bus). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  read(opts?: CallOptions): Promise<CmdResult<ClockReadResult>>;
+  /** Second `unix` (2000-2099) begins at node time `at_us` (0 = now): the node waits until then and writes the time in one burst, which restarts the chip's 1 Hz chain, and clears the oscillator-stop flag. INVALID_ARGS for a target more than 2 s ahead or 1 s behind, or a unix outside 2000-2099. It answers at once; the write follows, and `set` fires only when it succeeded (a hub waits for it). Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  set(args?: ClockSetArgs, opts?: CallOptions): Promise<CmdResult>;
+  /** The aging-offset register: positive slows the clock, about 0.1 ppm per step at 25 degC. Reliable: resolves on the RESULT ok, rejects with CommandError otherwise. */
+  setAging(args?: ClockSetAgingArgs, opts?: CallOptions): Promise<CmdResult>;
+}
+
+/** fr.clock.lost_power event fields (normal). The oscillator-stop flag was set at boot, or the chip's time jumped with no set: the time is not trustworthy until set. */
+export interface ClockLostPowerFields {}
+
+/** fr.clock.set event fields (normal). */
+export interface ClockSetFields {
+  unix: number;
+  by: ClockSetBy | number;
+}
+
+/** fr.clock events by wire name: `pad.on('<inst>.<event>', e => ...)`. */
+export interface ClockEvents {
+  lost_power: ClockLostPowerFields;
+  set: ClockSetFields;
+}
+
+/** fr.clock properties as the mirror holds them (`pad.<inst>.state`); a property a trait gates may be absent. */
+export interface ClockState {
+  /** (s) */
+  unix: number;
+  valid: boolean;
+  /** the chip's temperature, refreshed every 64 s (degC/10) */
+  tempC10: number;
+  /** reported 0 by the node: the hub computes the offset from read's unix and rollover_us (clock_read) (ms) */
+  offsetMs: number;
+}
+
+/** fr.clock property values by wire name: what a `<inst>.<prop>` event carries as `value`. */
+export interface ClockProps {
+  unix: number;
+  valid: boolean;
+  temp_c10: number;
+  offset_ms: number;
+}
+
 // ---- fr.node ----
 
 /** fr.node.identify arguments (all optional: the device applies the defaults). */
@@ -1210,6 +1447,8 @@ export interface CapClients {
   'fr.scale': ScaleClient;
   'fr.battery': BatteryClient;
   'fr.haptic': HapticClient;
+  'fr.storage': StorageClient;
+  'fr.clock': ClockClient;
   'fr.node': NodeClient;
   'fr.ota': OtaClient;
   'fr.diag': DiagClient;
@@ -1230,6 +1469,8 @@ export interface CapEvents {
   'fr.scale': ScaleEvents;
   'fr.battery': BatteryEvents;
   'fr.haptic': HapticEvents;
+  'fr.storage': StorageEvents;
+  'fr.clock': ClockEvents;
   'fr.node': NodeEvents;
   'fr.ota': OtaEvents;
   'fr.diag': DiagEvents;
@@ -1250,6 +1491,8 @@ export interface CapState {
   'fr.scale': ScaleState;
   'fr.battery': BatteryState;
   'fr.haptic': HapticState;
+  'fr.storage': StorageState;
+  'fr.clock': ClockState;
   'fr.node': NodeState;
   'fr.ota': OtaState;
   'fr.diag': DiagState;
@@ -1270,6 +1513,8 @@ export interface CapProps {
   'fr.scale': ScaleProps;
   'fr.battery': BatteryProps;
   'fr.haptic': HapticProps;
+  'fr.storage': StorageProps;
+  'fr.clock': ClockProps;
   'fr.node': NodeProps;
   'fr.ota': OtaProps;
   'fr.diag': DiagProps;
@@ -1293,6 +1538,8 @@ export const CAP_META: Readonly<Record<string, CapMeta>> = {
   'fr.scale': { commands: { tare: { method: 'tare', delivery: 'reliable', args: true }, calibrate: { method: 'calibrate', delivery: 'reliable', args: true }, read: { method: 'read', delivery: 'reliable' }, reset_calibration: { method: 'resetCalibration', delivery: 'reliable' }, watch_start: { method: 'watchStart', delivery: 'reliable', args: true }, watch_stop: { method: 'watchStop', delivery: 'reliable' }, inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['settled'], props: ['weight_mg', 'stable', 'calibrated', 'rate_hz'] },
   'fr.battery': { commands: { read: { method: 'read', delivery: 'reliable' }, calibrate: { method: 'calibrate', delivery: 'reliable', args: true }, reset_calibration: { method: 'resetCalibration', delivery: 'reliable' }, load: { method: 'load', delivery: 'reliable', args: true }, gate: { method: 'gate', delivery: 'reliable', args: true }, inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['charge', 'level_change', 'protect'], props: ['mv', 'percent', 'charger', 'level', 'load_on', 'gate_open'] },
   'fr.haptic': { commands: { pulse: { method: 'pulse', delivery: 'reliable', args: true }, play: { method: 'play', delivery: 'reliable', args: true }, stop: { method: 'stop', delivery: 'reliable' } }, events: ['cut'], props: ['active', 'supply_mv'] },
+  'fr.storage': { commands: { info: { method: 'info', delivery: 'reliable' }, list: { method: 'list', delivery: 'reliable', args: true }, stat: { method: 'stat', delivery: 'reliable', args: true }, read: { method: 'read', delivery: 'reliable', args: true }, write: { method: 'write', delivery: 'reliable', args: true }, remove: { method: 'remove', delivery: 'reliable', args: true }, mkdir: { method: 'mkdir', delivery: 'reliable', args: true }, rename: { method: 'rename', delivery: 'reliable', args: true }, remount: { method: 'remount', delivery: 'reliable' } }, events: ['mounted', 'unmounted'], props: ['state', 'total_mb', 'free_mb', 'card_type', 'busy'] },
+  'fr.clock': { commands: { read: { method: 'read', delivery: 'reliable' }, set: { method: 'set', delivery: 'reliable', args: true }, set_aging: { method: 'setAging', delivery: 'reliable', args: true }, inject: { method: 'inject', delivery: 'reliable', args: true, test: true } }, events: ['lost_power', 'set'], props: ['unix', 'valid', 'temp_c10', 'offset_ms'] },
   'fr.node': { commands: { identify: { method: 'identify', delivery: 'reliable', args: true }, describe: { method: 'describe', delivery: 'reliable' }, reboot: { method: 'reboot', delivery: 'reliable', args: true }, set_alias: { method: 'setAlias', delivery: 'reliable', args: true }, set_groups: { method: 'setGroups', delivery: 'reliable', args: true }, net_set: { method: 'netSet', delivery: 'reliable', args: true }, get_state: { method: 'getState', delivery: 'reliable' }, bind_set: { method: 'bindSet', delivery: 'reliable', args: true }, bind_clear: { method: 'bindClear', delivery: 'reliable', args: true }, bind_list: { method: 'bindList', delivery: 'reliable' } }, events: ['boot', 'binding_fired'], props: [] },
   'fr.ota': { commands: {}, events: [], props: [] },
   'fr.diag': { commands: { exec: { method: 'exec', delivery: 'reliable', args: true } }, events: ['mark'], props: [] },

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 680 380" role="img"><title>DS3231 module to lcd-c6</title><desc>The DS3231 module's VCC to the board's 3V3, GND to GND, SDA to GPIO18 and SCL to GPIO19. 32K and SQW are not connected. The module's charging diode is marked for removal when a CR2032 is fitted.</desc>
+<g class="c-teal"><rect x="40" y="40" width="180" height="300" rx="8" stroke-width="0.5"/>
+<text class="th" x="130" y="66" text-anchor="middle" dominant-baseline="central">lcd-c6</text>
+<text class="ts" x="130" y="86" text-anchor="middle" dominant-baseline="central">ESP32-C6-LCD-1.47</text>
+<text class="th" x="208" y="140" text-anchor="end" dominant-baseline="central">3V3</text>
+<text class="th" x="208" y="190" text-anchor="end" dominant-baseline="central">GND</text>
+<text class="th" x="208" y="240" text-anchor="end" dominant-baseline="central">GPIO18</text>
+<text class="th" x="208" y="290" text-anchor="end" dominant-baseline="central">GPIO19</text></g>
+<g class="c-purple"><rect x="440" y="40" width="200" height="300" rx="8" stroke-width="0.5"/>
+<text class="th" x="540" y="66" text-anchor="middle" dominant-baseline="central">DS3231 module</text>
+<text class="ts" x="540" y="86" text-anchor="middle" dominant-baseline="central">ZS-042 header</text>
+<text class="th" x="452" y="140" dominant-baseline="central">VCC</text>
+<text class="th" x="452" y="190" dominant-baseline="central">GND</text>
+<text class="th" x="452" y="240" dominant-baseline="central">SDA</text>
+<text class="th" x="452" y="290" dominant-baseline="central">SCL</text>
+<text class="ts" x="540" y="320" text-anchor="middle" dominant-baseline="central">32K, SQW: not connected</text></g>
+<path d="M220 140 H440" fill="none" stroke="#D85A30" stroke-width="1.5"/>
+<path d="M220 190 H440" fill="none" stroke="var(--s)" stroke-width="1.5"/>
+<path d="M220 240 H440" fill="none" stroke="#7F77DD" stroke-width="1.5"/>
+<path d="M220 290 H440" fill="none" stroke="#1D9E75" stroke-width="1.5"/>
+<text class="ts" x="330" y="128" text-anchor="middle">3.3 V</text>
+<text class="ts" x="330" y="228" text-anchor="middle">data</text>
+<text class="ts" x="330" y="278" text-anchor="middle">clock</text>
+</svg>

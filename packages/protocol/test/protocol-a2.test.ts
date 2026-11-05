@@ -17,7 +17,7 @@ const hashOf = (ops: readonly { name: string; input: z.ZodType }[]) =>
 
 describe('A2 ops (design audio-a2 D5)', () => {
   it('adds audio_monitor as a mutate job on `audio monitor <device>`, and moves REGISTRY_HASH once', () => {
-    expect(OPS.filter((o) => o.name !== 'network_list' && !/^(csi|camera|scale|battery|cell|haptic|wiring|part)_/.test(o.name))).toHaveLength(52); // CSI-1 adds three (protocol-csi.test.ts), CAM-1 seven (protocol-camera.test.ts)
+    expect(OPS.filter((o) => o.name !== 'network_list' && !/^(csi|camera|scale|battery|cell|haptic|wiring|part|storage|clock)_/.test(o.name))).toHaveLength(52); // CSI-1 adds three (protocol-csi.test.ts), CAM-1 seven (protocol-camera.test.ts)
     expect(findOp('audio_monitor')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['audio', 'monitor'], positional: ['device'] } });
     expect(findOp('audio_monitor')!.summary.length).toBeLessThan(1000);
     // A1's was 445e6697686c and A2's ee5dc36bb005; CSI-1 changed ops in place (protocol-csi.test.ts pins today's).

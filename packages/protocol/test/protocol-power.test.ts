@@ -35,7 +35,7 @@ const POWER_OP_NAMES = [
 
 describe('POWER-1 ops (design power-p1 D11)', () => {
   it('adds fourteen ops on their CLI paths and moves REGISTRY_HASH once', () => {
-    const power1 = OPS.filter((o) => !/^(wiring|part)_/.test(o.name)); // WIRING-1 adds eleven (protocol-wiring.test.ts)
+    const power1 = OPS.filter((o) => !/^(wiring|part|storage|clock)_/.test(o.name)); // WIRING-1 adds eleven (protocol-wiring.test.ts)
     expect(power1).toHaveLength(82);
     expect(power1.slice(-14).map((o) => o.name)).toEqual(POWER_OP_NAMES);
     const paths: Record<string, [string[], string[]?, string?, string?]> = {

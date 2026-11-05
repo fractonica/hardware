@@ -5,13 +5,13 @@ id: st7789_spi
 summary: ST7789 / ST7789T3 RGB565 panel on an SPI master (DMA), with LEDC PWM on the backlight; rendered through LVGL.
 implements: hal.Display
 class: fr::drv::St7789Spi               # header: include/fr/drv/st7789_spi.hpp
-targets: [esp32s3]
+targets: [esp32s3, esp32c6]
 binds: displays
 accepts_kinds: [st7789, st7789t3]
 config:                                 # same order as St7789Spi::Config
   kind:          { type: enum, values: [st7789, st7789t3], from: board.kind }
-  sclk:          { type: gpio, from: board.sclk }
-  mosi:          { type: gpio, from: board.mosi }
+  sclk:          { type: gpio, from: board.sclk, shared_bus: true }
+  mosi:          { type: gpio, from: board.mosi, shared_bus: true }
   cs:            { type: gpio, from: board.cs }
   dc:            { type: gpio, from: board.dc }
   rst:           { type: gpio, from: board.rst, optional: true, doc: "null: no reset line (power-up reset and SWRESET)" }
@@ -26,7 +26,10 @@ config:                                 # same order as St7789Spi::Config
   idle_high:     { type: gpio_mask, from: board.idle_high, doc: "bit n = GPIOn; absent: none" }
   # Which level lights the backlight (M2-C5 bench: the LCD-1.9's is active-low, the Touch-LCD-2's NPN switch high).
   backlight_active: { type: enum, values: [high, low], from: board.backlight_active, default: high }
+  # The shared bus's MISO (design lcd-clock-c1 D3): the C6-LCD-1.47's TF card reads back on the panel's SPI2, and the bus
+  # must be brought up with every line it will carry; the panel never reads. Claimed as a shared bus line.
+  miso:          { type: gpio, from: board.miso, optional: true, shared_bus: true }
 # fr.display traits its service reports (design m2-c5-display D3): RGB565 through the LVGL backend (fr_ui).
 traits: { color: rgb565, ui: true }
-resources: { gpio: 6, spi_host: 1, ledc_channels: 1, ledc_timers: 1 }   # the backlight PWM takes a channel and a timer
+resources: { gpio: 7, spi_host: 1, ledc_channels: 1, ledc_timers: 1 }   # the backlight PWM takes a channel and a timer; miso (optional) is the shared bus's
 dependencies: {}

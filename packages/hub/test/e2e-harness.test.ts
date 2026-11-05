@@ -523,7 +523,7 @@ function node(args: string[], env: Record<string, string>): Promise<{ code: numb
   });
 }
 
-/** Every target-tier gate module (spec 11 §11.1; T-VBAT since M2-C3, T-GW-LINK since M2-C4, T-DISPLAY since M2-C5, T-AUDIO since A1, T-CAMERA since CAM-1, T-SCALE since SCALE-1), what it needs, and one of its own flags its --help must name. */
+/** Every target-tier gate module (spec 11 §11.1; T-VBAT since M2-C3, T-GW-LINK since M2-C4, T-DISPLAY since M2-C5, T-AUDIO since A1, T-CAMERA since CAM-1, T-SCALE since SCALE-1, T-LCDC6 since LCD-1), what it needs, and one of its own flags its --help must name. */
 const GATES = [
   ['t-agent.ts', 'T-AGENT', { human: true, usb: true }, '--since c:<run>.<seq>'],
   ['t-audio.ts', 'T-AUDIO', {}, '--voice'],
@@ -535,6 +535,7 @@ const GATES = [
   ['t-gw-link.ts', 'T-GW-LINK', { human: true, usb: true }, '--gateway gw-c6'],
   ['t-input.ts', 'T-INPUT', { human: true, usb: true }, '--phase sim|human|loss|all'],
   ['t-lat.ts', 'T-LAT', { wiring: true, usb: true }, '--pair from:to'],
+  ['t-lcdc6.ts', 'T-LCDC6', {}, '--drift-min 30'],
   ['t-led.ts', 'T-LED', {}, '--no-node-stats'],
   ['t-nn.ts', 'T-NN', { human: true }, '--allow-hub-stop'],
   ['t-ota.ts', 'T-OTA', { human: true, usb: true }, '--cut-at-kb 256'],

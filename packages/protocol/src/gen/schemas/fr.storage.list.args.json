@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.storage.list.args",
+  "title": "fr.storage.list arguments",
+  "description": "A directory's entries from `offset`, at most 16; `more` when there are others.",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 96,
+      "description": "(<= 96 UTF-8 bytes)"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "default": 0
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "path": "/"
+    }
+  ]
+}

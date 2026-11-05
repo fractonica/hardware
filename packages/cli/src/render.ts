@@ -6,6 +6,7 @@ import { cliFlag, exitCodeForResult, findOp, type Job, type LogLine, type PortIn
 import { renderProbe } from './render-latency.ts';
 import { powerRenderer, renderCellTest } from './render-power.ts';
 import { wiringRenderer } from './render-wiring.ts';
+import { renderClockDrift, renderStorageJob, storageClockRenderer } from './render-storage-clock.ts';
 import { renderScaleWatch, scaleRenderer } from './render-scale.ts';
 import { renderGateReport, targetReport } from './render-tests.ts';
 
@@ -307,6 +308,12 @@ function renderJob(job: Job): string {
   if (job.kind === 'scale' && job.result && typeof job.result === 'object') {
     return [head, renderScaleWatch(job.result as Row)].join('\n'); // fr scale watch (design scale-round-c1 D10)
   }
+  if (job.kind === 'storage' && job.result && typeof job.result === 'object') {
+    return [head, renderStorageJob(job.result as Row)].join('\n'); // fr storage get | put | bench (design lcd-clock-c1 D9)
+  }
+  if (job.kind === 'clock' && job.result && typeof job.result === 'object') {
+    return [head, renderClockDrift(job.result as Row)].join('\n'); // fr clock drift (design lcd-clock-c1 D8)
+  }
   if (job.kind === 'cell' && job.result && typeof job.result === 'object') {
     return [head, renderCellTest(job.result as Row)].join('\n'); // fr cell test (design power-p1 D10)
   }
@@ -555,6 +562,10 @@ export function renderResult(op: string, r: Result): { out: string; err: string 
   const power = powerRenderer(op); // fr battery|cell|haptic (design power-p1 D11)
   if (power && data && typeof data === 'object') {
     return { out: power(data), err: '' };
+  }
+  const storageClock = storageClockRenderer(op); // fr storage|clock (design lcd-clock-c1 D9)
+  if (storageClock && data && typeof data === 'object') {
+    return { out: storageClock(data), err: '' };
   }
   const wiring = wiringRenderer(op); // fr wiring|parts (design wiring-w1 D4)
   if (wiring && data && typeof data === 'object') {

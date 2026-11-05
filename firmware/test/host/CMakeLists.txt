@@ -131,6 +131,7 @@ set(FR_PANEL_INCLUDES
 add_library(fr_panel_sim STATIC
     ${HOST_DIR}/shim/panel_sim.cpp
     ${COMPONENTS_DIR}/fr_core/src/i2c_bus.cpp
+    ${COMPONENTS_DIR}/fr_core/src/spi_bus.cpp
     ${REPO_DIR}/hardware/drivers/st7789_spi/src/st7789_spi.cpp
     ${REPO_DIR}/hardware/drivers/gc9a01_spi/src/gc9a01_spi.cpp
     ${REPO_DIR}/hardware/drivers/ssd1306_i2c/src/ssd1306_i2c.cpp

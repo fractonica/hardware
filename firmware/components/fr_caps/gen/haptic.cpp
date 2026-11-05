@@ -313,14 +313,14 @@ Status Haptic::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &)
     switch (cmd_id) {
     case kCmdPulse: {
         const auto a = decode_haptic_pulse_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return pulse(*a);
     }
     case kCmdPlay: {
         const auto a = decode_haptic_play_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return play(*a);

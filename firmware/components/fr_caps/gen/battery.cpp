@@ -856,7 +856,7 @@ Status Battery::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     }
     case kCmdCalibrate: {
         const auto a = decode_battery_calibrate_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = calibrate(*a);
@@ -879,14 +879,14 @@ Status Battery::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     }
     case kCmdLoad: {
         const auto a = decode_battery_load_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return load(*a);
     }
     case kCmdGate: {
         const auto a = decode_battery_gate_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return gate(*a);
@@ -894,7 +894,7 @@ Status Battery::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
 #if FR_TEST_HOOKS
     case kCmdInject: {
         const auto a = decode_battery_inject_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return inject(*a);

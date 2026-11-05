@@ -35,7 +35,7 @@ const hashOf = (ops: readonly { name: string; input: z.ZodType }[]) =>
 
 describe('CSI-1 ops (design csi-c1 D4, D5, D13)', () => {
   it('adds network_list, csi_stream and csi_status, and moves REGISTRY_HASH once for every op change', () => {
-    expect(OPS.filter((o) => !/^(camera|scale|battery|cell|haptic|wiring|part)_/.test(o.name))).toHaveLength(55); // CAM-1 adds seven (protocol-camera.test.ts)
+    expect(OPS.filter((o) => !/^(camera|scale|battery|cell|haptic|wiring|part|storage|clock)_/.test(o.name))).toHaveLength(55); // CAM-1 adds seven (protocol-camera.test.ts)
     expect(findOp('network_list')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['net', 'ls'] } });
     expect(findOp('csi_stream')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['csi', 'stream'], positional: ['device'] } });
     expect(findOp('csi_status')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['csi', 'status'], positional: ['device'] } });

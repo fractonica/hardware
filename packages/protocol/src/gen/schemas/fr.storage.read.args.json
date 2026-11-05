@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.storage.read.args",
+  "title": "fr.storage.read arguments",
+  "description": "Up to `len` bytes (at most config chunk) from `offset`; `eof` when the file ends within them.",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 96,
+      "description": "(<= 96 UTF-8 bytes)"
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "len": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    }
+  },
+  "additionalProperties": false
+}

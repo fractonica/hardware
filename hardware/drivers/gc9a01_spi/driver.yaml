@@ -10,8 +10,8 @@ targets: [esp32c6, esp32s3, esp32c3]
 binds: gpio                             # bare pins: bind { sclk, mosi, cs?, dc, rst? } (no board section)
 accepts_kinds: [gpio]
 config:                                 # same order as Gc9a01Spi::Config
-  sclk:    { type: gpio, from: bind.sclk, doc: "the module's SCL" }
-  mosi:    { type: gpio, from: bind.mosi, doc: "the module's SDA" }
+  sclk:    { type: gpio, from: bind.sclk, shared_bus: true, doc: "the module's SCL" }
+  mosi:    { type: gpio, from: bind.mosi, shared_bus: true, doc: "the module's SDA" }
   cs:      { type: gpio, from: bind.cs, optional: true, doc: "absent: CS tied low on the module (its R8)" }
   dc:      { type: gpio, from: bind.dc }
   rst:     { type: gpio, from: bind.rst, optional: true, doc: "absent: power-up reset and SWRESET at init" }

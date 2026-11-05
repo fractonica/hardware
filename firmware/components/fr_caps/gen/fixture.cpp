@@ -526,7 +526,7 @@ Status Fixture::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     switch (cmd_id) {
     case kCmdPress: {
         const auto a = decode_fixture_press_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = press(*a);
@@ -565,7 +565,7 @@ Status Fixture::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     }
     case kCmdSetDuty: {
         const auto a = decode_fixture_set_duty_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = set_duty(*a);

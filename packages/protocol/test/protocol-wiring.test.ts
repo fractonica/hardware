@@ -30,8 +30,9 @@ const WIRING_OP_NAMES = [
 
 describe('WIRING-1 ops (design wiring-w1 D3)', () => {
   it('adds eleven ops on their CLI paths and moves REGISTRY_HASH once', () => {
-    expect(OPS).toHaveLength(93);
-    expect(OPS.slice(-11).map((o) => o.name)).toEqual(WIRING_OP_NAMES);
+    const wiring1 = OPS.filter((o) => !/^(storage|clock)_/.test(o.name)); // LCD-1 / CLOCK-1 adds twelve (protocol-storage-clock.test.ts)
+    expect(wiring1).toHaveLength(93);
+    expect(wiring1.slice(-11).map((o) => o.name)).toEqual(WIRING_OP_NAMES);
     const paths: Record<string, [string[], string[] | undefined, string, string]> = {
       wiring_list: [['wiring', 'list'], undefined, 'query', 'read'],
       wiring_show: [['wiring', 'show'], ['guide'], 'query', 'read'],
@@ -49,11 +50,12 @@ describe('WIRING-1 ops (design wiring-w1 D3)', () => {
       const op = findOp(name)!;
       expect(op, name).toMatchObject({ kind, tier, cli: positional ? { path, positional } : { path } });
       expect(op.summary.length, name).toBeLessThan(1000);
-      expect(hashOf(OPS.filter((o) => o.name !== name)), name).not.toBe(REGISTRY_HASH);
+      expect(hashOf(wiring1.filter((o) => o.name !== name)), name).not.toBe('e37bcd657cfb');
     }
     expect(findOp('wiring_step')!.cli.variadic).toBe(true);
-    expect(hashOf(OPS)).toBe(REGISTRY_HASH);
-    expect(REGISTRY_HASH).toBe('e37bcd657cfb');
+    // WIRING-1's own hash, LCD-1 / CLOCK-1's ops left out (protocol-storage-clock.test.ts pins the current one).
+    expect(hashOf(wiring1)).toBe('e37bcd657cfb');
+    expect(REGISTRY_HASH).not.toBe('e37bcd657cfb');
     expect(REGISTRY_HASH).not.toBe('a377215c884f'); // POWER-1's
   });
 

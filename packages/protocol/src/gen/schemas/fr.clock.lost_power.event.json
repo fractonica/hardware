@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.clock.lost_power.event",
+  "title": "fr.clock.lost_power event",
+  "description": "The oscillator-stop flag was set at boot, or the chip's time jumped with no set: the time is not trustworthy until set.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

@@ -14,6 +14,8 @@ standard:
   0x000C: fr.scale         # design scale-round-c1 D6
   0x000D: fr.battery       # design power-p1 D2
   0x000E: fr.haptic        # design power-p1 D6
+  0x000F: fr.storage       # design lcd-clock-c1 D5
+  0x0010: fr.clock         # design lcd-clock-c1 D7
 system:
   0x00F0: fr.node
   0x00F1: fr.ota

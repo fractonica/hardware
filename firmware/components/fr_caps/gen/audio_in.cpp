@@ -565,7 +565,7 @@ Status AudioIn::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     switch (cmd_id) {
     case kCmdStreamStart: {
         const auto a = decode_audio_in_stream_start_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = stream_start(*a);
@@ -582,7 +582,7 @@ Status AudioIn::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     }
     case kCmdStreamStop: {
         const auto a = decode_audio_in_stream_stop_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return stream_stop(*a);
@@ -605,7 +605,7 @@ Status AudioIn::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     }
     case kCmdMonitorStart: {
         const auto a = decode_audio_in_monitor_start_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return monitor_start(*a);

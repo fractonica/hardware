@@ -1,0 +1,26 @@
+# Driver manifest (design lcd-clock-c1 D5, D6; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::SdspiCard::Config from the bound `sd_cards.<name>` entry of kind sdspi. SCLK, MOSI and MISO are shared bus
+# lines (the C6-LCD-1.47's panel is on the same SPI2): codegen lets the panel claim them too, fr::platform::spi_bus
+# checks they agree.
+schema: fractonica/driver@1
+id: sdspi_card
+summary: A FAT micro-SD card on an SPI master shared with other devices (esp_vfs_fat_sdspi_mount, no auto-format), as fr.storage's file store.
+implements: hal.FileStore
+class: fr::drv::SdspiCard               # header: include/fr/drv/sdspi_card.hpp
+targets: [esp32c6, esp32c3, esp32s3, esp32c5]
+binds: sd_cards
+accepts_kinds: [sdspi]
+config:                                 # same order as SdspiCard::Config
+  cs:        { type: gpio, from: board.cs }
+  sclk:      { type: gpio, from: board.sclk, shared_bus: true }
+  mosi:      { type: gpio, from: board.mosi, shared_bus: true }
+  miso:      { type: gpio, from: board.miso, shared_bus: true }
+  speed_khz: { type: u16, default: 20000, range: [400, 40000], doc: "the card's SPI clock after init (init runs at 400 kHz)" }
+traits: { removable: true }
+# The SPI host is the shared one (fr::platform::spi_bus): not counted again here (spi_host is counted by the panel).
+resources: { gpio: 4 }
+# Long file names (the hub's paths are not 8.3), their buffer on the heap.
+sdkconfig:
+  - CONFIG_FATFS_LFN_HEAP=y
+  - CONFIG_FATFS_MAX_LFN=255
+dependencies: {}

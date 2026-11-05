@@ -126,7 +126,7 @@ Status Diag::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &repl
     switch (cmd_id) {
     case kCmdExec: {
         const auto a = decode_diag_exec_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = exec(*a);

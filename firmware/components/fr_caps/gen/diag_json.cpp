@@ -24,6 +24,8 @@
 #include "scale.hpp"
 #include "battery.hpp"
 #include "haptic.hpp"
+#include "storage.hpp"
+#include "clock.hpp"
 #include "node.hpp"
 #include "ota.hpp"
 #include "diag.hpp"
@@ -45,6 +47,8 @@ cJSON *to_json(const CameraTraits &v);
 cJSON *to_json(const ScaleTraits &v);
 cJSON *to_json(const BatteryTraits &v);
 cJSON *to_json(const HapticTraits &v);
+cJSON *to_json(const StorageTraits &v);
+cJSON *to_json(const ClockTraits &v);
 #if FR_TEST_HOOKS
 cJSON *to_json(const ButtonInjectArgs &v);
 cJSON *to_json(const ButtonDown &v);
@@ -125,6 +129,28 @@ cJSON *to_json(const BatteryProtect &v);
 cJSON *to_json(const HapticPulseArgs &v);
 cJSON *to_json(const HapticPlayArgs &v);
 cJSON *to_json(const HapticCut &v);
+cJSON *to_json(const StorageEntry &v);
+cJSON *to_json(const StorageInfoResult &v);
+cJSON *to_json(const StorageListArgs &v);
+cJSON *to_json(const StorageListResult &v);
+cJSON *to_json(const StorageStatArgs &v);
+cJSON *to_json(const StorageStatResult &v);
+cJSON *to_json(const StorageReadArgs &v);
+cJSON *to_json(const StorageReadResult &v);
+cJSON *to_json(const StorageWriteArgs &v);
+cJSON *to_json(const StorageWriteResult &v);
+cJSON *to_json(const StorageRemoveArgs &v);
+cJSON *to_json(const StorageMkdirArgs &v);
+cJSON *to_json(const StorageRenameArgs &v);
+cJSON *to_json(const StorageRemountResult &v);
+cJSON *to_json(const StorageMounted &v);
+cJSON *to_json(const StorageUnmounted &v);
+cJSON *to_json(const ClockReadResult &v);
+cJSON *to_json(const ClockSetArgs &v);
+cJSON *to_json(const ClockSetAgingArgs &v);
+cJSON *to_json(const ClockInjectArgs &v);
+cJSON *to_json(const ClockLostPower &v);
+cJSON *to_json(const ClockSet &v);
 cJSON *to_json(const NodeIdentifyArgs &v);
 cJSON *to_json(const NodeDescribeResult &v);
 cJSON *to_json(const NodeRebootArgs &v);
@@ -537,6 +563,24 @@ cJSON *to_json(const HapticTraits &v)
     cJSON *o = cJSON_CreateObject();
     bool ok = o != nullptr;
     ok = ok && add(o, "pwm", json_bool(v.pwm));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "removable", json_bool(v.removable));
+    ok = ok && add(o, "card_detect", json_bool(v.card_detect));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ClockTraits &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "has_temperature", json_bool(v.has_temperature));
+    ok = ok && add(o, "resolution_ms", json_number(v.resolution_ms));
     return finish(o, ok);
 }
 
@@ -1342,6 +1386,209 @@ cJSON *to_json(const HapticCut &v)
     return finish(o, ok);
 }
 
+cJSON *to_json(const StorageEntry &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "name", json_string(v.name));
+    ok = ok && add(o, "size", json_number(v.size));
+    ok = ok && add(o, "dir", json_bool(v.dir));
+    ok = ok && add(o, "mtime", json_number(v.mtime));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageInfoResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "state", json_enum(v.state));
+    ok = ok && add(o, "card_type", json_enum(v.card_type));
+    ok = ok && add(o, "total_mb", json_number(v.total_mb));
+    ok = ok && add(o, "free_mb", json_number(v.free_mb));
+    ok = ok && add(o, "name", json_string(v.name));
+    ok = ok && add(o, "speed_khz", json_number(v.speed_khz));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageListArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "path", json_string(v.path));
+    ok = ok && add(o, "offset", json_number(v.offset));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageListResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "entries", json_array(v.entries, [](const StorageEntry &e) { return to_json(e); }));
+    ok = ok && add(o, "more", json_bool(v.more));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageStatArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "path", json_string(v.path));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageStatResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "entry", to_json(v.entry));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageReadArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "path", json_string(v.path));
+    ok = ok && add(o, "offset", json_number(v.offset));
+    ok = ok && add(o, "len", json_number(v.len));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageReadResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "data", json_bytes(v.data));
+    ok = ok && add(o, "eof", json_bool(v.eof));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageWriteArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "path", json_string(v.path));
+    ok = ok && add(o, "offset", json_number(v.offset));
+    ok = ok && add(o, "data", json_bytes(v.data));
+    ok = ok && add(o, "truncate", json_bool(v.truncate));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageWriteResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "size", json_number(v.size));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageRemoveArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "path", json_string(v.path));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageMkdirArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "path", json_string(v.path));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageRenameArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "from", json_string(v.from));
+    ok = ok && add(o, "to", json_string(v.to));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageRemountResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "state", json_enum(v.state));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageMounted &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "total_mb", json_number(v.total_mb));
+    ok = ok && add(o, "free_mb", json_number(v.free_mb));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const StorageUnmounted &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "reason", json_enum(v.reason));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ClockReadResult &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "unix", json_number(v.unix));
+    ok = ok && add(o, "valid", json_bool(v.valid));
+    ok = ok && add(o, "osf", json_bool(v.osf));
+    ok = ok && add(o, "temp_c10", json_number(v.temp_c10));
+    ok = ok && add(o, "aging", json_number(v.aging));
+    ok = ok && add(o, "offset_ms", json_number(v.offset_ms));
+    ok = ok && add(o, "rollover_us", json_u64(v.rollover_us));
+    ok = ok && add(o, "injected", json_bool(v.injected));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ClockSetArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "unix", json_number(v.unix));
+    ok = ok && add(o, "at_us", json_u64(v.at_us));
+    ok = ok && add(o, "by", json_enum(v.by));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ClockSetAgingArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "offset", json_number(v.offset));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ClockInjectArgs &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "unix", json_number(v.unix));
+    ok = ok && add(o, "hold_ms", json_number(v.hold_ms));
+    return finish(o, ok);
+}
+
+cJSON *to_json(const ClockLostPower &)
+{
+    cJSON *o = cJSON_CreateObject();
+    return o;
+}
+
+cJSON *to_json(const ClockSet &v)
+{
+    cJSON *o = cJSON_CreateObject();
+    bool ok = o != nullptr;
+    ok = ok && add(o, "unix", json_number(v.unix));
+    ok = ok && add(o, "by", json_enum(v.by));
+    return finish(o, ok);
+}
+
 cJSON *to_json(const NodeIdentifyArgs &v)
 {
     cJSON *o = cJSON_CreateObject();
@@ -1554,6 +1801,29 @@ cJSON *to_json(const DiagMark &v)
             ok = from_json_uint(it, 0xFFFFFFFF, v.frames);
         } else if (key == "bytes") {
             ok = from_json_uint(it, 0xFFFFFFFF, v.bytes);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    return ok;
+}
+
+[[maybe_unused]] bool from_json_storage_entry(const cJSON *j, StorageEntry &v)
+{
+    if (!cJSON_IsObject(j)) {
+        return false;
+    }
+    bool ok = true;
+    for (const cJSON *it = j->child; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "name") {
+            ok = from_json_string(it, 64, v.name);
+        } else if (key == "size") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.size);
+        } else if (key == "dir") {
+            ok = from_json_bool(it, v.dir);
+        } else if (key == "mtime") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.mtime);
         } else {
             ok = false;  // unknown key
         }
@@ -2576,6 +2846,241 @@ Status args_haptic_stop(const cJSON *obj)
         return std::unexpected(Err::invalid_args);
     }
     return {};
+}
+
+Status args_storage_info(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_storage_list(const cJSON *obj, fr::wire::Writer &w)
+{
+    StorageListArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "path") {
+            ok = from_json_string(it, 96, v.path);
+        } else if (key == "offset") {
+            ok = from_json_uint(it, 0xFFFF, v.offset);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_storage_stat(const cJSON *obj, fr::wire::Writer &w)
+{
+    StorageStatArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "path") {
+            ok = from_json_string(it, 96, v.path);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_storage_read(const cJSON *obj, fr::wire::Writer &w)
+{
+    StorageReadArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "path") {
+            ok = from_json_string(it, 96, v.path);
+        } else if (key == "offset") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.offset);
+        } else if (key == "len") {
+            ok = from_json_uint(it, 0xFFFF, v.len);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_storage_write(const cJSON *obj, fr::wire::Writer &w)
+{
+    StorageWriteArgs v{};
+    uint8_t data_buf[1024];
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "path") {
+            ok = from_json_string(it, 96, v.path);
+        } else if (key == "offset") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.offset);
+        } else if (key == "data") {
+            ok = from_json_bytes(it, data_buf, v.data);
+        } else if (key == "truncate") {
+            ok = from_json_bool(it, v.truncate);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_storage_remove(const cJSON *obj, fr::wire::Writer &w)
+{
+    StorageRemoveArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "path") {
+            ok = from_json_string(it, 96, v.path);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_storage_mkdir(const cJSON *obj, fr::wire::Writer &w)
+{
+    StorageMkdirArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "path") {
+            ok = from_json_string(it, 96, v.path);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_storage_rename(const cJSON *obj, fr::wire::Writer &w)
+{
+    StorageRenameArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "from") {
+            ok = from_json_string(it, 96, v.from);
+        } else if (key == "to") {
+            ok = from_json_string(it, 96, v.to);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_storage_remount(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_clock_read(const cJSON *obj)
+{
+    if (obj != nullptr && obj->child != nullptr) {
+        return std::unexpected(Err::invalid_args);
+    }
+    return {};
+}
+
+Status args_clock_set(const cJSON *obj, fr::wire::Writer &w)
+{
+    ClockSetArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "unix") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.unix);
+        } else if (key == "at_us") {
+            ok = from_json_u64(it, v.at_us);
+        } else if (key == "by") {
+            ok = from_json_enum(it, v.by);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_clock_set_aging(const cJSON *obj, fr::wire::Writer &w)
+{
+    ClockSetAgingArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "offset") {
+            ok = from_json_sint(it, -0x80, 0x7F, v.offset);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
+}
+
+Status args_clock_inject(const cJSON *obj, fr::wire::Writer &w)
+{
+    ClockInjectArgs v{};
+    bool ok = true;
+    for (const cJSON *it = obj != nullptr ? obj->child : nullptr; ok && it != nullptr; it = it->next) {
+        const std::string_view key = it->string != nullptr ? it->string : "";
+        if (key == "unix") {
+            ok = from_json_uint(it, 0xFFFFFFFF, v.unix);
+        } else if (key == "hold_ms") {
+            ok = from_json_uint(it, 0xFFFF, v.hold_ms);
+        } else {
+            ok = false;  // unknown key
+        }
+    }
+    if (!ok || !valid(v)) {
+        return std::unexpected(Err::invalid_args);
+    }
+    encode(v, w);
+    return encoded(w);
 }
 
 Status args_node_identify(const cJSON *obj, fr::wire::Writer &w)
@@ -3686,6 +4191,188 @@ cJSON *haptic_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
     return nullptr;
 }
 
+cJSON *storage_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Storage::kCmdInfo:
+            return json_empty(body);
+        case Storage::kCmdList:
+            return json_of(decode_storage_list_args(body));
+        case Storage::kCmdStat:
+            return json_of(decode_storage_stat_args(body));
+        case Storage::kCmdRead:
+            return json_of(decode_storage_read_args(body));
+        case Storage::kCmdWrite:
+            return json_of(decode_storage_write_args(body));
+        case Storage::kCmdRemove:
+            return json_of(decode_storage_remove_args(body));
+        case Storage::kCmdMkdir:
+            return json_of(decode_storage_mkdir_args(body));
+        case Storage::kCmdRename:
+            return json_of(decode_storage_rename_args(body));
+        case Storage::kCmdRemount:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Storage::kCmdInfo:
+            return json_of(decode_storage_info_result(body));
+        case Storage::kCmdList:
+            return json_of(decode_storage_list_result(body));
+        case Storage::kCmdStat:
+            return json_of(decode_storage_stat_result(body));
+        case Storage::kCmdRead:
+            return json_of(decode_storage_read_result(body));
+        case Storage::kCmdWrite:
+            return json_of(decode_storage_write_result(body));
+        case Storage::kCmdRemove:
+            return json_empty(body);
+        case Storage::kCmdMkdir:
+            return json_empty(body);
+        case Storage::kCmdRename:
+            return json_empty(body);
+        case Storage::kCmdRemount:
+            return json_of(decode_storage_remount_result(body));
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Storage::kEventMounted:
+            return json_of(decode_storage_mounted(body));
+        case Storage::kEventUnmounted:
+            return json_of(decode_storage_unmounted(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Storage::kPropState: {
+            const auto v = decode_storage_state_state(body);
+            if (!v || !(is_known(*v))) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "state", json_enum(*v)));
+        }
+        case Storage::kPropTotalMb: {
+            const auto v = decode_storage_total_mb_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "total_mb", json_number(*v)));
+        }
+        case Storage::kPropFreeMb: {
+            const auto v = decode_storage_free_mb_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "free_mb", json_number(*v)));
+        }
+        case Storage::kPropCardType: {
+            const auto v = decode_storage_card_type_state(body);
+            if (!v || !(is_known(*v))) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "card_type", json_enum(*v)));
+        }
+        case Storage::kPropBusy: {
+            const auto v = decode_storage_busy_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "busy", json_bool(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
+cJSON *clock_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
+{
+    switch (cls) {
+    case fr::wire::kClsCmd:
+        switch (id) {
+        case Clock::kCmdRead:
+            return json_empty(body);
+        case Clock::kCmdSet:
+            return json_of(decode_clock_set_args(body));
+        case Clock::kCmdSetAging:
+            return json_of(decode_clock_set_aging_args(body));
+        case Clock::kCmdInject:
+            return json_of(decode_clock_inject_args(body));
+        }
+        break;
+    case fr::wire::kClsResult:
+        switch (id) {
+        case Clock::kCmdRead:
+            return json_of(decode_clock_read_result(body));
+        case Clock::kCmdSet:
+            return json_empty(body);
+        case Clock::kCmdSetAging:
+            return json_empty(body);
+        case Clock::kCmdInject:
+            return json_empty(body);
+        }
+        break;
+    case fr::wire::kClsEvent:
+        switch (id) {
+        case Clock::kEventLostPower:
+            return json_of(decode_clock_lost_power(body));
+        case Clock::kEventSet:
+            return json_of(decode_clock_set(body));
+        }
+        break;
+    case fr::wire::kClsState:
+        switch (id) {
+        case Clock::kPropUnix: {
+            const auto v = decode_clock_unix_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "unix", json_number(*v)));
+        }
+        case Clock::kPropValid: {
+            const auto v = decode_clock_valid_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "valid", json_bool(*v)));
+        }
+        case Clock::kPropTempC10: {
+            const auto v = decode_clock_temp_c10_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "temp_c10", json_number(*v)));
+        }
+        case Clock::kPropOffsetMs: {
+            const auto v = decode_clock_offset_ms_state(body);
+            if (!v) {
+                return nullptr;
+            }
+            cJSON *o = cJSON_CreateObject();
+            return finish(o, o != nullptr && add(o, "offset_ms", json_number(*v)));
+        }
+        }
+        break;
+    default:
+        break;
+    }
+    return nullptr;
+}
+
 cJSON *node_to_json(uint8_t cls, uint8_t id, std::span<const uint8_t> body)
 {
     switch (cls) {
@@ -3821,6 +4508,10 @@ cJSON *traits_to_json(uint16_t cap_id, std::span<const uint8_t> traits)
         return json_of(decode_battery_traits(traits));
     case Haptic::kId:
         return json_of(decode_haptic_traits(traits));
+    case Storage::kId:
+        return json_of(decode_storage_traits(traits));
+    case Clock::kId:
+        return json_of(decode_clock_traits(traits));
     case Node::kId:
         return json_empty(traits);
     case Ota::kId:
@@ -4072,6 +4763,51 @@ Status encode_args_json(uint16_t cap_id, const char *cmd, const cJSON *args, uin
             s = args_haptic_stop(obj);
         }
         break;
+    case Storage::kId:
+        if (name == "info") {
+            id = Storage::kCmdInfo;
+            s = args_storage_info(obj);
+        } else if (name == "list") {
+            id = Storage::kCmdList;
+            s = args_storage_list(obj, w);
+        } else if (name == "stat") {
+            id = Storage::kCmdStat;
+            s = args_storage_stat(obj, w);
+        } else if (name == "read") {
+            id = Storage::kCmdRead;
+            s = args_storage_read(obj, w);
+        } else if (name == "write") {
+            id = Storage::kCmdWrite;
+            s = args_storage_write(obj, w);
+        } else if (name == "remove") {
+            id = Storage::kCmdRemove;
+            s = args_storage_remove(obj, w);
+        } else if (name == "mkdir") {
+            id = Storage::kCmdMkdir;
+            s = args_storage_mkdir(obj, w);
+        } else if (name == "rename") {
+            id = Storage::kCmdRename;
+            s = args_storage_rename(obj, w);
+        } else if (name == "remount") {
+            id = Storage::kCmdRemount;
+            s = args_storage_remount(obj);
+        }
+        break;
+    case Clock::kId:
+        if (name == "read") {
+            id = Clock::kCmdRead;
+            s = args_clock_read(obj);
+        } else if (name == "set") {
+            id = Clock::kCmdSet;
+            s = args_clock_set(obj, w);
+        } else if (name == "set_aging") {
+            id = Clock::kCmdSetAging;
+            s = args_clock_set_aging(obj, w);
+        } else if (name == "inject") {
+            id = Clock::kCmdInject;
+            s = args_clock_inject(obj, w);
+        }
+        break;
     case Node::kId:
         if (name == "identify") {
             id = Node::kCmdIdentify;
@@ -4153,6 +4889,10 @@ cJSON *decode_to_json(uint16_t cap_id, uint8_t cls, uint8_t member_id, std::span
         return battery_to_json(cls, member_id, body);
     case Haptic::kId:
         return haptic_to_json(cls, member_id, body);
+    case Storage::kId:
+        return storage_to_json(cls, member_id, body);
+    case Clock::kId:
+        return clock_to_json(cls, member_id, body);
     case Node::kId:
         return node_to_json(cls, member_id, body);
     case Ota::kId:

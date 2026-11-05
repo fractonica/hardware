@@ -353,14 +353,14 @@ Status AudioOut::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &
     switch (cmd_id) {
     case kCmdTone: {
         const auto a = decode_audio_out_tone_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return tone(*a);
     }
     case kCmdPlay: {
         const auto a = decode_audio_out_play_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return play(*a);
@@ -373,7 +373,7 @@ Status AudioOut::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &
     }
     case kCmdSetVolume: {
         const auto a = decode_audio_out_set_volume_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return set_volume(*a);

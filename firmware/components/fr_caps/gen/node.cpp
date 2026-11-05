@@ -587,7 +587,7 @@ Status Node::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &repl
     switch (cmd_id) {
     case kCmdIdentify: {
         const auto a = decode_node_identify_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return identify(*a);
@@ -610,28 +610,28 @@ Status Node::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &repl
     }
     case kCmdReboot: {
         const auto a = decode_node_reboot_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return reboot(*a);
     }
     case kCmdSetAlias: {
         const auto a = decode_node_set_alias_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return set_alias(*a);
     }
     case kCmdSetGroups: {
         const auto a = decode_node_set_groups_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return set_groups(*a);
     }
     case kCmdNetSet: {
         const auto a = decode_node_net_set_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return net_set(*a);
@@ -644,14 +644,14 @@ Status Node::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &repl
     }
     case kCmdBindSet: {
         const auto a = decode_node_bind_set_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return bind_set(*a);
     }
     case kCmdBindClear: {
         const auto a = decode_node_bind_clear_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return bind_clear(*a);

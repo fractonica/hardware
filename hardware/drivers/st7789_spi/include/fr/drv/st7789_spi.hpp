@@ -14,7 +14,8 @@ struct spi_device_t;
 namespace fr::drv {
 
 /**
- * The panel on SPI2 (mode 0, cfg.spi_mhz, DMA, MOSI only: nothing is read back), DC on its own GPIO.
+ * The panel on SPI2 (mode 0, cfg.spi_mhz, DMA, MOSI only: nothing is read back), DC on its own GPIO. The bus is the
+ * shared one (fr::platform::spi_bus, design lcd-clock-c1 D3), brought up with cfg.miso when a card shares it.
  *
  * init: the other devices' chip selects on the bus (cfg.idle_high: the Touch-LCD-2's TF card CS 41, which shares MOSI
  * 38 / SCLK 39) driven high, so no card answers the LCD's traffic, then the reset line if wired (low 10 ms, then
@@ -59,6 +60,7 @@ public:
         uint8_t spi_mhz = 40;
         uint64_t idle_high = 0;  // bit n: GPIOn, another device's CS on this bus, held high (deselected)
         BacklightActive backlight_active = BacklightActive::high;  // the level that lights it
+        int8_t miso = -1;  // the shared bus's MISO (a card on the same host, design lcd-clock-c1 D3); the panel reads nothing
     };
 
     /** The controller's RAM (both kinds). */

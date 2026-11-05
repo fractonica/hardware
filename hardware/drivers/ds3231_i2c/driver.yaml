@@ -1,0 +1,19 @@
+# Driver manifest (design lcd-clock-c1 D7, D8; spec 07 §7.8). `fr gen firmware` validates profiles against it and fills
+# fr::drv::Ds3231I2c::Config from the instance's multi-pin bind, `bind: { sda: gpio.<n>, scl: gpio.<n> }` (each in the
+# board's pins.free). The bus is fr_core's shared i2c_bus, so other I2C parts on the same pins share it.
+schema: fractonica/driver@1
+id: ds3231_i2c
+summary: A DS3231 real-time clock (TCXO, battery-backed) at I2C 0x68 on the shared I2C bus; time, oscillator-stop flag, temperature and aging offset.
+implements: hal.Rtc
+class: fr::drv::Ds3231I2c               # header: include/fr/drv/ds3231_i2c.hpp
+targets: [esp32c6, esp32c3, esp32s3, esp32c5, esp32]
+binds: gpio                             # bare pins: bind { sda: gpio.<n>, scl: gpio.<n> } (no board section)
+accepts_kinds: [gpio]
+config:                                 # same order as Ds3231I2c::Config
+  sda: { type: gpio, from: bind.sda, doc: "the module's SDA (the ZS-042 module has 4.7 kOhm pull-ups to its VCC)" }
+  scl: { type: gpio, from: bind.scl }
+  khz: { type: u16, default: 100, range: [100, 400], doc: "the bus clock (the DS3231 does 400 kHz; 100 is the default: more margin on jumper wires)" }
+# fr.clock traits its service reports (has_temperature(), resolution_ms()).
+traits: { has_temperature: true, resolution_ms: 1000 }
+resources: { gpio: 2 }
+dependencies: {}

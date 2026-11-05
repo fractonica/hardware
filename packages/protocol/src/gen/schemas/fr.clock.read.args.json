@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.clock.read.args",
+  "title": "fr.clock.read arguments",
+  "description": "The latest reading (never waits for the bus).",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

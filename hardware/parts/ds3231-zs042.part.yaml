@@ -1,0 +1,25 @@
+schema: fractonica/part@1
+id: ds3231-zs042
+name: DS3231 real-time clock module (ZS-042 type, with AT24C32)
+category: module
+summary: Temperature-compensated RTC (±2 ppm, 0–40 °C) on I²C 0x68, with an AT24C32 EEPROM at 0x57, 4.7 kΩ pull-ups and a coin-cell holder.
+specs:
+  accuracy: ±2 ppm from 0 to 40 °C (about 1 minute a year)
+  i2c: 0x68 (DS3231), 0x57 (AT24C32), up to 400 kHz
+  supply: 2.3–5.5 V
+  temperature_sensor: ±3 °C, updated every 64 s
+  resolution: whole seconds (no sub-second register)
+inferred: [i2c]
+pins:
+  - { name: 32K, desc: 32 kHz output (not used) }
+  - { name: SQW, desc: square wave / alarm interrupt (not used) }
+  - { name: SCL, desc: I²C clock }
+  - { name: SDA, desc: I²C data }
+  - { name: VCC, desc: 3.3 V }
+  - { name: GND, desc: ground }
+notes:
+  - "The module charges its coin cell through a 200 Ω resistor and a diode from VCC, meant for a rechargeable LIR2032. With a plain CR2032, remove that diode (or the resistor next to it) so the cell is not charged."
+  - "The time survives power-off only with a coin cell fitted."
+  - "Writing the seconds register restarts the 1 Hz chain: fr.clock uses that to set the time to the second boundary."
+datasheets:
+  - https://www.analog.com/media/en/technical-documentation/data-sheets/DS3231.pdf

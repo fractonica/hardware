@@ -1,0 +1,51 @@
+schema: fractonica/wiring@1
+id: clock-lcd-c6
+title: DS3231 clock and micro-SD on lcd-c6
+summary: >-
+  The Waveshare ESP32-C6-LCD-1.47 with a micro-SD card in its slot and a DS3231 real-time clock module on I²C
+  (SDA GPIO18, SCL GPIO19). The display and the card are on the board already (LCD-1, CLOCK-1).
+board: waveshare-esp32c6-lcd147
+profile: c6l-lcd
+device: lcd-c6
+design: docs/design/lcd-clock-c1.md
+covers: [clock]
+safety:
+  - "Unplug the board's USB before connecting or moving wires."
+  - "With a plain CR2032 in the DS3231 module, remove the module's charging diode (or the 200 Ω resistor next to it) first: the module would otherwise try to charge it."
+  - "Keep the LCD backlight at 50 % or lower (vendor warning); the firmware caps it."
+bom:
+  - { part: waveshare-esp32c6-lcd147-board, qty: 1, note: lcd-c6 }
+  - { part: ds3231-zs042, qty: 1 }
+  - { part: cr2032, value: CR2032, qty: 1, note: "or a LIR2032 with the charging path left in" }
+  - { part: micro-sd-card, qty: 1 }
+diagrams:
+  - { id: ds3231, title: DS3231 to lcd-c6, file: ds3231.svg }
+connections:
+  - { pin: gpio.18, instance: clock, bind: sda, to: "DS3231 SDA", via: "the module's 4.7 kΩ pull-up" }
+  - { pin: gpio.19, instance: clock, bind: scl, to: "DS3231 SCL", via: "the module's 4.7 kΩ pull-up" }
+  - { pin: 3v3, to: "DS3231 VCC" }
+  - { pin: gnd, to: "DS3231 GND" }
+sections:
+  - id: card
+    title: Micro-SD card
+    steps:
+      - id: card-format
+        text: "Format the card FAT32 on the Mac (Disk Utility: MS-DOS (FAT), Master Boot Record) if it is new or exFAT."
+      - id: card-insert
+        text: "Insert it into the board's TF slot, contacts toward the board."
+        check: "After flashing: fr storage info lcd-c6 says mounted, with the card's size."
+  - id: clock
+    title: DS3231 clock
+    diagram: ds3231
+    steps:
+      - id: rtc-cell
+        text: "Fit the coin cell. With a CR2032, first remove the module's charging diode (the small glass/SMD diode beside the 200 Ω resistor near the cell holder)."
+        check: "Multimeter on the cell holder: about 3 V."
+      - id: rtc-power
+        text: "DS3231 VCC to the board's 3V3, GND to GND."
+        pins: [3v3, gnd]
+        check: "The module's red LED (if fitted) lights when the board is on USB."
+      - id: rtc-i2c
+        text: "DS3231 SDA to GPIO18 and SCL to GPIO19. Leave 32K and SQW unconnected."
+        pins: [gpio.18, gpio.19]
+        check: "After flashing: fr clock read lcd-c6 shows a time and a temperature."

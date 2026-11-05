@@ -33,6 +33,8 @@ import { isDeviceId, registryOf, resolvePort } from './registry/hub.ts';
 import { REGISTRY_HANDLERS } from './registry/ops.ts';
 import { POWER_HANDLERS } from './power/ops.ts';
 import { WIRING_HANDLERS } from './wiring/ops.ts';
+import { STORAGE_HANDLERS } from './storage/ops.ts';
+import { CLOCK_HANDLERS } from './clock/ops.ts';
 import { SCALE_HANDLERS } from './scale/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
 import { routerStatus } from './router/index.ts';
@@ -588,4 +590,6 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...POWER_HANDLERS,
   // WIRING-1 (design wiring-w1 D3): wiring_*, part_*.
   ...WIRING_HANDLERS,
+  ...STORAGE_HANDLERS,
+  ...CLOCK_HANDLERS,
 };

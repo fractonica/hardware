@@ -29,7 +29,7 @@ Status DisplayService::init(Core &core)
     }
     ready_ = true;
     // After the backend's first frame, which is black: the backlight never shows the panel's power-up noise.
-    return panel_.set_backlight(brightness_);
+    return panel_.set_backlight(scaled(brightness_, cfg_.max_brightness));
 }
 
 hal::Selftest DisplayService::selftest()
@@ -79,7 +79,7 @@ Status DisplayService::set_brightness(const cap::DisplaySetBrightnessArgs &args)
     brightness_ = args.level;
     Status st{};
     if (ready_) {
-        st = panel_.set_backlight(brightness_);
+        st = panel_.set_backlight(scaled(brightness_, cfg_.max_brightness));
     }
     if (changed) {
         report_brightness(brightness_);

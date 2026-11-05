@@ -448,7 +448,7 @@ export const CATALOG: Catalog = {
     {
       "id": 3,
       "name": "fr.display",
-      "version": "1.1",
+      "version": "1.2",
       "section": "standard",
       "summary": "A pixel panel with drawing primitives everywhere and LVGL layouts where the panel's driver says so (trait ui).",
       "doc": "Colours are 0xRRGGBB on the wire; a mono panel (color mono1) lights a pixel whose colour is at least 50 % luminance.\nCommands are queued to the renderer and never draw inside dispatch; the panel is flushed at most every flush_ms.\nPrimitives (clear, text, fill_rect) work on every panel. ui_load and ui_set answer UNSUPPORTED where `ui` is false\n(the C3 OLED's built-in 1-bit renderer); on LVGL panels a layout replaces the screen and primitives sent after it\ndraw on top. snapshot and snapshot_read read back the framebuffer as drawn (test builds), so an agent sees the real\nscreen and compares it with the desktop render of the same commands (T-DISPLAY).\n",
@@ -644,6 +644,16 @@ export const CATALOG: Catalog = {
           "type": "u8",
           "default": 255,
           "doc": "backlight level at boot; ignored on panels without backlight control"
+        },
+        {
+          "name": "max_brightness",
+          "type": "u8",
+          "default": 255,
+          "range": [
+            1,
+            255
+          ],
+          "doc": "a hard cap on the backlight: set_brightness and brightness scale into 0..max (design lcd-clock-c1 D4; 128 where the vendor warns against full brightness)"
         },
         {
           "name": "flush_ms",
@@ -3693,6 +3703,643 @@ export const CATALOG: Catalog = {
       ]
     },
     {
+      "id": 15,
+      "name": "fr.storage",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "Files on a removable FAT card (micro-SD) - listed, read, written and removed from the hub in chunks.",
+      "doc": "Design lcd-clock-c1 D5-D6 (as built). Paths are absolute under the card (\"/\" is its root): ASCII, at most 96 bytes, no\n\"..\", no backslash; anything else is INVALID_ARGS. Each command does one bounded piece of I/O (a chunk, a directory\npage); the mount and the free-space walk run in the background, and while one runs (`busy`) every command answers BUSY.\nWithout card detect a removal is noticed by the next access that fails while the card no longer answers (unmounted\n{reason: removed}); other failures (a full card, a read-only file, no memory) answer their error and keep the card.\n`info` and `remount` mount again when the state is none. There is no format command.\n",
+      "types": {
+        "StoreState": {
+          "none": 0,
+          "mounted": 1,
+          "error": 2
+        },
+        "CardType": {
+          "unknown": 0,
+          "sdsc": 1,
+          "sdhc": 2,
+          "sdxc": 3
+        },
+        "UnmountReason": {
+          "removed": 0,
+          "error": 1,
+          "command": 2
+        }
+      },
+      "messages": {
+        "Entry": {
+          "doc": "One directory entry: its name (not the path), size in bytes (0 for a directory), whether it is a directory, and its modification time (unix s, 0 when unknown).",
+          "fields": [
+            {
+              "name": "name",
+              "id": 1,
+              "type": "string",
+              "max": 64
+            },
+            {
+              "name": "size",
+              "id": 2,
+              "type": "u32"
+            },
+            {
+              "name": "dir",
+              "id": 3,
+              "type": "bool"
+            },
+            {
+              "name": "mtime",
+              "id": 4,
+              "type": "u32"
+            }
+          ]
+        }
+      },
+      "traits": [
+        {
+          "name": "removable",
+          "id": 1,
+          "type": "bool"
+        },
+        {
+          "name": "card_detect",
+          "id": 2,
+          "type": "bool",
+          "doc": "a card-detect switch is wired (else removal is found on access)"
+        }
+      ],
+      "config": [
+        {
+          "name": "mount_on_boot",
+          "type": "bool",
+          "default": true
+        },
+        {
+          "name": "max_files",
+          "type": "u8",
+          "default": 4,
+          "range": [
+            1,
+            8
+          ],
+          "doc": "files open at once (FatFs keeps about 4 KB each)"
+        },
+        {
+          "name": "chunk",
+          "type": "u16",
+          "default": 1024,
+          "range": [
+            128,
+            1024
+          ],
+          "unit": "B",
+          "doc": "the most bytes one read or write carries"
+        }
+      ],
+      "properties": [
+        {
+          "name": "state",
+          "id": 1,
+          "type": "StoreState"
+        },
+        {
+          "name": "total_mb",
+          "id": 2,
+          "type": "u32",
+          "unit": "MB"
+        },
+        {
+          "name": "free_mb",
+          "id": 3,
+          "type": "u32",
+          "unit": "MB",
+          "doc": "refreshed after writes, at most every 10 s"
+        },
+        {
+          "name": "card_type",
+          "id": 4,
+          "type": "CardType"
+        },
+        {
+          "name": "busy",
+          "id": 5,
+          "type": "bool"
+        }
+      ],
+      "commands": [
+        {
+          "name": "info",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The card's state and sizes (the cached ones; a refresh follows in the reports when they are old). With no card it starts a mount and answers BUSY while it runs; an attempt that ended under 3 s ago is not repeated.",
+          "fields": [],
+          "result": [
+            {
+              "name": "state",
+              "id": 1,
+              "type": "StoreState"
+            },
+            {
+              "name": "card_type",
+              "id": 2,
+              "type": "CardType"
+            },
+            {
+              "name": "total_mb",
+              "id": 3,
+              "type": "u32"
+            },
+            {
+              "name": "free_mb",
+              "id": 4,
+              "type": "u32"
+            },
+            {
+              "name": "name",
+              "id": 5,
+              "type": "string",
+              "max": 8,
+              "doc": "the card's product name from its CID"
+            },
+            {
+              "name": "speed_khz",
+              "id": 6,
+              "type": "u32"
+            }
+          ]
+        },
+        {
+          "name": "list",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "A directory's entries from `offset`, at most 16; `more` when there are others.",
+          "fields": [
+            {
+              "name": "path",
+              "id": 1,
+              "type": "string",
+              "max": 96
+            },
+            {
+              "name": "offset",
+              "id": 2,
+              "type": "u16",
+              "default": 0
+            }
+          ],
+          "result": [
+            {
+              "name": "entries",
+              "id": 1,
+              "type": "array<Entry>",
+              "max": 16
+            },
+            {
+              "name": "more",
+              "id": 2,
+              "type": "bool"
+            }
+          ],
+          "examples": [
+            {
+              "path": "/"
+            }
+          ]
+        },
+        {
+          "name": "stat",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "One path's entry; NOT_FOUND when there is none.",
+          "fields": [
+            {
+              "name": "path",
+              "id": 1,
+              "type": "string",
+              "max": 96
+            }
+          ],
+          "result": [
+            {
+              "name": "entry",
+              "id": 1,
+              "type": "Entry"
+            }
+          ]
+        },
+        {
+          "name": "read",
+          "id": 4,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Up to `len` bytes (at most config chunk) from `offset`; `eof` when the file ends within them.",
+          "fields": [
+            {
+              "name": "path",
+              "id": 1,
+              "type": "string",
+              "max": 96
+            },
+            {
+              "name": "offset",
+              "id": 2,
+              "type": "u32"
+            },
+            {
+              "name": "len",
+              "id": 3,
+              "type": "u16"
+            }
+          ],
+          "result": [
+            {
+              "name": "data",
+              "id": 1,
+              "type": "bytes",
+              "max": 1024
+            },
+            {
+              "name": "eof",
+              "id": 2,
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "name": "write",
+          "id": 5,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Writes `data` at `offset` (creating the file and the directories on the way); `truncate` cuts the file at offset + its length. The data must not exceed config chunk; an offset past the file's end, or a card too full for the data, is INVALID_ARGS.",
+          "fields": [
+            {
+              "name": "path",
+              "id": 1,
+              "type": "string",
+              "max": 96
+            },
+            {
+              "name": "offset",
+              "id": 2,
+              "type": "u32"
+            },
+            {
+              "name": "data",
+              "id": 3,
+              "type": "bytes",
+              "max": 1024
+            },
+            {
+              "name": "truncate",
+              "id": 4,
+              "type": "bool",
+              "default": false
+            }
+          ],
+          "result": [
+            {
+              "name": "size",
+              "id": 1,
+              "type": "u32",
+              "doc": "the file's size after the write"
+            }
+          ]
+        },
+        {
+          "name": "remove",
+          "id": 6,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "A file, or an empty directory.",
+          "fields": [
+            {
+              "name": "path",
+              "id": 1,
+              "type": "string",
+              "max": 96
+            }
+          ]
+        },
+        {
+          "name": "mkdir",
+          "id": 7,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "fields": [
+            {
+              "name": "path",
+              "id": 1,
+              "type": "string",
+              "max": 96
+            }
+          ]
+        },
+        {
+          "name": "rename",
+          "id": 8,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "fields": [
+            {
+              "name": "from",
+              "id": 1,
+              "type": "string",
+              "max": 96
+            },
+            {
+              "name": "to",
+              "id": 2,
+              "type": "string",
+              "max": 96
+            }
+          ]
+        },
+        {
+          "name": "remount",
+          "id": 9,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Unmounts (if mounted) and starts a mount in the background; answers the state now (none), `mounted` follows when it succeeds.",
+          "fields": [],
+          "result": [
+            {
+              "name": "state",
+              "id": 1,
+              "type": "StoreState"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "name": "mounted",
+          "id": 1,
+          "priority": "normal",
+          "fields": [
+            {
+              "name": "total_mb",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "free_mb",
+              "id": 2,
+              "type": "u32"
+            }
+          ]
+        },
+        {
+          "name": "unmounted",
+          "id": 2,
+          "priority": "normal",
+          "fields": [
+            {
+              "name": "reason",
+              "id": 1,
+              "type": "UnmountReason"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "name": "fr.clock",
+      "version": "1.0",
+      "section": "standard",
+      "summary": "A battery-backed real-time clock (DS3231) - its time, set from the hub to the second boundary, its temperature, oscillator-stop detection and aging trim.",
+      "doc": "Design lcd-clock-c1 D7-D8 (as built). `unix` is UTC seconds. The node polls the seconds register (poll_hz, faster near\nthe expected rollover) and timestamps each rollover in node time: `read` pairs `unix` with `rollover_us`, the node time\nat which that second began, and the hub derives the RTC's error against its own clock from that pair (the node does\nnot know the hub's clock). `set` writes the time so that second `unix` begins at node time `at_us` and clears the\noscillator-stop flag; `valid` is false while that flag is set (the clock lost power), before a first set, and after the\nchip's time jumped with no set (a stray write on the bus: `lost_power` fires) until the next set. With\nseed_system_time the node's own clock is set from a valid RTC at boot and after each set.\n",
+      "types": {
+        "SetBy": {
+          "command": 0,
+          "sync": 1
+        }
+      },
+      "traits": [
+        {
+          "name": "has_temperature",
+          "id": 1,
+          "type": "bool"
+        },
+        {
+          "name": "resolution_ms",
+          "id": 2,
+          "type": "u16",
+          "doc": "1000 on the DS3231, which counts whole seconds"
+        }
+      ],
+      "config": [
+        {
+          "name": "seed_system_time",
+          "type": "bool",
+          "default": true
+        },
+        {
+          "name": "poll_hz",
+          "type": "u8",
+          "default": 10,
+          "range": [
+            1,
+            50
+          ],
+          "unit": "Hz"
+        },
+        {
+          "name": "report_s",
+          "type": "u16",
+          "default": 60,
+          "range": [
+            1,
+            3600
+          ],
+          "unit": "s",
+          "doc": "how often unix (and offset_ms) are reported"
+        }
+      ],
+      "properties": [
+        {
+          "name": "unix",
+          "id": 1,
+          "type": "u32",
+          "unit": "s"
+        },
+        {
+          "name": "valid",
+          "id": 2,
+          "type": "bool"
+        },
+        {
+          "name": "temp_c10",
+          "id": 3,
+          "type": "i16",
+          "unit": "degC/10",
+          "doc": "the chip's temperature, refreshed every 64 s"
+        },
+        {
+          "name": "offset_ms",
+          "id": 4,
+          "type": "i32",
+          "unit": "ms",
+          "doc": "reported 0 by the node: the hub computes the offset from read's unix and rollover_us (clock_read)"
+        }
+      ],
+      "commands": [
+        {
+          "name": "read",
+          "id": 1,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "The latest reading (never waits for the bus).",
+          "fields": [],
+          "result": [
+            {
+              "name": "unix",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "valid",
+              "id": 2,
+              "type": "bool"
+            },
+            {
+              "name": "osf",
+              "id": 3,
+              "type": "bool",
+              "doc": "the oscillator-stop flag"
+            },
+            {
+              "name": "temp_c10",
+              "id": 4,
+              "type": "i16"
+            },
+            {
+              "name": "aging",
+              "id": 5,
+              "type": "i8"
+            },
+            {
+              "name": "offset_ms",
+              "id": 6,
+              "type": "i32"
+            },
+            {
+              "name": "rollover_us",
+              "id": 7,
+              "type": "u64",
+              "doc": "node time (esp_timer us) of the last seconds rollover seen"
+            },
+            {
+              "name": "injected",
+              "id": 8,
+              "type": "bool"
+            }
+          ]
+        },
+        {
+          "name": "set",
+          "id": 2,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "public",
+          "doc": "Second `unix` (2000-2099) begins at node time `at_us` (0 = now): the node waits until then and writes the time in one burst, which restarts the chip's 1 Hz chain, and clears the oscillator-stop flag. INVALID_ARGS for a target more than 2 s ahead or 1 s behind, or a unix outside 2000-2099. It answers at once; the write follows, and `set` fires only when it succeeded (a hub waits for it).",
+          "fields": [
+            {
+              "name": "unix",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "at_us",
+              "id": 2,
+              "type": "u64",
+              "default": 0
+            },
+            {
+              "name": "by",
+              "id": 3,
+              "type": "SetBy",
+              "default": "command"
+            }
+          ]
+        },
+        {
+          "name": "set_aging",
+          "id": 3,
+          "delivery": "reliable",
+          "idempotent": true,
+          "visibility": "public",
+          "doc": "The aging-offset register: positive slows the clock, about 0.1 ppm per step at 25 degC.",
+          "fields": [
+            {
+              "name": "offset",
+              "id": 1,
+              "type": "i8"
+            }
+          ]
+        },
+        {
+          "name": "inject",
+          "id": 4,
+          "delivery": "reliable",
+          "idempotent": false,
+          "visibility": "test",
+          "doc": "Holds `unix` in place of the chip for hold_ms (0 means 1,000; at most 60,000).",
+          "fields": [
+            {
+              "name": "unix",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "hold_ms",
+              "id": 2,
+              "type": "u16"
+            }
+          ]
+        }
+      ],
+      "events": [
+        {
+          "name": "lost_power",
+          "id": 1,
+          "priority": "normal",
+          "doc": "The oscillator-stop flag was set at boot, or the chip's time jumped with no set: the time is not trustworthy until set.",
+          "fields": []
+        },
+        {
+          "name": "set",
+          "id": 2,
+          "priority": "normal",
+          "fields": [
+            {
+              "name": "unix",
+              "id": 1,
+              "type": "u32"
+            },
+            {
+              "name": "by",
+              "id": 2,
+              "type": "SetBy"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "id": 240,
       "name": "fr.node",
       "version": "1.0",
@@ -4071,4 +4718,4 @@ export const CATALOG: Catalog = {
   ]
 };
 
-export const CATALOG_HASH = 0xa9d281fe;
+export const CATALOG_HASH = 0x95782421;

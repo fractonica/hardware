@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.storage.mkdir.args",
+  "title": "fr.storage.mkdir arguments",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 96,
+      "description": "(<= 96 UTF-8 bytes)"
+    }
+  },
+  "additionalProperties": false
+}

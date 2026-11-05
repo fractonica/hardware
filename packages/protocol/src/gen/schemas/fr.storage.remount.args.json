@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.storage.remount.args",
+  "title": "fr.storage.remount arguments",
+  "description": "Unmounts (if mounted) and starts a mount in the background; answers the state now (none), `mounted` follows when it succeeds.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

@@ -225,6 +225,21 @@ export const SERVICES: Readonly<Record<string, ServiceFacts>> = {
     timers: 1,
     peer: { config: 'supply', cap: 'fr.battery', method: 'bind_supply' },
   },
+  // Design lcd-clock-c1 D5, D6: one timer (the free-space refresh and the remount after a removal); the card's file I/O
+  // runs in dispatch, one chunk per command. removable and card_detect come from driver.yaml `traits:` and the entry.
+  'fr.storage': {
+    implements: 'hal.FileStore',
+    service: 'fr::StorageService',
+    header: 'fr/services/storage_service.hpp',
+    timers: 1,
+    traits: (_c, { driverTraits, entry }) => ({
+      removable: Boolean(driverTraits.removable ?? true),
+      card_detect: entry.card_detect !== undefined && entry.card_detect !== null,
+    }),
+  },
+  // Design lcd-clock-c1 D7, D8: one timer (the seconds poll, faster near the rollover; the reports; inject's hold);
+  // has_temperature and resolution_ms from driver.yaml `traits:`.
+  'fr.clock': { implements: 'hal.Rtc', service: 'fr::ClockService', header: 'fr/services/clock_service.hpp', timers: 1 },
 };
 
 /** fr.camera's `sensor` trait by the board entry's `sensor` (design camera-c1 D7): 0 is unknown. */
@@ -242,6 +257,9 @@ const TOUCH_CAP = 'fr.touch';
  * pins of group `display` its own entry names (sclk, dc, backlight, ...), as one bound to `touch.<name>` those of
  * `touch`. The group keeps every other instance (a button, a bare-pin bind) off them.
  */
+/** The pins.reserved group of a shared SPI bus's lines (design lcd-clock-c1 D3): shared_bus fields of an entry naming them. */
+const SPI_BUS_GROUP = 'spi_bus';
+
 const ENTRY_GROUPS: Readonly<Record<string, string>> = { displays: 'display', touch: 'touch', cameras: 'camera', sd_cards: 'sd_card' };
 
 /**
@@ -555,17 +573,29 @@ const RawBoard = z.looseObject({
   sd_cards: z
     .record(
       ident,
-      z.looseObject({
-        kind: z.literal('sdmmc'),
-        slot: int.min(0).max(1),
-        width: z.union([z.literal(1), z.literal(4)]),
-        clk: gpioNum,
-        cmd: gpioNum,
-        d0: gpioNum,
-        d1: gpioNum.nullable().optional(),
-        d2: gpioNum.nullable().optional(),
-        d3: gpioNum.nullable().optional(),
-      }),
+      z.discriminatedUnion('kind', [
+        z.looseObject({
+          kind: z.literal('sdmmc'),
+          slot: int.min(0).max(1),
+          width: z.union([z.literal(1), z.literal(4)]),
+          clk: gpioNum,
+          cmd: gpioNum,
+          d0: gpioNum,
+          d1: gpioNum.nullable().optional(),
+          d2: gpioNum.nullable().optional(),
+          d3: gpioNum.nullable().optional(),
+        }),
+        // A slot wired to an SPI master (design lcd-clock-c1 D1: the C6-LCD-1.47's TF card on the panel's SPI2): its CS
+        // in pins.reserved's `sd_card` group, SCLK/MOSI/MISO in `spi_bus` when another device shares them.
+        z.looseObject({
+          kind: z.literal('sdspi'),
+          cs: gpioNum,
+          sclk: gpioNum,
+          mosi: gpioNum,
+          miso: gpioNum,
+          card_detect: gpioNum.nullable().optional(),
+        }),
+      ]),
     )
     .optional(),
   pins: z.looseObject({
@@ -616,6 +646,27 @@ const DRIVER_SCALARS = ['bool', 'u8', 'u16', 'u32', 'i8', 'i16', 'i32'] as const
 const GPIO_MASK = 'gpio_mask';
 
 /**
+ * A held pin another instance claims is allowed when it is that instance's own chip select on the same SPI bus (design
+ * lcd-clock-c1 D3, as built): the panel holds the TF card's CS high while it brings the shared bus up, and the card's
+ * driver takes the pin over (setting it high before it configures it). The claimer must be bound to an `sd_cards` entry
+ * whose `cs` is the pin and whose sclk and mosi are the holder's entry's.
+ */
+function sameSpiBusCs(board: BoardManifest, out: readonly { name: string; bind?: unknown }[], holder: { bind?: unknown }, otherName: string, pin: number): boolean {
+  const entryOf = (bind: unknown): Record<string, unknown> | null => {
+    if (typeof bind !== 'string' || !bind.includes('.')) {
+      return null;
+    }
+    const [section, name] = bind.split('.', 2);
+    const sec = (board as unknown as Record<string, Record<string, Record<string, unknown>> | undefined>)[section];
+    return sec?.[name] ?? null;
+  };
+  const other = out.find((i) => i.name === otherName);
+  const card = other && typeof other.bind === 'string' && other.bind.startsWith('sd_cards.') ? entryOf(other.bind) : null;
+  const panel = entryOf(holder.bind);
+  return card !== null && panel !== null && Number(card.cs) === pin && card.sclk === panel.sclk && card.mosi === panel.mosi;
+}
+
+/**
  * An I2S controller number (design audio-a1 D6): `auto` (the default) or 0..resources.i2s-1 in a profile; codegen
  * resolves auto to the lowest free controller, so the Config holds a uint8_t.
  */
@@ -647,6 +698,12 @@ const RawDriverField = z.strictObject({
    * from power-up, so it may not sit on a board pin that drives a level at power-up (pins.power_up_glitch).
    */
   output: z.boolean().optional(),
+  /**
+   * A line of a shared SPI bus (design lcd-clock-c1 D3: the C6-LCD-1.47's panel and TF card on one SPI2): the pin may be
+   * claimed by several instances when every claim of it is a shared_bus field, and it may sit in pins.reserved's
+   * `spi_bus` group when the instance's own board entry names it. fr::platform::spi_bus checks at runtime that they agree.
+   */
+  shared_bus: z.boolean().optional(),
   /** Inclusive bounds of an integer field (design audio-a2 D2: adc_audio's oversample 1..8), for its default and a profile. */
   range: z.tuple([int, int]).optional(),
   default: jsonScalar.optional(),
@@ -1351,6 +1408,8 @@ interface ResolvedInstance {
   adcPins: number[];
   /** The pins of driver fields marked `output` (design power-p1 review m6): never on a power-up glitch pin. */
   outPins: number[];
+  /** The pins of driver fields marked `shared_bus` (design lcd-clock-c1 D3): several instances may claim them. */
+  busPins: number[];
   /** The service's store (ServiceFacts.store), when the profile names one. */
   store: ResolvedStore | null;
 }
@@ -1764,6 +1823,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     const heldPins: number[] = [];
     const adcPins: number[] = [];
     const outPins: number[] = [];
+    const busPins: number[] = [];
     for (const [fname, field] of Object.entries(driverFields)) {
       // `from: bind` is the pin of the gpio.<n> bind, which the profile cannot override (design m2-c1-hil D5).
       if (field.from === 'bind') {
@@ -1774,6 +1834,9 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         } else {
           driverConfig.push({ name: fname, field, value: bindPin });
           pins.push(bindPin);
+          if (field.shared_bus) {
+            busPins.push(bindPin);
+          }
           if (field.output) {
             outPins.push(bindPin);
           }
@@ -1789,6 +1852,9 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         } else if (pin !== undefined) {
           driverConfig.push({ name: fname, field, value: pin });
           pins.push(pin);
+          if (field.shared_bus) {
+            busPins.push(pin);
+          }
           if (field.adc1) {
             adcPins.push(pin);
           }
@@ -1847,6 +1913,9 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         pins.push(value as number);
         if (origin[0] === bf) {
           entryPins.push(value as number);
+        }
+        if (field.shared_bus) {
+          busPins.push(value as number);
         }
       }
     }
@@ -1963,7 +2032,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     }
 
     if (ok && cap && service) {
-      out.push({ name, port: 0, bind: bindText, bare: bindMap !== null || bindPin !== undefined, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins, adcPins, outPins, store });
+      out.push({ name, port: 0, bind: bindText, bare: bindMap !== null || bindPin !== undefined, cap, service, driver, driverConfig, capConfig, traits, pins, entryPins, heldPins, adcPins, outPins, busPins, store });
     }
   }
 
@@ -1984,6 +2053,8 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
   const strapping = new Set(board.pins.strapping ?? []);
   const glitch = new Set(board.pins.power_up_glitch ?? []);
   const claimed = new Map<number, string>();
+  // Per claimed pin: every claim so far was a shared_bus line (design lcd-clock-c1 D3).
+  const busClaims = new Map<number, boolean>();
   for (const inst of out) {
     const bare = inst.bare;
     const drive = inst.cap.name === FIXTURE_CAP ? inst.capConfig.find((c) => c.entry.name === 'drive')?.value : undefined;
@@ -1991,20 +2062,22 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
     const storeGroup = inst.store ? ENTRY_GROUPS[inst.store.bind.split('.')[0]] : undefined;
     // The store's pins (design camera-c1 §10) are the instance's too, under its own bind and reserved group.
     const claims = [
-      ...inst.pins.map((pin) => ({ pin, bind: inst.bind, own: ownGroup, entry: inst.entryPins.includes(pin), bare })),
-      ...(inst.store?.pins ?? []).map((pin) => ({ pin, bind: inst.store!.bind, own: storeGroup, entry: true, bare: false })),
+      ...inst.pins.map((pin) => ({ pin, bind: inst.bind, own: ownGroup, entry: inst.entryPins.includes(pin), bare, bus: inst.busPins.includes(pin) })),
+      ...(inst.store?.pins ?? []).map((pin) => ({ pin, bind: inst.store!.bind, own: storeGroup, entry: true, bare: false, bus: false })),
     ];
-    for (const { pin, bind, own, entry, bare: barePin } of claims) {
+    for (const { pin, bind, own, entry, bare: barePin, bus } of claims) {
       const where = ['caps', inst.name, bind === inst.bind ? 'bind' : 'store'];
       const group = reserved.get(pin);
       // A display, touch, camera or card driver takes the pins its own board entry reserves (design m2-c5-display D9).
-      if (group !== undefined && !(group === own && entry)) {
+      // A shared SPI line (design lcd-clock-c1 D3) sits in the `spi_bus` group; an entry naming it may take it.
+      if (group !== undefined && !(group === own && entry) && !(group === SPI_BUS_GROUP && bus && entry)) {
         issues.add(pf, where, `GPIO${pin} (${bind}) is reserved for ${group} on ${board.id}`);
       }
       const other = claimed.get(pin);
-      if (other !== undefined) {
+      if (other !== undefined && !(bus && busClaims.get(pin) === true)) {
         issues.add(pf, where, `GPIO${pin} (${bind}) is already claimed by '${other}'`);
       }
+      busClaims.set(pin, (busClaims.get(pin) ?? true) && bus);
       claimed.set(pin, inst.name);
       // A strapping pin that needs no level at reset (pins.strapping_levels `none`: the C6's GPIO4/5 with default
       // eFuses) may take a bare bind, with the warning (design power-p1 D1: scale-c6's solenoid on GPIO5, a 10 kOhm
@@ -2046,7 +2119,7 @@ function resolveInstances(sourceDir: string, inp: Inputs, model: Model, issues: 
         issues.add(pf, where, `GPIO${pin} (${inst.bind}, held by driver ${inst.driver.id}) must be in pins.reserved of ${board.id}`);
       }
       const other = claimed.get(pin);
-      if (other !== undefined) {
+      if (other !== undefined && !sameSpiBusCs(board, out, inst, other, pin)) {
         issues.add(pf, where, `GPIO${pin} (${inst.bind}, held by driver ${inst.driver.id}) is claimed by '${other}'`);
       }
     }

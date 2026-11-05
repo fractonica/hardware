@@ -319,7 +319,7 @@ Status Touch::dispatch(uint8_t cmd_id, [[maybe_unused]] std::span<const uint8_t>
 #if FR_TEST_HOOKS
     case kCmdInject: {
         const auto a = decode_touch_inject_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return inject(*a);
