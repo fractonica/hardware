@@ -42,6 +42,7 @@ import { cellTracker, stopCellTracker } from './power/tracker.ts';
 import { CursorSeq } from './seq.ts';
 import { SerialPortManager } from './serial.ts';
 import { listenLoopbackV6 } from './web/guard.ts';
+import { restoreApps } from './app-host/ops.ts';
 import { createStaticSite } from './web/static.ts';
 import { createWsServer } from './web/ws.ts';
 
@@ -239,6 +240,8 @@ async function main(): Promise<void> {
   for (const part of [hub.prompts, hub.leases, hub.lnp, hub.advert, hub.latencyProbe, hub.staticSite]) {
     await part.start();
   }
+  // Apps (design uno-q-services): on a Linux hub with systemd, recorded apps get their units back after a reflash.
+  await restoreApps(hub);
   console.log(
     JSON.stringify({
       event: 'listening',

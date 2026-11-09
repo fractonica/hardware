@@ -20,6 +20,7 @@ import { addDisplayWindowCommand } from './display.ts';
 import { genAll, genFirmware } from './gen.ts';
 import { restartHub, startHub, stopHub } from './hub.ts';
 import type { CliKit } from './kit.ts';
+import { addAppDeployCommand } from './app-deploy.ts';
 import { addMcpCommand } from './mcp.ts';
 import { cliExitCode, renderChecks, renderResult } from './render.ts';
 import { addSerialCommands, SERIAL_OPS } from './serial.ts';
@@ -375,6 +376,7 @@ addCodegenClientCommand(group(['codegen']), kit);
 addDisplayWindowCommand(group(['display']), kit);
 addAudioCommands(group(['audio']), kit);
 addCsiCommands(group(['csi']), kit);
+addAppDeployCommand(group(['app']), kit);
 addMcpCommand(program, kit);
 
 try {

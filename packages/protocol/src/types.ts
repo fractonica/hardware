@@ -4,7 +4,7 @@ export const JOB_STATUSES = ['queued', 'working', 'completed', 'failed', 'cancel
 // msg: a repeated message_send (design c5 §4); test: test_run, latency: latency_probe (design c6 D19).
 // audio: audio_record and audio_play (design audio-a1 D8). csi: csi_stream (design csi-c1 D13). camera: camera_snap,
 // camera_stream and camera_sd_fetch (design camera-c1 D11). scale: scale_watch (design scale-round-c1 D10).
-export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg', 'test', 'latency', 'audio', 'csi', 'camera', 'scale', 'cell', 'storage', 'clock'] as const;
+export const JOB_KINDS = ['build', 'flash', 'reset', 'provision', 'ota', 'deploy', 'msg', 'test', 'latency', 'audio', 'csi', 'camera', 'scale', 'cell', 'storage', 'clock', 'app'] as const;
 
 /**
  * Who started a job (design c6 D18): the `X-Fr-Client` request header (CLIENT_HEADER) of the call that

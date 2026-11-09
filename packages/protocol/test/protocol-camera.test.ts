@@ -42,7 +42,7 @@ const CAMERA_OP_NAMES = ['camera_snap', 'camera_stream', 'camera_status', 'camer
 
 describe('CAM-1 ops (design camera-c1 D11)', () => {
   it('adds the seven camera ops and moves REGISTRY_HASH once for every op change (and the selector texts)', () => {
-    expect(OPS.filter((o) => !/^(scale|battery|cell|haptic|wiring|part|storage|clock)_/.test(o.name))).toHaveLength(62); // POWER-1 adds fourteen (protocol-power.test.ts) // SCALE-1 adds six (protocol-scale.test.ts)
+    expect(OPS.filter((o) => !/^(scale|battery|cell|haptic|wiring|part|storage|clock|app)_|^device_adopt$/.test(o.name))).toHaveLength(62); // POWER-1 adds fourteen (protocol-power.test.ts) // SCALE-1 adds six (protocol-scale.test.ts)
     expect(findOp('camera_snap')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['camera', 'snap'], positional: ['device'] } });
     expect(findOp('camera_stream')).toMatchObject({ kind: 'job', tier: 'mutate', cli: { path: ['camera', 'stream'], positional: ['device'] } });
     expect(findOp('camera_status')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['camera', 'status'], positional: ['device'] } });
@@ -56,7 +56,7 @@ describe('CAM-1 ops (design camera-c1 D11)', () => {
     }
     expect(hashOf(OPS)).toBe(REGISTRY_HASH);
     // CAM-1's own hash, with SCALE-1's ops left out (protocol-scale.test.ts pins the current one).
-    expect(hashOf(OPS.filter((o) => !/^(scale|battery|cell|haptic|wiring|part|storage|clock)_/.test(o.name)))).toBe('b62397012231'); // the fix round's camera_stream `out` text; '45d33d0f924f' was stream C's
+    expect(hashOf(OPS.filter((o) => !/^(scale|battery|cell|haptic|wiring|part|storage|clock|app)_|^device_adopt$/.test(o.name)))).toBe('b62397012231'); // the fix round's camera_stream `out` text; '45d33d0f924f' was stream C's
     expect(REGISTRY_HASH).not.toBe('6dcd17ef8882'); // CSI-1's
     expect(JOB_KINDS).toContain('camera');
     // The selector texts name the new target and the bridge ports (D1, D3).

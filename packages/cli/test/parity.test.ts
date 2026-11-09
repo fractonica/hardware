@@ -20,7 +20,7 @@ const PLUGIN = join(REPO, 'plugin');
 const OP_NAMES = OPS.map((o) => o.name as string);
 
 /** Commands with an action that are not ops (09 §9.5): local, hub-less or hand-written (design c6 §3.3). */
-const CLI_ONLY = ['doctor', 'gen', 'gen firmware', 'hub start', 'hub stop', 'hub restart', 'mcp', 'serial monitor', 'display window', 'audio tone'];  // display window: the Mac preview with SDL, no hub (M2-C5); audio tone: audio_play's tone (A1)
+const CLI_ONLY = ['doctor', 'gen', 'gen firmware', 'hub start', 'hub stop', 'hub restart', 'mcp', 'serial monitor', 'display window', 'audio tone', 'app deploy'];  // display window: the Mac preview with SDL, no hub (M2-C5); audio tone: audio_play's tone (A1); app deploy: packs a folder, then app_upload + app_deploy (UNOQ-2)
 
 /** The 09 §9.3 remediation tools of M1 (confirm.resolved is M2). */
 const REMEDIATION_TOOLS_9_3 = [

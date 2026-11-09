@@ -109,6 +109,7 @@ export {
 export * from './ops/wiring.ts';
 export * from './ops/storage.ts';
 export * from './ops/clock.ts';
+export * from './ops/app-host.ts';
 import { CSI_OPS } from './ops/csi.ts';
 import { DISPLAY_OPS } from './ops/display.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
@@ -122,6 +123,7 @@ import { PORTS_OPS } from './ops/ports.ts';
 import { POWER_OPS } from './ops/power.ts';
 import { WIRING_OPS } from './ops/wiring.ts';
 import { STORAGE_OPS } from './ops/storage.ts';
+import { APP_HOST_OPS } from './ops/app-host.ts';
 import { CLOCK_OPS } from './ops/clock.ts';
 import { INVENTORY_OPS, REGISTRY_OPS } from './ops/registry.ts';
 import { SCALE_OPS } from './ops/scale.ts';
@@ -465,6 +467,7 @@ export const OPS = [
   // LCD-1 / CLOCK-1 (design lcd-clock-c1 D9): a board's card (files to and from the Mac, a bench) and its real-time clock.
   ...STORAGE_OPS,
   ...CLOCK_OPS,
+  ...APP_HOST_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

@@ -34,6 +34,7 @@ import { REGISTRY_HANDLERS } from './registry/ops.ts';
 import { POWER_HANDLERS } from './power/ops.ts';
 import { WIRING_HANDLERS } from './wiring/ops.ts';
 import { STORAGE_HANDLERS } from './storage/ops.ts';
+import { APP_HOST_HANDLERS } from './app-host/ops.ts';
 import { CLOCK_HANDLERS } from './clock/ops.ts';
 import { SCALE_HANDLERS } from './scale/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
@@ -568,6 +569,7 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...NET_HANDLERS,
   // Checkpoint C6 (design c6 §3.3), one module per area.
   ...APPS_HANDLERS, // client_generate (S1)
+  ...APP_HOST_HANDLERS, // app_* (design uno-q-services): apps as systemd units on a Linux hub
   ...HUB_HANDLERS, // hub_doctor (S2)
   ...INVENTORY_HANDLERS, // board_list, profile_list, capability_list (S2)
   ...LOGS_HANDLERS, // logs_assert (S4)

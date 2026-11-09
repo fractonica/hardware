@@ -30,7 +30,7 @@ const WIRING_OP_NAMES = [
 
 describe('WIRING-1 ops (design wiring-w1 D3)', () => {
   it('adds eleven ops on their CLI paths and moves REGISTRY_HASH once', () => {
-    const wiring1 = OPS.filter((o) => !/^(storage|clock)_/.test(o.name)); // LCD-1 / CLOCK-1 adds twelve (protocol-storage-clock.test.ts)
+    const wiring1 = OPS.filter((o) => !/^(storage|clock|app)_|^device_adopt$/.test(o.name)); // LCD-1 / CLOCK-1 adds twelve (protocol-storage-clock.test.ts)
     expect(wiring1).toHaveLength(93);
     expect(wiring1.slice(-11).map((o) => o.name)).toEqual(WIRING_OP_NAMES);
     const paths: Record<string, [string[], string[] | undefined, string, string]> = {

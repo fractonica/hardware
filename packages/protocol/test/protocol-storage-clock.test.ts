@@ -33,8 +33,9 @@ const NAMES = [
 
 describe('LCD-1 / CLOCK-1 ops (design lcd-clock-c1 D9)', () => {
   it('adds twelve ops on their CLI paths and moves REGISTRY_HASH once', () => {
-    expect(OPS).toHaveLength(105);
-    expect(OPS.slice(-12).map((o) => o.name)).toEqual(NAMES);
+    // Later ops come after these (UNOQ-2's app_* pins the count and the hash now).
+    const at = OPS.findIndex((o) => o.name === 'storage_info');
+    expect(OPS.slice(at, at + 12).map((o) => o.name)).toEqual(NAMES);
     const paths: Record<string, [string[], string[], string, string]> = {
       storage_info: [['storage', 'info'], ['device'], 'query', 'read'],
       storage_ls: [['storage', 'ls'], ['device', 'path'], 'query', 'read'],
@@ -56,7 +57,6 @@ describe('LCD-1 / CLOCK-1 ops (design lcd-clock-c1 D9)', () => {
       expect(hashOf(OPS.filter((o) => o.name !== name)), name).not.toBe(REGISTRY_HASH);
     }
     expect(hashOf(OPS)).toBe(REGISTRY_HASH);
-    expect(REGISTRY_HASH).toBe('9e6905ab39fd');
     expect(REGISTRY_HASH).not.toBe('e37bcd657cfb'); // WIRING-1's
     expect(JOB_KINDS).toContain('storage');
     expect(JOB_KINDS).toContain('clock');

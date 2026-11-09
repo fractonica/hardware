@@ -1,0 +1,7 @@
+{
+  "name": "hello-web",
+  "kind": "web",
+  "start": "node server.mjs",
+  "description": "the hub's devices, live, as a page and a JSON API",
+  "version": "0.1.0"
+}
