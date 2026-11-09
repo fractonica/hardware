@@ -1,0 +1,7 @@
+# secrets and per-machine state: never commit
+/local/
+# build outputs
+/out/
+.DS_Store
+/.buildx/
+/out-build*.log

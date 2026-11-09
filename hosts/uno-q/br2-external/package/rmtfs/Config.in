@@ -1,0 +1,13 @@
+config BR2_PACKAGE_RMTFS
+	bool "rmtfs"
+	depends on BR2_PACKAGE_HAS_UDEV
+	select BR2_PACKAGE_QRTR
+	help
+	  Qualcomm remote filesystem service. Serves the modem's
+	  storage partitions (modemst1/2, fsg, fsc) and starts the
+	  modem DSP, which runs the Wi-Fi firmware on the UNO Q.
+
+	  https://github.com/linux-msm/rmtfs
+
+comment "rmtfs needs udev"
+	depends on !BR2_PACKAGE_HAS_UDEV

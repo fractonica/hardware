@@ -1,0 +1,9 @@
+config BR2_PACKAGE_QONU_LINK
+	bool "qonu-link"
+	depends on BR2_aarch64
+	help
+	  The qonu link between Linux and the UNO Q's STM32U585:
+	  /usr/bin/qonu-link (daemon + CLI) and the matching MCU
+	  firmware at /usr/share/qonu/mcu/qonu-fw.elf. Built from
+	  link/ in this repository with the Rust toolchain pinned in
+	  docker/Dockerfile, using the committed Cargo.lock files.

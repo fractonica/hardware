@@ -1,0 +1,14 @@
+[Unit]
+Description=Hold the STM32 BOOT0 strap low (MCU boots its own flash)
+DefaultDependencies=no
+After=systemd-udev-trigger.service
+Before=sysinit.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/qonu/mcu-boot0
+
+[Install]
+WantedBy=sysinit.target

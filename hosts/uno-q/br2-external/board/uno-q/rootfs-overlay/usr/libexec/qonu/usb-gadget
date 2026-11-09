@@ -1,0 +1,72 @@
+#!/bin/sh
+# USB gadget on the UNO Q's USB-C port:
+#   ncm.usb0 -> Ethernet over USB (board 10.55.0.1, host gets DHCP)
+#   acm.GS0  -> serial console (/dev/ttyGS0 here, /dev/cu.usbmodem* on a Mac)
+set -eu
+G=/sys/kernel/config/usb_gadget/qonu
+
+stop() {
+	[ -d "$G" ] || return 0
+	echo "" > "$G/UDC" 2>/dev/null || true
+	rm -f "$G/configs/c.1/ncm.usb0" "$G/configs/c.1/acm.GS0"
+	for d in configs/c.1/strings/0x409 configs/c.1 functions/ncm.usb0 functions/acm.GS0 strings/0x409; do
+		rmdir "$G/$d" 2>/dev/null || true
+	done
+	rmdir "$G" 2>/dev/null || true
+}
+
+# Stable, locally administered MAC derived from the board serial and a role byte.
+mac() {
+	h=$(printf '%s-%s' "$2" "$1" | sha256sum | cut -c1-10)
+	echo "$1:$(echo "$h" | sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)/\1:\2:\3:\4:\5/')"
+}
+
+start() {
+	modprobe libcomposite 2>/dev/null || true
+	mountpoint -q /sys/kernel/config || mount -t configfs configfs /sys/kernel/config
+	if [ -d "$G" ] && [ -n "$(cat "$G/UDC" 2>/dev/null)" ]; then
+		exit 0
+	fi
+	stop
+
+	i=0
+	while [ -z "$(ls /sys/class/udc 2>/dev/null)" ] && [ $i -lt 30 ]; do sleep 1; i=$((i + 1)); done
+	udc=$(ls /sys/class/udc 2>/dev/null | head -n1)
+	[ -n "$udc" ] || { echo "usb-gadget: no USB device controller found" >&2; exit 1; }
+
+	i=0
+	while [ ! -r /sys/devices/soc0/serial_number ] && [ $i -lt 5 ]; do sleep 1; i=$((i + 1)); done
+	serial=$(cat /sys/devices/soc0/serial_number 2>/dev/null || cat /etc/machine-id)
+
+	mkdir -p "$G"
+	cd "$G"
+	echo 0x1d6b > idVendor        # Linux Foundation
+	echo 0x0104 > idProduct       # Multifunction Composite Gadget
+	echo 0x0100 > bcdDevice
+	echo 0x0200 > bcdUSB
+	echo 0xEF > bDeviceClass      # composite device with interface association
+	echo 0x02 > bDeviceSubClass
+	echo 0x01 > bDeviceProtocol
+	mkdir -p strings/0x409
+	echo "$serial" > strings/0x409/serialnumber
+	echo "qonu" > strings/0x409/manufacturer
+	echo "UNO Q $(hostname)" > strings/0x409/product
+
+	mkdir -p functions/ncm.usb0 functions/acm.GS0
+	mac 02 "$serial" > functions/ncm.usb0/dev_addr
+	mac 06 "$serial" > functions/ncm.usb0/host_addr
+
+	mkdir -p configs/c.1/strings/0x409
+	echo "NCM + ACM" > configs/c.1/strings/0x409/configuration
+	echo 250 > configs/c.1/MaxPower
+	ln -s functions/ncm.usb0 configs/c.1/
+	ln -s functions/acm.GS0 configs/c.1/
+
+	echo "$udc" > UDC
+}
+
+case "${1:-start}" in
+	start) start ;;
+	stop) stop ;;
+	*) echo "usage: $0 start|stop" >&2; exit 2 ;;
+esac

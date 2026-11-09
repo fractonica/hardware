@@ -1,0 +1,128 @@
+===== rmtfs.service
+[Unit]
+Description=Qualcomm remotefs service
+Before=NetworkManager.service
+
+[Service]
+ExecStart=/usr/bin/rmtfs -r -P -s
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+===== tqftpserv.service
+[Unit]
+Description=QRTR TFTP service
+
+[Service]
+ExecStart=/usr/bin/tqftpserv
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+
+===== qbootctl.service
+
+[Unit]
+Description=Mark the Current Boot slot as Good
+DefaultDependencies=no
+Requires=boot-complete.target
+After=local-fs.target boot-complete.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/qbootctl -m
+
+[Install]
+WantedBy=multi-user.target
+===== arduino-router.service
+[Unit]
+Description=Arduino Router Service
+After=network-online.target
+Wants=network-online.target
+Requires=
+
+[Service]
+ExecStartPre=-/usr/bin/gpioset -c /dev/gpiochip1 -t0 37=0
+ExecStart=/usr/bin/arduino-router --unix-port /var/run/arduino-router.sock --serial-port /dev/ttyHS1 --serial-baudrate 115200
+ExecStartPost=/usr/bin/gpioset -c /dev/gpiochip1 -t0 70=1
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+===== firmware
+total 21248
+drwxr-xr-x  2 root root     4096 Dec 29 14:23 .
+drwxr-xr-x 32 root root     4096 Dec 29 14:23 ..
+-rw-r--r--  1 root root    13804 Nov 25 18:17 a702_zap.mbn
+-rw-r--r--  1 root root 12826756 Nov 25 18:17 adsp.mbn
+-rw-r--r--  1 root root      403 Nov 25 18:17 adspr.jsn
+-rw-r--r--  1 root root      405 Nov 25 18:17 adsps.jsn
+-rw-r--r--  1 root root      555 Nov 25 18:17 adspua.jsn
+-rw-r--r--  1 root root  8881672 Nov 25 18:17 modem.mbn
+-rw-r--r--  1 root root      562 Nov 25 18:17 modemr.jsn
+-rw-r--r--  1 root root      713 Nov 25 18:17 modemuw.jsn
+lrwxrwxrwx  1 root root       47 Nov 25 18:17 wlanmdsp.mbn -> ../../ath10k/WCN3990/hw1.0/qcm2290/wlanmdsp.mbn
+/lib/firmware/ath10k/WCN3990/:
+total 12
+drwxr-xr-x  3 root root 4096 Dec 29 14:22 .
+drwxr-xr-x 11 root root 4096 Dec 29 14:22 ..
+drwxr-xr-x  4 root root 4096 Dec 29 14:23 hw1.0
+
+/lib/firmware/ath10k/WCN3990/hw1.0:
+total 4392
+drwxr-xr-x 4 root root    4096 Dec 29 14:23 .
+drwxr-xr-x 3 root root    4096 Dec 29 14:22 ..
+-rw-r--r-- 1 root root  749364 Jan  1  1970 board-2.bin
+-rw-r--r-- 1 root root      60 Nov 25 18:17 firmware-5.bin
+drwxr-xr-x 2 root root    4096 Dec 29 14:23 qcm2290
+drwxr-xr-x 2 root root    4096 Dec 29 14:23 qrb4210
+-rw-r--r-- 1 root root 3725044 Nov 25 18:17 wlanmdsp.mbn
+
+/lib/firmware/ath10k/WCN3990/hw1.0/qcm2290:
+total 3752
+drwxr-xr-x 2 root root    4096 Dec 29 14:23 .
+drwxr-xr-x 4 root root    4096 Dec 29 14:23 ..
+-rw-r--r-- 1 root root      60 Nov 25 18:17 firmware-5.bin
+-rw-r--r-- 1 root root 3828228 Nov 25 18:17 wlanmdsp.mbn
+
+/lib/firmware/ath10k/WCN3990/hw1.0/qrb4210:
+total 8
+drwxr-xr-x 2 root root 4096 Dec 29 14:23 .
+drwxr-xr-x 4 root root 4096 Dec 29 14:23 ..
+lrwxrwxrwx 1 root root   25 Nov 25 18:17 firmware-5.bin -> ../qcm2290/firmware-5.bin
+lrwxrwxrwx 1 root root   23 Nov 25 18:17 wlanmdsp.mbn -> ../qcm2290/wlanmdsp.mbn
+apbtfw10.tlv
+apbtfw11.tlv
+apnv10.bin
+apnv11.bin
+crnv21.bin
+crnv32.bin
+crnv32u.bin
+msbtfw11.mbn
+msbtfw11.tlv
+===== radio pkg
+/.
+/etc
+/etc/initramfs-tools
+/etc/initramfs-tools/scripts
+/etc/initramfs-tools/scripts/local-bottom
+/etc/initramfs-tools/scripts/local-bottom/ath_bdf_override.sh
+/usr
+/usr/share
+/usr/share/arduino-unoq-radio-firmware
+/usr/share/arduino-unoq-radio-firmware/board-2.bin_CTL_061125_REGDM4067_CCA22
+/usr/share/arduino-unoq-radio-firmware/board-2.bin_CTL_061125_REGDM4067_CCA22_OldPCB
+Version: 0.6.1
+===== usb gadget
+  sys-devices-platform-soc\x400-4ef8800.usb-4e00000.usb-udc-4e00000.usb.device                                                                loaded    active   plugged   /sys/devices/platform/soc@0/4ef8800.usb/4e00000.usb/udc/4e00000.usb
+  dev-usb\x2dffs-adb.mount                                                                                                                    loaded    active   mounted   /dev/usb-ffs/adb
+  usb-gadget.target                                                                                                                           loaded    active   active    Hardware activated USB gadget
+adbd.service
+usb-gadget.target

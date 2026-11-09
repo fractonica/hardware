@@ -1,0 +1,15 @@
+[Unit]
+Description=Qualcomm remote filesystem (modem storage; boots the modem DSP that runs Wi-Fi)
+# The modem fetches its Wi-Fi firmware from tqftpserv while it boots.
+Wants=tqftpserv.service
+After=tqftpserv.service
+StartLimitIntervalSec=0
+
+[Service]
+# Retries until /dev/qcom_rmtfs_mem1 and the modem remoteproc exist.
+ExecStart=/usr/bin/rmtfs -r -P -s
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

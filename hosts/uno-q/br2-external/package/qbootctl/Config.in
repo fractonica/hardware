@@ -1,0 +1,8 @@
+config BR2_PACKAGE_QBOOTCTL
+	bool "qbootctl"
+	help
+	  Qualcomm A/B boot slot control. `qbootctl -m` marks the
+	  current slot as successfully booted; without it the UNO Q's
+	  ABL switches slots or stops in fastboot after a few boots.
+
+	  https://github.com/linux-msm/qbootctl

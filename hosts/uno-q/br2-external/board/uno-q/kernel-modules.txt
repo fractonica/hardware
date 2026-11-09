@@ -1,0 +1,31 @@
+# Kernel modules kept by `localmodconfig` when generating linux.config.
+# Source: `lsmod` on the stock Arduino image (board-snapshot/stock-lsmod.txt),
+# minus audio, video codec, Docker networking and adb.
+# Anything selected by these via Kconfig is kept automatically.
+
+# Wi-Fi (WCN3990 via the modem DSP) and Bluetooth (WCN3988)
+ath ath10k_core ath10k_snoc mac80211 cfg80211 rfkill libarc4
+bluetooth btqca btbcm hci_uart ecc ecdh_generic
+
+# Remote processors, QMI/QRTR, rmtfs shared memory
+mdt_loader qcom_common qcom_glink_smem qcom_pil_info qcom_q6v5 qcom_q6v5_pas
+qcom_sysmon pdr_interface qcom_pdr_msg qcom_pd_mapper qmi_helpers
+qrtr qrtr_smd rmtfs_mem rpmsg_char rpmsg_ctrl
+
+# Buses to the STM32 and the headers
+gpi i2c_qcom_geni spi_geni_qcom spidev
+
+# USB-C: PHYs, VBUS, Type-C, and the DSI/DP bridge that owns the connector
+phy_qcom_qmp_usbc phy_qcom_qusb2 qcom_usb_vbus_regulator typec anx7625
+libcomposite usb_f_acm u_serial
+
+# Display/GPU chain kept so anx7625 (and with it the USB-C connector) probes
+msm drm drm_kms_helper drm_display_helper drm_dp_aux_bus drm_exec
+drm_client_lib gpu_sched dispcc_qcm2290 gpucc_qcm2290 backlight cec
+
+# SoC housekeeping: thermal limits, caches, power key, RTC, RNG, crypto engine
+lmh llcc_qcom icc_bwmon ocmem qcom_stats qcom_pon rtc_pm8xxx qcom_rng
+qcrypto socinfo pwrseq_core qcom_wdt
+
+# Crypto helpers, networking, misc
+af_alg authenc libdes sha256 libsha256_generic ipv6 fuse

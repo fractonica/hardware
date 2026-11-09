@@ -1,0 +1,10 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+# Panic messages embed source paths; keep the build host's layout out of them.
+[target.thumbv8m.main-none-eabihf]
+rustflags = [
+    "--remap-path-prefix=/src/link=link",
+    "--remap-path-prefix=/work/cargo/registry/src=crates",
+    "--remap-path-prefix=/work/link-target/firmware=target",
+]
