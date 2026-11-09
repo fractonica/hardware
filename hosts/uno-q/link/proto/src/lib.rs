@@ -48,7 +48,13 @@ pub enum Request {
     /// Deliberately breaks the firmware to prove recovery works. No response:
     /// the MCU resets (watchdog or panic) and reports it in `Event::Boot`.
     Fault { kind: Fault },
+    /// Shows a frame on the 13x8 LED matrix: one row per element, top first;
+    /// bit `x` lights column `x` (0 = left). Bits above 12 are ignored.
+    Matrix { rows: [u16; MATRIX_HEIGHT] },
 }
+
+pub const MATRIX_WIDTH: usize = 13;
+pub const MATRIX_HEIGHT: usize = 8;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fault {
@@ -359,7 +365,7 @@ mod tests {
     #[test]
     fn frame_roundtrip_both_directions() {
         let mut out = [0u8; MAX_FRAME];
-        let req = Request::SetLed { led: 0, r: true, g: false, b: true };
+        let req = Request::Matrix { rows: [0x1FFF, 0x1001, 0x1001, 0x1001, 0x1001, 0x1001, 0x1001, 0x1FFF] };
         let n = encode(0xBEEF, &req, &mut out).unwrap();
         assert_eq!(out[n - 1], 0);
         let mut wire = out[..n - 1].to_vec();

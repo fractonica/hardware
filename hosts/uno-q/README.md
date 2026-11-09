@@ -18,6 +18,7 @@ Goals for this first layer:
 | Access | OpenSSH (key-only), USB NCM network, USB serial console, debug UART |
 | MCU link | `qonu-link` daemon and the qonu-fw Rust/Embassy firmware for the STM32U585, over the UART at 4 Mbaud with RTS/CTS (see [STM32 link](#stm32-link)) |
 | MCU flashing | OpenOCD (pinned upstream commit, libgpiod v2) bit-banging SWD on the QRB2210's GPIOs; `qonu-mcu` wraps it |
+| Agent access | `qonu-mcp`, an MCP server over stdio, reached through SSH with a key that can only start it (see [MCP server](#mcp-server)) |
 | Rootfs | ext4, mounted read-only by the kernel, then fsck'd, remounted rw, and grown to the 10 GB partition by systemd |
 | Size | No package manager, no Docker, no desktop. See `out/flash` after a build. |
 
@@ -159,6 +160,44 @@ The image's firmware is built from the same tree, with the same flags and the sa
 
 Arduino's loader also waits for line 70 to go high before it starts a sketch.
 
+## MCP server
+
+`qonu-mcp` (in `link/mcp`) exposes the board to agents as Model Context Protocol tools. It is built on rmcp 3.9, the official Rust SDK, and speaks MCP over stdio. It holds no hardware itself: every call goes through the `qonu-link` socket, so the daemon's failsafe and validation apply to agents too.
+
+```
+Claude Code ──ssh uriel-mcp──▶ qonu-mcp ──/run/qonu/link.sock──▶ qonu-link ──4 Mbaud UART──▶ STM32
+```
+
+| Tool | Does | Hints |
+|---|---|---|
+| `get_status` | link state, MCU firmware, uptime, reset cause, failsafe, last panic, latency, error count | read-only |
+| `matrix_draw` | static image: 8 rows × 13 chars, `#` on, `.` off | idempotent |
+| `matrix_text` | text in a 3×5 font; up to 3 chars shown centered, longer text scrolls | idempotent |
+| `matrix_animate` | 1-64 frames at 40-2000 ms each, up to 10 loops, at most 30 s per call | idempotent |
+| `matrix_clear` | all LEDs off; stops a running animation | idempotent |
+| `set_led` | RGB LED3: off, red, green, blue, yellow, cyan, magenta or white | idempotent |
+
+All tools return structured output with output schemas. A newer matrix command interrupts a running animation.
+
+### Use it from Claude Code
+
+`.mcp.json` registers the server as `uno-q` for this project. Open the project in Claude Code and approve the server when asked, then ask for something like "draw a heart on the LED matrix". To try it without an interactive session:
+
+```bash
+claude -p "draw a smiley on the uno-q LED matrix" --mcp-config .mcp.json --strict-mcp-config --allowedTools mcp__uno-q
+```
+
+### How access is limited
+
+- `make local` generates `local/ssh/mcp_ed25519`. Its line in the board's `authorized_keys` is `command="/usr/bin/qonu-mcp",restrict`.
+- That key starts only the MCP server, whatever command a client sends. It gets no shell, no terminal, and no port, agent or X11 forwarding.
+- Nothing listens on the network. Reaching the tools takes that key and the board's pinned host key.
+- **Still to do:** `qonu-mcp` runs as root behind the forced command. A dedicated unprivileged user with access to only the link socket comes next.
+
+### Measured
+
+Claude Code driven headless (`claude -p`) checked status, drew a smiley, scrolled `HELLO QONU`, redrew the smiley and set LED3 green. Every call went through SSH → `qonu-mcp` → `qonu-link` → the STM32, with 0 link errors. A second run played a 12-frame animation and left a heart on the matrix. Checked by eye on the board: the heart is upright and LED3 is green. This confirms the charlieplex pin map and the row and column orientation.
+
 ## Layout
 
 ```
@@ -176,6 +215,8 @@ link/                         the STM32 link, in Rust
   proto/                      wire protocol shared by both ends (no_std, tested)
   firmware/                   qonu-fw for the STM32U585 (Embassy)
   daemon/                     qonu-link: Linux daemon + CLI
+  mcp/                        qonu-mcp: MCP server (tools over stdio)
+.mcp.json                     registers qonu-mcp with Claude Code (via ssh uriel-mcp)
 br2-external/                 Buildroot external tree (BR2_EXTERNAL_QONU)
   configs/qonu_uno_q_defconfig
   board/uno-q/
@@ -219,7 +260,7 @@ Build state lives in the Docker volume `qonu-build` (it has to be on a case-sens
 - **SWD is slow:** bit-banged through libgpiod at about 14.5 KiB/s.
   - qonu-fw (22 KB) flashes in about 2 s.
   - A full 2 MiB backup takes about 2.5 min.
-- **The daemon runs as root:** a dedicated user with access to only `ttyHS1` comes with the MCP layer.
+- **The daemon and qonu-mcp run as root:** dedicated users with access to only `ttyHS1` (daemon) and the link socket (qonu-mcp) are next.
 
 ## Measured on the board (16 GB UNO Q)
 

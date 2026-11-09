@@ -10,7 +10,14 @@ SYSTEMCTL=("$HOST_DIR/bin/systemctl" "--root=$TARGET_DIR")
 # change the board's identity.
 install -d -m 0700 "$TARGET_DIR/root/.ssh"
 if [ -s "$LOCAL/authorized_keys" ]; then
-	install -m 0600 "$LOCAL/authorized_keys" "$TARGET_DIR/root/.ssh/authorized_keys"
+	{
+		cat "$LOCAL/authorized_keys"
+		# The MCP client key may only start qonu-mcp: no shell, no forwarding.
+		if [ -s "$LOCAL/ssh/mcp_ed25519.pub" ]; then
+			echo "command=\"/usr/bin/qonu-mcp\",restrict $(cat "$LOCAL/ssh/mcp_ed25519.pub")"
+		fi
+	} > "$TARGET_DIR/root/.ssh/authorized_keys"
+	chmod 0600 "$TARGET_DIR/root/.ssh/authorized_keys"
 else
 	echo "post-build: WARNING: $LOCAL/authorized_keys missing; SSH login will be impossible" >&2
 fi

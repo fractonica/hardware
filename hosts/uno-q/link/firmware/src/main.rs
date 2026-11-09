@@ -6,7 +6,8 @@
 //!   safe state (host-owned outputs off) until the host clears it.
 //! - Independent watchdog (1 s), fed only while both link tasks make progress.
 //! - LED4 shows state: green blink = disarmed, green = armed, red blink = tripped.
-//!   LED3 belongs to the host (`SetLed`).
+//!   LED3 and the 13x8 LED matrix belong to the host (`SetLed`, `Matrix`) and
+//!   go dark when the failsafe trips.
 #![no_std]
 #![no_main]
 
@@ -14,7 +15,7 @@ use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::gpio::{Flex, Level, Output, Speed};
 use embassy_stm32::mode::Async;
 use embassy_stm32::usart::{self, RingBufferedUartRx, Uart, UartTx};
 use embassy_stm32::wdg::IndependentWatchdog;
@@ -163,6 +164,7 @@ mod failsafe {
 
     /// Drives every host-owned output to its safe level.
     fn safe_outputs() {
+        matrix::set([0; proto::MATRIX_HEIGHT]);
         LED3.lock(|l| {
             if let Some(leds) = l.borrow_mut().as_mut() {
                 for led in leds.iter_mut() {
@@ -220,6 +222,86 @@ fn handle(req: Request) -> Response {
             loop {} // blocks the executor: nothing pets the watchdog
         }
         Request::Fault { kind: Fault::Panic } => panic!("fault injection"),
+        Request::Matrix { rows } => {
+            if failsafe::state() == FailsafeState::Tripped {
+                return Response::Error(ErrorCode::FailsafeTripped);
+            }
+            matrix::set(rows);
+            Response::Ok
+        }
+    }
+}
+
+// ------------------------------------------------------------- LED matrix
+
+/// The 13x8 LED matrix: 104 LEDs charlieplexed on PF0..PF10. Each pixel lights
+/// when its "high" pin drives high and its "low" pin drives low while every
+/// other pin floats. The scan task drives one high pin per phase.
+mod matrix {
+    use super::*;
+    use proto::{MATRIX_HEIGHT as H, MATRIX_WIDTH as W};
+
+    const PINS: usize = 11;
+    /// Pixel `y * 13 + x` -> `(high pin << 8) | low pin`, from the
+    /// `pixel-pairs` table of Zephyr's arduino_uno_q board devicetree.
+    const PAIRS: [u16; W * H] = [
+        0x0001, 0x0100, 0x0002, 0x0200, 0x0102, 0x0201, 0x0003, 0x0300, 0x0103, 0x0301, 0x0203, 0x0302, 0x0004,
+        0x0400, 0x0104, 0x0401, 0x0204, 0x0402, 0x0304, 0x0403, 0x0005, 0x0500, 0x0105, 0x0501, 0x0205, 0x0502,
+        0x0305, 0x0503, 0x0405, 0x0504, 0x0006, 0x0600, 0x0106, 0x0601, 0x0206, 0x0602, 0x0306, 0x0603, 0x0406,
+        0x0604, 0x0506, 0x0605, 0x0007, 0x0700, 0x0107, 0x0701, 0x0207, 0x0702, 0x0307, 0x0703, 0x0407, 0x0704,
+        0x0507, 0x0705, 0x0607, 0x0706, 0x0008, 0x0800, 0x0108, 0x0801, 0x0208, 0x0802, 0x0308, 0x0803, 0x0408,
+        0x0804, 0x0508, 0x0805, 0x0608, 0x0806, 0x0708, 0x0807, 0x0009, 0x0900, 0x0109, 0x0901, 0x0209, 0x0902,
+        0x0309, 0x0903, 0x0409, 0x0904, 0x0509, 0x0905, 0x0609, 0x0906, 0x0709, 0x0907, 0x0809, 0x0908, 0x000a,
+        0x0a00, 0x010a, 0x0a01, 0x020a, 0x0a02, 0x030a, 0x0a03, 0x040a, 0x0a04, 0x050a, 0x0a05, 0x060a, 0x0a06,
+    ];
+    /// MODER bits of PF0..PF10 (2 bits per pin).
+    const MODER_MASK: u32 = (1 << (2 * PINS)) - 1;
+
+    static FRAME: BlockingMutex<CriticalSectionRawMutex, RefCell<[u16; H]>> =
+        BlockingMutex::new(RefCell::new([0; H]));
+
+    pub fn set(rows: [u16; H]) {
+        FRAME.lock(|f| *f.borrow_mut() = rows.map(|r| r & ((1 << W) - 1)));
+    }
+
+    /// Owns PF0..PF10 (the `Flex` pins only reserve them) and drives the port
+    /// registers directly, so each phase switches all 11 pins at once.
+    #[embassy_executor::task]
+    pub async fn scan(_pins: [Flex<'static>; PINS]) {
+        let moder = pac::GPIOF.moder().as_ptr() as *mut u32;
+        let bsrr = pac::GPIOF.bsrr().as_ptr() as *mut u32;
+        let mut ticker = Ticker::every(Duration::from_micros(500));
+        loop {
+            let rows = FRAME.lock(|f| *f.borrow());
+            let mut lows = [0u32; PINS];
+            for (y, row) in rows.iter().enumerate() {
+                for x in 0..W {
+                    if row >> x & 1 != 0 {
+                        let pair = PAIRS[y * W + x];
+                        lows[(pair >> 8) as usize] |= 1 << (pair & 0xFF);
+                    }
+                }
+            }
+            for (high, &low_pins) in lows.iter().enumerate() {
+                // SAFETY: GPIOF registers; PF0..PF10 are reserved by `_pins`
+                // and only touched here. Read-modify-write keeps PF11..PF15.
+                unsafe {
+                    let floating = moder.read_volatile() & !MODER_MASK;
+                    moder.write_volatile(floating); // blank: every pin floats
+                    if low_pins != 0 {
+                        bsrr.write_volatile((1 << high) | (low_pins << 16));
+                        let mut out = 1 << (2 * high);
+                        for pin in 0..PINS {
+                            if low_pins >> pin & 1 != 0 {
+                                out |= 1 << (2 * pin);
+                            }
+                        }
+                        moder.write_volatile(floating | out);
+                    }
+                }
+                ticker.next().await;
+            }
+        }
     }
 }
 
@@ -316,6 +398,19 @@ async fn main(spawner: Spawner) {
         Output::new(p.PH12, Level::High, Speed::Low),
     ];
     LED3.lock(|l| *l.borrow_mut() = Some(led3));
+    let matrix_pins = [
+        Flex::new(p.PF0),
+        Flex::new(p.PF1),
+        Flex::new(p.PF2),
+        Flex::new(p.PF3),
+        Flex::new(p.PF4),
+        Flex::new(p.PF5),
+        Flex::new(p.PF6),
+        Flex::new(p.PF7),
+        Flex::new(p.PF8),
+        Flex::new(p.PF9),
+        Flex::new(p.PF10),
+    ];
     let mut led4_r = Output::new(p.PH13, Level::High, Speed::Low);
     let mut led4_g = Output::new(p.PH14, Level::High, Speed::Low);
     let _led4_b = Output::new(p.PH15, Level::High, Speed::Low);
@@ -335,6 +430,7 @@ async fn main(spawner: Spawner) {
     emit(Event::Boot { reset_cause });
     spawner.spawn(link_rx(rx).unwrap());
     spawner.spawn(link_tx(tx).unwrap());
+    spawner.spawn(matrix::scan(matrix_pins).unwrap());
 
     let mut wdg = IndependentWatchdog::new(p.IWDG, WATCHDOG_US);
     wdg.unleash();

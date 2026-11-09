@@ -8,7 +8,8 @@
 //! Socket protocol, one JSON object per line in each direction:
 //!   -> {"id": 1, "method": "ping", "params": {}}
 //!   <- {"id": 1, "ok": true, "result": {...}}   or   {"id": 1, "ok": false, "error": "..."}
-//! Methods: ping, info, stats, led {r,g,b}, clear_failsafe, bench {n}, fault {kind}.
+//! Methods: ping, info, stats, led {r,g,b}, matrix {rows}, clear_failsafe, bench {n},
+//! fault {kind}.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -24,7 +25,8 @@ use std::time::{Duration, Instant};
 use std::{env, process, thread};
 
 use qonu_link_proto::{
-    self as proto, Accumulator, ErrorCode, Event, FailsafeState, Fault, FrameError, MAX_FRAME, Request, Response, Up,
+    self as proto, Accumulator, ErrorCode, Event, FailsafeState, Fault, FrameError, MATRIX_HEIGHT, MATRIX_WIDTH, MAX_FRAME,
+    Request, Response, Up,
 };
 use serde_json::{Value, json};
 
@@ -320,6 +322,38 @@ fn client_session(link: &Link, conn: UnixStream) -> io::Result<()> {
     Ok(())
 }
 
+/// Matrix rows from JSON: 8 entries, top first, each either a 13-bit number
+/// (bit x = column x) or a 13-character string where `#`, `X`, `*`, `O`, `@`
+/// or `1` is lit and `.`, ` `, `-`, `_` or `0` is dark.
+fn parse_matrix(rows: &Value) -> Result<[u16; MATRIX_HEIGHT], String> {
+    let arr = rows.as_array().filter(|a| a.len() == MATRIX_HEIGHT).ok_or("rows must be an array of 8 rows")?;
+    let mut out = [0u16; MATRIX_HEIGHT];
+    for (y, row) in arr.iter().enumerate() {
+        out[y] = match row {
+            Value::Number(n) => n
+                .as_u64()
+                .filter(|&n| n < 1 << MATRIX_WIDTH)
+                .ok_or_else(|| format!("row {y}: numbers must be 0..8191"))? as u16,
+            Value::String(s) => {
+                if s.chars().count() != MATRIX_WIDTH {
+                    return Err(format!("row {y}: needs exactly {MATRIX_WIDTH} characters, got {}", s.chars().count()));
+                }
+                let mut bits = 0u16;
+                for (x, c) in s.chars().enumerate() {
+                    match c {
+                        '#' | 'X' | 'x' | '*' | 'O' | '@' | '1' => bits |= 1 << x,
+                        '.' | ' ' | '-' | '_' | '0' => {}
+                        other => return Err(format!("row {y}: '{other}' is neither lit (#) nor dark (.)")),
+                    }
+                }
+                bits
+            }
+            _ => return Err(format!("row {y}: must be a number or a string")),
+        };
+    }
+    Ok(out)
+}
+
 fn expect_ok(r: Result<Response, CallError>) -> Result<Value, String> {
     match r {
         Ok(Response::Ok) => Ok(json!("ok")),
@@ -362,6 +396,11 @@ fn dispatch(link: &Link, req: &Value) -> Value {
         },
         "led" => expect_ok(link.call(&Request::SetLed { led: 0, r: flag("r"), g: flag("g"), b: flag("b") })),
         "clear_failsafe" => expect_ok(link.call(&Request::ClearFailsafe)),
+        "matrix" => match params.get("rows").map(parse_matrix) {
+            Some(Ok(rows)) => expect_ok(link.call(&Request::Matrix { rows })),
+            Some(Err(e)) => Err(e),
+            None => Err("params.rows is required".into()),
+        },
         "fault" => {
             let kind = match params.get("kind").and_then(Value::as_str) {
                 Some("hang") => Some(Fault::Hang),
@@ -498,6 +537,7 @@ fn usage() -> ! {
        qonu-link info               firmware, uptime, reset cause, MCU-side counters
        qonu-link stats              daemon-side counters and latency
        qonu-link led R G B          LED3, each 0 or 1
+       qonu-link matrix ROW x8      13-char rows, # lit . dark (or: qonu-link matrix clear)
        qonu-link clear              leave a latched failsafe
        qonu-link bench [N]          N back-to-back pings, latency percentiles
        qonu-link fault hang|panic   break the firmware on purpose to test recovery
@@ -531,6 +571,14 @@ fn main() {
         }
         Some(m @ ("info" | "stats")) => request(m, json!({})).map(pretty),
         Some("clear") => request("clear_failsafe", json!({})).map(pretty),
+        Some("matrix") => {
+            let rows: Vec<Value> = if arg(1) == Some("clear") {
+                vec![json!(0); MATRIX_HEIGHT]
+            } else {
+                args[1..].iter().map(|r| json!(r)).collect()
+            };
+            request("matrix", json!({"rows": rows})).map(pretty)
+        }
         Some("led") => {
             let on = |i| arg(i) == Some("1");
             request("led", json!({"r": on(1), "g": on(2), "b": on(3)})).map(pretty)
