@@ -339,7 +339,7 @@ Status Led::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &)
     switch (cmd_id) {
     case kCmdSet: {
         const auto a = decode_led_set_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return set(*a);
@@ -352,7 +352,7 @@ Status Led::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &)
     }
     case kCmdBlink: {
         const auto a = decode_led_blink_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return blink(*a);

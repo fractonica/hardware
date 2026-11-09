@@ -7,7 +7,5 @@ idf_component_register(SRCS "src/fixture_gpio.cpp"
                        PRIV_REQUIRES esp_driver_gpio esp_driver_ledc esp_timer
                        LDFRAGMENTS "linker.lf")
 
-# Design m2-c1-hil D11 item 1: the panic hook. Every panic lets go of the lines in __wrap_esp_panic_handler
-# (src/fixture_gpio.cpp) before esp_panic_handler prints and dumps; -u keeps the object in the link whenever the
-# wrap is on, so no profile that builds this component can link the wrap without its target.
-target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler" "-Wl,-u,__wrap_esp_panic_handler")
+# Design m2-c1-hil D11 item 1: the panic hook and the restart handler are fr_core's (fr/platform/safe_off.hpp), shared
+# with every driver that drives an output a CPU reset would leave running; this driver registers its two hooks there.

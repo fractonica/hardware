@@ -1,6 +1,6 @@
 capability: fr.display
 id: 0x0003
-version: "1.1"
+version: "1.2"
 summary: A pixel panel with drawing primitives everywhere and LVGL layouts where the panel's driver says so (trait ui).
 doc: |
   Colours are 0xRRGGBB on the wire; a mono panel (color mono1) lights a pixel whose colour is at least 50 % luminance.
@@ -49,6 +49,7 @@ traits:
 config:
   rotation:   { type: Rotation, default: r0, doc: "panel rotation; a board entry's `rotation` (0, 90, 180, 270) is its default" }
   brightness: { type: u8, default: 255, doc: "backlight level at boot; ignored on panels without backlight control" }
+  max_brightness: { type: u8, default: 255, range: [1, 255], doc: "a hard cap on the backlight: set_brightness and brightness scale into 0..max (design lcd-clock-c1 D4; 128 where the vendor warns against full brightness)" }
   flush_ms:   { type: u16, default: 20, range: [20, 1000], unit: ms, doc: "coalescing period: the panel is flushed at most this often (50 Hz)" }
 properties:
   brightness: { id: 1, type: u8, doc: "the backlight level (255 on panels without backlight control)" }

@@ -1,0 +1,12 @@
+schema: fractonica/part@1
+id: erm-coin-10mm
+name: Coin vibration motor (ERM), 10 mm
+category: actuator
+summary: Flat eccentric-rotating-mass motor, 3 V, about 60–90 mA.
+specs: { rated: 3 V, current: about 60–90 mA }
+inferred: [current]
+pins:
+  - { name: "red", desc: + }
+  - { name: "blue/black", desc: − }
+notes:
+  - "Driven by an NPN low-side with a flyback diode; fr.haptic kind erm, rated_mv 3000."

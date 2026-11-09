@@ -273,11 +273,13 @@ export interface DisplayConfig {
   rotation: DisplayRotation | number;
   /** backlight level at boot; ignored on panels without backlight control (default 255) */
   brightness: number;
+  /** a hard cap on the backlight: set_brightness and brightness scale into 0..max (design lcd-clock-c1 D4; 128 where the vendor warns against full brightness) (1..255; default 255) */
+  max_brightness: number;
   /** coalescing period: the panel is flushed at most this often (50 Hz) (ms; 20..1000; default 20) */
   flush_ms: number;
 }
 
-export const DISPLAY_CONFIG_DEFAULTS: Readonly<DisplayConfig> = { rotation: 'r0', brightness: 255, flush_ms: 20 };
+export const DISPLAY_CONFIG_DEFAULTS: Readonly<DisplayConfig> = { rotation: 'r0', brightness: 255, max_brightness: 255, flush_ms: 20 };
 
 /** fr.display.clear arguments (command 1, reliable). Drops every primitive and any layout, and fills the panel with `color`. */
 export interface DisplayClearArgs {
@@ -764,7 +766,7 @@ export function decodeDisplayBrightnessState(bytes: Uint8Array): Decoded<Display
 export const DISPLAY_CAP: $.CapInfo = {
   id: 0x0003,
   name: 'fr.display',
-  version: { major: 1, minor: 1 },
+  version: { major: 1, minor: 2 },
   section: 'standard',
   traits: { fields: [{ name: 'width' }, { name: 'height' }, { name: 'color', members: DisplayColorFormat }, { name: 'ui' }, { name: 'touch' }, { name: 'round' }], maxSize: 17, encode: encodeDisplayTraits, decode: decodeDisplayTraits },
   commands: [

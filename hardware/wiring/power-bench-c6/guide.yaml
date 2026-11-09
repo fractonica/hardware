@@ -1,0 +1,133 @@
+schema: fractonica/wiring@1
+id: power-bench-c6
+title: Power bench on scale-c6
+summary: >-
+  Two TP4056 chargers (the LiPo and the 90 F lithium-ion capacitor), voltage sense, charger status, a test load,
+  the coin motor and the push-pull solenoid on scale-c6 (POWER-1).
+board: esp32c6-wroom1-n8
+profile: c6w-scale
+device: scale-c6
+design: docs/design/power-p1.md
+covers: [battery, cap, buzz, kick]
+safety:
+  - "Unplug the C6's USB and the modules' USB charger while soldering; plug them back only to test a step."
+  - "Every ground is common: the C6's GND, both modules' OUT−, every emitter, the IRF530N's source. A missing ground makes every reading wrong."
+  - "Use OUT−, never B−, as ground, so the module's protection can still cut the load."
+  - "Never short the capacitor or run it flat: below 2.5 V it is damaged. Leave it at about 3.8 V when you stop."
+  - "Diodes across the motor and the solenoid: stripe toward +. Reversed, they short the capacitor when the transistor turns on."
+  - "The TP4056 gets hot charging the capacitor at 1 A: keep it off the breadboard plastic."
+bom:
+  - { part: esp32c6-wroom1-n8-board, qty: 1, note: scale-c6 }
+  - { part: tp4056-protected, qty: 2, note: "#1 the LiPo, #2 the capacitor" }
+  - { part: lipo-602030, qty: 1 }
+  - { part: lic-h-0825, qty: 1 }
+  - { part: usb-charger-5v, qty: 1, note: feeds both modules' IN+/IN− }
+  - { part: resistor, value: 1 MΩ, qty: 4, note: two dividers (100 kΩ works too) }
+  - { part: capacitor-ceramic, value: 100 nF, qty: 2, note: one per divider }
+  - { part: resistor, value: 10 kΩ, qty: 7, note: "4 status taps, solenoid pull-down, Q1 pull-up; one spare" }
+  - { part: resistor, value: 1 kΩ, qty: 3, note: "test-load base, Q1 base, Q2 pull-up" }
+  - { part: resistor, value: 470 Ω, qty: 1, note: motor base }
+  - { part: resistor, value: 100 Ω, qty: 1, note: the test load }
+  - { part: npn-small, value: S8050, qty: 4, note: "test load, motor, Q1, Q2 (2N2222 works too)" }
+  - { part: irf530n, qty: 1 }
+  - { part: diode, value: 1N4148, qty: 1, note: across the motor (1N4007 works too) }
+  - { part: diode, value: 1N4007, qty: 1, note: across the solenoid }
+  - { part: erm-coin-10mm, qty: 1 }
+  - { part: solenoid-push-pull-mini, qty: 1 }
+diagrams:
+  - { id: map, title: Every connection at a glance, file: map.svg }
+  - { id: divider, title: Sense divider (GPIO0; the same on GPIO1), file: divider.svg }
+  - { id: test-load, title: Test load on GPIO11, file: test-load.svg }
+  - { id: motor, title: Coin motor on GPIO14, file: motor.svg }
+  - { id: solenoid, title: Solenoid on GPIO5 (two NPNs and the IRF530N), file: solenoid.svg }
+connections:
+  - { pin: gpio.0,  instance: battery, bind: sense, to: "TP4056 #1 OUT+ through the divider", via: "1 MΩ / 1 MΩ, 100 nF" }
+  - { pin: gpio.19, instance: battery, bind: chrg,  to: "TP4056 #1 CHRG", via: 10 kΩ }
+  - { pin: gpio.20, instance: battery, bind: stdby, to: "TP4056 #1 STDBY", via: 10 kΩ }
+  - { pin: gpio.11, instance: battery, bind: load,  to: "test-load NPN base", via: "1 kΩ; 100 Ω from LiPo OUT+ to the collector" }
+  - { pin: gpio.1,  instance: cap,     bind: sense, to: "TP4056 #2 OUT+ through the divider", via: "1 MΩ / 1 MΩ, 100 nF" }
+  - { pin: gpio.21, instance: cap,     bind: chrg,  to: "TP4056 #2 CHRG", via: 10 kΩ }
+  - { pin: gpio.22, instance: cap,     bind: stdby, to: "TP4056 #2 STDBY", via: 10 kΩ }
+  - { pin: gpio.14, instance: buzz,    bind: out,   to: "motor NPN base", via: "470 Ω; motor from capacitor OUT+ to the collector" }
+  - { pin: gpio.5,  instance: kick,    bind: out,   to: "Q1 base (solenoid shifter)", via: "1 kΩ; 10 kΩ pull-down to GND" }
+  - { pin: 5v,  to: "Q1 and Q2 pull-ups (10 kΩ, 1 kΩ) of the solenoid shifter" }
+  - { pin: gnd, to: "both OUT−, every emitter, the IRF530N source, the dividers' bottoms" }
+sections:
+  - id: power
+    title: Chargers and grounds
+    diagram: map
+    steps:
+      - id: chargers-in
+        text: "Wire the USB charger's 5 V and ground to IN+ and IN− of both TP4056 modules (or plug each module's USB-C into the same charger through a splitter)."
+        check: "Charger plugged, no cells: each module's red LED flickers (no cell) or the blue/green LED is on."
+      - id: lipo-in
+        text: "Connect the LiPo to TP4056 #1: red to B+, black to B−."
+        check: "Multimeter on OUT+ / OUT−: the LiPo's voltage (3.0–4.2 V)."
+      - id: cap-in
+        text: "Connect the 90 F capacitor to TP4056 #2: + to B+, − to B− (the sleeve's stripe usually marks −; check before soldering)."
+        check: "With the charger plugged, OUT+ / OUT− of #2 rises to 4.2 V within a few minutes."
+      - id: grounds
+        text: "Join both modules' OUT− to the C6's GND (one ground rail on the breadboard)."
+        pins: [gnd]
+        check: "Continuity beep between each OUT− and the C6's GND."
+  - id: sense
+    title: Voltage sense
+    diagram: divider
+    steps:
+      - id: sense-battery
+        text: "R1 (1 MΩ) from TP4056 #1 OUT+ to a free breadboard row; R2 (1 MΩ) from that row to ground; 100 nF from that row to ground; a jumper from that row to GPIO0."
+        pins: [gpio.0]
+        check: "Multimeter from GPIO0 to GND: half of the LiPo's voltage (1.5–2.1 V)."
+      - id: sense-cap
+        text: "The same divider on TP4056 #2 OUT+, its middle row to GPIO1."
+        pins: [gpio.1]
+        check: "GPIO1 to GND: half of the capacitor's voltage."
+  - id: status
+    title: Charger status lines
+    diagram: map
+    steps:
+      - id: status-battery
+        text: "A 10 kΩ from TP4056 #1's CHRG pad (the red LED's cathode side) to GPIO19, and a 10 kΩ from its STDBY pad (the other LED's cathode) to GPIO20."
+        pins: [gpio.19, gpio.20]
+        check: "Charger unplugged and the C6 running: both pins read about 3.3 V. Charging the LiPo: GPIO19 drops near 0 V."
+      - id: status-cap
+        text: "The same for TP4056 #2: CHRG through 10 kΩ to GPIO21, STDBY through 10 kΩ to GPIO22."
+        pins: [gpio.21, gpio.22]
+        check: "When the capacitor is full the blue/green LED is on and GPIO22 is near 0 V."
+  - id: load
+    title: Test load
+    diagram: test-load
+    steps:
+      - id: test-load
+        text: "NPN (flat face toward you: E B C): emitter to ground; base through 1 kΩ to GPIO11; collector through the 100 Ω resistor to TP4056 #1 OUT+."
+        pins: [gpio.11]
+        check: "Board running, load off: no current, the resistor stays cold. (fr battery load scale-c6 battery on switches it on for a minute.)"
+  - id: motor
+    title: Coin motor
+    diagram: motor
+    steps:
+      - id: motor-driver
+        text: "NPN: emitter to ground; base through 470 Ω to GPIO14; collector to the motor's − (blue); the motor's + (red) to TP4056 #2 OUT+ (the capacitor)."
+        pins: [gpio.14]
+      - id: motor-diode
+        text: "A 1N4148 (or 1N4007) across the motor: stripe to the + side, plain end to the collector side."
+        check: "Diode mode across the motor's leads: 0.5–0.7 V one way (meter + on the collector side), open the other."
+  - id: solenoid
+    title: Solenoid driver
+    diagram: solenoid
+    steps:
+      - id: sol-pulldown
+        text: "10 kΩ from GPIO5 to ground (holds the solenoid off while the C6 boots or flashes)."
+        pins: [gpio.5]
+      - id: sol-q1
+        text: "Q1 (NPN): base through 1 kΩ to GPIO5; emitter to ground; collector to Q2's base and through 10 kΩ to the C6's 5V pin."
+        pins: [gpio.5, 5v]
+      - id: sol-q2
+        text: "Q2 (NPN): emitter to ground; collector to the IRF530N's gate and through 1 kΩ to the C6's 5V pin."
+        pins: [5v]
+        check: "C6 running, GPIO5 low: the IRF530N's gate reads 0 V."
+      - id: sol-fet
+        text: "IRF530N (printed side toward you: G D S): source to ground; drain to the solenoid's −; the solenoid's + to TP4056 #2 OUT+."
+      - id: sol-diode
+        text: "A 1N4007 across the solenoid: stripe to the + side."
+        check: "Diode mode across the solenoid's leads: 0.5–0.7 V with meter + on the drain side, open the other way."

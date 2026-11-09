@@ -12,7 +12,8 @@
 // device_provision and flash_start. CAM-1 (design camera-c1 D11) adds ops/camera.ts (camera_snap, camera_stream,
 // camera_status, camera_set, camera_sd_list, camera_sd_fetch, camera_sd_delete) and the bridge ports' `path:` selector.
 // SCALE-1 (design scale-round-c1 D10) adds ops/scale.ts (scale_status, scale_read, scale_tare, scale_calibrate,
-// scale_reset_calibration, scale_watch).
+// scale_reset_calibration, scale_watch). POWER-1 (design power-p1 D11) adds ops/power.ts (battery_*, cell_*, haptic_*).
+// WIRING-1 (design wiring-w1 D3) adds ops/wiring.ts (wiring_*, part_*).
 // This module loads no Node builtin: the browser entry (browser.ts) exports it, and REGISTRY_HASH,
 // which hashes it with node:crypto, lives in registry-hash.ts.
 
@@ -42,6 +43,73 @@ export {
   type ScaleWatch,
   type ScaleWatchReason,
 } from './ops/scale.ts';
+export {
+  BATTERY_LOAD_MAX_S,
+  BATTERY_METER_MAX_MV,
+  BATTERY_METER_MIN_MV,
+  BatteryCalibrateSchema,
+  BatteryEstimateSchema,
+  BatteryLoadSchema,
+  BatteryResetSchema,
+  BatteryRowSchema,
+  BatteryStatusSchema,
+  CELL_LEVELS,
+  CELL_NAME_RE,
+  CELL_SESSION_KINDS,
+  CELL_TEST_ENDS,
+  CELL_TEST_MAX_S,
+  CELL_TEST_REST_S,
+  CELL_TEST_TARGETS,
+  CHARGER_MODES,
+  CHEMISTRIES,
+  CURVE_MAX_POINTS,
+  CellInstallSchema,
+  CellLearnedSchema,
+  CellListSchema,
+  CellPlaceSchema,
+  CellSchema,
+  CellSessionSchema,
+  CellShowSchema,
+  CellTestSchema,
+  CellUninstallSchema,
+  CurveSchema,
+  HAPTIC_MAX_MS,
+  HAPTIC_MAX_STEPS,
+  HapticPlaySchema,
+  HapticPulseSchema,
+  HapticStopSchema,
+  parseHapticSteps,
+  type BatteryCalibrate,
+  type BatteryEstimate,
+  type BatteryLoad,
+  type BatteryReset,
+  type BatteryRow,
+  type BatteryStatus,
+  type Cell,
+  type CellInstall,
+  type CellLearned,
+  type CellLevel,
+  type CellList,
+  type CellPlace,
+  type CellSession,
+  type CellSessionKind,
+  type CellShow,
+  type CellTest,
+  type CellTestEnd,
+  type CellTestTarget,
+  type CellUninstall,
+  type ChargerMode,
+  type Chemistry,
+  type Curve,
+  type HapticPlay,
+  type HapticPulse,
+  type HapticStop,
+  type PowerOpName,
+} from './ops/power.ts';
+export * from './ops/wiring.ts';
+export * from './ops/storage.ts';
+export * from './ops/clock.ts';
+export * from './ops/app-host.ts';
 import { CSI_OPS } from './ops/csi.ts';
 import { DISPLAY_OPS } from './ops/display.ts';
 import { cursor, MAX_WAIT_S, op, portSel, sourceDir, waitS, type OpDef } from './ops/common.ts';
@@ -52,6 +120,11 @@ import { NET_OPS, PROBE_OPS } from './ops/net.ts';
 import { DEFAULT_NETWORK, NETWORK_BANDS, NetworkSchema, networkName } from './ops/network.ts';
 import { OTA_OPS } from './ops/ota.ts';
 import { PORTS_OPS } from './ops/ports.ts';
+import { POWER_OPS } from './ops/power.ts';
+import { WIRING_OPS } from './ops/wiring.ts';
+import { STORAGE_OPS } from './ops/storage.ts';
+import { APP_HOST_OPS } from './ops/app-host.ts';
+import { CLOCK_OPS } from './ops/clock.ts';
 import { INVENTORY_OPS, REGISTRY_OPS } from './ops/registry.ts';
 import { SCALE_OPS } from './ops/scale.ts';
 import { TESTS_OPS } from './ops/tests.ts';
@@ -387,6 +460,14 @@ export const OPS = [
   ...CAMERA_OPS,
   // SCALE-1 (design scale-round-c1 D10): a board's weighing scale: its reading, tare, calibration, a recording.
   ...SCALE_OPS,
+  // POWER-1 (design power-p1 D11): rechargeable cells, the cell registry and its learning, haptics.
+  ...POWER_OPS,
+  // WIRING-1 (design wiring-w1 D3): wiring guides, steps done, the parts catalogue and what is on hand.
+  ...WIRING_OPS,
+  // LCD-1 / CLOCK-1 (design lcd-clock-c1 D9): a board's card (files to and from the Mac, a bench) and its real-time clock.
+  ...STORAGE_OPS,
+  ...CLOCK_OPS,
+  ...APP_HOST_OPS,
 ] as const;
 
 export type OpName = (typeof OPS)[number]['name'];

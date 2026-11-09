@@ -1,0 +1,14 @@
+schema: fractonica/part@1
+id: ao3400a
+name: AO3400A N-channel MOSFET (SOT-23), logic level
+category: semiconductor
+summary: 30 V, 5.7 A N-MOSFET that switches fully from a 3.3 V GPIO; the simple solenoid switch on a battery-only device.
+specs:
+  vds: 30 V
+  rds_on: about 50 mΩ at V_GS 2.5 V
+pins:
+  - { name: G, desc: "gate (pin 1)" }
+  - { name: S, desc: "source (pin 2)" }
+  - { name: D, desc: "drain (pin 3, alone on its side)" }
+notes:
+  - "SOT-23: solder it to a small adapter board for the breadboard."

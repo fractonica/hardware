@@ -18,8 +18,9 @@ const SCALE_OP_NAMES = ['scale_status', 'scale_read', 'scale_tare', 'scale_calib
 
 describe('SCALE-1 ops (design scale-round-c1 D10)', () => {
   it('adds six scale ops on the CLI paths of D10 and moves REGISTRY_HASH once', () => {
-    expect(OPS).toHaveLength(68);
-    expect(OPS.slice(-6).map((o) => o.name)).toEqual(SCALE_OP_NAMES);
+    const scale1 = OPS.filter((o) => !/^(battery|cell|haptic|wiring|part|storage|clock|app)_|^device_adopt$/.test(o.name)); // POWER-1 adds fourteen (protocol-power.test.ts)
+    expect(scale1).toHaveLength(68);
+    expect(scale1.slice(-6).map((o) => o.name)).toEqual(SCALE_OP_NAMES);
     expect(findOp('scale_status')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['scale', 'status'], positional: ['device'] } });
     expect(findOp('scale_read')).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['scale', 'read'], positional: ['device'] } });
     expect(findOp('scale_tare')).toMatchObject({ kind: 'command', tier: 'mutate', cli: { path: ['scale', 'tare'], positional: ['device'] } });
@@ -31,7 +32,8 @@ describe('SCALE-1 ops (design scale-round-c1 D10)', () => {
       expect(hashOf(OPS.filter((o) => o.name !== name)), name).not.toBe(REGISTRY_HASH);
     }
     expect(hashOf(OPS)).toBe(REGISTRY_HASH);
-    expect(REGISTRY_HASH).toBe('382bd44ad86c');
+    // SCALE-1's own hash, POWER-1's ops left out (protocol-power.test.ts pins the current one).
+    expect(hashOf(scale1)).toBe('382bd44ad86c');
     expect(REGISTRY_HASH).not.toBe('b62397012231'); // CAM-1's
     expect(JOB_KINDS).toContain('scale');
   });

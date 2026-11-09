@@ -1,0 +1,8 @@
+config BR2_PACKAGE_TQFTPSERV
+	bool "tqftpserv"
+	select BR2_PACKAGE_QRTR
+	help
+	  TFTP server over QRTR. The modem DSP fetches the Wi-Fi
+	  firmware through it while booting.
+
+	  https://github.com/linux-msm/tqftpserv

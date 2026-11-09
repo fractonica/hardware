@@ -24,6 +24,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "fr/platform/gpio_isr.hpp"
+#include "fr/platform/safe_off.hpp"
 #include "freertos/FreeRTOS.h"
 #include "hal/gpio_ll.h"
 #include "sdkconfig.h"
@@ -298,8 +299,7 @@ Status FixtureGpio::init(Core &core, const hal::FixtureLineMode &mode, hal::Edge
     // A driving line needs esp_restart to let go of it first (D11 item 1). Five handlers fit; none left means
     // this line never drives rather than one a reboot could leave pressed.
     if (drives && !s_shutdown_handler) {
-        const esp_err_t err = esp_register_shutdown_handler(&FixtureGpio::release_for_restart);
-        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        if (!platform::register_safe_off(&FixtureGpio::release_for_restart, &FixtureGpio::release_for_panic)) {
             ESP_LOGE(TAG, "no shutdown handler slot left: a restart could leave a press held");
             return std::unexpected(Err::failed);
         }
@@ -650,6 +650,7 @@ void fixture_gpio_host_reset()
     s_isr_service = false;
     s_draining = false;
     s_shutdown_handler = false;
+    platform::safe_off_host_reset();
     s_pins = 0;
     s_ledc_timer = false;
     s_ledc_channels = 0;
@@ -657,14 +658,3 @@ void fixture_gpio_host_reset()
 #endif
 
 }  // namespace fr::drv
-
-// The panic hook (D11 item 1): every panic (a task or interrupt watchdog with CONFIG_ESP_TASK_WDT_PANIC, abort, an
-// assert, a fault) reaches esp_panic_handler from the port's handler, with the other CPU stalled; CMakeLists.txt
-// links with -Wl,--wrap=esp_panic_handler. The lines are let go here, before the backtrace and the coredump (which
-// takes up to seconds on this flash) and the restart's CPU reset, which keeps them as they are. IRAM (noflash).
-extern "C" void __real_esp_panic_handler(void *info);
-extern "C" IRAM_ATTR void __wrap_esp_panic_handler(void *info)
-{
-    fr::drv::FixtureGpio::release_for_panic();
-    __real_esp_panic_handler(info);
-}

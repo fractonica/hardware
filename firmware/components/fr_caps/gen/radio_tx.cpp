@@ -94,7 +94,7 @@ Status RadioTx::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &)
     switch (cmd_id) {
     case kCmdStart: {
         const auto a = decode_radio_tx_start_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return start(*a);

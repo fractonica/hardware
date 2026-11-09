@@ -31,6 +31,11 @@ import { INVENTORY_HANDLERS } from './registry/catalog-ops.ts';
 import { type FlashStartInput, startFlash } from './registry/flashing.ts';
 import { isDeviceId, registryOf, resolvePort } from './registry/hub.ts';
 import { REGISTRY_HANDLERS } from './registry/ops.ts';
+import { POWER_HANDLERS } from './power/ops.ts';
+import { WIRING_HANDLERS } from './wiring/ops.ts';
+import { STORAGE_HANDLERS } from './storage/ops.ts';
+import { APP_HOST_HANDLERS } from './app-host/ops.ts';
+import { CLOCK_HANDLERS } from './clock/ops.ts';
 import { SCALE_HANDLERS } from './scale/ops.ts';
 import { diagLinkTarget, diagOverLink } from './router/diag.ts';
 import { routerStatus } from './router/index.ts';
@@ -564,6 +569,7 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...NET_HANDLERS,
   // Checkpoint C6 (design c6 §3.3), one module per area.
   ...APPS_HANDLERS, // client_generate (S1)
+  ...APP_HOST_HANDLERS, // app_* (design uno-q-services): apps as systemd units on a Linux hub
   ...HUB_HANDLERS, // hub_doctor (S2)
   ...INVENTORY_HANDLERS, // board_list, profile_list, capability_list (S2)
   ...LOGS_HANDLERS, // logs_assert (S4)
@@ -582,4 +588,10 @@ export const HANDLERS: Record<OpName, Handler> = {
   ...CAMERA_HANDLERS,
   // SCALE-1 (design scale-round-c1 D10): scale_status, scale_read, scale_tare, scale_calibrate, scale_reset_calibration, scale_watch.
   ...SCALE_HANDLERS,
+  // POWER-1 (design power-p1 D11): battery_*, cell_*, haptic_*.
+  ...POWER_HANDLERS,
+  // WIRING-1 (design wiring-w1 D3): wiring_*, part_*.
+  ...WIRING_HANDLERS,
+  ...STORAGE_HANDLERS,
+  ...CLOCK_HANDLERS,
 };

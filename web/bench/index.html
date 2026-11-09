@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bench</title>
+  </head>
+  <body>
+    <header class="bar">
+      <h1>Bench <small>wiring guides and parts</small></h1>
+      <nav class="nav" aria-label="Views">
+        <a href="#/guides" data-view="guides">Guides</a>
+        <a href="#/parts" data-view="parts">Parts</a>
+        <a href="#/shopping" data-view="shopping">Shopping</a>
+      </nav>
+      <div class="status">
+        <button id="reload" type="button" class="ghost" title="Read hardware/wiring and hardware/parts again (wiring_reload)">reload files</button>
+        <button id="theme" type="button" class="ghost" title="Theme: auto / light / dark">auto</button>
+      </div>
+    </header>
+    <p id="error" class="error" hidden></p>
+    <main id="main"></main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

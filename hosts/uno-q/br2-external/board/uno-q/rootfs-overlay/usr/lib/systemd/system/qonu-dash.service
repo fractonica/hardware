@@ -1,0 +1,14 @@
+[Unit]
+Description=qonu vitals dashboard on the SPI display
+After=qonu-link.service
+Wants=qonu-link.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/qonu-dash
+Restart=always
+RestartSec=2
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

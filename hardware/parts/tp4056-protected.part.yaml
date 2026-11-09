@@ -1,0 +1,30 @@
+schema: fractonica/part@1
+id: tp4056-protected
+name: TP4056 charger module with protection (DW01 + 8205A)
+category: power
+summary: 1 A linear Li-ion charger to 4.2 V with cell protection; USB-C input, six pads (IN+, IN−, B+, B−, OUT+, OUT−).
+specs:
+  charge_voltage: 4.2 V (constant voltage)
+  charge_current: 1 A as sold (R_PROG 1.2 kΩ); a tenth of it below 2.9 V (trickle)
+  termination: at a tenth of the charge current
+  over_discharge_cutoff: about 2.4 V (DW01A), on OUT−
+  over_charge_cutoff: about 4.3 V (DW01A)
+  input: 5 V (USB-C or IN+/IN−)
+  status_pins: CHRG low while charging, STDBY low when done, both released without input
+inferred: [over_discharge_cutoff, over_charge_cutoff]
+pins:
+  - { name: IN+, desc: "5 V input (the same as the USB-C's VBUS)" }
+  - { name: IN−, desc: input ground }
+  - { name: B+, desc: "cell + (the cell itself)" }
+  - { name: B−, desc: "cell − (before the protection MOSFETs)" }
+  - { name: OUT+, desc: "load + (joined to B+ on the board)" }
+  - { name: OUT−, desc: "load − (after the protection MOSFETs): the ground everything else shares" }
+  - { name: CHRG, desc: "the red LED's cathode (a small pad or the LED's pin): open-drain, low while charging" }
+  - { name: STDBY, desc: "the green/blue LED's cathode: open-drain, low when charged" }
+notes:
+  - "CHRG and STDBY drive the module's LEDs from IN+ (5 V): tap them to a 3.3 V GPIO through 10 kΩ, never directly."
+  - "Use OUT−, not B−, as the shared ground, so the protection can still cut the load at its floor."
+  - "At 1 A from 5 V into a low cell it dissipates about 2.5 W and throttles itself (thermal regulation): it gets hot."
+  - "Most modules tie TEMP to GND (temperature sensing off) and CE to VCC (always enabled)."
+datasheets:
+  - https://dlnmh9ip6v2uc.cloudfront.net/datasheets/Prototyping/TP4056.pdf

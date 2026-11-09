@@ -4,6 +4,8 @@
 // `fr codegen client`, `fr display window` (design m2-c5-display D6) and `fr audio record|play|tone` (design
 // audio-a1 D9) are hand-written in their own modules (design c6 §3.3).
 
+import { resolve as resolvePath } from 'node:path';
+
 import { Command, CommanderError, InvalidArgumentError, Option } from 'commander';
 import { z } from 'zod';
 
@@ -18,6 +20,7 @@ import { addDisplayWindowCommand } from './display.ts';
 import { genAll, genFirmware } from './gen.ts';
 import { restartHub, startHub, stopHub } from './hub.ts';
 import type { CliKit } from './kit.ts';
+import { addAppDeployCommand } from './app-deploy.ts';
 import { addMcpCommand } from './mcp.ts';
 import { cliExitCode, renderChecks, renderResult } from './render.ts';
 import { addSerialCommands, SERIAL_OPS } from './serial.ts';
@@ -152,8 +155,19 @@ async function readStdin(): Promise<string> {
   return s.replace(/\r?\n$/, '');
 }
 
+/**
+ * Generated commands whose fields are paths on the Mac: a relative one is taken from the shell's directory (the hub needs
+ * them absolute, and its working directory is not yours), as the hand-written audio and csi commands do.
+ */
+const MAC_PATH_FIELDS: Record<string, readonly string[]> = { storage_put: ['file'], storage_get: ['out'] };
+
 async function invoke(op: OpDef, input: Record<string, unknown>, follow: boolean): Promise<never> {
   const shape = op.input.shape as Record<string, z.ZodType>;
+  for (const f of MAC_PATH_FIELDS[op.name] ?? []) {
+    if (typeof input[f] === 'string') {
+      input[f] = resolvePath(input[f] as string);
+    }
+  }
   if ('source_dir' in shape && input.source_dir === undefined) {
     const src = findSourceDir(process.cwd());
     if (!src) {
@@ -362,6 +376,7 @@ addCodegenClientCommand(group(['codegen']), kit);
 addDisplayWindowCommand(group(['display']), kit);
 addAudioCommands(group(['audio']), kit);
 addCsiCommands(group(['csi']), kit);
+addAppDeployCommand(group(['app']), kit);
 addMcpCommand(program, kit);
 
 try {

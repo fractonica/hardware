@@ -112,6 +112,7 @@ target_link_libraries(fr_host_lib PUBLIC fr_cjson)
 add_library(fr_fixture_sim STATIC
     ${HOST_DIR}/shim/esp_sim.cpp
     ${COMPONENTS_DIR}/fr_core/src/gpio_isr.cpp
+    ${COMPONENTS_DIR}/fr_core/src/safe_off.cpp
     ${REPO_DIR}/hardware/drivers/fixture_gpio/src/fixture_gpio.cpp
     ${REPO_DIR}/hardware/drivers/fixture_ws2812_rx/src/ws2812_rx.cpp)
 target_include_directories(fr_fixture_sim PRIVATE ${HOST_DIR}/shim/idf PUBLIC ${HOST_DIR}/shim ${FR_FIXTURE_INCLUDES})
@@ -130,6 +131,7 @@ set(FR_PANEL_INCLUDES
 add_library(fr_panel_sim STATIC
     ${HOST_DIR}/shim/panel_sim.cpp
     ${COMPONENTS_DIR}/fr_core/src/i2c_bus.cpp
+    ${COMPONENTS_DIR}/fr_core/src/spi_bus.cpp
     ${REPO_DIR}/hardware/drivers/st7789_spi/src/st7789_spi.cpp
     ${REPO_DIR}/hardware/drivers/gc9a01_spi/src/gc9a01_spi.cpp
     ${REPO_DIR}/hardware/drivers/ssd1306_i2c/src/ssd1306_i2c.cpp

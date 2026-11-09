@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "fr/platform/spi_bus.hpp"
 
 namespace fr::drv {
 namespace {
@@ -161,22 +162,18 @@ Status Gc9a01Spi::init(Core &, hal::Rotation rotation)
         delay_ms(120);
     }
 
-    spi_bus_config_t bus = {};
-    std::fill(std::begin(bus.iocfg), std::end(bus.iocfg), -1);
-    bus.mosi_io_num = cfg_.mosi;
-    bus.sclk_io_num = cfg_.sclk;
-    bus.max_transfer_sz = static_cast<int>(kChunk);
-    esp_err_t err = spi_bus_initialize(kHost, &bus, SPI_DMA_CH_AUTO);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {  // INVALID_STATE: another device brought the bus up
-        ESP_LOGE(TAG, "spi_bus_initialize: %s", esp_err_to_name(err));
-        return std::unexpected(Err::failed);
+    // The shared bus (design lcd-clock-c1 D3): a card may sit on the same host (the C6-LCD-1.47's), so the bus carries
+    // its MISO too when the board names one; the panel itself reads nothing back.
+    if (const Status bus = platform::spi_bus(kHost, {cfg_.sclk, cfg_.mosi, -1}, static_cast<int>(kChunk)); !bus) {
+        ESP_LOGE(TAG, "the SPI bus is not available");
+        return bus;
     }
     spi_device_interface_config_t dev = {};
     dev.mode = 0;
     dev.clock_speed_hz = static_cast<int>(cfg_.spi_mhz) * 1'000'000;
     dev.spics_io_num = cfg_.cs;  // -1: no CS (the module pulls it low)
     dev.queue_size = 2;
-    err = spi_bus_add_device(kHost, &dev, &dev_);
+    esp_err_t err = spi_bus_add_device(kHost, &dev, &dev_);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "spi_bus_add_device: %s", esp_err_to_name(err));
         return std::unexpected(Err::failed);

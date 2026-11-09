@@ -1,0 +1,12 @@
+config BR2_PACKAGE_UNO_Q_OPENOCD
+	bool "uno-q-openocd"
+	depends on BR2_PACKAGE_LIBGPIOD2
+	select BR2_PACKAGE_JIMTCL
+	help
+	  OpenOCD built from a pinned upstream commit, for flashing and
+	  debugging the UNO Q's STM32U585 over SWD bit-banged on the
+	  QRB2210's GPIOs. Buildroot's OpenOCD 0.12.0 only supports
+	  libgpiod v1; upstream master supports libgpiod v2. Only the
+	  linuxgpiod adapter is built.
+
+	  https://openocd.org

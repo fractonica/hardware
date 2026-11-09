@@ -16,6 +16,10 @@ import { CSI_CAP } from './csi.ts';
 import { RADIO_TX_CAP } from './radio_tx.ts';
 import { CAMERA_CAP } from './camera.ts';
 import { SCALE_CAP } from './scale.ts';
+import { BATTERY_CAP } from './battery.ts';
+import { HAPTIC_CAP } from './haptic.ts';
+import { STORAGE_CAP } from './storage.ts';
+import { CLOCK_CAP } from './clock.ts';
 import { NODE_CAP } from './node.ts';
 import { OTA_CAP } from './ota.ts';
 import { DIAG_CAP } from './diag.ts';
@@ -32,12 +36,16 @@ export * from './csi.ts';
 export * from './radio_tx.ts';
 export * from './camera.ts';
 export * from './scale.ts';
+export * from './battery.ts';
+export * from './haptic.ts';
+export * from './storage.ts';
+export * from './clock.ts';
 export * from './node.ts';
 export * from './ota.ts';
 export * from './diag.ts';
 
 /** Every capability, by id: the catalog's (CATALOG) and the test_only ones it leaves out (testOnly). */
-export const CAPS: readonly $.CapInfo[] = [BUTTON_CAP, LED_CAP, DISPLAY_CAP, AUDIO_OUT_CAP, ANALOG_IN_CAP, FIXTURE_CAP, AUDIO_IN_CAP, TOUCH_CAP, CSI_CAP, RADIO_TX_CAP, CAMERA_CAP, SCALE_CAP, NODE_CAP, OTA_CAP, DIAG_CAP];
+export const CAPS: readonly $.CapInfo[] = [BUTTON_CAP, LED_CAP, DISPLAY_CAP, AUDIO_OUT_CAP, ANALOG_IN_CAP, FIXTURE_CAP, AUDIO_IN_CAP, TOUCH_CAP, CSI_CAP, RADIO_TX_CAP, CAMERA_CAP, SCALE_CAP, BATTERY_CAP, HAPTIC_CAP, STORAGE_CAP, CLOCK_CAP, NODE_CAP, OTA_CAP, DIAG_CAP];
 
 /** By id (0x0002) or name ('fr.led'). */
 export function findCap(cap: number | string): $.CapInfo | undefined {

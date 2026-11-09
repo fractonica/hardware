@@ -435,7 +435,7 @@ describe('validation', () => {
       y.caps.status.bind = 'leds.status';
     });
     expect(messages(dir)).toEqual([
-      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, gc9a01_spi, hx711_gpio, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, ssd1306_i2c, st7789_spi, wifi_csi)",
+      "unknown driver 'button_touch' (known: adc_audio, adc_oneshot, button_gpio, cst816_i2c, ds3231_i2c, dvp_camera, espnow_tx, fixture_gpio, fixture_ws2812_rx, gc9a01_spi, haptic_ledc, hx711_gpio, i2s_amp, i2s_mic, led_gpio, led_ws2812, sdmmc_card, sdspi_card, ssd1306_i2c, st7789_spi, tp4056, tp5000, wifi_csi)",
       "driver led_ws2812 does not accept leds.status of kind 'gpio' (accepts: ws2812)",
     ]);
   });
@@ -463,7 +463,7 @@ describe('validation', () => {
     expect(messages(dir)).toEqual([
       "instance name 'node' is reserved (spec 03 §3.6)",
       "instance name 'Status' must be snake_case, at most 31 characters",
-      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx, fr.camera, fr.scale)',
+      'fr.ota has no service in this framework yet (services: fr.button, fr.led, fr.fixture, fr.analog_in, fr.display, fr.touch, fr.audio_in, fr.audio_out, fr.csi, fr.radio_tx, fr.camera, fr.scale, fr.battery, fr.haptic, fr.storage, fr.clock)',
       'board esp32c6-supermini has no entry leds.nope',
     ]);
   });
@@ -574,25 +574,30 @@ describe('validation', () => {
 describe('driver manifests', () => {
   const drivers = listDrivers(ROOT);
 
-  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones, A2\'s adc_audio, CSI-1\'s radio drivers and CAM-1\'s camera and card', () => {
+  it('lists the M1 drivers, the M2-C1 fixture drivers, M2-C3\'s adc_oneshot, the M2-C5 panel and touch drivers, A1\'s I2S ones, A2\'s adc_audio, CSI-1\'s radio drivers, CAM-1\'s camera and card, SCALE-1\'s HX711 and ROUND-1\'s panel, and POWER-1\'s chargers and haptic output', () => {
     expect(drivers).toEqual([
       'adc_audio',
       'adc_oneshot',
       'button_gpio',
       'cst816_i2c',
+      'ds3231_i2c',
       'dvp_camera',
       'espnow_tx',
       'fixture_gpio',
       'fixture_ws2812_rx',
       'gc9a01_spi',
+      'haptic_ledc',
       'hx711_gpio',
       'i2s_amp',
       'i2s_mic',
       'led_gpio',
       'led_ws2812',
       'sdmmc_card',
+      'sdspi_card',
       'ssd1306_i2c',
       'st7789_spi',
+      'tp4056',
+      'tp5000',
       'wifi_csi',
     ]);
   });
@@ -600,7 +605,12 @@ describe('driver manifests', () => {
   it.each(drivers)('%s: driver.yaml matches its header and idf_component.yml', (id) => {
     const d = loadDriver(ROOT, id);
     const dir = join(ROOT, 'hardware', 'drivers', id);
-    const hpp = readFileSync(join(dir, 'include', 'fr', 'drv', `${id}.hpp`), 'utf8');
+    // A header may only include the class's own (design power-p1 D4: tp4056.hpp and tp5000.hpp include ChargerGpio's
+    // charger_gpio.hpp, in tp4056's component, which tp5000 `uses`).
+    const own = readFileSync(join(dir, 'include', 'fr', 'drv', `${id}.hpp`), 'utf8');
+    const included = [...own.matchAll(/#include "fr\/drv\/(\w+)\.hpp"/g)].map((m) => m[1]);
+    const homes = [id, ...(d.uses ?? [])].map((u) => join(ROOT, 'hardware', 'drivers', u, 'include', 'fr', 'drv'));
+    const hpp = [own, ...included.flatMap((h) => homes.map((home) => join(home, `${h}.hpp`)).filter((f) => existsSync(f)).slice(0, 1).map((f) => readFileSync(f, 'utf8')))].join('\n');
     const cls = d.class.split('::').at(-1)!;
     expect(hpp).toMatch(new RegExp(`class ${cls} final : public ${d.implements.replace('.', '::')}\\b`));
     // Every config field is a Config member, in the same order, and every enum value an enumerator.
@@ -1370,7 +1380,7 @@ describe('displays, touch and the Touch-LCD-2 (design m2-c5-display D9)', () => 
     expect(r.instances.lcd).toEqual({
       bind: 'displays.lcd',
       pins: [39, 38, 45, 42, 1],
-      driverConfig: { kind: 'st7789t3', sclk: 39, mosi: 38, cs: 45, dc: 42, rst: -1, backlight: 1, width: 240, height: 320, column_offset: 0, row_offset: 0, spi_mhz: 40, idle_high: 2 ** 41, backlight_active: 'high' },
+      driverConfig: { kind: 'st7789t3', sclk: 39, mosi: 38, cs: 45, dc: 42, rst: -1, backlight: 1, width: 240, height: 320, column_offset: 0, row_offset: 0, spi_mhz: 40, idle_high: 2 ** 41, backlight_active: 'high', miso: -1 },
     });
     expect(r.instances.touch).toEqual({ bind: 'touch.tp', pins: [48, 47, 46], driverConfig: { sda: 48, scl: 47, irq: 46, rst: -1, address: 0x15, i2c_khz: 400 } });
     expect(r.warnings).toEqual([
@@ -2249,5 +2259,124 @@ describe('CAM-1: the esp32 target, aithinker-esp32-cam and e32a-cam (design came
       expect(f, p).not.toContain('CONFIG_FR_SERIAL_UART');
       expect(f, p).not.toContain('CONFIG_CAMERA_');
     }
+  });
+});
+
+describe('POWER-1 (design power-p1 D4, D6, D8)', () => {
+  const messages = (dir: string) => issuesOf(() => gen(dir, 'c6w-scale', false)).map((i) => i.message);
+
+  it('c6w-scale binds the supply before init, derives fr.battery traits from the bind and warns on GPIO5', () => {
+    const r = gen(fixture(), 'c6w-scale', false);
+    const cpp = file(r, 'fr_board/fr_board.cpp');
+    const bind = cpp.indexOf('inst_buzz::service.bind_supply(inst_cap::service);');
+    expect(bind).toBeGreaterThan(-1);
+    expect(cpp).toContain('inst_kick::service.bind_supply(inst_cap::service);');
+    expect(bind).toBeLessThan(cpp.indexOf('inst_buzz::service.init(core)'));
+    const caps = r.manifest.caps as { name: string; traits: Record<string, unknown> }[];
+    expect(caps.find((c) => c.name === 'battery')?.traits).toEqual({ status_pins: true, test_load: true, charge_gate: false });
+    expect(caps.find((c) => c.name === 'cap')?.traits).toEqual({ status_pins: true, test_load: false, charge_gate: false });
+    expect(r.warnings.some((w) => /kick: GPIO5 .* strapping pin; with default eFuses no level is required/.test(w))).toBe(true);
+  });
+
+  it('refuses a supply that is not an fr.battery instance', () => {
+    const dir = fixture();
+    edit(dir, PROFILE('c6w-scale'), (y) => {
+      y.caps.buzz.config.supply = 'nope';
+      y.caps.kick.config.supply = 'scale';
+    });
+    const m = messages(dir);
+    expect(m).toContainEqual(expect.stringMatching(/no instance 'nope' in this profile; supply names an fr\.battery instance \(battery, cap\)/));
+    expect(m).toContainEqual(expect.stringMatching(/'scale' is an fr\.scale instance; supply names an fr\.battery instance/));
+  });
+
+  it('checks only the sense pin against ADC1 and refuses a strapping pin that needs a level', () => {
+    const dir = fixture();
+    edit(dir, PROFILE('c6w-scale'), (y) => {
+      y.caps.cap.bind.sense = 'gpio.11';
+      y.caps.battery.bind.load = 'gpio.9';
+    });
+    expect(messages(dir)).toEqual([
+      expect.stringMatching(/^GPIO9 .* is already claimed by 'boot'$/),
+      expect.stringMatching(/^GPIO9 .* is a strapping pin; a gpio.<n> bind may not use one$/),
+      expect.stringMatching(/^GPIO11 .* is not in pins\.adc1 of esp32c6-wroom1-n8, which driver tp4056 needs/),
+    ]);
+  });
+
+  it('refuses a load output on a pin that drives a level at power-up, and warns on a solenoid without a supply', () => {
+    const dir = fixture();
+    edit(dir, 'hardware/boards/esp32c6-wroom1-n8.board.yaml', (y) => {
+      y.pins.power_up_glitch = [11, 14, 19];
+    });
+    edit(dir, PROFILE('c6w-scale'), (y) => {
+      y.caps.kick.config.supply = '';
+    });
+    const m = messages(dir);
+    // The test load (11) and the ERM (14) are outputs; CHRG (19) is an input, which a glitch does not harm.
+    expect(m).toContainEqual(expect.stringMatching(/^GPIO11 .*power_up_glitch.*driver tp4056 switches a load on it/));
+    expect(m).toContainEqual(expect.stringMatching(/^GPIO14 .*power_up_glitch.*driver haptic_ledc switches a load on it/));
+    expect(m.some((x) => /^GPIO19 /.test(x))).toBe(false);
+    const ok = fixture();
+    edit(ok, PROFILE('c6w-scale'), (y) => {
+      y.caps.kick.config.supply = '';
+    });
+    const r = gen(ok, 'c6w-scale', false);
+    expect(r.warnings).toContainEqual(expect.stringMatching(/^kick: a solenoid with no supply/));
+  });
+
+  it('refuses a supply name a C++ literal would need escaping for, or longer than 16', () => {
+    const dir = fixture();
+    edit(dir, PROFILE('c6w-scale'), (y) => {
+      y.caps.buzz.config.supply = 'ca"p';
+      y.caps.kick.config.supply = 'x'.repeat(17);
+    });
+    const m = messages(dir);
+    expect(m).toContainEqual(expect.stringMatching(/printable ASCII only, no quotes or backslashes/));
+    expect(m).toContainEqual(expect.stringMatching(/is longer than 16 characters/));
+  });
+});
+
+describe('LCD-1 and CLOCK-1: the C6-LCD-1.47, its shared SPI2 and a DS3231 (design lcd-clock-c1 D1-D8)', () => {
+  const committed = (p: string) => generateFirmware({ sourceDir: ROOT, profile: p, outDir: join(tmpdir(), 'unused'), write: false, model: MODEL });
+  const messages = (dir: string, profile: string) => issuesOf(() => gen(dir, profile, false)).map((i) => i.message);
+
+  it('c6l-lcd generates against the committed slots.lock: the panel and the card on one bus, the clock on bare pins', () => {
+    const r = committed('c6l-lcd');
+    expect(r.slotsLockChanged).toBe(false);
+    expect(r.manifest.caps.map((c) => [c.name, c.port, c.cap, c.driver])).toEqual([
+      ['boot', 1, 'fr.button', 'button_gpio'],
+      ['status', 2, 'fr.led', 'led_ws2812'],
+      ['screen', 3, 'fr.display', 'st7789_spi'],
+      ['card', 4, 'fr.storage', 'sdspi_card'],
+      ['clock', 5, 'fr.clock', 'ds3231_i2c'],
+    ]);
+    // The panel brings the bus up with the card's MISO; both claim SCLK/MOSI/MISO as shared bus lines.
+    expect(r.instances.screen.driverConfig).toMatchObject({ sclk: 7, mosi: 6, miso: 5, cs: 14, dc: 15, rst: 21, backlight: 22, width: 172, height: 320, column_offset: 34 });
+    // The panel holds the card's CS (GPIO4) high while it brings the shared bus up (review row 12); the card's own pin
+    // on the same bus, so the hold is allowed though 'card' claims it.
+    expect(r.instances.screen.driverConfig.idle_high).toBe(2 ** 4);
+    expect(r.instances.card.driverConfig).toEqual({ cs: 4, sclk: 7, mosi: 6, miso: 5, speed_khz: 20000 });
+    expect(r.instances.clock.driverConfig).toEqual({ sda: 18, scl: 19, khz: 100 });
+    expect(r.manifest.caps[2]).toMatchObject({ config: { max_brightness: 128 }, traits: { width: 172, height: 320 } });
+    expect(r.manifest.caps[3]).toMatchObject({ traits: { removable: true, card_detect: false } });
+    expect(r.manifest.caps[4]).toMatchObject({ traits: { has_temperature: true, resolution_ms: 1000 } });
+    const sdk = file(r, 'sdkconfig.board');
+    expect(sdk).toContain('CONFIG_FATFS_LFN_HEAP=y\n');
+  });
+
+  it('a shared bus line may be claimed twice only when both claims are shared_bus fields', () => {
+    const dir = fixture();
+    // The clock on the panel's SCLK: a bare-pin claim of a reserved spi_bus line is refused.
+    edit(dir, PROFILE('c6l-lcd'), (y) => {
+      y.caps.clock.bind = { sda: 'gpio.18', scl: 'gpio.7' };
+    });
+    expect(messages(dir, 'c6l-lcd')).toEqual(expect.arrayContaining([expect.stringMatching(/^GPIO7 \(\{sda: gpio\.18, scl: gpio\.7\}\) is reserved for spi_bus/)]));
+  });
+
+  it('a card entry of kind sdspi needs its four lines', () => {
+    const dir = fixture();
+    edit(dir, 'hardware/boards/waveshare-esp32c6-lcd147.board.yaml', (y) => {
+      delete y.sd_cards.card.miso;
+    });
+    expect(issuesOf(() => gen(dir, 'c6l-lcd', false)).map((i) => `${i.path}`)).toEqual(expect.arrayContaining([expect.stringContaining('sd_cards.card.miso')]));
   });
 });

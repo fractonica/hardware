@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.clock.set.event",
+  "title": "fr.clock.set event",
+  "type": "object",
+  "properties": {
+    "unix": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "by": {
+      "type": "string",
+      "enum": [
+        "command",
+        "sync"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

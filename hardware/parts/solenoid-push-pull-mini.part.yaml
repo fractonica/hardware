@@ -1,0 +1,11 @@
+schema: fractonica/part@1
+id: solenoid-push-pull-mini
+name: Miniature push-pull solenoid (open frame)
+category: actuator
+summary: Small open-frame push-pull solenoid with a return spring; probably 5–6 V, 0.3–1 A.
+specs: { rated: probably 5–6 V, current: 0.3–1 A }
+inferred: [rated, current]
+notes:
+  - "Needs a MOSFET (IRF530N behind the two-NPN shifter, or an AO3400A) and a 1N4007 flyback."
+  - "Kick at full power for ~30 ms, then hold at ~40 %: holding at full power cooks the coil (fr.haptic kind solenoid)."
+  - "Measure its coil resistance: I ≈ V / R tells the real current."

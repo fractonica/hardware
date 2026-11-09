@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.reset_calibration.args",
+  "title": "fr.battery.reset_calibration arguments",
+  "description": "Config divider_milli again; the kept calibration is erased.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

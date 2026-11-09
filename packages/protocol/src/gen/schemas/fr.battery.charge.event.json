@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.charge.event",
+  "title": "fr.battery.charge event",
+  "description": "The charger's state changed (held 300 ms before it counts).",
+  "type": "object",
+  "properties": {
+    "state": {
+      "type": "string",
+      "enum": [
+        "none",
+        "unplugged",
+        "charging",
+        "charged",
+        "no_cell",
+        "fault"
+      ]
+    },
+    "mv": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(mV)"
+    }
+  },
+  "additionalProperties": false
+}

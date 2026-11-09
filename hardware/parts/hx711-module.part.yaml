@@ -1,0 +1,13 @@
+schema: fractonica/part@1
+id: hx711-module
+name: HX711 load-cell amplifier module (green)
+category: sensor
+summary: 24-bit bridge ADC for a load cell; 10 or 80 conversions/s by its RATE pin.
+pins:
+  - { name: VCC, desc: 2.6–5.5 V }
+  - { name: GND, desc: ground }
+  - { name: DT, desc: data out (scale-c6 GPIO18) }
+  - { name: SCK, desc: clock (scale-c6 GPIO23) }
+  - { name: "E+ E− A− A+", desc: "the load cell's red, black, white, green wires (typical)" }
+notes:
+  - "A broken VCC wire reads as hundreds of fake conversions of 0/±1 (floating DOUT)."

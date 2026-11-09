@@ -1,0 +1,21 @@
+schema: fractonica/part@1
+id: irf530n
+name: IRF530N N-channel MOSFET (TO-220)
+category: semiconductor
+summary: 100 V, 17 A N-MOSFET; NOT logic-level (needs ~5–10 V on the gate).
+specs:
+  vds: 100 V
+  id: 17 A
+  rds_on: 90 mΩ at V_GS 10 V
+  vgs_th: 2–4 V
+  at_5v_gate: conducts amps for the solenoid (typical transfer curve)
+inferred: [at_5v_gate]
+pins:
+  - { name: G, desc: gate (left) }
+  - { name: D, desc: "drain (middle; also the metal tab)" }
+  - { name: S, desc: source (right) }
+pinout: "Printed side toward you, legs down: G D S from left to right. The tab is the drain: keep it from touching other wires."
+notes:
+  - "From a 3.3 V GPIO it needs the two-NPN shifter to 5 V (power-bench guide); a single NPN would invert and fire the load at boot."
+datasheets:
+  - https://www.infineon.com/dgdl/irf530npbf.pdf?fileId=5546d462533600a4015355e39b5c1a01

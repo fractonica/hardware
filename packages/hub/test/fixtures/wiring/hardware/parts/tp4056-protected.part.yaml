@@ -1,0 +1,11 @@
+schema: fractonica/part@1
+id: tp4056-protected
+name: TP4056 charger module with protection
+category: power
+summary: 1 A linear Li-ion charger with DW01 protection.
+specs: { charge_voltage: 4.2 V }
+pins:
+  - { name: OUT+, desc: protected cell + }
+  - { name: CHRG }
+notes: ["Tap CHRG through 10 kΩ."]
+datasheets: [https://example.com/tp4056.pdf]

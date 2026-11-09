@@ -17,7 +17,7 @@ const hashOf = (ops: readonly { name: string; input: z.ZodType }[]) =>
 describe('M2-C5 ops (design m2-c5-display D10)', () => {
   it('adds display_snapshot and display_render as read-tier queries, and moves REGISTRY_HASH', () => {
     // A1 adds four audio_ ops (protocol-a1.test.ts), CSI-1 network_list and two csi_ ops (protocol-csi.test.ts).
-    expect(OPS.filter((o) => !/^(audio|csi|camera|scale)_/.test(o.name) && o.name !== 'network_list')).toHaveLength(48);
+    expect(OPS.filter((o) => !/^(audio|csi|camera|scale|battery|cell|haptic|wiring|part|storage|clock|app)_|^device_adopt$/.test(o.name) && o.name !== 'network_list')).toHaveLength(48);
     for (const name of ['display_snapshot', 'display_render']) {
       const op = findOp(name)!;
       expect(op, name).toMatchObject({ kind: 'query', tier: 'read', cli: { path: ['display', name.slice('display_'.length)] } });

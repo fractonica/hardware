@@ -615,7 +615,7 @@ Status Scale::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &rep
     switch (cmd_id) {
     case kCmdTare: {
         const auto a = decode_scale_tare_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = tare(*a);
@@ -632,7 +632,7 @@ Status Scale::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &rep
     }
     case kCmdCalibrate: {
         const auto a = decode_scale_calibrate_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = calibrate(*a);
@@ -671,7 +671,7 @@ Status Scale::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &rep
     }
     case kCmdWatchStart: {
         const auto a = decode_scale_watch_start_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return watch_start(*a);
@@ -685,7 +685,7 @@ Status Scale::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &rep
 #if FR_TEST_HOOKS
     case kCmdInject: {
         const auto a = decode_scale_inject_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return inject(*a);

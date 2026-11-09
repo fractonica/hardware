@@ -10,20 +10,21 @@ Contents:
 2. [Everyday basics](#2-everyday-basics)
 3. [Camera (ESP32-CAM)](#3-camera-esp32-cam)
 4. [Weighing scale and round display](#4-weighing-scale-and-round-display)
-5. [Audio: microphone and speaker](#5-audio-microphone-and-speaker)
-6. [Electrosmog listener](#6-electrosmog-listener)
-7. [Wi-Fi sensing (CSI) and its sound modes](#7-wi-fi-sensing-csi-and-its-sound-modes)
-8. [Buttons, LEDs, bindings and messages](#8-buttons-leds-bindings-and-messages)
-9. [Displays and touch](#9-displays-and-touch)
-10. [Analog input](#10-analog-input)
-11. [The gateway](#11-the-gateway)
-12. [Adding a new board](#12-adding-a-new-board)
-13. [Firmware updates](#13-firmware-updates)
-14. [Testing](#14-testing)
-15. [Apps and the SDK](#15-apps-and-the-sdk)
-16. [AI agents](#16-ai-agents)
-17. [Troubleshooting](#17-troubleshooting)
-18. [The bench](#18-the-bench)
+5. [LCD board, micro-SD card and clock](#5-lcd-board-micro-sd-card-and-clock)
+6. [Audio: microphone and speaker](#6-audio-microphone-and-speaker)
+7. [Electrosmog listener](#7-electrosmog-listener)
+8. [Wi-Fi sensing (CSI) and its sound modes](#8-wi-fi-sensing-csi-and-its-sound-modes)
+9. [Buttons, LEDs, bindings and messages](#9-buttons-leds-bindings-and-messages)
+10. [Displays and touch](#10-displays-and-touch)
+11. [Analog input](#11-analog-input)
+12. [The gateway](#12-the-gateway)
+13. [Adding a new board](#13-adding-a-new-board)
+14. [Firmware updates](#14-firmware-updates)
+15. [Testing](#15-testing)
+16. [Apps and the SDK](#16-apps-and-the-sdk)
+17. [AI agents](#17-ai-agents)
+18. [Troubleshooting](#18-troubleshooting)
+19. [The bench](#19-the-bench)
 
 Every `fr` command below runs from the checkout (`~/projects/fractonica-hardware`). Add `--json` to any of them for machine-readable output, and `--help` to see all options.
 
@@ -291,7 +292,7 @@ Without `--via wifi` the hub picks the USB route for a board on a USB bridge, an
 
 ### 4.2 The round display
 
-Drawing works as on the other panels (section 9), with the instance `round`:
+Drawing works as on the other panels (section 10), with the instance `round`:
 
 ```bash
 fr send scale-c6 round.clear
@@ -322,7 +323,93 @@ Keep content inside the circle: the corners of the 240×240 frame are not on the
 
 ---
 
-## 5. Audio: microphone and speaker
+## 5. LCD board, micro-SD card and clock
+
+**The board:** lcd-c6, a **Waveshare ESP32-C6-LCD-1.47** (ESP32-C6FH4, 4 MB flash, no PSRAM) with its own **1.47" ST7789 display**, 172×320 (the `screen` instance, `fr.display`), a **micro-SD (TF) slot** on the display's SPI bus (the `card` instance, `fr.storage`) and an RGB LED. A **DS3231 real-time clock** module is wired to it: SDA to GPIO18, SCL to GPIO19, VCC to 3.3 V, GND (the `clock` instance, `fr.clock`). The wiring guide is in the bench app: <http://127.0.0.1:7420/apps/bench/>, guide `clock-lcd-c6`.
+
+**What it does:** layouts and drawing on the display (its backlight is capped at half, as Waveshare advises: full brightness overheats the panel), files to and from the card, a clock that keeps time on its coin cell through power cuts, set from the Mac to the second boundary, and a drift measurement against the Mac.
+
+### 5.1 Test the card, step by step
+
+1. **Put a micro-SD card in** (FAT32, as cards come; format a new exFAT card as FAT32 on the Mac first) and **connect the board** with USB. Within about 10 s it joins Wi-Fi.
+
+2. **Check the card:**
+
+   ```bash
+   fr storage info lcd-c6
+   ```
+
+   You should see `lcd-c6 card: mounted, SDHC, … MB free of … MB`. `none` means no card or it did not mount: reseat it and run the command again (the board tries again on every `info`). `error` means the card or its filesystem failed.
+
+3. **List it, put a file on, get it back:**
+
+   ```bash
+   fr storage ls lcd-c6 /
+   fr storage put lcd-c6 /Users/you/notes.txt
+   fr storage get lcd-c6 /notes.txt
+   ```
+
+   `put` copies a file from the Mac (absolute path, up to 64 MB) to the card, to `/<its name>` unless you give a card path as the third word. `get` copies it to `~/.fractonica/storage/lcd-c6/notes.txt`. `fr storage rm lcd-c6 /notes.txt` removes it; `fr storage mkdir lcd-c6 /logs` makes a directory.
+
+4. **Measure it:**
+
+   ```bash
+   fr storage bench lcd-c6
+   ```
+
+   It writes 1 MB of a test pattern, reads it back, compares every byte and removes it: `write … KB/s, read … KB/s, identical`. `DIFFERS at byte …` means a bad card or a bus problem.
+
+### 5.2 Test the clock, step by step
+
+1. **Set it from the Mac:**
+
+   ```bash
+   fr clock sync lcd-c6
+   ```
+
+   The hub sets the DS3231 so its next second starts with the Mac's. "Busy" right after the board comes online: wait a few seconds and repeat.
+
+2. **Read it:**
+
+   ```bash
+   fr clock read lcd-c6
+   ```
+
+   You should see `lcd-c6 clock: 2026-11-05T14:00:00Z, valid, +3.2 ms against the Mac (±1.4 ms), 24.50 °C`. The time is UTC. **NOT valid** means the clock lost power since it was set (no coin cell, or a flat one): sync it again.
+
+3. **Unplug the board for a minute and plug it back:** `fr clock read lcd-c6` still says valid and a few ms from the Mac. The coin cell kept it counting.
+
+4. **Measure its drift** (optional; it takes as long as you ask):
+
+   ```bash
+   fr clock drift lcd-c6 60
+   ```
+
+   After an hour: `0.80 ppm fast (0.069 s a day)`. A DS3231 is within about ±2 ppm. When a long run suggests a trim, `fr clock aging lcd-c6 <value>` applies it (positive slows the clock, about 0.1 ppm a step).
+
+### 5.3 The display and the automated test
+
+Drawing works as on the other panels (section 10), with the instance `screen`; the panel is 172 wide and 320 tall. Then run the automated test (about a minute, no person needed):
+
+```bash
+fr test run t-lcdc6 --tier target --args=--device --args=lcd-c6
+```
+
+It loads a test pattern on the display, benches the card, syncs the clock and checks it through a reboot, and runs the display and the card together for 30 s. You should see `T-LCDC6 PASS`. Add `--args=--look` to be asked whether the pattern is right (red, green, blue and white bands from the top, a thin white border touching all four edges, the backlight not at full): press BOOT once for yes, hold it 2 s for no.
+
+### 5.4 Card and clock troubleshooting
+
+| You see | Do this |
+|---|---|
+| `none` from `fr storage info` | Reseat the card and run it again; a card formatted exFAT or NTFS will not mount: format it FAT32 on the Mac. |
+| `DIFFERS at byte …` in the bench | Try another card; if every card differs, the display and the card are fighting over their bus: report it with the run's output. |
+| The clock reads NOT valid after a power cut | The coin cell is missing or flat. A plain CR2032 on the common DS3231 module: remove the module's charging diode (see the wiring guide), or fit a rechargeable LIR2032. |
+| The clock does not answer | Check SDA (GPIO18), SCL (GPIO19), 3.3 V and GND to the module. |
+| The border is missing on one side of the display | The panel's column offset is off: report it (the driver's offset for this panel is 34). |
+
+---
+
+## 6. Audio: microphone and speaker
 
 **The board:** mic-s3, an ESP32-S3 with an INMP441 microphone (`mic`) and a MAX98357A amplifier with a small speaker (`spk`).
 
@@ -369,7 +456,7 @@ Note: the INMP441 picks up the board's own Wi-Fi transmissions as soft thumps. K
 
 ---
 
-## 6. Electrosmog listener
+## 7. Electrosmog listener
 
 **The board:** mic-s3 again, with a radio detector on GPIO1 (`rf`: a diode, a capacitor, a resistor and a short wire antenna) read by the ADC as an audio source.
 
@@ -389,7 +476,7 @@ A floating input hears 50 Hz mains loudly; the germanium diode is weak at 2.4 GH
 
 ---
 
-## 7. Wi-Fi sensing (CSI) and its sound modes
+## 8. Wi-Fi sensing (CSI) and its sound modes
 
 **The board:** csi-c5, an ESP32-C5 dev board that reads the Wi-Fi channel state information (CSI) of the router's traffic on 5 GHz. Movement in the room changes the signal.
 
@@ -417,7 +504,7 @@ csi-c5 joins the hub's `5ghz` network. Its source can also be a second board tra
 
 ---
 
-## 8. Buttons, LEDs, bindings and messages
+## 9. Buttons, LEDs, bindings and messages
 
 **The boards:** the pads (pad-c3, pad-c3b, pad-c6, pad-s3, pad-s3t): each has a BOOT button (`boot`) and a status LED (`status`), most have a display.
 
@@ -470,7 +557,7 @@ csi-c5 joins the hub's `5ghz` network. Its source can also be a second board tra
 
 ---
 
-## 9. Displays and touch
+## 10. Displays and touch
 
 **The boards:** pad-c3 and pad-c3b (a 0.42" OLED, `oled`), pad-s3 (a 1.9" LCD, `lcd`), pad-s3t (a 2" touch LCD, `lcd` and `touch`), scale-c6 (a 1.28" round LCD, `round`: see [4.2](#42-the-round-display)).
 
@@ -501,24 +588,24 @@ csi-c5 joins the hub's `5ghz` network. Its source can also be a second board tra
 
 ---
 
-## 10. Analog input
+## 11. Analog input
 
 **The profile:** c3o-analog (a pad-c3 board with `analog` on an ADC pin). It streams the value at 20 Hz by default.
 
-1. Put the profile on a C3 pad over USB: `fr build --profile c3o-analog`, then `fr flash pad-c3b --profile c3o-analog --plan full` (see [13](#13-firmware-updates)).
+1. Put the profile on a C3 pad over USB: `fr build --profile c3o-analog`, then `fr flash pad-c3b --profile c3o-analog --plan full` (see [14](#14-firmware-updates)).
 2. Read it: `fr send pad-c3b analog.read`.
 3. Watch it stream: `fr events pad-c3b --types 'analog.*'`.
 4. On a debug build, fake a value: `fr input pad-c3b analog --mv 1650`.
 
 ---
 
-## 11. The gateway
+## 12. The gateway
 
 **The board:** gw-c6, a nanoESP32-C6 on the Mac's USB. It bridges ESP-NOW nodes that have no Wi-Fi link to the hub over USB. It needs no setup: plug it in and the hub uses it for nodes it cannot reach over Wi-Fi. `fr devices get <node>` shows `gw` among its links when traffic goes through it.
 
 ---
 
-## 12. Adding a new board
+## 13. Adding a new board
 
 1. **Plug it in** and find its port:
 
@@ -546,7 +633,7 @@ For an ESP32-CAM, take the SD card out before provisioning (see 3.4).
 
 ---
 
-## 13. Firmware updates
+## 14. Firmware updates
 
 | What | Command |
 |---|---|
@@ -562,7 +649,7 @@ An update that fails its health check after reboot rolls back to the previous fi
 
 ---
 
-## 14. Testing
+## 15. Testing
 
 | Tier | What it covers | Command |
 |---|---|---|
@@ -591,7 +678,7 @@ Pass extra flags to a gate with `--args=<flag>` once per word; add `--allow-huma
 
 ---
 
-## 15. Apps and the SDK
+## 16. Apps and the SDK
 
 Web apps live in `web/<name>/` and the hub serves each at `http://127.0.0.1:7420/apps/<name>/`, with an access token injected:
 
@@ -612,7 +699,7 @@ The SDK gives you the devices by alias, their commands and events, and live stre
 
 ---
 
-## 16. AI agents
+## 17. AI agents
 
 Every `fr` command is also an MCP tool, served by `fr mcp`.
 
@@ -622,7 +709,7 @@ Every `fr` command is also an MCP tool, served by `fr mcp`.
 
 ---
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 | You see | Do this |
 |---|---|
@@ -636,12 +723,13 @@ Every `fr` command is also an MCP tool, served by `fr mcp`.
 
 ---
 
-## 18. The bench
+## 19. The bench
 
 | Alias | Board | Profile | What it is for |
 |---|---|---|---|
 | cam-esp32 | AI-Thinker ESP32-CAM (ESP32, OV2640, micro-SD) | e32a-cam | Camera |
 | scale-c6 | ESP32-C6-WROOM-1-N8 board with an HX711 and a round GC9A01 | c6w-scale | Weighing scale, round display |
+| lcd-c6 | Waveshare ESP32-C6-LCD-1.47 (ST7789 172×320, micro-SD) with a DS3231 clock | c6l-lcd | Display, SD card, real-time clock |
 | mic-s3 | ESP32-S3 WROOM-1 N16R8 | s3a-audio | Microphone, speaker, electrosmog detector |
 | csi-c5 | DOIT ESPC5-32 (ESP32-C5) | c5d-csi | Wi-Fi sensing on 5 GHz |
 | pad-c3, pad-c3b | ESP32-C3 with a 0.42" OLED | c3o-pad | Button, LED, display |

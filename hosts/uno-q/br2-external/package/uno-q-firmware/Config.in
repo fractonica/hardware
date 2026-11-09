@@ -1,0 +1,8 @@
+config BR2_PACKAGE_UNO_Q_FIRMWARE
+	bool "uno-q-firmware"
+	select BR2_PACKAGE_LINUX_FIRMWARE
+	help
+	  Installs the subset of linux-firmware the UNO Q needs:
+	  modem DSP (runs Wi-Fi), ath10k WCN3990 Wi-Fi, WCN3988
+	  Bluetooth, ADSP and the Adreno 702 GPU microcode.
+	  linux-firmware's own options do not cover these files.

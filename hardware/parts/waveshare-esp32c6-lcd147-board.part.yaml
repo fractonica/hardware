@@ -1,0 +1,19 @@
+schema: fractonica/part@1
+id: waveshare-esp32c6-lcd147-board
+name: Waveshare ESP32-C6-LCD-1.47 ("lcd-c6")
+category: board
+summary: ESP32-C6FH4 (4 MB flash, no PSRAM) with a 1.47" ST7789 172 × 320 LCD, a micro-SD (TF) slot on the LCD's SPI bus, an RGB LED and USB-C.
+specs:
+  lcd: ST7789, 172 × 320; MOSI 6, SCLK 7, CS 14, DC 15, RST 21, backlight 22
+  sd: SPI mode on the LCD's bus; MISO 5, MOSI 6, SCLK 7, CS 4; no card detect
+  rgb_led: WS2812 on GPIO8
+  buttons: BOOT (GPIO9), RESET
+  ldo: ME6217, 800 mA
+  free_pins: "0, 1, 2, 3, 18, 19, 20, 23"
+inferred: [free_pins]
+notes:
+  - "Keep the backlight at 50 % or lower (vendor warning): full brightness overheats the panel and leaves dark shadows. The profile caps it at 128 of 255."
+  - "Do not remove the screen to solder headers; tilt the iron instead (vendor)."
+  - "esptool cannot tell it from the ESP32-C6 Super Mini (same chip and flash): provision it with its profile, c6l-lcd."
+datasheets:
+  - https://docs.waveshare.com/ESP32-C6-LCD-1.47

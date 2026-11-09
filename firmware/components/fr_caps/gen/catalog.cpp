@@ -82,6 +82,48 @@ constexpr MemberInfo kScaleProperties[] = {
     {3, "calibrated"},
     {4, "rate_hz"},
 };
+constexpr MemberInfo kBatteryCommands[] = {
+    {1, "read"},
+    {2, "calibrate"},
+    {3, "reset_calibration"},
+    {4, "load"},
+    {5, "gate"},
+    {6, "inject"},
+};
+constexpr MemberInfo kBatteryEvents[] = {{1, "charge"}, {2, "level_change"}, {3, "protect"}};
+constexpr MemberInfo kBatteryProperties[] = {
+    {1, "mv"},
+    {2, "percent"},
+    {3, "charger"},
+    {4, "level"},
+    {5, "load_on"},
+    {6, "gate_open"},
+};
+constexpr MemberInfo kHapticCommands[] = {{1, "pulse"}, {2, "play"}, {3, "stop"}};
+constexpr MemberInfo kHapticEvents[] = {{1, "cut"}};
+constexpr MemberInfo kHapticProperties[] = {{1, "active"}, {2, "supply_mv"}};
+constexpr MemberInfo kStorageCommands[] = {
+    {1, "info"},
+    {2, "list"},
+    {3, "stat"},
+    {4, "read"},
+    {5, "write"},
+    {6, "remove"},
+    {7, "mkdir"},
+    {8, "rename"},
+    {9, "remount"},
+};
+constexpr MemberInfo kStorageEvents[] = {{1, "mounted"}, {2, "unmounted"}};
+constexpr MemberInfo kStorageProperties[] = {
+    {1, "state"},
+    {2, "total_mb"},
+    {3, "free_mb"},
+    {4, "card_type"},
+    {5, "busy"},
+};
+constexpr MemberInfo kClockCommands[] = {{1, "read"}, {2, "set"}, {3, "set_aging"}, {4, "inject"}};
+constexpr MemberInfo kClockEvents[] = {{1, "lost_power"}, {2, "set"}};
+constexpr MemberInfo kClockProperties[] = {{1, "unix"}, {2, "valid"}, {3, "temp_c10"}, {4, "offset_ms"}};
 constexpr MemberInfo kNodeCommands[] = {
     {1, "identify"},
     {2, "describe"},
@@ -101,7 +143,7 @@ constexpr MemberInfo kDiagEvents[] = {{1, "mark"}};
 constexpr CapInfo kCaps[] = {
     {0x0001, "fr.button", {1, 0}, kButtonCommands, kButtonEvents, kButtonProperties},
     {0x0002, "fr.led", {1, 0}, kLedCommands, kLedEvents, kLedProperties},
-    {0x0003, "fr.display", {1, 1}, kDisplayCommands, kDisplayEvents, kDisplayProperties},
+    {0x0003, "fr.display", {1, 2}, kDisplayCommands, kDisplayEvents, kDisplayProperties},
     {0x0004, "fr.audio_out", {1, 0}, kAudioOutCommands, kAudioOutEvents, kAudioOutProperties},
     {0x0005, "fr.analog_in", {1, 0}, kAnalogInCommands, kAnalogInEvents, kAnalogInProperties},
     {0x0006, "fr.fixture", {0, 2}, kFixtureCommands, kFixtureEvents, kFixtureProperties},
@@ -111,6 +153,10 @@ constexpr CapInfo kCaps[] = {
     {0x000A, "fr.radio_tx", {1, 0}, kRadioTxCommands, {}, kRadioTxProperties},
     {0x000B, "fr.camera", {1, 0}, kCameraCommands, kCameraEvents, kCameraProperties},
     {0x000C, "fr.scale", {1, 0}, kScaleCommands, kScaleEvents, kScaleProperties},
+    {0x000D, "fr.battery", {1, 0}, kBatteryCommands, kBatteryEvents, kBatteryProperties},
+    {0x000E, "fr.haptic", {1, 0}, kHapticCommands, kHapticEvents, kHapticProperties},
+    {0x000F, "fr.storage", {1, 0}, kStorageCommands, kStorageEvents, kStorageProperties},
+    {0x0010, "fr.clock", {1, 0}, kClockCommands, kClockEvents, kClockProperties},
     {0x00F0, "fr.node", {1, 0}, kNodeCommands, kNodeEvents, {}},
     {0x00F1, "fr.ota", {1, 0}, {}, {}, {}},
     {0x00F2, "fr.diag", {1, 0}, kDiagCommands, kDiagEvents, {}},

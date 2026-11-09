@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.storage.mounted.event",
+  "title": "fr.storage.mounted event",
+  "type": "object",
+  "properties": {
+    "total_mb": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "free_mb": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    }
+  },
+  "additionalProperties": false
+}

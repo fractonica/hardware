@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.storage.info.args",
+  "title": "fr.storage.info arguments",
+  "description": "The card's state and sizes (the cached ones; a refresh follows in the reports when they are old). With no card it starts a mount and answers BUSY while it runs; an attempt that ended under 3 s ago is not repeated.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

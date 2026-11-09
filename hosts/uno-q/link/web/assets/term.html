@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0b0f17">
+<title>{{HOST}} terminal</title>
+<link rel="stylesheet" href="/term/xterm.css">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b0f17; color: #e5e7eb; font: 14px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; height: 100dvh; }
+  header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #151b26; }
+  header b { font-weight: 600; }
+  #state { margin-left: auto; font-size: 12px; color: #8b95a5; }
+  #state.up { color: #34d399; }
+  #state.down { color: #f87171; }
+  #term { flex: 1; min-height: 0; padding: 4px; }
+  #keys { display: flex; gap: 6px; padding: 6px; background: #151b26; overflow-x: auto; }
+  #keys button { flex: 0 0 auto; min-width: 44px; height: 36px; border: 0; border-radius: 6px; background: #232c3b;
+                 color: #e5e7eb; font: 600 13px ui-monospace, monospace; }
+  #keys button.on { background: #60a5fa; color: #0b0f17; }
+</style>
+</head>
+<body>
+<header><b>{{HOST}}</b><span>terminal</span><span id="state">connecting</span></header>
+<div id="term"></div>
+<div id="keys">
+  <button data-k="esc">Esc</button><button data-k="tab">Tab</button><button data-k="ctrl" id="ctrl">Ctrl</button>
+  <button data-k="up">&uarr;</button><button data-k="down">&darr;</button><button data-k="left">&larr;</button>
+  <button data-k="right">&rarr;</button><button data-k="c">^C</button><button data-k="d">^D</button>
+  <button data-k="pipe">|</button><button data-k="slash">/</button><button data-k="dash">-</button>
+</div>
+<script src="/term/xterm.js"></script>
+<script src="/term/addon-fit.js"></script>
+<script>
+const term = new Terminal({ cursorBlink: true, fontSize: 14, scrollback: 5000,
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  theme: { background: '#0b0f17', foreground: '#e5e7eb', cursor: '#60a5fa' } });
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById('term'));
+fit.fit();
+const state = document.getElementById('state');
+const enc = new TextEncoder();
+let ws = null, ctrl = false;
+
+function send(text) {
+  if (ctrl && text.length === 1) {               // Ctrl + a letter from the on-screen row or the keyboard
+    const c = text.toUpperCase().charCodeAt(0);
+    if (c >= 64 && c <= 95) text = String.fromCharCode(c - 64);
+    ctrl = false; document.getElementById('ctrl').classList.remove('on');
+  }
+  if (ws && ws.readyState === 1) ws.send(enc.encode(text));
+}
+function resize() {
+  fit.fit();
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ cols: term.cols, rows: term.rows }));
+}
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/term/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { state.textContent = 'connected'; state.className = 'up'; resize(); term.focus(); };
+  ws.onmessage = (e) => term.write(new Uint8Array(e.data));
+  ws.onclose = (e) => {
+    state.className = 'down';
+    state.textContent = e.code === 4401 ? 'session expired: scan the QR again' : 'disconnected (tap to reconnect)';
+    if (e.code !== 4401) state.onclick = () => { state.onclick = null; state.textContent = 'connecting'; connect(); };
+  };
+}
+term.onData(send);
+const seq = { esc: '\x1b', tab: '\t', up: '\x1b[A', down: '\x1b[B', right: '\x1b[C', left: '\x1b[D',
+              c: '\x03', d: '\x04', pipe: '|', slash: '/', dash: '-' };
+document.getElementById('keys').addEventListener('click', (e) => {
+  const k = e.target.dataset && e.target.dataset.k;
+  if (!k) return;
+  if (k === 'ctrl') { ctrl = !ctrl; e.target.classList.toggle('on', ctrl); }
+  else send(seq[k]);
+  term.focus();
+});
+window.addEventListener('resize', resize);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resize);
+connect();
+</script>
+</body>
+</html>

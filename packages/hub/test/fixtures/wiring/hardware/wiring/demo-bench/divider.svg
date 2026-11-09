@@ -1,0 +1,5 @@
+<svg width="100%" viewBox="0 0 680 200" role="img"><title>Divider</title><desc>A divider.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke"/></marker></defs>
+<g class="c-gray node" onclick="sendPrompt('x')"><rect x="40" y="40" width="150" height="100" rx="8"/><text class="th" x="115" y="90">TP4056</text></g>
+<path d="M190 90 H330" fill="none" stroke="var(--p)" marker-end="url(#arrow)"/>
+</svg>

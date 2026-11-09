@@ -1,0 +1,18 @@
+schema: fractonica/part@1
+id: npn-small
+name: Small NPN transistor (S8050, 2N2222, PN2222, BC547)
+category: semiconductor
+summary: TO-92 NPN for low-side switching up to ~150 mA from a GPIO (S8050/2N2222 class).
+values: ["S8050", "2N2222", "BC547"]
+specs:
+  ic_max: 500 mA (S8050), 600 mA (PN2222), 100 mA (BC547)
+  vce_sat: 0.2–0.3 V at 100 mA
+  base_drive_from_3v3: 470 Ω ≈ 5.5 mA (motor), 1 kΩ ≈ 2.6 mA (lighter loads)
+inferred: [vce_sat]
+pins:
+  - { name: E, desc: emitter (to GND) }
+  - { name: B, desc: base (through the resistor to the GPIO) }
+  - { name: C, desc: collector (to the load's −) }
+pinout: "Usually E B C seen from the flat face, legs down; S8050 and BC547 vary by maker, so check with the meter's diode mode: base→emitter and base→collector both read 0.6–0.7 V."
+notes:
+  - "Too little for the solenoid: 0.3–1 A would need 15–50 mA of base current."

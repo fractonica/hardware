@@ -1,0 +1,22 @@
+schema: fractonica/part@1
+id: tp5000-module
+name: TP5000 charger module (Li-ion 4.2 V or LiFePO4 3.6 V)
+category: power
+summary: Switching (buck) charger up to 2 A for one Li-ion cell (4.2 V) or one LiFePO4 cell (3.6 V), chosen by its CS pin.
+specs:
+  charge_voltage: 4.2 V (Li-ion) or 3.6 V (LiFePO4), by CS
+  charge_current: up to 2 A (set by the sense resistor)
+  status_pins: CHRG low while charging, STDB low when done
+inferred: [charge_current, status_pins]
+pins:
+  - { name: VIN+, desc: 5 V input }
+  - { name: VIN−, desc: input ground }
+  - { name: BAT+, desc: cell + }
+  - { name: BAT−, desc: cell − }
+  - { name: CS, desc: "chemistry select: check the module's jumper or pad (LiFePO4 vs Li-ion)" }
+  - { name: CHRG, desc: "open-drain charge LED line" }
+  - { name: STDB, desc: "open-drain done LED line" }
+notes:
+  - "Set the chemistry jumper BEFORE fitting a cell: a LiFePO4 cell charged to 4.2 V is overcharged."
+  - "Firmware: driver tp5000 (the same class as tp4056), chemistry lifepo4."
+  - "LiFePO4's voltage is flat over most of its charge: percent from voltage is poor until a capacity test gives the cell a learned curve."

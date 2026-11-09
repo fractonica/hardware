@@ -1,0 +1,21 @@
+[package]
+name = "qonu-web"
+version = "0.1.0"
+edition = "2024"
+description = "The UNO Q's LAN front door: a phone terminal behind a one-time QR link"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"
+tungstenite = { version = "0.27", default-features = false }
+sha1_smol = "1"
+base64 = "0.22"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

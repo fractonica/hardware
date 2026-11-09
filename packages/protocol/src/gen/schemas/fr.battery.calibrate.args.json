@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.calibrate.args",
+  "title": "fr.battery.calibrate arguments",
+  "description": "The divider becomes meter_mv / adc_mv (a multimeter on the cell), kept across reboots. BUSY with no sample yet; INVALID_ARGS when the result is more than 15 % from config divider_milli (a typo in the reading).",
+  "type": "object",
+  "properties": {
+    "meter_mv": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(mV)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "meter_mv": 3912
+    }
+  ]
+}

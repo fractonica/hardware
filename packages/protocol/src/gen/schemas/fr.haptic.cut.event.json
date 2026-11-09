@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.haptic.cut.event",
+  "title": "fr.haptic.cut event",
+  "description": "A running pulse or pattern was stopped by the supply or by max_on_ms.",
+  "type": "object",
+  "properties": {
+    "reason": {
+      "type": "string",
+      "enum": [
+        "low_supply",
+        "floor",
+        "max_on"
+      ]
+    },
+    "supply_mv": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(mV)"
+    }
+  },
+  "additionalProperties": false
+}

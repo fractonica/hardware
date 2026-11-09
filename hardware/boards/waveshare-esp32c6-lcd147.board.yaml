@@ -1,0 +1,61 @@
+schema: fractonica/board@1
+id: waveshare-esp32c6-lcd147
+name: Waveshare ESP32-C6-LCD-1.47
+# Design lcd-clock-c1 D1. From the Waveshare wiki (docs.waveshare.com/ESP32-C6-LCD-1.47, read 2026-11-05): ESP32-C6FH4
+# (4 MB flash in the package, no PSRAM), ME6217C33 LDO, a 1.47" ST7789 172x320 panel and a TF slot in SPI mode on one
+# SPI bus, an RGB LED on GPIO8, BOOT and RESET buttons. The vendor asks to keep the backlight at 50 % or lower (heat
+# leaves dark shadows on the panel): the profile caps it with fr.display max_brightness 128.
+idf_target: esp32c6
+flash: { size: 4MB, mode: dio, part_profile: fr-4mb-v1 }
+psram: null
+usb: { kind: usb_serial_jtag, vid: 0x303A, pid: 0x1001, bcd_device: 0x0102, serial_is_mac: true, pins: [12, 13] }
+console: usb_serial_jtag
+buttons:
+  boot: { gpio: 9, active_level: low, pull: external, strapping: true, deep_sleep_wake: false, confidence: H }
+leds:
+  rgb: { gpio: 8, kind: ws2812, color_order: GRB, count: 1, strapping: true, confidence: M }
+displays:
+  # Column offset 34: the ST7789's RAM is 240 wide and the 172-column glass sits in its middle, (240 - 172) / 2 (inferred;
+  # the bench checks the 1-px border reaches every edge). MISO 5 is the TF card's: the shared SPI2 is brought up with
+  # every line it carries (design D3); the panel reads nothing. idle_high: the card's CS, deselected while the panel
+  # initialises.
+  lcd: { kind: st7789, bus: spi, sclk: 7, mosi: 6, miso: 5, cs: 14, dc: 15, rst: 21, backlight: 22, backlight_active: high, width: 172, height: 320, column_offset: 34, idle_high: [4], confidence: M }
+sd_cards:
+  # The TF slot in SPI mode on the panel's SPI2 (D1 and D2 not connected, no card detect).
+  card: { kind: sdspi, cs: 4, sclk: 7, mosi: 6, miso: 5, card_detect: null, confidence: H }
+pins:
+  # 16/17: UART0 (the ROM log); 10/11 are not bonded on the QFN32 C6FH4, 24-30 are its in-package flash.
+  reserved:
+    usb: [12, 13]
+    uart0: [16, 17]
+    flash: [24, 25, 26, 27, 28, 29, 30]
+    not_bonded: [10, 11]
+    display: [14, 15, 21, 22]
+    sd_card: [4]
+    spi_bus: [5, 6, 7]       # the shared SPI2 lines (design D3): the panel's and the card's
+  strapping: [4, 5, 8, 9, 15]
+  # As on every C6 (spec 04 §4.1): GPIO9 low selects download mode, which needs GPIO8 high; 4, 5 (SDIO timing) and 15
+  # (JTAG source) matter only with non-default eFuses. Here 4 (the card's CS), 5 (MISO) and 15 (the panel's DC) are
+  # the board's own lines.
+  strapping_levels: { 4: none, 5: none, 8: high, 9: high, 15: none }
+  # Bonded GPIOs less USB, UART0, the panel, the card, the LED and BOOT (inferred from the QFN32 pin list).
+  free: [0, 1, 2, 3, 18, 19, 20, 23]
+  adc1: [0, 1, 2, 3]
+boot_uart_tx: 16
+en_access: null
+rf: { max_tx_power_qdbm: null, antenna: ceramic }
+test_pin: null
+resources: { rmt_tx: 2, rmt_rx: 2, ledc_timers: 4, ledc_channels: 6, i2c: 1, spi_host: 1, adc1_channel: 7, i2s: 1 }   # spi_host: SPI2, shared by the panel and the card
+defaults:
+  boot:   { cap: fr.button, driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,    driver: led_ws2812,  bind: leds.rgb }
+detection:
+  usb: { vid: 0x303A, pid: 0x1001, bcd_device: 0x0102 }
+  # The same chip and flash as the Super Mini: esptool cannot tell them apart. Provisioning takes the profile the user
+  # names (--profile c6l-lcd), as it does for every ambiguous board; a probe (this board's backlight on GPIO22 against the
+  # Super Mini's LED on GPIO15) is a follow-up (design D1).
+  esptool: { chip_type: '^ESP32-C6FH4 \(QFN32\)', flash_size: 4MB }
+  ambiguous_with: [esp32c6-supermini]
+  probe: { leds: [rgb] }
+sources:
+  - https://docs.waveshare.com/ESP32-C6-LCD-1.47

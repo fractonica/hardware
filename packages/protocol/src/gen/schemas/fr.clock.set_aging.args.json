@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.clock.set_aging.args",
+  "title": "fr.clock.set_aging arguments",
+  "description": "The aging-offset register: positive slows the clock, about 0.1 ppm per step at 25 degC.",
+  "type": "object",
+  "properties": {
+    "offset": {
+      "type": "integer",
+      "minimum": -128,
+      "maximum": 127
+    }
+  },
+  "additionalProperties": false
+}

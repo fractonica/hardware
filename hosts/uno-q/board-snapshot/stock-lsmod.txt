@@ -1,0 +1,120 @@
+Module                  Size  Used by
+xt_conntrack           12288  4
+xt_MASQUERADE          12288  4
+iptable_nat            12288  1
+nf_nat                 45056  2 iptable_nat,xt_MASQUERADE
+nf_conntrack          118784  3 xt_conntrack,nf_nat,xt_MASQUERADE
+nf_defrag_ipv6         16384  1 nf_conntrack
+nf_defrag_ipv4         12288  1 nf_conntrack
+xt_addrtype            12288  2
+iptable_filter         12288  1
+br_netfilter           32768  0
+bridge                266240  1 br_netfilter
+stp                    12288  1 bridge
+llc                    16384  2 bridge,stp
+usb_f_acm              16384  2
+u_serial               20480  3 usb_f_acm
+usb_f_fs               40960  3
+overlay               143360  0
+rfcomm                 36864  6
+af_alg                 24576  0
+bnep                   16384  2
+apr                    20480  0
+pdr_interface          16384  1 apr
+qrtr_smd               12288  0
+venus_dec              28672  0
+venus_enc              28672  0
+videobuf2_dma_contig    16384  2 venus_dec,venus_enc
+videobuf2_memops       12288  1 videobuf2_dma_contig
+qcom_pd_mapper         24576  0
+qcom_pdr_msg           16384  2 qcom_pd_mapper,pdr_interface
+ath10k_snoc            49152  0
+ath10k_core           380928  1 ath10k_snoc
+hci_uart               86016  0
+btqca                  16384  1 hci_uart
+ath                    32768  1 ath10k_core
+btbcm                  20480  1 hci_uart
+venus_core            135168  2 venus_dec,venus_enc
+mac80211              614400  1 ath10k_core
+qrtr                   28672  27 qrtr_smd
+libarc4                12288  1 mac80211
+v4l2_mem2mem           36864  3 venus_dec,venus_core,venus_enc
+snd_soc_sm8250         12288  0
+videobuf2_v4l2         28672  3 venus_dec,venus_enc,v4l2_mem2mem
+snd_soc_qcom_sdw       12288  1 snd_soc_sm8250
+snd_soc_qcom_common    12288  1 snd_soc_sm8250
+bluetooth             548864  32 btqca,hci_uart,btbcm,bnep,rfcomm
+lmh                    12288  0
+qcom_q6v5_pas          36864  0
+cfg80211              421888  3 ath,mac80211,ath10k_core
+qcom_pil_info          12288  1 qcom_q6v5_pas
+ecdh_generic           16384  2 bluetooth
+qcom_q6v5              12288  1 qcom_q6v5_pas
+snd_soc_lpass_va_macro    53248  0
+qcom_sysmon            16384  2 qcom_q6v5_pas,qcom_q6v5
+snd_soc_hdmi_codec     16384  0
+snd_soc_lpass_rx_macro   110592  0
+qcom_common            16384  2 ath10k_snoc,qcom_q6v5_pas
+soundwire_qcom         32768  0
+ecc                    36864  1 ecdh_generic
+videodev              258048  5 venus_dec,videobuf2_v4l2,venus_core,venus_enc,v4l2_mem2mem
+snd_soc_lpass_tx_macro    98304  0
+slimbus                28672  1 soundwire_qcom
+qcom_glink_smem        12288  1 qcom_common
+qmi_helpers            24576  5 qcom_pd_mapper,ath10k_snoc,qcom_sysmon,qcom_pdr_msg,pdr_interface
+rfkill                 28672  6 bluetooth,cfg80211
+videobuf2_common       57344  7 videobuf2_dma_contig,venus_dec,videobuf2_v4l2,venus_core,venus_enc,v4l2_mem2mem,videobuf2_memops
+pwrseq_core            20480  1 hci_uart
+snd_soc_lpass_macro_common    12288  3 snd_soc_lpass_va_macro,snd_soc_lpass_rx_macro,snd_soc_lpass_tx_macro
+mc                     57344  4 videodev,videobuf2_v4l2,videobuf2_common,v4l2_mem2mem
+qcom_rng               12288  0
+snd_soc_pm4125         49152  0
+snd_soc_pm4125_sdw     12288  1 snd_soc_pm4125
+qcrypto                32768  0
+regmap_sdw             12288  1 snd_soc_pm4125_sdw
+snd_soc_wcd_mbhc       24576  1 snd_soc_pm4125
+sha256                 16384  1 qcrypto
+soundwire_bus        1138688  6 regmap_sdw,snd_soc_pm4125,snd_soc_pm4125_sdw,snd_soc_qcom_sdw,snd_soc_sm8250,soundwire_qcom
+libsha256_generic      12288  1 sha256
+authenc                12288  1 qcrypto
+libdes                 20480  1 qcrypto
+libcomposite           65536  13 u_serial,usb_f_fs,usb_f_acm
+fuse                  155648  1
+ip_tables              28672  2 iptable_filter,iptable_nat
+x_tables               36864  6 xt_conntrack,iptable_filter,xt_addrtype,ip_tables,iptable_nat,xt_MASQUERADE
+ipv6                  462848  48 bridge,br_netfilter
+anx7625                45056  0
+spidev                 20480  0
+msm                  1056768  2
+mdt_loader             12288  3 msm,qcom_q6v5_pas,venus_core
+drm_exec               12288  1 msm
+llcc_qcom              45056  1 msm
+ocmem                  12288  1 msm
+gpu_sched              40960  1 msm
+drm_dp_aux_bus         12288  2 anx7625,msm
+drm_display_helper    188416  2 anx7625,msm
+cec                    53248  1 drm_display_helper
+drm_client_lib         12288  1 msm
+drm_kms_helper        184320  4 anx7625,msm,drm_display_helper,drm_client_lib
+drm                   585728  10 gpu_sched,anx7625,drm_kms_helper,msm,drm_exec,drm_display_helper,drm_client_lib
+pinctrl_sm6115_lpass_lpi    16384  0
+qcom_wdt               12288  1
+pinctrl_lpass_lpi      12288  1 pinctrl_sm6115_lpass_lpi
+gpucc_qcm2290          20480  7
+backlight              20480  2 drm_display_helper,drm
+qcom_usb_vbus_regulator    12288  0
+rtc_pm8xxx             12288  1
+dispcc_qcm2290         20480  14
+spi_geni_qcom          16384  0
+qcom_pon               12288  0
+i2c_qcom_geni          16384  0
+gpi                    24576  0
+qcom_stats             12288  0
+icc_bwmon              16384  0
+rpmsg_ctrl             12288  0
+phy_qcom_qmp_usbc      24576  2
+typec                  81920  2 anx7625,phy_qcom_qmp_usbc
+rpmsg_char             20480  1 rpmsg_ctrl
+phy_qcom_qusb2         20480  1
+socinfo                20480  0
+rmtfs_mem              12288  2

@@ -1,0 +1,7 @@
+profile: demo-power
+board: demo-c6
+app: node
+caps:
+  battery: { cap: fr.battery, driver: tp4056, bind: { sense: gpio.0, chrg: gpio.19, stdby: gpio.20, load: gpio.11 }, config: { chemistry: liion } }
+  buzz:    { cap: fr.haptic,  driver: haptic_ledc, bind: { out: gpio.14 }, config: { supply: battery } }
+  kick:    { cap: fr.haptic,  driver: haptic_ledc, bind: { out: gpio.5 }, config: { kind: solenoid, supply: battery } }

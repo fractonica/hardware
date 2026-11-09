@@ -1,0 +1,13 @@
+schema: fractonica/part@1
+id: load-cell-bar-1kg
+name: Bar load cell, 1 kg (80 × 12.7 × 12.7 mm)
+category: sensor
+summary: Aluminium double-bending-beam cell; 2 × M4 and 2 × M5 holes at 15/40/15 mm, 5 mm from the ends.
+pins:
+  - { name: red, desc: E+ }
+  - { name: black, desc: E− }
+  - { name: white, desc: A− (or S−) }
+  - { name: green, desc: A+ (or S+) }
+inferred: []
+notes:
+  - "Force goes along the hole axis; fix one end, load the other, keep the middle (the gauges) free."

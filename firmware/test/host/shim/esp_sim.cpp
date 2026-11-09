@@ -19,6 +19,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "fr/platform/gpio_isr.hpp"
+#include "fr/platform/safe_off.hpp"
 #include "freertos/FreeRTOS.h"
 #include "hal/gpio_ll.h"
 #include "soc/gpio_sig_map.h"
@@ -26,7 +27,7 @@
 
 gpio_dev_t GPIO = {};
 
-extern "C" void __wrap_esp_panic_handler(void *info);  // fixture_gpio.cpp: the panic hook under test
+extern "C" void __wrap_esp_panic_handler(void *info);  // fr_core safe_off.cpp: the panic hook under test
 
 struct esp_timer {
     esp_timer_cb_t cb = nullptr;
@@ -452,6 +453,7 @@ void cpu_reset()
     }
     s.shutdown.clear();
     s.shutdown_free = 5;
+    fr::platform::safe_off_host_reset();  // fr_core's registry was RAM too
     s.crit = 0;
     s.isr = 0;
     s.masked = false;

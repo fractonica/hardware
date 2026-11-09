@@ -100,6 +100,13 @@ public:
     }
 
     void advance_ms(uint32_t ms) { advance_to(now_ + static_cast<fr::TimeUs>(ms) * 1000); }
+    /** A busy core: the clock moves to `t` with nothing run on the way; the next advance fires overdue timers late. */
+    void stall_to(fr::TimeUs t)
+    {
+        if (t > now_) {
+            now_ = t;
+        }
+    }
     void advance_us(uint32_t us) { advance_to(now_ + us); }
 
     size_t timers_used() const { return timers_used_; }

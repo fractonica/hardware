@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 680 580" role="img"><title>Power bench wiring map on scale-c6</title><desc>Each line runs from a module pad through the parts in the orange box to a scale-c6 pin.</desc>
+<g class="c-gray"><rect x="40" y="40" width="180" height="190" rx="8" stroke-width="0.5"/>
+<text class="th" x="52" y="70" dominant-baseline="central">TP4056 #1</text>
+<text class="ts" x="52" y="92" dominant-baseline="central">+ LiPo cell</text>
+<text class="ts" x="52" y="112" dominant-baseline="central">IN: USB charger</text>
+<text class="ts" x="212" y="70" text-anchor="end" dominant-baseline="central">OUT+</text>
+<text class="ts" x="212" y="115" text-anchor="end" dominant-baseline="central">CHRG</text>
+<text class="ts" x="212" y="160" text-anchor="end" dominant-baseline="central">STDBY</text>
+<text class="ts" x="212" y="205" text-anchor="end" dominant-baseline="central">OUT+</text></g>
+<g class="c-gray"><rect x="40" y="250" width="180" height="235" rx="8" stroke-width="0.5"/>
+<text class="th" x="52" y="280" dominant-baseline="central">TP4056 #2</text>
+<text class="ts" x="52" y="302" dominant-baseline="central">+ 90 F capacitor</text>
+<text class="ts" x="52" y="322" dominant-baseline="central">IN: USB charger</text>
+<text class="ts" x="212" y="280" text-anchor="end" dominant-baseline="central">OUT+</text>
+<text class="ts" x="212" y="325" text-anchor="end" dominant-baseline="central">CHRG</text>
+<text class="ts" x="212" y="370" text-anchor="end" dominant-baseline="central">STDBY</text>
+<text class="ts" x="212" y="415" text-anchor="end" dominant-baseline="central">OUT+</text>
+<text class="ts" x="212" y="460" text-anchor="end" dominant-baseline="central">OUT+</text></g>
+<g class="c-gray"><rect x="40" y="510" width="180" height="40" rx="8" stroke-width="0.5"/>
+<text class="th" x="130" y="530" text-anchor="middle" dominant-baseline="central">All grounds</text></g>
+<g class="c-teal"><rect x="500" y="20" width="140" height="540" rx="8" stroke-width="0.5"/>
+<text class="th" x="570" y="40" text-anchor="middle" dominant-baseline="central">scale-c6</text>
+<text class="th" x="512" y="70" dominant-baseline="central">GPIO0</text>
+<text class="th" x="512" y="115" dominant-baseline="central">GPIO19</text>
+<text class="th" x="512" y="160" dominant-baseline="central">GPIO20</text>
+<text class="th" x="512" y="205" dominant-baseline="central">GPIO11</text>
+<text class="th" x="512" y="280" dominant-baseline="central">GPIO1</text>
+<text class="th" x="512" y="325" dominant-baseline="central">GPIO21</text>
+<text class="th" x="512" y="370" dominant-baseline="central">GPIO22</text>
+<text class="th" x="512" y="415" dominant-baseline="central">GPIO14</text>
+<text class="th" x="512" y="460" dominant-baseline="central">GPIO5</text>
+<text class="th" x="512" y="500" dominant-baseline="central">5V</text>
+<text class="th" x="512" y="530" dominant-baseline="central">GND</text></g>
+<g fill="none" stroke="var(--s)" stroke-width="1">
+<path d="M220 70 H280 M440 70 H500"/><path d="M220 115 H280 M440 115 H500"/><path d="M220 160 H280 M440 160 H500"/><path d="M220 205 H280 M440 205 H500"/>
+<path d="M220 280 H280 M440 280 H500"/><path d="M220 325 H280 M440 325 H500"/><path d="M220 370 H280 M440 370 H500"/><path d="M220 415 H280 M440 415 H500"/><path d="M220 460 H280 M440 460 H500"/>
+<path d="M360 474 V500 H500"/><path d="M220 530 H500"/></g>
+<g class="c-amber"><rect x="280" y="56" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="70" text-anchor="middle" dominant-baseline="central">Divider</text></g>
+<g class="c-amber"><rect x="280" y="101" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="115" text-anchor="middle" dominant-baseline="central">10 kΩ in series</text></g>
+<g class="c-amber"><rect x="280" y="146" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="160" text-anchor="middle" dominant-baseline="central">10 kΩ in series</text></g>
+<g class="c-amber"><rect x="280" y="191" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="205" text-anchor="middle" dominant-baseline="central">Test load: NPN, 100 Ω</text></g>
+<g class="c-amber"><rect x="280" y="266" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="280" text-anchor="middle" dominant-baseline="central">Divider (same)</text></g>
+<g class="c-amber"><rect x="280" y="311" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="325" text-anchor="middle" dominant-baseline="central">10 kΩ in series</text></g>
+<g class="c-amber"><rect x="280" y="356" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="370" text-anchor="middle" dominant-baseline="central">10 kΩ in series</text></g>
+<g class="c-amber"><rect x="280" y="401" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="415" text-anchor="middle" dominant-baseline="central">Motor driver: NPN</text></g>
+<g class="c-amber"><rect x="280" y="446" width="160" height="28" rx="4" stroke-width="0.5"/><text class="ts" x="360" y="460" text-anchor="middle" dominant-baseline="central">Solenoid: 2 NPN + FET</text></g>
+</svg>

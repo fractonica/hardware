@@ -3,6 +3,7 @@
 #pragma once
 
 #define SOC_I2C_NUM (2U)
+#define SOC_SPI_PERIPH_NUM (3)
 
 // ADC (adc_audio, shim/adc_sim.cpp)
 #define SOC_ADC_DMA_SUPPORTED 1

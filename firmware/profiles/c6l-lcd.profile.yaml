@@ -1,0 +1,15 @@
+profile: c6l-lcd
+board: waveshare-esp32c6-lcd147
+app: node
+net: { link_profile: default }
+# Design lcd-clock-c1 D2. No PSRAM: LVGL's pool and draw buffers from internal RAM, no snapshot (as ROUND-1). The panel and
+# the TF card share SPI2 (D3); the DS3231 module is wired by the user to GPIO18 (SDA) and GPIO19 (SCL), 3.3 V (2026-11-05).
+memory: default
+caps:
+  boot:   { cap: fr.button,  driver: button_gpio, bind: buttons.boot }
+  status: { cap: fr.led,     driver: led_ws2812,  bind: leds.rgb, config: { max_brightness: 32 } }
+  # The vendor's 50 % backlight limit (D4): every level the app sets is scaled into 0..128.
+  screen: { cap: fr.display, driver: st7789_spi,  bind: displays.lcd, config: { max_brightness: 128 } }
+  card:   { cap: fr.storage, driver: sdspi_card,  bind: sd_cards.card }
+  # 100 kHz (design D8 as built): more margin on the jumper wires; the driver never points a read at a writable register.
+  clock:  { cap: fr.clock,   driver: ds3231_i2c,  bind: { sda: gpio.18, scl: gpio.19 }, config: { khz: 100 } }

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.storage.remove.args",
+  "title": "fr.storage.remove arguments",
+  "description": "A file, or an empty directory.",
+  "type": "object",
+  "properties": {
+    "path": {
+      "type": "string",
+      "maxLength": 96,
+      "description": "(<= 96 UTF-8 bytes)"
+    }
+  },
+  "additionalProperties": false
+}

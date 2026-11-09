@@ -77,6 +77,33 @@ const MIGRATIONS = [
      from_spec TEXT NOT NULL, to_spec TEXT NOT NULL, target_id TEXT, args TEXT, binding TEXT NOT NULL,
      pushed_at TEXT, PRIMARY KEY (device_id, slot))`,
   `CREATE INDEX IF NOT EXISTS bindings_target ON bindings(target_id)`,
+  // POWER-1 (design power-p1 D9; power/cells.ts): the user's named cells, where each is installed (`until` NULL while
+  // it is there), its samples (thinned: one row per 10 s unless the voltage moved 10 mV or the charger changed) and its
+  // sessions (a charge, a discharge in use, a capacity test; `curve` JSON `[t_s, mv]` points, `ended` NULL while open).
+  `CREATE TABLE IF NOT EXISTS cells (
+     id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+     chemistry TEXT NOT NULL CHECK (chemistry IN ('liion', 'lifepo4', 'lic')), nominal_mah REAL, notes TEXT,
+     created_at TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS cell_installs (
+     id INTEGER PRIMARY KEY, cell INTEGER NOT NULL, device TEXT NOT NULL, instance TEXT NOT NULL,
+     since TEXT NOT NULL, until TEXT)`,
+  `CREATE INDEX IF NOT EXISTS cell_installs_cell ON cell_installs(cell, id)`,
+  `CREATE INDEX IF NOT EXISTS cell_installs_place ON cell_installs(device, instance, id)`,
+  `CREATE TABLE IF NOT EXISTS cell_samples (
+     cell INTEGER NOT NULL, ts_ms INTEGER NOT NULL, mv INTEGER NOT NULL, charger TEXT, load INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE INDEX IF NOT EXISTS cell_samples_cell ON cell_samples(cell, ts_ms)`,
+  `CREATE TABLE IF NOT EXISTS cell_sessions (
+     id INTEGER PRIMARY KEY, cell INTEGER NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('charge', 'discharge', 'test')),
+     device TEXT NOT NULL, instance TEXT NOT NULL, started TEXT NOT NULL, ended TEXT, start_mv INTEGER, end_mv INTEGER,
+     duration_s REAL, complete INTEGER NOT NULL DEFAULT 0, mah REAL, wh REAL, r_int_mohm REAL, curve TEXT, json TEXT)`,
+  `CREATE INDEX IF NOT EXISTS cell_sessions_cell ON cell_sessions(cell, kind, id)`,
+  // WIRING-1 (design wiring-w1 D3; wiring/state.ts): a row per wiring-guide step done, and the parts on hand (`value`
+  // '' for a part that comes in no values).
+  `CREATE TABLE IF NOT EXISTS wiring_progress (
+     guide TEXT NOT NULL, step TEXT NOT NULL, done_at TEXT NOT NULL, PRIMARY KEY (guide, step))`,
+  `CREATE TABLE IF NOT EXISTS parts_stock (
+     part TEXT NOT NULL, value TEXT NOT NULL DEFAULT '', qty INTEGER NOT NULL CHECK (qty >= 0), location TEXT,
+     note TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (part, value))`,
 ];
 
 /** Columns added to tables that earlier hubs created (CREATE TABLE IF NOT EXISTS leaves those as they were). */

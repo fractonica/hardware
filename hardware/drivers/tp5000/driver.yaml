@@ -1,0 +1,21 @@
+# Driver manifest (design power-p1 D4; spec 07 §7.8): tp4056's ChargerGpio under its own id, for a TP5000 module (a 2 A
+# switching charger for Li-ion at 4.2 V or LiFePO4 at 3.6 V by its CS pin, inferred: check the module's jumper). The same
+# status pins and truth table (inferred); a profile sets fr.battery's chemistry to match the CS setting.
+schema: fractonica/driver@1
+id: tp5000
+summary: A cell on a TP5000 switching charger module (Li-ion 4.2 V or LiFePO4 3.6 V) - its divided voltage on ADC1, the CHRG/STDBY status pins, an optional test load and charge gate.
+implements: hal.PowerCell
+class: fr::drv::ChargerGpio             # header: include/fr/drv/tp5000.hpp (includes tp4056's charger_gpio.hpp)
+targets: [esp32c6, esp32c3, esp32c5, esp32s3]
+binds: gpio
+accepts_kinds: [gpio]
+uses: [tp4056]                          # the class's code is tp4056's component
+config:                                 # same order as ChargerGpio::Config
+  sense:       { type: gpio, from: bind.sense, adc1: true, doc: "the divided cell voltage (an ADC1 pin)" }
+  chrg:        { type: gpio, from: bind.chrg, optional: true, doc: "the module's CHRG through 10 kOhm" }
+  stdby:       { type: gpio, from: bind.stdby, optional: true, doc: "the module's STDBY (STDB) through 10 kOhm" }
+  load:        { type: gpio, from: bind.load, optional: true, output: true, doc: "the test load's NPN base (active high)" }
+  gate:        { type: gpio, from: bind.gate, optional: true, output: true, doc: "the charge gate's driver" }
+  gate_active: { type: enum, values: [low, high], default: high }
+resources: { gpio: 5, adc1_channel: 1 }
+dependencies: {}

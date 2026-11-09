@@ -1,0 +1,19 @@
+# USB-C gadget network: always-available link to the host computer.
+# The board is 10.55.0.1; the host gets an address by DHCP. No router or DNS is
+# offered, so the host keeps its own internet route.
+[Match]
+Name=usb0
+
+[Network]
+Address=10.55.0.1/24
+DHCPServer=yes
+MulticastDNS=yes
+LinkLocalAddressing=ipv6
+ConfigureWithoutCarrier=yes
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=40
+EmitRouter=no
+EmitDNS=no
+EmitNTP=no

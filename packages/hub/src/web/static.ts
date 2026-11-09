@@ -9,13 +9,14 @@
 // - dist/.source-hash against the sources (@fractonica/host web.ts) says whether the dashboard is stale:
 //   hub_status.dashboard and a warning. The source hash is recomputed every 30 s, off the request path.
 // - GET /api/v1/openapi.json, the op registry as OpenAPI 3.1 (web/openapi.ts).
+// - `/wiring/<guide>/<file>` and `/parts/<file>` (design wiring-w1 D3): a wiring guide's SVG diagrams and part images.
 // The guard (web/guard.ts) has checked Host, Origin and the method before any of these routes runs, and
 // gives HTML its CSP and X-Frame-Options unless a route sets its own (the app index does).
 
 import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
-import { join } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 
 import fastifyStatic from '@fastify/static';
 import type { FastifyInstance, FastifyReply } from 'fastify';
@@ -27,6 +28,8 @@ import type { HubContext, HubRunOptions, StaticSite } from '../context.ts';
 import { mintCursor } from '../events/index.ts';
 import { htmlSecurityHeaders } from './guard.ts';
 import { openApiDocument } from './openapi.ts';
+import { diagramPath, IMAGE_TYPES, partImagePath } from '../wiring/catalog.ts';
+import { catalogOf } from '../wiring/ops.ts';
 
 /** How often the dashboard's source hash is recomputed for hub_status. */
 const STALE_CHECK_MS = 30_000;
@@ -220,6 +223,30 @@ export function createStaticSite(hub: () => HubContext, run: HubRunOptions, opts
             .send(injectToken(html, script));
         }
         return rest.startsWith('assets/') ? reply.sendFile(rest, dist, IMMUTABLE) : reply.sendFile(rest, dist);
+      });
+
+      // ---- wiring diagrams and part images (design wiring-w1 D3) ----
+      // Only files a loaded guide or part names (catalog.ts diagramPath/partImagePath check the name and that it is
+      // one of theirs), read-only, never cached long (a guide is edited in place), and an SVG can run nothing.
+      const fileHeaders = (path: string) => ({
+        'cache-control': 'no-cache',
+        'x-content-type-options': 'nosniff',
+        'content-security-policy': "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:",
+        'content-type': IMAGE_TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream',
+      });
+      app.get<{ Params: { guide: string; file: string } }>('/wiring/:guide/:file', async (req, reply) => {
+        const path = diagramPath(await catalogOf(hub()), req.params.guide, req.params.file);
+        if (!path) {
+          return notFound(reply, `no diagram ${req.params.file} in wiring guide ${req.params.guide}`);
+        }
+        return reply.headers(fileHeaders(path)).sendFile(basename(path), dirname(path), { cacheControl: false });
+      });
+      app.get<{ Params: { file: string } }>('/parts/:file', async (req, reply) => {
+        const path = partImagePath(await catalogOf(hub()), req.params.file);
+        if (!path) {
+          return notFound(reply, `no part image ${req.params.file}`);
+        }
+        return reply.headers(fileHeaders(path)).sendFile(basename(path), dirname(path), { cacheControl: false });
       });
     },
   };

@@ -52,7 +52,7 @@ function vectorsBody(cases: VectorCase[]): string {
 describe('emitCpp', () => {
   it('writes every C++ output with the generated banner', () => {
     const out = files();
-    const caps = ['button', 'led', 'display', 'audio_out', 'analog_in', 'fixture', 'audio_in', 'touch', 'csi', 'radio_tx', 'camera', 'scale', 'node', 'ota', 'diag'];
+    const caps = ['button', 'led', 'display', 'audio_out', 'analog_in', 'fixture', 'audio_in', 'touch', 'csi', 'radio_tx', 'camera', 'scale', 'battery', 'haptic', 'storage', 'clock', 'node', 'ota', 'diag'];
     expect([...out.keys()].sort()).toEqual(
       [
         ...['codec_support.hpp', 'protocol.hpp', 'protocol.cpp', 'messages.hpp', 'messages.cpp', 'serial.hpp', 'serial.cpp'].map((f) => `${CPP_PROTO_GEN_DIR}/${f}`),
@@ -134,7 +134,7 @@ describe('generated capability API (design c2 §4)', () => {
   });
 
   it('dispatches: test commands only with FR_TEST_HOOKS, decode or schema failures are invalid_args', () => {
-    expect(buttonCpp).toMatch(/#if FR_TEST_HOOKS\n    case kCmdInject: \{\n        const auto a = decode_button_inject_args\(args\);\n        if \(!a \|\| !valid\(\*a\)\) \{\n            return std::unexpected\(Err::invalid_args\);/);
+    expect(buttonCpp).toMatch(/#if FR_TEST_HOOKS\n    case kCmdInject: \{\n        const auto a = decode_button_inject_args\(args\);\n        if \(!a \|\| !fr::cap::valid\(\*a\)\) \{\n            return std::unexpected\(Err::invalid_args\);/);
     expect(buttonCpp).toContain('Status Button::dispatch(uint8_t cmd_id, [[maybe_unused]] std::span<const uint8_t> args, Reply &)');
     expect(buttonCpp).toContain('    default:\n        return std::unexpected(Err::unsupported);');
     expect(ledCpp).toContain('    case kCmdToggle: {\n        if (!fr::proto::decode_empty(args)) {');

@@ -1056,35 +1056,35 @@ Status Display::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     switch (cmd_id) {
     case kCmdClear: {
         const auto a = decode_display_clear_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return clear(*a);
     }
     case kCmdText: {
         const auto a = decode_display_text_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return text(*a);
     }
     case kCmdFillRect: {
         const auto a = decode_display_fill_rect_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return fill_rect(*a);
     }
     case kCmdSetBrightness: {
         const auto a = decode_display_set_brightness_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return set_brightness(*a);
     }
     case kCmdUiLoad: {
         const auto a = decode_display_ui_load_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = ui_load(*a);
@@ -1101,7 +1101,7 @@ Status Display::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
     }
     case kCmdUiSet: {
         const auto a = decode_display_ui_set_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return ui_set(*a);
@@ -1127,7 +1127,7 @@ Status Display::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &r
 #if FR_TEST_HOOKS
     case kCmdSnapshotRead: {
         const auto a = decode_display_snapshot_read_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         const auto r = snapshot_read(*a);

@@ -1,0 +1,645 @@
+/* web/bench (design wiring-w1 D4): web/power's plain CSS, light by default, dark from the system or the theme button,
+   plus the drawing vocabulary of the chat's diagrams (design D2): text classes t, ts, th; colour classes c-<ramp> on a
+   shape or on the <g> holding it (50 fill / 600 stroke / 800 text light, 800 / 200 / 100 dark); --p, --s, --t strokes;
+   .arr, .leader, .box. */
+
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --text: #1b2230;
+  --muted: #5f6b7c;
+  --line: #dde2ea;
+  --accent: #2f6fde;
+  --ok: #1f8a4c;
+  --warn: #b7791f;
+  --bad: #c0392b;
+  --p: #3d3d3a;
+  --s: #73726c;
+  --t: #9c9a92;
+  --purple-fill: #EEEDFE; --purple-stroke: #534AB7; --purple-title: #3C3489; --purple-sub: #534AB7;
+  --teal-fill: #E1F5EE; --teal-stroke: #0F6E56; --teal-title: #085041; --teal-sub: #0F6E56;
+  --coral-fill: #FAECE7; --coral-stroke: #993C1D; --coral-title: #712B13; --coral-sub: #993C1D;
+  --pink-fill: #FBEAF0; --pink-stroke: #993556; --pink-title: #72243E; --pink-sub: #993556;
+  --gray-fill: #F1EFE8; --gray-stroke: #5F5E5A; --gray-title: #444441; --gray-sub: #5F5E5A;
+  --blue-fill: #E6F1FB; --blue-stroke: #185FA5; --blue-title: #0C447C; --blue-sub: #185FA5;
+  --green-fill: #EAF3DE; --green-stroke: #3B6D11; --green-title: #27500A; --green-sub: #3B6D11;
+  --amber-fill: #FAEEDA; --amber-stroke: #854F0B; --amber-title: #633806; --amber-sub: #854F0B;
+  --red-fill: #FCEBEB; --red-stroke: #A32D2D; --red-title: #791F1F; --red-sub: #A32D2D;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #12151b;
+    --panel: #1a1f27;
+    --text: #e3e8ef;
+    --muted: #96a1b2;
+    --line: #2a313c;
+    --accent: #6d9cf0;
+    --ok: #4cc27f;
+    --warn: #e0a84a;
+    --bad: #ef6b5d;
+    --p: #c2c0b6;
+    --s: #9c9a92;
+    --t: #73726c;
+    --purple-fill: #3C3489; --purple-stroke: #AFA9EC; --purple-title: #CECBF6; --purple-sub: #AFA9EC;
+    --teal-fill: #085041; --teal-stroke: #5DCAA5; --teal-title: #9FE1CB; --teal-sub: #5DCAA5;
+    --coral-fill: #712B13; --coral-stroke: #F0997B; --coral-title: #F5C4B3; --coral-sub: #F0997B;
+    --pink-fill: #72243E; --pink-stroke: #ED93B1; --pink-title: #F4C0D1; --pink-sub: #ED93B1;
+    --gray-fill: #444441; --gray-stroke: #B4B2A9; --gray-title: #D3D1C7; --gray-sub: #B4B2A9;
+    --blue-fill: #0C447C; --blue-stroke: #85B7EB; --blue-title: #B5D4F4; --blue-sub: #85B7EB;
+    --green-fill: #27500A; --green-stroke: #97C459; --green-title: #C0DD97; --green-sub: #97C459;
+    --amber-fill: #633806; --amber-stroke: #EF9F27; --amber-title: #FAC775; --amber-sub: #EF9F27;
+    --red-fill: #791F1F; --red-stroke: #F09595; --red-title: #F7C1C1; --red-sub: #F09595;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #12151b;
+  --panel: #1a1f27;
+  --text: #e3e8ef;
+  --muted: #96a1b2;
+  --line: #2a313c;
+  --accent: #6d9cf0;
+  --ok: #4cc27f;
+  --warn: #e0a84a;
+  --bad: #ef6b5d;
+  --p: #c2c0b6;
+  --s: #9c9a92;
+  --t: #73726c;
+  --purple-fill: #3C3489; --purple-stroke: #AFA9EC; --purple-title: #CECBF6; --purple-sub: #AFA9EC;
+  --teal-fill: #085041; --teal-stroke: #5DCAA5; --teal-title: #9FE1CB; --teal-sub: #5DCAA5;
+  --coral-fill: #712B13; --coral-stroke: #F0997B; --coral-title: #F5C4B3; --coral-sub: #F0997B;
+  --pink-fill: #72243E; --pink-stroke: #ED93B1; --pink-title: #F4C0D1; --pink-sub: #ED93B1;
+  --gray-fill: #444441; --gray-stroke: #B4B2A9; --gray-title: #D3D1C7; --gray-sub: #B4B2A9;
+  --blue-fill: #0C447C; --blue-stroke: #85B7EB; --blue-title: #B5D4F4; --blue-sub: #85B7EB;
+  --green-fill: #27500A; --green-stroke: #97C459; --green-title: #C0DD97; --green-sub: #97C459;
+  --amber-fill: #633806; --amber-stroke: #EF9F27; --amber-title: #FAC775; --amber-sub: #EF9F27;
+  --red-fill: #791F1F; --red-stroke: #F09595; --red-title: #F7C1C1; --red-sub: #F09595;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+a {
+  color: var(--accent);
+}
+
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+h1 small,
+h2 small,
+h3 small,
+.hint {
+  color: var(--muted);
+  font-weight: normal;
+  font-size: 12px;
+}
+
+.nav {
+  display: flex;
+  gap: 4px;
+}
+
+.nav a {
+  padding: 4px 12px;
+  border-radius: 6px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.nav a.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.status {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.page-title {
+  font-size: 18px;
+  margin: 8px 0;
+}
+
+.error {
+  margin: 12px 16px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+
+button,
+select,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+button.ghost {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+select,
+input[type='number'],
+input[type='text'],
+input[type='search'] {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+input[type='search'] {
+  width: min(100%, 360px);
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.card {
+  display: block;
+  margin: 0 0 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: inherit;
+  text-decoration: none;
+}
+
+a.card:hover {
+  border-color: var(--accent);
+}
+
+.card.failed {
+  border-color: var(--bad);
+}
+
+.part-card img {
+  max-width: 100%;
+  max-height: 120px;
+  object-fit: contain;
+}
+
+.part-image {
+  max-width: min(100%, 420px);
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+
+.cat {
+  margin: 16px 0 8px;
+  text-transform: capitalize;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pill.on {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.pill.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.pill.bad {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.progress.big {
+  height: 10px;
+  max-width: 480px;
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+}
+
+.guide-head {
+  margin-bottom: 12px;
+}
+
+.banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+}
+
+.banner.bad {
+  border-color: var(--bad);
+}
+
+.banner .warn-item {
+  color: var(--warn);
+}
+
+.safety {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--warn);
+  border-left-width: 4px;
+  border-radius: 0;
+  background: var(--panel);
+}
+
+.refused {
+  margin-top: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--bad);
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+tr.short td {
+  color: var(--bad);
+}
+
+td.mark {
+  width: 1.5em;
+  text-align: center;
+}
+
+tr.conn-ok td.mark {
+  color: var(--ok);
+}
+
+tr.conn-warning td.mark {
+  color: var(--warn);
+}
+
+tr.conn-failed td {
+  color: var(--bad);
+}
+
+.section.complete {
+  border-color: var(--ok);
+}
+
+.section-body.with-diagram {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 860px) {
+  .section-body.with-diagram {
+    grid-template-columns: 1fr;
+  }
+}
+
+.steps {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.steps li {
+  margin: 0 0 10px;
+}
+
+.steps li.done .step-text {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.steps label {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.steps input[type='checkbox'] {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.check,
+.note,
+.intro {
+  margin: 4px 0 0 24px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.intro {
+  margin-left: 0;
+}
+
+.pins {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0 0 24px;
+}
+
+.chip {
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.chip.live {
+  border-color: var(--ok);
+}
+
+.chip.live::after {
+  content: ' · ' attr(data-live);
+  color: var(--ok);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.figure {
+  margin: 0;
+  cursor: zoom-in;
+}
+
+.figure figcaption {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.figure.big {
+  position: relative;
+  z-index: 2;
+  cursor: zoom-out;
+}
+
+.figure.big .diagram {
+  width: min(96vw, 1100px);
+  max-width: none;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+/* ---- the diagram vocabulary (design D2) ---- */
+
+.diagram svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.diagram .t,
+.diagram .th,
+.diagram .ts {
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+.diagram .t {
+  font-size: 14px;
+  fill: var(--text);
+}
+
+.diagram .th {
+  font-size: 14px;
+  font-weight: 500;
+  fill: var(--text);
+}
+
+.diagram .ts {
+  font-size: 12px;
+  fill: var(--muted);
+}
+
+.diagram .box {
+  fill: var(--panel);
+  stroke: var(--s);
+}
+
+.diagram .arr {
+  fill: none;
+  stroke: var(--s);
+  stroke-width: 1.5;
+}
+
+.diagram .leader {
+  fill: none;
+  stroke: var(--t);
+  stroke-width: 0.5;
+  stroke-dasharray: 4 3;
+}
+
+.diagram .c-purple > rect, .diagram .c-purple > circle, .diagram .c-purple > ellipse, .diagram .c-purple > polygon, .diagram rect.c-purple, .diagram circle.c-purple, .diagram ellipse.c-purple, .diagram polygon.c-purple {
+  fill: var(--purple-fill);
+  stroke: var(--purple-stroke);
+}
+.diagram .c-purple > .t,
+.diagram .c-purple > .th {
+  fill: var(--purple-title);
+}
+.diagram .c-purple > .ts {
+  fill: var(--purple-sub);
+}
+.diagram .c-teal > rect, .diagram .c-teal > circle, .diagram .c-teal > ellipse, .diagram .c-teal > polygon, .diagram rect.c-teal, .diagram circle.c-teal, .diagram ellipse.c-teal, .diagram polygon.c-teal {
+  fill: var(--teal-fill);
+  stroke: var(--teal-stroke);
+}
+.diagram .c-teal > .t,
+.diagram .c-teal > .th {
+  fill: var(--teal-title);
+}
+.diagram .c-teal > .ts {
+  fill: var(--teal-sub);
+}
+.diagram .c-coral > rect, .diagram .c-coral > circle, .diagram .c-coral > ellipse, .diagram .c-coral > polygon, .diagram rect.c-coral, .diagram circle.c-coral, .diagram ellipse.c-coral, .diagram polygon.c-coral {
+  fill: var(--coral-fill);
+  stroke: var(--coral-stroke);
+}
+.diagram .c-coral > .t,
+.diagram .c-coral > .th {
+  fill: var(--coral-title);
+}
+.diagram .c-coral > .ts {
+  fill: var(--coral-sub);
+}
+.diagram .c-pink > rect, .diagram .c-pink > circle, .diagram .c-pink > ellipse, .diagram .c-pink > polygon, .diagram rect.c-pink, .diagram circle.c-pink, .diagram ellipse.c-pink, .diagram polygon.c-pink {
+  fill: var(--pink-fill);
+  stroke: var(--pink-stroke);
+}
+.diagram .c-pink > .t,
+.diagram .c-pink > .th {
+  fill: var(--pink-title);
+}
+.diagram .c-pink > .ts {
+  fill: var(--pink-sub);
+}
+.diagram .c-gray > rect, .diagram .c-gray > circle, .diagram .c-gray > ellipse, .diagram .c-gray > polygon, .diagram rect.c-gray, .diagram circle.c-gray, .diagram ellipse.c-gray, .diagram polygon.c-gray {
+  fill: var(--gray-fill);
+  stroke: var(--gray-stroke);
+}
+.diagram .c-gray > .t,
+.diagram .c-gray > .th {
+  fill: var(--gray-title);
+}
+.diagram .c-gray > .ts {
+  fill: var(--gray-sub);
+}
+.diagram .c-blue > rect, .diagram .c-blue > circle, .diagram .c-blue > ellipse, .diagram .c-blue > polygon, .diagram rect.c-blue, .diagram circle.c-blue, .diagram ellipse.c-blue, .diagram polygon.c-blue {
+  fill: var(--blue-fill);
+  stroke: var(--blue-stroke);
+}
+.diagram .c-blue > .t,
+.diagram .c-blue > .th {
+  fill: var(--blue-title);
+}
+.diagram .c-blue > .ts {
+  fill: var(--blue-sub);
+}
+.diagram .c-green > rect, .diagram .c-green > circle, .diagram .c-green > ellipse, .diagram .c-green > polygon, .diagram rect.c-green, .diagram circle.c-green, .diagram ellipse.c-green, .diagram polygon.c-green {
+  fill: var(--green-fill);
+  stroke: var(--green-stroke);
+}
+.diagram .c-green > .t,
+.diagram .c-green > .th {
+  fill: var(--green-title);
+}
+.diagram .c-green > .ts {
+  fill: var(--green-sub);
+}
+.diagram .c-amber > rect, .diagram .c-amber > circle, .diagram .c-amber > ellipse, .diagram .c-amber > polygon, .diagram rect.c-amber, .diagram circle.c-amber, .diagram ellipse.c-amber, .diagram polygon.c-amber {
+  fill: var(--amber-fill);
+  stroke: var(--amber-stroke);
+}
+.diagram .c-amber > .t,
+.diagram .c-amber > .th {
+  fill: var(--amber-title);
+}
+.diagram .c-amber > .ts {
+  fill: var(--amber-sub);
+}
+.diagram .c-red > rect, .diagram .c-red > circle, .diagram .c-red > ellipse, .diagram .c-red > polygon, .diagram rect.c-red, .diagram circle.c-red, .diagram ellipse.c-red, .diagram polygon.c-red {
+  fill: var(--red-fill);
+  stroke: var(--red-stroke);
+}
+.diagram .c-red > .t,
+.diagram .c-red > .th {
+  fill: var(--red-title);
+}
+.diagram .c-red > .ts {
+  fill: var(--red-sub);
+}

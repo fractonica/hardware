@@ -292,7 +292,7 @@ Status AnalogIn::dispatch(uint8_t cmd_id, std::span<const uint8_t> args, Reply &
 #if FR_TEST_HOOKS
     case kCmdInject: {
         const auto a = decode_analog_in_inject_args(args);
-        if (!a || !valid(*a)) {
+        if (!a || !fr::cap::valid(*a)) {
             return std::unexpected(Err::invalid_args);
         }
         return inject(*a);

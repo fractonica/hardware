@@ -53,6 +53,17 @@ public:
     std::expected<cap::DisplaySnapshotReadResult, Err> snapshot_read(const cap::DisplaySnapshotReadArgs &args) override;
 #endif
     uint8_t brightness() const override { return brightness_; }
+    /**
+     * The level the backlight is driven at for property level `level` under config max_brightness (design lcd-clock-c1
+     * D4): level x max / 255, rounded; max 255 drives `level` unchanged, so every panel without a cap behaves as before.
+     * The property keeps the 0..255 the app set.
+     */
+    static constexpr uint8_t scaled(uint8_t level, uint8_t max)
+    {
+        // A lit backlight stays lit: any level above 0 is at least 1 (128 x 1 / 255 would round to off).
+        const uint32_t v = (static_cast<uint32_t>(level) * max + 127) / 255;
+        return static_cast<uint8_t>(level > 0 && max > 0 && v == 0 ? 1 : v);
+    }
     cap::DisplayTraits traits() const override;
 
     /** ui events dropped because the core's post queue was full. */

@@ -1,0 +1,15 @@
+schema: fractonica/part@1
+id: diode
+name: Diode
+category: semiconductor
+summary: Rectifier, signal or Schottky diode; the stripe (bar) marks the cathode.
+values: ["1N4148", "1N4007", "1N5819"]
+specs:
+  1N4148: signal, 100 V, 200 mA continuous; fine as an ERM flyback
+  1N4007: rectifier, 1000 V, 1 A; flyback for the solenoid
+  1N5819: Schottky, 40 V, 1 A, ~0.4 V drop
+pins:
+  - { name: anode, desc: the plain end }
+  - { name: cathode, desc: "the end with the stripe" }
+notes:
+  - "As a flyback across a motor or coil: stripe toward + (the supply side). Reversed, it shorts the supply every time the transistor turns on."

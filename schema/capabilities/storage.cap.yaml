@@ -1,0 +1,98 @@
+capability: fr.storage
+id: 0x000F
+version: "1.0"
+summary: Files on a removable FAT card (micro-SD) - listed, read, written and removed from the hub in chunks.
+doc: |
+  Design lcd-clock-c1 D5-D6 (as built). Paths are absolute under the card ("/" is its root): ASCII, at most 96 bytes, no
+  "..", no backslash; anything else is INVALID_ARGS. Each command does one bounded piece of I/O (a chunk, a directory
+  page); the mount and the free-space walk run in the background, and while one runs (`busy`) every command answers BUSY.
+  Without card detect a removal is noticed by the next access that fails while the card no longer answers (unmounted
+  {reason: removed}); other failures (a full card, a read-only file, no memory) answer their error and keep the card.
+  `info` and `remount` mount again when the state is none. There is no format command.
+types:
+  StoreState: { enum: { none: 0, mounted: 1, error: 2 } }
+  CardType:   { enum: { unknown: 0, sdsc: 1, sdhc: 2, sdxc: 3 } }
+  UnmountReason: { enum: { removed: 0, error: 1, command: 2 } }
+  Entry:
+    doc: "One directory entry: its name (not the path), size in bytes (0 for a directory), whether it is a directory, and its modification time (unix s, 0 when unknown)."
+    fields:
+      name:  { id: 1, type: string, max: 64 }
+      size:  { id: 2, type: u32 }
+      dir:   { id: 3, type: bool }
+      mtime: { id: 4, type: u32 }
+traits:
+  removable:   { id: 1, type: bool }
+  card_detect: { id: 2, type: bool, doc: "a card-detect switch is wired (else removal is found on access)" }
+config:
+  mount_on_boot: { type: bool, default: true }
+  max_files:     { type: u8, default: 4, range: [1, 8], doc: "files open at once (FatFs keeps about 4 KB each)" }
+  chunk:         { type: u16, default: 1024, range: [128, 1024], unit: B, doc: "the most bytes one read or write carries" }
+properties:
+  state:     { id: 1, type: StoreState }
+  total_mb:  { id: 2, type: u32, unit: MB }
+  free_mb:   { id: 3, type: u32, unit: MB, doc: "refreshed after writes, at most every 10 s" }
+  card_type: { id: 4, type: CardType }
+  busy:      { id: 5, type: bool }
+events:
+  mounted:   { id: 1, priority: normal, fields: { total_mb: { id: 1, type: u32 }, free_mb: { id: 2, type: u32 } } }
+  unmounted: { id: 2, priority: normal, fields: { reason: { id: 1, type: UnmountReason } } }
+commands:
+  info:
+    id: 1
+    delivery: reliable
+    doc: "The card's state and sizes (the cached ones; a refresh follows in the reports when they are old). With no card it starts a mount and answers BUSY while it runs; an attempt that ended under 3 s ago is not repeated."
+    result:
+      state:     { id: 1, type: StoreState }
+      card_type: { id: 2, type: CardType }
+      total_mb:  { id: 3, type: u32 }
+      free_mb:   { id: 4, type: u32 }
+      name:      { id: 5, type: string, max: 8, doc: "the card's product name from its CID" }
+      speed_khz: { id: 6, type: u32 }
+  list:
+    id: 2
+    delivery: reliable
+    doc: "A directory's entries from `offset`, at most 16; `more` when there are others."
+    fields: { path: { id: 1, type: string, max: 96 }, offset: { id: 2, type: u16, default: 0 } }
+    result: { entries: { id: 1, type: "array<Entry>", max: 16 }, more: { id: 2, type: bool } }
+    examples: [ { path: "/" } ]
+  stat:
+    id: 3
+    delivery: reliable
+    doc: One path's entry; NOT_FOUND when there is none.
+    fields: { path: { id: 1, type: string, max: 96 } }
+    result: { entry: { id: 1, type: Entry } }
+  read:
+    id: 4
+    delivery: reliable
+    doc: "Up to `len` bytes (at most config chunk) from `offset`; `eof` when the file ends within them."
+    fields: { path: { id: 1, type: string, max: 96 }, offset: { id: 2, type: u32 }, len: { id: 3, type: u16 } }
+    result: { data: { id: 1, type: bytes, max: 1024 }, eof: { id: 2, type: bool } }
+  write:
+    id: 5
+    delivery: reliable
+    doc: "Writes `data` at `offset` (creating the file and the directories on the way); `truncate` cuts the file at offset + its length. The data must not exceed config chunk; an offset past the file's end, or a card too full for the data, is INVALID_ARGS."
+    fields:
+      path:     { id: 1, type: string, max: 96 }
+      offset:   { id: 2, type: u32 }
+      data:     { id: 3, type: bytes, max: 1024 }
+      truncate: { id: 4, type: bool, default: false }
+    result: { size: { id: 1, type: u32, doc: "the file's size after the write" } }
+  remove:
+    id: 6
+    delivery: reliable
+    doc: A file, or an empty directory.
+    fields: { path: { id: 1, type: string, max: 96 } }
+  mkdir:
+    id: 7
+    delivery: reliable
+    idempotent: true
+    fields: { path: { id: 1, type: string, max: 96 } }
+  rename:
+    id: 8
+    delivery: reliable
+    fields: { from: { id: 1, type: string, max: 96 }, to: { id: 2, type: string, max: 96 } }
+  remount:
+    id: 9
+    delivery: reliable
+    doc: "Unmounts (if mounted) and starts a mount in the background; answers the state now (none), `mounted` follows when it succeeds."
+    result: { state: { id: 1, type: StoreState } }

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.protect.event",
+  "title": "fr.battery.protect event",
+  "description": "The node cut loads at the floor (floor) or closed the gate above full (ceiling) on its own.",
+  "type": "object",
+  "properties": {
+    "reason": {
+      "type": "string",
+      "enum": [
+        "floor",
+        "ceiling"
+      ]
+    },
+    "mv": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(mV)"
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.haptic.pulse.args",
+  "title": "fr.haptic.pulse arguments",
+  "description": "On for `ms` at `level` % (1-100, default 100), replacing whatever runs. BUSY at or below the supply's critical, or past the cooldown budget; INVALID_ARGS above max_on_ms.",
+  "type": "object",
+  "properties": {
+    "ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535,
+      "description": "(ms)"
+    },
+    "level": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "description": "(1..100)",
+      "default": 100
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "ms": 200
+    },
+    {
+      "ms": 500,
+      "level": 60
+    }
+  ]
+}

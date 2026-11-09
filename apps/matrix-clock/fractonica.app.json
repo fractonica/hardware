@@ -1,0 +1,7 @@
+{
+  "name": "matrix-clock",
+  "kind": "worker",
+  "start": "node clock.mjs",
+  "description": "the time on the UNO Q's LED matrix, through the hub",
+  "version": "0.1.0"
+}

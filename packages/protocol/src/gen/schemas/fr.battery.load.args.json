@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:fractonica:schema:fr.battery.load.args",
+  "title": "fr.battery.load arguments",
+  "description": "The test load on for at most `seconds` (0 means 60), or off; while it is on, `on` renews its time at any level above empty. It also goes off at the floor, on a stale reading, at boot, and 60 s after the newest frame of the hub that turned it on (or at a new hub run). UNSUPPORTED without a load; BUSY turning it on at or below critical.",
+  "type": "object",
+  "properties": {
+    "on": {
+      "type": "boolean"
+    },
+    "seconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 86400,
+      "description": "(s; 0..86400)"
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "on": true,
+      "seconds": 600
+    },
+    {
+      "on": false
+    }
+  ]
+}

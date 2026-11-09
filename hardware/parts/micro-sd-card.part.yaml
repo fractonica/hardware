@@ -1,0 +1,8 @@
+schema: fractonica/part@1
+id: micro-sd-card
+name: micro-SD card (FAT32)
+category: misc
+summary: A micro-SD / TF card formatted FAT32 (SDHC up to 32 GB as sold); exFAT cards must be reformatted on the Mac.
+notes:
+  - "Format on the Mac with Disk Utility: MS-DOS (FAT), Master Boot Record."
+  - "Insert with the contacts toward the board; the slot has no card-detect switch on lcd-c6."

@@ -1,0 +1,13 @@
+[Unit]
+Description=USB gadget: NCM network (usb0) and serial console (ttyGS0)
+Requires=sys-kernel-config.mount
+After=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/qonu/usb-gadget start
+ExecStop=/usr/libexec/qonu/usb-gadget stop
+
+[Install]
+WantedBy=usb-gadget.target multi-user.target

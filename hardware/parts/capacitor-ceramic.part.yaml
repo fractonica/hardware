@@ -1,0 +1,8 @@
+schema: fractonica/part@1
+id: capacitor-ceramic
+name: Ceramic capacitor
+category: passive
+summary: Small ceramic disc or MLCC, not polarised.
+values: ["1 nF", "100 nF"]
+notes:
+  - "Markings: 102 = 1 nF, 104 = 100 nF (and a resistor marked 102 is 1 kΩ: don't mix them up)."

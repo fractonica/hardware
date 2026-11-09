@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "uno-q": {
+      "type": "stdio",
+      "command": "ssh",
+      "args": ["-F", "hosts/uno-q/local/ssh_config", "uriel-mcp", "qonu-mcp"]
+    }
+  }
+}

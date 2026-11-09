@@ -1,6 +1,8 @@
 // The host suite's I2C and SPI shim (panel_sim.hpp): the idf/ functions the panel and touch drivers call.
 #include "panel_sim.hpp"
 
+#include "fr/platform/spi_bus.hpp"
+
 #include <array>
 #include <cstring>
 #include <deque>
@@ -146,6 +148,7 @@ uint64_t spi_high_at_bus_init()
 
 void spi_reset()
 {
+    fr::platform::spi_bus_host_reset();
     PanelSim &s = ps();
     s.spi.clear();
     s.bus_up = false;

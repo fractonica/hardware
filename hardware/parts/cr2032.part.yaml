@@ -1,0 +1,8 @@
+schema: fractonica/part@1
+id: cr2032
+name: Coin cell (CR2032 primary or LIR2032 rechargeable)
+category: cell
+summary: 3 V coin cell that keeps the DS3231 counting without power.
+values: ["CR2032", "LIR2032"]
+notes:
+  - "A CR2032 must not be charged: on a ZS-042 module, remove the charging diode first."
