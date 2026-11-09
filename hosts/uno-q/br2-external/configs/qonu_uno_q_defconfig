@@ -1,0 +1,87 @@
+# qonu: minimal headless Linux for the Arduino UNO Q (QRB2210).
+# Boot chain on the board: Qualcomm ROM/XBL/ABL -> stock U-Boot (boot_a/b, untouched)
+#   -> systemd-boot (efi partition) -> Linux 7.3 with the mainline device tree.
+
+# Architecture: 4x Cortex-A53
+BR2_aarch64=y
+BR2_cortex_a53=y
+
+# Toolchain built by Buildroot (glibc is required by systemd)
+BR2_TOOLCHAIN_BUILDROOT_GLIBC=y
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_KERNEL_HEADERS_AS_KERNEL=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_7_1=y
+BR2_CCACHE=y
+BR2_REPRODUCIBLE=y
+
+# System
+BR2_INIT_SYSTEMD=y
+BR2_ROOTFS_MERGED_USR=y
+BR2_TARGET_GENERIC_HOSTNAME="uriel"
+BR2_TARGET_GENERIC_ISSUE="qonu (Arduino UNO Q)"
+# Development setting: empty root password allows console login (USB serial
+# and debug UART). SSH stays key-only. Harden before deploying anywhere.
+BR2_TARGET_GENERIC_ROOT_PASSWD=""
+BR2_TARGET_GENERIC_GETTY_PORT="ttyMSM0"
+BR2_TARGET_GENERIC_GETTY_BAUDRATE_115200=y
+BR2_SYSTEM_DHCP=""
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_QONU_PATH)/board/uno-q/rootfs-overlay"
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_QONU_PATH)/board/uno-q/post-build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_QONU_PATH)/board/uno-q/post-image.sh"
+
+# Kernel: mainline stable with the upstream Imola device tree
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="7.3.3"
+BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
+BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL_QONU_PATH)/board/uno-q/linux.config"
+BR2_LINUX_KERNEL_DTS_SUPPORT=y
+BR2_LINUX_KERNEL_INTREE_DTS_NAME="qcom/qrb2210-arduino-imola"
+BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
+
+# systemd: networkd + resolved (mDNS) + timesyncd + systemd-boot; nothing desktop-ish
+BR2_PACKAGE_SYSTEMD_BOOT=y
+BR2_PACKAGE_SYSTEMD_NETWORKD=y
+BR2_PACKAGE_SYSTEMD_RESOLVED=y
+BR2_PACKAGE_SYSTEMD_TIMESYNCD=y
+# BR2_PACKAGE_SYSTEMD_HWDB is not set
+# BR2_PACKAGE_SYSTEMD_PSTORE is not set
+# BR2_PACKAGE_SYSTEMD_VCONSOLE is not set
+
+# Board support
+BR2_PACKAGE_UNO_Q_FIRMWARE=y
+BR2_PACKAGE_WIRELESS_REGDB=y
+BR2_PACKAGE_QRTR=y
+BR2_PACKAGE_RMTFS=y
+BR2_PACKAGE_TQFTPSERV=y
+BR2_PACKAGE_QBOOTCTL=y
+BR2_PACKAGE_LIBGPIOD2=y
+BR2_PACKAGE_LIBGPIOD2_TOOLS=y
+
+# Connectivity
+BR2_PACKAGE_IWD=y
+# readline enables iwctl, for joining networks from the console
+BR2_PACKAGE_READLINE=y
+BR2_PACKAGE_OPENSSH=y
+# BR2_PACKAGE_OPENSSH_CLIENT is not set
+BR2_PACKAGE_OPENSSH_SERVER=y
+BR2_PACKAGE_OPENSSH_KEY_UTILS=y
+BR2_PACKAGE_CA_CERTIFICATES=y
+
+# Filesystem tools (fsck at boot, growing the root partition)
+BR2_PACKAGE_E2FSPROGS=y
+BR2_PACKAGE_E2FSPROGS_RESIZE2FS=y
+
+# Root filesystem: ext4 image, grown to the 10 GB partition on first boot
+BR2_TARGET_ROOTFS_EXT2=y
+BR2_TARGET_ROOTFS_EXT2_4=y
+BR2_TARGET_ROOTFS_EXT2_LABEL="qonu-root"
+BR2_TARGET_ROOTFS_EXT2_SIZE="384M"
+# 4 KiB blocks: the filesystem is grown to 10 GB on first boot
+BR2_TARGET_ROOTFS_EXT2_MKFS_OPTIONS="-O ^64bit -b 4096"
+# BR2_TARGET_ROOTFS_TAR is not set
+
+# Host tools for the efi partition image
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_MTOOLS=y

@@ -1,0 +1,12 @@
+[Match]
+Name=wlan*
+
+[Network]
+DHCP=yes
+MulticastDNS=yes
+IPv6PrivacyExtensions=no
+
+[DHCPv4]
+# Stable lease across reflashes as long as the MAC is stable.
+ClientIdentifier=mac
+RouteMetric=600

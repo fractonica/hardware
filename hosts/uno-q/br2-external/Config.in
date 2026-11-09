@@ -1,0 +1,7 @@
+menu "qonu: Arduino UNO Q support"
+	source "$BR2_EXTERNAL_QONU_PATH/package/qrtr/Config.in"
+	source "$BR2_EXTERNAL_QONU_PATH/package/rmtfs/Config.in"
+	source "$BR2_EXTERNAL_QONU_PATH/package/tqftpserv/Config.in"
+	source "$BR2_EXTERNAL_QONU_PATH/package/qbootctl/Config.in"
+	source "$BR2_EXTERNAL_QONU_PATH/package/uno-q-firmware/Config.in"
+endmenu

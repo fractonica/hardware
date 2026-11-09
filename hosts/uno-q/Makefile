@@ -1,0 +1,54 @@
+# qonu: host-side entry points (macOS or Linux, with Docker).
+IMAGE  := qonu-builder:trixie
+VOLUME := qonu-build
+HOST   ?= uriel
+# A root-owned ~/.docker/buildx/refs blocks `docker build` on this Mac; keep buildx state here.
+DOCKER := BUILDX_CONFIG=$(CURDIR)/.buildx docker
+TTY    := $(shell [ -t 0 ] && echo -it)
+RUN    := $(DOCKER) run --rm $(TTY) -v $(VOLUME):/work -v $(CURDIR):/src $(IMAGE)
+SSH    := ssh -F local/ssh_config
+
+.PHONY: help builder local build kernel-config menuconfig linux-menuconfig shell wifi flash ssh ssh-usb console clean
+
+help:
+	@echo "make build          build the image (first run ~45-75 min, then incremental)"
+	@echo "make wifi           add a Wi-Fi network to the next image (prompts, stays in local/)"
+	@echo "make flash          write efi + rootfs to the board over EDL (needs the JCTL jumper)"
+	@echo "make ssh            ssh root@$(HOST).local      make ssh-usb   ssh over USB (10.55.0.1)"
+	@echo "make console        serial console over USB (ttyGS0)"
+	@echo "make kernel-config  regenerate br2-external/board/uno-q/linux.config"
+	@echo "make menuconfig | linux-menuconfig | shell | clean"
+
+builder:
+	@$(DOCKER) build -q -t $(IMAGE) docker/ >/dev/null
+
+local:
+	@scripts/setup-local.sh
+
+build: builder local
+	$(RUN) /src/scripts/build.sh
+
+kernel-config: builder
+	$(RUN) /src/scripts/gen-kernel-config.sh
+
+menuconfig linux-menuconfig clean: builder
+	$(RUN) /src/scripts/build.sh $@
+
+shell: builder
+	$(DOCKER) run --rm -it -v $(VOLUME):/work -v $(CURDIR):/src $(IMAGE) bash
+
+wifi:
+	@scripts/add-wifi.sh
+
+flash:
+	@scripts/flash.sh
+
+ssh: local
+	$(SSH) $(HOST)
+
+ssh-usb: local
+	$(SSH) $(HOST)-usb
+
+console:
+	@dev=$$(ls /dev/cu.usbmodem* 2>/dev/null | head -n1); [ -n "$$dev" ] || { echo "no USB serial device"; exit 1; }; \
+	echo "screen $$dev 115200  (exit: Ctrl-A then K)"; screen $$dev 115200

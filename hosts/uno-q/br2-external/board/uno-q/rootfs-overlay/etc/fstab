@@ -1,0 +1,7 @@
+# <device>           <mount>  <type>  <options>                                                         <dump> <pass>
+# The kernel mounts / read-only; systemd fscks it, remounts it rw and grows it to the partition.
+/dev/root            /        ext4    rw,noatime,x-systemd.growfs                                       0      1
+# efi partition (kernel, device tree, systemd-boot): mounted on first access only.
+PARTLABEL=efi        /boot    vfat    noauto,x-systemd.automount,x-systemd.idle-timeout=60,umask=0077   0      0
+# userdata partition, left as Arduino created it. Persistent storage that survives rootfs reflashes.
+PARTLABEL=userdata   /data    ext4    noatime,nofail,x-systemd.device-timeout=15s                       0      2

@@ -1,0 +1,12 @@
+[Unit]
+Description=QRTR TFTP server (firmware for the modem DSP)
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=/usr/bin/tqftpserv
+Restart=always
+RestartSec=1
+StateDirectory=tqftpserv
+
+[Install]
+WantedBy=multi-user.target

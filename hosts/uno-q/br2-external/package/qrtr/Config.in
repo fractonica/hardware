@@ -1,0 +1,7 @@
+config BR2_PACKAGE_QRTR
+	bool "qrtr"
+	help
+	  Library and tools for the Qualcomm IPC Router (QRTR), used to
+	  talk to the modem/ADSP remote processors.
+
+	  https://github.com/linux-msm/qrtr
