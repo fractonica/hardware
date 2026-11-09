@@ -11,6 +11,7 @@ qonu-link-proto = { path = "../proto" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
+heapless = { version = "0.9.3", default-features = false }
 
 [profile.release]
 opt-level = "s"

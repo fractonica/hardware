@@ -4,6 +4,7 @@
 #   link.sh firmware   STM32 firmware ELF  -> /work/link-target/firmware/.../qonu-fw
 #   link.sh daemon     qonu-link for the board -> /work/link-target/daemon/.../qonu-link
 #   link.sh mcp        qonu-mcp for the board  -> /work/link-target/mcp/.../qonu-mcp
+#   link.sh dash       qonu-dash for the board -> /work/link-target/dash/.../qonu-dash
 set -euo pipefail
 export CARGO_HOME=/work/cargo
 case "${1:-}" in
@@ -21,5 +22,9 @@ mcp)
 	[ -x /work/output/host/bin/aarch64-buildroot-linux-gnu-gcc ] \
 		|| { echo "needs Buildroot's toolchain: run make build first" >&2; exit 1; }
 	cd /src/link/mcp && CARGO_TARGET_DIR=/work/link-target/mcp cargo build --release --locked ;;
-*) echo "usage: $0 test|firmware|daemon|mcp" >&2; exit 2 ;;
+dash)
+	[ -x /work/output/host/bin/aarch64-buildroot-linux-gnu-gcc ] \
+		|| { echo "needs Buildroot's toolchain: run make build first" >&2; exit 1; }
+	cd /src/link/dash && CARGO_TARGET_DIR=/work/link-target/dash cargo build --release --locked ;;
+*) echo "usage: $0 test|firmware|daemon|mcp|dash" >&2; exit 2 ;;
 esac

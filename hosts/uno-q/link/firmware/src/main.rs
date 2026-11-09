@@ -11,12 +11,16 @@
 #![no_std]
 #![no_main]
 
+mod display;
+
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Flex, Level, Output, Speed};
 use embassy_stm32::mode::Async;
+use embassy_stm32::spi::{self, Spi};
+use embassy_stm32::time::Hertz;
 use embassy_stm32::usart::{self, RingBufferedUartRx, Uart, UartTx};
 use embassy_stm32::wdg::IndependentWatchdog;
 use embassy_stm32::{bind_interrupts, dma, pac, peripherals};
@@ -44,6 +48,12 @@ const RTSCTS: bool = match option_env!("QONU_RTSCTS") {
     None => true,
 };
 const WATCHDOG_US: u32 = 1_000_000;
+/// SPI clock for the display; the ST7789 accepts up to ~62 MHz. Override with
+/// QONU_LCD_MHZ if long jumper wires garble the picture.
+const LCD_SPI_HZ: u32 = match option_env!("QONU_LCD_MHZ") {
+    Some(m) => parse_u32(m) * 1_000_000,
+    None => 40_000_000,
+};
 
 const FW: [u8; 3] = [
     parse_u8(env!("CARGO_PKG_VERSION_MAJOR")),
@@ -55,6 +65,7 @@ bind_interrupts!(struct Irqs {
     LPUART1 => usart::InterruptHandler<peripherals::LPUART1>;
     GPDMA1_CHANNEL0 => dma::InterruptHandler<peripherals::GPDMA1_CH0>;
     GPDMA1_CHANNEL1 => dma::InterruptHandler<peripherals::GPDMA1_CH1>;
+    GPDMA1_CHANNEL2 => dma::InterruptHandler<peripherals::GPDMA1_CH2>;
 });
 
 // ------------------------------------------------------------ shared state
@@ -165,6 +176,7 @@ mod failsafe {
     /// Drives every host-owned output to its safe level.
     fn safe_outputs() {
         matrix::set([0; proto::MATRIX_HEIGHT]);
+        display::failsafe_banner();
         LED3.lock(|l| {
             if let Some(leds) = l.borrow_mut().as_mut() {
                 for led in leds.iter_mut() {
@@ -222,6 +234,15 @@ fn handle(req: Request) -> Response {
             loop {} // blocks the executor: nothing pets the watchdog
         }
         Request::Fault { kind: Fault::Panic } => panic!("fault injection"),
+        Request::Draw { ops } => {
+            if failsafe::state() == FailsafeState::Tripped {
+                return Response::Error(ErrorCode::FailsafeTripped);
+            }
+            for op in &ops {
+                display::apply(op);
+            }
+            Response::Ok
+        }
         Request::Matrix { rows } => {
             if failsafe::state() == FailsafeState::Tripped {
                 return Response::Error(ErrorCode::FailsafeTripped);
@@ -431,6 +452,21 @@ async fn main(spawner: Spawner) {
     spawner.spawn(link_rx(rx).unwrap());
     spawner.spawn(link_tx(tx).unwrap());
     spawner.spawn(matrix::scan(matrix_pins).unwrap());
+
+    // SPI display on the UNO header: D13 SCK, D11 MOSI, D10 CS, D9 DC, D8 RES, D6 BL.
+    let mut spi_config = spi::Config::default();
+    spi_config.frequency = Hertz(LCD_SPI_HZ);
+    let lcd_spi = Spi::new_txonly(p.SPI2, p.PB13, p.PB15, p.GPDMA1_CH2, Irqs, spi_config);
+    spawner.spawn(
+        display::run(
+            lcd_spi,
+            Output::new(p.PB9, Level::High, Speed::VeryHigh), // CS, idle high
+            Output::new(p.PB8, Level::Low, Speed::VeryHigh),  // DC
+            Output::new(p.PB4, Level::High, Speed::Low),      // RES
+            Output::new(p.PB1, Level::Low, Speed::Low),       // backlight off until the first frame
+        )
+        .unwrap(),
+    );
 
     let mut wdg = IndependentWatchdog::new(p.IWDG, WATCHDOG_US);
     wdg.unleash();

@@ -8,8 +8,8 @@
 //! Socket protocol, one JSON object per line in each direction:
 //!   -> {"id": 1, "method": "ping", "params": {}}
 //!   <- {"id": 1, "ok": true, "result": {...}}   or   {"id": 1, "ok": false, "error": "..."}
-//! Methods: ping, info, stats, led {r,g,b}, matrix {rows}, clear_failsafe, bench {n},
-//! fault {kind}.
+//! Methods: ping, info, stats, led {r,g,b}, matrix {rows}, draw {ops}, clear_failsafe,
+//! bench {n}, fault {kind}.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 use std::{env, process, thread};
 
 use qonu_link_proto::{
-    self as proto, Accumulator, ErrorCode, Event, FailsafeState, Fault, FrameError, MATRIX_HEIGHT, MATRIX_WIDTH, MAX_FRAME,
-    Request, Response, Up,
+    self as proto, Accumulator, Align, DrawOp, ErrorCode, Event, FailsafeState, Fault, Font, FrameError, MATRIX_HEIGHT,
+    MATRIX_WIDTH, MAX_DRAW_OPS, MAX_FRAME, Request, Response, Up,
 };
 use serde_json::{Value, json};
 
@@ -354,6 +354,136 @@ fn parse_matrix(rows: &Value) -> Result<[u16; MATRIX_HEIGHT], String> {
     Ok(out)
 }
 
+/// "#rrggbb", "#rgb" or a raw RGB565 number.
+fn parse_color(v: &Value) -> Result<u16, String> {
+    match v {
+        Value::Number(n) => n.as_u64().filter(|&n| n <= 0xFFFF).map(|n| n as u16).ok_or("RGB565 colors are 0..65535".into()),
+        Value::String(s) => {
+            let hex = s.strip_prefix('#').unwrap_or(s);
+            let byte = |i: usize, w: usize| u8::from_str_radix(&hex[i..i + w], 16).map(|b| if w == 1 { b * 17 } else { b });
+            let rgb = match hex.len() {
+                6 => (byte(0, 2), byte(2, 2), byte(4, 2)),
+                3 => (byte(0, 1), byte(1, 1), byte(2, 1)),
+                _ => return Err(format!("color {s:?}: use #rrggbb or #rgb")),
+            };
+            match rgb {
+                (Ok(r), Ok(g), Ok(b)) => Ok(proto::rgb565(r, g, b)),
+                _ => Err(format!("color {s:?}: not hex")),
+            }
+        }
+        _ => Err("color must be \"#rrggbb\" or a number".into()),
+    }
+}
+
+/// One draw op from JSON, e.g. {"op":"text","x":4,"y":2,"text":"hi","font":"large","color":"#fff"}.
+fn parse_op(o: &Value) -> Result<DrawOp, String> {
+    let int = |k: &str, default: Option<i64>| -> Result<i64, String> {
+        match o.get(k) {
+            Some(v) => v.as_i64().ok_or_else(|| format!("{k} must be an integer")),
+            None => default.ok_or_else(|| format!("{k} is required")),
+        }
+    };
+    let i16_ = |k: &str| int(k, None).map(|v| v.clamp(i16::MIN as i64, i16::MAX as i64) as i16);
+    let u16_ = |k: &str, d: Option<i64>| int(k, d).map(|v| v.clamp(0, u16::MAX as i64) as u16);
+    let u8_ = |k: &str, d: Option<i64>| int(k, d).map(|v| v.clamp(0, 255) as u8);
+    let color = |k: &str| o.get(k).map(parse_color).unwrap_or(Ok(0xFFFF));
+    let bg = || o.get("bg").filter(|v| !v.is_null()).map(parse_color).transpose();
+    Ok(match o.get("op").and_then(Value::as_str).unwrap_or("") {
+        "clear" => DrawOp::Clear { color: o.get("color").map(parse_color).unwrap_or(Ok(0))? },
+        "rect" => DrawOp::Rect {
+            x: i16_("x")?,
+            y: i16_("y")?,
+            w: u16_("w", None)?,
+            h: u16_("h", None)?,
+            color: color("color")?,
+            filled: o.get("filled").and_then(Value::as_bool).unwrap_or(true),
+        },
+        "line" => DrawOp::Line {
+            x0: i16_("x0")?,
+            y0: i16_("y0")?,
+            x1: i16_("x1")?,
+            y1: i16_("y1")?,
+            color: color("color")?,
+            width: u8_("width", Some(1))?,
+        },
+        "text" => {
+            let s = o.get("text").and_then(Value::as_str).ok_or("text is required")?;
+            DrawOp::Text {
+                x: i16_("x")?,
+                y: i16_("y")?,
+                font: match o.get("font").and_then(Value::as_str).unwrap_or("medium") {
+                    "small" => Font::Small,
+                    "medium" => Font::Medium,
+                    "large" => Font::Large,
+                    "huge" => Font::Huge,
+                    f => return Err(format!("font {f:?}: small, medium, large or huge")),
+                },
+                align: match o.get("align").and_then(Value::as_str).unwrap_or("left") {
+                    "left" => Align::Left,
+                    "center" => Align::Center,
+                    "right" => Align::Right,
+                    a => return Err(format!("align {a:?}: left, center or right")),
+                },
+                color: color("color")?,
+                bg: bg()?,
+                text: heapless::String::try_from(s).map_err(|_| format!("text {s:?} is over {} bytes", proto::MAX_TEXT))?,
+            }
+        }
+        "bars" => {
+            let values: Vec<u8> = o
+                .get("values")
+                .and_then(Value::as_array)
+                .ok_or("values (0-100 each) are required")?
+                .iter()
+                .map(|v| v.as_f64().map(|f| f.clamp(0.0, 100.0).round() as u8).ok_or("values must be numbers"))
+                .collect::<Result<_, _>>()?;
+            DrawOp::Bars {
+                x: i16_("x")?,
+                y: i16_("y")?,
+                h: u16_("h", None)?,
+                bar_w: u8_("bar_w", Some(2))?,
+                gap: u8_("gap", Some(1))?,
+                color: color("color")?,
+                bg: bg()?,
+                values: heapless::Vec::from_slice(&values).map_err(|_| format!("at most {} values", proto::MAX_BARS))?,
+            }
+        }
+        "present" => DrawOp::Present,
+        "backlight" => DrawOp::Backlight { on: o.get("on").and_then(Value::as_bool).unwrap_or(true) },
+        other => return Err(format!("unknown op {other:?}: clear, rect, line, text, bars, present, backlight")),
+    })
+}
+
+/// Sends ops in as few frames as fit. Returns how many frames it took.
+fn draw(link: &Link, ops: &[Value]) -> Result<usize, String> {
+    let ops = ops.iter().enumerate().map(|(i, o)| parse_op(o).map_err(|e| format!("op {i}: {e}"))).collect::<Result<Vec<_>, _>>()?;
+    let fits = |batch: &heapless::Vec<DrawOp, MAX_DRAW_OPS>| {
+        proto::encode(0, &Request::Draw { ops: batch.clone() }, &mut [0u8; MAX_FRAME]).is_ok()
+    };
+    let send = |batch: heapless::Vec<DrawOp, MAX_DRAW_OPS>| expect_ok(link.call(&Request::Draw { ops: batch }));
+    let mut batch = heapless::Vec::<DrawOp, MAX_DRAW_OPS>::new();
+    let mut frames = 0;
+    for (i, op) in ops.into_iter().enumerate() {
+        if batch.push(op.clone()).is_err() || !fits(&batch) {
+            batch.pop();
+            if batch.is_empty() {
+                return Err(format!("op {i} alone is too large for one frame"));
+            }
+            send(std::mem::take(&mut batch))?;
+            frames += 1;
+            batch.push(op).ok();
+            if !fits(&batch) {
+                return Err(format!("op {i} alone is too large for one frame"));
+            }
+        }
+    }
+    if !batch.is_empty() {
+        send(batch)?;
+        frames += 1;
+    }
+    Ok(frames)
+}
+
 fn expect_ok(r: Result<Response, CallError>) -> Result<Value, String> {
     match r {
         Ok(Response::Ok) => Ok(json!("ok")),
@@ -396,6 +526,10 @@ fn dispatch(link: &Link, req: &Value) -> Value {
         },
         "led" => expect_ok(link.call(&Request::SetLed { led: 0, r: flag("r"), g: flag("g"), b: flag("b") })),
         "clear_failsafe" => expect_ok(link.call(&Request::ClearFailsafe)),
+        "draw" => match params.get("ops").and_then(Value::as_array) {
+            Some(ops) => draw(link, ops).map(|frames| json!({"ops": ops.len(), "frames": frames})),
+            None => Err("params.ops must be an array of draw ops".into()),
+        },
         "matrix" => match params.get("rows").map(parse_matrix) {
             Some(Ok(rows)) => expect_ok(link.call(&Request::Matrix { rows })),
             Some(Err(e)) => Err(e),

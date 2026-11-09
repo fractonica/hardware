@@ -9,7 +9,7 @@ RUN    := $(DOCKER) run --rm $(TTY) -v $(VOLUME):/work -v $(CURDIR):/src $(IMAGE
 SSH    := ssh -F local/ssh_config
 
 .PHONY: help builder local build kernel-config menuconfig linux-menuconfig shell wifi flash ssh ssh-usb console clean \
-	link-test mcu-flash link-push mcp-push
+	link-test mcu-flash link-push mcp-push dash-push
 
 help:
 	@echo "make build          build the image (first run ~45-75 min, then incremental)"
@@ -22,6 +22,7 @@ help:
 	@echo "make mcu-flash      build the STM32 firmware and flash it over SWD (board must be up)"
 	@echo "make link-push      build qonu-link, install it on the board, restart the daemon"
 	@echo "make mcp-push       build qonu-mcp and install it on the board"
+	@echo "make dash-push      build qonu-dash, install it on the board, restart the dashboard"
 	@echo "make menuconfig | linux-menuconfig | shell | clean"
 
 builder:
@@ -62,6 +63,7 @@ console:
 FW_ELF := /work/link-target/firmware/thumbv8m.main-none-eabihf/release/qonu-fw
 LINKD  := /work/link-target/daemon/aarch64-unknown-linux-gnu/release/qonu-link
 MCPD   := /work/link-target/mcp/aarch64-unknown-linux-gnu/release/qonu-mcp
+DASHD  := /work/link-target/dash/aarch64-unknown-linux-gnu/release/qonu-dash
 
 link-test: builder
 	$(RUN) /src/scripts/link.sh test
@@ -77,3 +79,7 @@ link-push: builder local
 mcp-push: builder local
 	$(RUN) /src/scripts/link.sh mcp
 	$(DOCKER) run --rm -v $(VOLUME):/work $(IMAGE) cat $(MCPD) | $(SSH) $(HOST)-usb 'cat > /tmp/qonu-mcp && install -m 0755 /tmp/qonu-mcp /usr/bin/qonu-mcp && echo "qonu-mcp installed"'
+
+dash-push: builder local
+	$(RUN) /src/scripts/link.sh dash
+	$(DOCKER) run --rm -v $(VOLUME):/work $(IMAGE) cat $(DASHD) | $(SSH) $(HOST)-usb 'cat > /tmp/qonu-dash && install -m 0755 /tmp/qonu-dash /usr/bin/qonu-dash && systemctl restart qonu-dash && echo "qonu-dash restarted"'

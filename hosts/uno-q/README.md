@@ -19,6 +19,7 @@ Goals for this first layer:
 | MCU link | `qonu-link` daemon and the qonu-fw Rust/Embassy firmware for the STM32U585, over the UART at 4 Mbaud with RTS/CTS (see [STM32 link](#stm32-link)) |
 | MCU flashing | OpenOCD (pinned upstream commit, libgpiod v2) bit-banging SWD on the QRB2210's GPIOs; `qonu-mcu` wraps it |
 | Agent access | `qonu-mcp`, an MCP server over stdio, reached through SSH with a key that can only start it (see [MCP server](#mcp-server)) |
+| Display | 1.47" ST7789 IPS panel on the STM32's SPI2, with a vitals dashboard from `qonu-dash` (see [Display dashboard](#display-dashboard)) |
 | Rootfs | ext4, mounted read-only by the kernel, then fsck'd, remounted rw, and grown to the 10 GB partition by systemd |
 | Size | No package manager, no Docker, no desktop. See `out/flash` after a build. |
 
@@ -198,6 +199,45 @@ claude -p "draw a smiley on the uno-q LED matrix" --mcp-config .mcp.json --stric
 
 Claude Code driven headless (`claude -p`) checked status, drew a smiley, scrolled `HELLO QONU`, redrew the smiley and set LED3 green. Every call went through SSH → `qonu-mcp` → `qonu-link` → the STM32, with 0 link errors. A second run played a 12-frame animation and left a heart on the matrix. Checked by eye on the board: the heart is upright and LED3 is green. This confirms the charlieplex pin map and the row and column orientation.
 
+## Display dashboard
+
+A 1.47" 172×320 ST7789 IPS module (sold as GMT147SPI) sits on the STM32's SPI2 at the UNO header. It is driven in landscape, 320×172.
+
+| Display | UNO Q header | STM32 |
+|---|---|---|
+| GND | GND | — |
+| VDD | 3.3V | — |
+| SCL | D13 | PB13, SPI2 SCK |
+| SDA | D11 | PB15, SPI2 MOSI |
+| RES | D8 | PB4 |
+| DC | D9 | PB8 |
+| CS | D10 | PB9 |
+| BL | D6 | PB1 |
+
+**Firmware (`link/firmware/src/display.rs`):**
+- Draw ops paint a 110 KB back buffer in the STM32's SRAM.
+- `Present` copies the rows that changed into a front buffer and streams them to the panel over SPI with DMA at 40 MHz (`QONU_LCD_MHZ` overrides it). The panel never shows a half-drawn frame, and the link never waits for SPI.
+- At power-up the STM32 shows a splash screen. If the failsafe trips, it shows a "LINK LOST" banner by itself.
+
+**Protocol:** `Request::Draw { ops }` carries up to 24 ops of these kinds:
+- `Clear`, `Rect`, `Line`
+- `Text` in 4 fonts with alignment and background
+- `Bars`, a bar graph of 0-100 values
+- `Present`, `Backlight`
+
+The daemon's `draw` method takes the ops as JSON (`{"op":"text","x":4,"y":2,"text":"hi","font":"large","color":"#fff"}`) and packs them into as few link frames as fit.
+
+**`qonu-dash`** (`link/dash`, `qonu-dash.service`) redraws the whole screen once a second. It shows:
+- hostname, clock and uptime
+- CPU load as a total, per core (4 cores) and a 60-second history
+- load average and memory
+- temperatures from the thermal zones (CPU, GPU, Wi-Fi, modem)
+- disk use of `/` and `/data`
+- Wi-Fi network name, signal (from `iwctl`), IP address and receive/transmit rates
+- the STM32 link: firmware version, round-trip time, errors and failsafe state
+
+A full redraw costs about 1 KB on the link and 22 ms of SPI. Because each frame is complete, the picture heals by itself after an MCU reset or a failsafe trip. `make dash-push` updates it.
+
 ## Layout
 
 ```
@@ -216,6 +256,7 @@ link/                         the STM32 link, in Rust
   firmware/                   qonu-fw for the STM32U585 (Embassy)
   daemon/                     qonu-link: Linux daemon + CLI
   mcp/                        qonu-mcp: MCP server (tools over stdio)
+  dash/                       qonu-dash: vitals dashboard for the SPI display
 .mcp.json                     registers qonu-mcp with Claude Code (via ssh uriel-mcp)
 br2-external/                 Buildroot external tree (BR2_EXTERNAL_QONU)
   configs/qonu_uno_q_defconfig

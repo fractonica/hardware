@@ -51,6 +51,76 @@ pub enum Request {
     /// Shows a frame on the 13x8 LED matrix: one row per element, top first;
     /// bit `x` lights column `x` (0 = left). Bits above 12 are ignored.
     Matrix { rows: [u16; MATRIX_HEIGHT] },
+    /// Drawing on the SPI display. Ops paint an off-screen buffer in order;
+    /// `DrawOp::Present` shows it. Hosts split long op lists across frames.
+    Draw { ops: heapless::Vec<DrawOp, MAX_DRAW_OPS> },
+}
+
+/// Display geometry, landscape, origin top left.
+pub const DISPLAY_WIDTH: u16 = 320;
+pub const DISPLAY_HEIGHT: u16 = 172;
+pub const MAX_DRAW_OPS: usize = 24;
+pub const MAX_TEXT: usize = 64;
+pub const MAX_BARS: usize = 96;
+
+/// One drawing operation. Colors are RGB565. Coordinates may run off-screen;
+/// drawing is clipped.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum DrawOp {
+    /// Fill the whole buffer.
+    Clear { color: u16 },
+    Rect { x: i16, y: i16, w: u16, h: u16, color: u16, filled: bool },
+    Line { x0: i16, y0: i16, x1: i16, y1: i16, color: u16, width: u8 },
+    /// Text with its top edge at `y`; `x` is the left, center or right edge
+    /// per `align`. With `bg`, glyph cells are painted (erasing what was there).
+    Text {
+        x: i16,
+        y: i16,
+        font: Font,
+        align: Align,
+        color: u16,
+        bg: Option<u16>,
+        text: heapless::String<MAX_TEXT>,
+    },
+    /// Bar graph in the box `(x, y, w = len * (bar_w + gap), h)`: one bar per
+    /// value (0-100, % of `h`), bottom aligned. With `bg`, the box is cleared first.
+    Bars {
+        x: i16,
+        y: i16,
+        h: u16,
+        bar_w: u8,
+        gap: u8,
+        color: u16,
+        bg: Option<u16>,
+        values: heapless::Vec<u8, MAX_BARS>,
+    },
+    /// Show what has been drawn so far.
+    Present,
+    Backlight { on: bool },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Font {
+    /// 6x10 px cells
+    Small,
+    /// 8x13
+    Medium,
+    /// 10x20
+    Large,
+    /// ProFont 24 pt (16x29 px cells), for big numbers
+    Huge,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+/// 8-bit-per-channel color to RGB565.
+pub const fn rgb565(r: u8, g: u8, b: u8) -> u16 {
+    ((r as u16 & 0xF8) << 8) | ((g as u16 & 0xFC) << 3) | (b as u16 >> 3)
 }
 
 pub const MATRIX_WIDTH: usize = 13;
@@ -387,6 +457,34 @@ mod tests {
         assert!(n <= MAX_FRAME);
         let mut wire = out[..n - 1].to_vec();
         assert_eq!(unframe(&mut wire).unwrap().parse::<Up>().unwrap(), up);
+    }
+
+    #[test]
+    fn draw_batches_fit_in_a_frame() {
+        let mut ops = heapless::Vec::<DrawOp, MAX_DRAW_OPS>::new();
+        ops.push(DrawOp::Clear { color: rgb565(0, 0, 0) }).unwrap();
+        ops.push(DrawOp::Text {
+            x: 160,
+            y: 2,
+            font: Font::Medium,
+            align: Align::Center,
+            color: 0xFFFF,
+            bg: Some(0),
+            text: heapless::String::try_from("uriel  12:34:56  up 3h").unwrap(),
+        })
+        .unwrap();
+        ops.push(DrawOp::Present).unwrap();
+        let mut out = [0u8; MAX_FRAME];
+        let n = encode(1, &Request::Draw { ops: ops.clone() }, &mut out).unwrap();
+        let mut wire = out[..n - 1].to_vec();
+        assert_eq!(unframe(&mut wire).unwrap().parse::<Request>().unwrap(), Request::Draw { ops });
+        // A full bar graph alone must still fit, so hosts can always send it.
+        let mut big = heapless::Vec::<DrawOp, MAX_DRAW_OPS>::new();
+        let values = heapless::Vec::from_slice(&[100u8; MAX_BARS]).unwrap();
+        big.push(DrawOp::Bars { x: 0, y: 0, h: 30, bar_w: 2, gap: 1, color: 0xFFFF, bg: Some(0), values }).unwrap();
+        assert!(encode(2, &Request::Draw { ops: big }, &mut out).is_ok());
+        assert_eq!(rgb565(255, 255, 255), 0xFFFF);
+        assert_eq!(rgb565(255, 0, 0), 0xF800);
     }
 
     #[test]
