@@ -1,0 +1,5 @@
+#!/bin/sh
+# fr, the Fractonica CLI, against the board's own hub (fractonica-hub.service, API on 7520).
+export FR_HUB="${FR_HUB:-http://127.0.0.1:7520}"
+export FR_HOME="${FR_HOME:-/data/fractonica/home}"
+exec /usr/bin/node --conditions=@fractonica/source /data/fractonica/hub/packages/cli/src/main.ts "$@"

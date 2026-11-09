@@ -24,6 +24,7 @@ QONU_LINK_DAEMON = $(QONU_LINK_TARGETS)/daemon/aarch64-unknown-linux-gnu/release
 QONU_LINK_FW = $(QONU_LINK_TARGETS)/firmware/thumbv8m.main-none-eabihf/release/qonu-fw
 QONU_LINK_MCP = $(QONU_LINK_TARGETS)/mcp/aarch64-unknown-linux-gnu/release/qonu-mcp
 QONU_LINK_DASH = $(QONU_LINK_TARGETS)/dash/aarch64-unknown-linux-gnu/release/qonu-dash
+QONU_LINK_WEB = $(QONU_LINK_TARGETS)/web/aarch64-unknown-linux-gnu/release/qonu-web
 
 define QONU_LINK_BUILD_CMDS
 	cd $(QONU_LINK_SRC)/daemon && CARGO_TARGET_DIR=$(QONU_LINK_TARGETS)/daemon $(QONU_LINK_CARGO) \
@@ -35,6 +36,9 @@ define QONU_LINK_BUILD_CMDS
 	cd $(QONU_LINK_SRC)/dash && CARGO_TARGET_DIR=$(QONU_LINK_TARGETS)/dash $(QONU_LINK_CARGO) \
 		build --release --locked --target aarch64-unknown-linux-gnu \
 		--config 'target.aarch64-unknown-linux-gnu.linker="$(TARGET_CC)"'
+	cd $(QONU_LINK_SRC)/web && CARGO_TARGET_DIR=$(QONU_LINK_TARGETS)/web $(QONU_LINK_CARGO) \
+		build --release --locked --target aarch64-unknown-linux-gnu \
+		--config 'target.aarch64-unknown-linux-gnu.linker="$(TARGET_CC)"'
 	cd $(QONU_LINK_SRC)/firmware && CARGO_TARGET_DIR=$(QONU_LINK_TARGETS)/firmware \
 		$(QONU_LINK_CARGO) build --release --locked
 endef
@@ -43,6 +47,7 @@ define QONU_LINK_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(QONU_LINK_DAEMON) $(TARGET_DIR)/usr/bin/qonu-link
 	$(INSTALL) -D -m 0755 $(QONU_LINK_MCP) $(TARGET_DIR)/usr/bin/qonu-mcp
 	$(INSTALL) -D -m 0755 $(QONU_LINK_DASH) $(TARGET_DIR)/usr/bin/qonu-dash
+	$(INSTALL) -D -m 0755 $(QONU_LINK_WEB) $(TARGET_DIR)/usr/bin/qonu-web
 	mkdir -p $(TARGET_DIR)/usr/share/qonu/mcu
 	$(QONU_LINK_LLVM_STRIP) --strip-debug -o $(TARGET_DIR)/usr/share/qonu/mcu/qonu-fw.elf $(QONU_LINK_FW)
 	chmod 0644 $(TARGET_DIR)/usr/share/qonu/mcu/qonu-fw.elf

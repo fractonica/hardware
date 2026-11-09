@@ -34,6 +34,16 @@ for f in "$LOCAL"/wifi/*.psk "$LOCAL"/wifi/*.open; do
 done
 shopt -u nullglob
 
+# Time zone, from local/timezone (scripts/setup-local.sh writes this computer's). Change it on the board with
+# timedatectl set-timezone.
+tz=$(tr -d '[:space:]' < "$LOCAL/timezone" 2>/dev/null || true)
+if [ -n "$tz" ] && [ -f "$TARGET_DIR/usr/share/zoneinfo/$tz" ]; then
+	ln -sfn "../usr/share/zoneinfo/$tz" "$TARGET_DIR/etc/localtime"
+	echo "$tz" > "$TARGET_DIR/etc/timezone"
+elif [ -n "$tz" ]; then
+	echo "post-build: WARNING: unknown time zone '$tz' in $LOCAL/timezone; the board stays on UTC" >&2
+fi
+
 # Arduino's per-PCB Wi-Fi calibration, if it was copied off a stock board.
 if [ -s "$LOCAL/firmware/board-2.bin" ]; then
 	install -m 0644 "$LOCAL/firmware/board-2.bin" \
@@ -42,7 +52,7 @@ fi
 
 "${SYSTEMCTL[@]}" enable \
 	rmtfs.service tqftpserv.service qbootctl-mark.service qonu-mcu-boot0.service \
-	qonu-usb-gadget.service serial-getty@ttyGS0.service qonu-link.service qonu-dash.service \
+	qonu-usb-gadget.service serial-getty@ttyGS0.service qonu-link.service qonu-dash.service qonu-node.service qonu-web.service fractonica-hub.service \
 	iwd.service sshd.service \
 	systemd-networkd.service systemd-resolved.service systemd-timesyncd.service
 

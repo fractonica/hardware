@@ -9,9 +9,11 @@ export BR2_DL_DIR=/work/dl BR2_CCACHE_DIR=/work/ccache QONU_LOCAL_DIR=/src/local
 if [ ! -f "$O/.config" ] || [ "$EXT/configs/qonu_uno_q_defconfig" -nt "$O/.config" ]; then
 	make -C "$BR" O="$O" BR2_EXTERNAL="$EXT" qonu_uno_q_defconfig
 fi
-# Buildroot doesn't track changes under link/; cargo does, so let it decide.
+# Buildroot does not track changes under link/ (cargo does) or in the Fractonica checkout (make does): rebuild both.
 if [ $# -eq 0 ] || [ "$1" = all ]; then
 	[ -d "$O/build/qonu-link-0.1.0" ] && make -C "$O" qonu-link-rebuild
+	# qonu-node builds against the Fractonica checkout at /fr, which Buildroot does not watch either.
+	[ -d "$O/build/qonu-node-0.1.0" ] && make -C "$O" qonu-node-rebuild
 fi
 make -C "$O" "$@"
 

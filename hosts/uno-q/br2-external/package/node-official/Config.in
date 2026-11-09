@@ -1,0 +1,10 @@
+config BR2_PACKAGE_NODE_OFFICIAL
+	bool "node-official"
+	depends on BR2_aarch64
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on BR2_INSTALL_LIBSTDCPP
+	help
+	  Node.js from nodejs.org's prebuilt linux-arm64 release
+	  (Buildroot's own nodejs is 22.x; the Fractonica hub needs
+	  >= 24.12). Installs /usr/bin/node and npm/npx, for the hub
+	  and the apps deployed to the board.

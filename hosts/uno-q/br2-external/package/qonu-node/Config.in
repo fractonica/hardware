@@ -1,0 +1,12 @@
+config BR2_PACKAGE_QONU_NODE
+	bool "qonu-node"
+	depends on BR2_aarch64
+	depends on BR2_INSTALL_LIBSTDCPP
+	depends on BR2_TOOLCHAIN_HAS_THREADS
+	depends on BR2_PACKAGE_QONU_LINK
+	help
+	  The UNO Q as a Fractonica device: /usr/bin/qonu-node runs
+	  Fractonica's node runtime (fr_posix) and offers the STM32's
+	  LED3 and LED matrix to the hub through qonu-link. Built from
+	  hosts/uno-q/node against the Fractonica checkout, which the
+	  builder mounts at /fr.

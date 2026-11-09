@@ -1,0 +1,17 @@
+[Unit]
+Description=qonu-node: the UNO Q as a Fractonica device
+Documentation=file:///usr/share/doc/qonu/README.md
+After=qonu-link.service systemd-resolved.service network-online.target
+Wants=qonu-link.service network-online.target
+
+[Service]
+ExecStart=/usr/bin/qonu-node
+# 75: fr.node.reboot asked for a restart; any other stop restarts too, after a pause.
+Restart=always
+RestartSec=2
+# 64: no hub configured yet (`qonu-node set-hub HOST`) or bad options: wait for a person instead of looping.
+RestartPreventExitStatus=64
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

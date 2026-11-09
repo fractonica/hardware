@@ -6,4 +6,6 @@ menu "qonu: Arduino UNO Q support"
 	source "$BR2_EXTERNAL_QONU_PATH/package/uno-q-firmware/Config.in"
 	source "$BR2_EXTERNAL_QONU_PATH/package/uno-q-openocd/Config.in"
 	source "$BR2_EXTERNAL_QONU_PATH/package/qonu-link/Config.in"
+	source "$BR2_EXTERNAL_QONU_PATH/package/qonu-node/Config.in"
+	source "$BR2_EXTERNAL_QONU_PATH/package/node-official/Config.in"
 endmenu

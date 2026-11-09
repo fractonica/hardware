@@ -8,8 +8,9 @@
 //! Socket protocol, one JSON object per line in each direction:
 //!   -> {"id": 1, "method": "ping", "params": {}}
 //!   <- {"id": 1, "ok": true, "result": {...}}   or   {"id": 1, "ok": false, "error": "..."}
-//! Methods: ping, info, stats, led {r,g,b}, matrix {rows}, draw {ops}, clear_failsafe,
-//! bench {n}, fault {kind}.
+//! Methods: ping, info, stats, led {r,g,b}, matrix {rows}, draw {ops}, panel {text|digits, leds, level},
+//! panel_status, screen (what the display and the LED&KEY last showed), clear_failsafe, bench {n}, fault {kind};
+//! subscribe (event lines from then on), press {id, pressed}.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -26,7 +27,7 @@ use std::{env, process, thread};
 
 use qonu_link_proto::{
     self as proto, Accumulator, Align, DrawOp, ErrorCode, Event, FailsafeState, Fault, Font, FrameError, MATRIX_HEIGHT,
-    MATRIX_WIDTH, MAX_DRAW_OPS, MAX_FRAME, Request, Response, Up,
+    MATRIX_WIDTH, MAX_DRAW_OPS, MAX_FRAME, PANEL_DIGITS, PANEL_KEY_FIRST, Request, Response, Up,
 };
 use serde_json::{Value, json};
 
@@ -54,6 +55,14 @@ struct Stats {
     failsafe_clears: u64,
 }
 
+#[derive(Default, Clone)]
+struct Shown {
+    draw: Value,
+    panel: Value,
+    matrix: Value,
+    matrix_writes: u64,
+}
+
 struct Link {
     port: Mutex<File>,
     pending: Mutex<HashMap<u16, SyncSender<Response>>>,
@@ -66,6 +75,14 @@ struct Link {
     device: String,
     baud: u32,
     latch: bool,
+    /// Connections that asked for `subscribe`: every MCU event goes to each as a JSON line.
+    subscribers: Mutex<Vec<UnixStream>>,
+    /// Whether the LED&KEY module answers, from the MCU's last `Event::Panel` (None: no event since we started).
+    panel: Mutex<Option<bool>>,
+    /// What the display, the LED&KEY and the matrix were last asked to show (the last `draw` list that ended in
+    /// `present`, the last `panel` params, the last matrix rows and how many matrix writes so far), for `screen`:
+    /// tests and agents read the panels without a camera.
+    shown: Mutex<Shown>,
 }
 
 #[derive(Debug)]
@@ -135,6 +152,12 @@ impl Link {
         self.last_rx.lock().unwrap().is_some_and(|t| t.elapsed() < Duration::from_secs(1))
     }
 
+    /// One event line to every subscriber; a subscriber that cannot take it (gone, or 1 s stuck) is dropped.
+    fn publish(&self, event: Value) {
+        let line = format!("{event}\n");
+        self.subscribers.lock().unwrap().retain_mut(|s| s.write_all(line.as_bytes()).is_ok());
+    }
+
     fn on_frame(&self, cobs: &mut [u8]) {
         let frame = match proto::unframe(cobs) {
             Ok(f) => f,
@@ -157,6 +180,7 @@ impl Link {
                 eprintln!("mcu: booted (reset cause: {reset_cause:?})");
                 self.stat(|s| s.mcu_boots += 1);
                 *self.failsafe.lock().unwrap() = Some(FailsafeState::Disarmed);
+                self.publish(json!({"event": "boot", "reset_cause": format!("{reset_cause:?}")}));
             }
             Up::Event(Event::Failsafe { state }) => {
                 eprintln!("mcu: failsafe {state:?}");
@@ -164,6 +188,15 @@ impl Link {
                     self.stat(|s| s.failsafe_trips += 1);
                 }
                 *self.failsafe.lock().unwrap() = Some(state);
+                self.publish(json!({"event": "failsafe", "state": state}));
+            }
+            Up::Event(Event::Button { id, pressed, t_ms }) => {
+                self.publish(json!({"event": "button", "id": id, "pressed": pressed, "t_ms": t_ms}));
+            }
+            Up::Event(Event::Panel { present }) => {
+                eprintln!("mcu: LED&KEY module {}", if present { "found" } else { "gone" });
+                *self.panel.lock().unwrap() = Some(present);
+                self.publish(json!({"event": "panel", "present": present}));
             }
         }
     }
@@ -177,6 +210,7 @@ impl Link {
             "uptime_s": self.started.elapsed().as_secs(),
             "link_up": self.link_up(),
             "failsafe": *self.failsafe.lock().unwrap(),
+            "panel": *self.panel.lock().unwrap(),
             "latch": self.latch,
             "counters": *self.stats.lock().unwrap(),
             "rtt_us": percentiles(&rtts),
@@ -314,6 +348,26 @@ fn client_session(link: &Link, conn: UnixStream) -> io::Result<()> {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
+            Ok(req) if req["method"] == "press" => {
+                // A button event that did not come from the MCU (testing, or an agent driving the panel): the same
+                // line subscribers get from a real press, marked injected.
+                let id = req["params"]["id"].as_u64().filter(|id| *id < PANEL_KEY_FIRST as u64 + 8);
+                let pressed = req["params"]["pressed"].as_bool().unwrap_or(true);
+                match id {
+                    Some(id) => {
+                        link.publish(json!({"event": "button", "id": id, "pressed": pressed, "t_ms": 0, "injected": true}));
+                        json!({"id": req["id"], "ok": true, "result": {}})
+                    }
+                    None => json!({"id": req["id"], "ok": false, "error": "params.id (0 confirm, 1 up, 2 down, 8..15 the LED&KEY keys S1..S8) is required"}),
+                }
+            }
+            Ok(req) if req["method"] == "subscribe" => {
+                // From now on this connection also carries event lines ({"event": ...}), between replies.
+                let sub = out.try_clone()?;
+                sub.set_write_timeout(Some(Duration::from_secs(1)))?;
+                link.subscribers.lock().unwrap().push(sub);
+                json!({"id": req["id"], "ok": true, "result": {"events": ["boot", "failsafe", "button", "panel"]}})
+            }
             Ok(req) => dispatch(link, &req),
             Err(e) => json!({"id": null, "ok": false, "error": format!("bad JSON: {e}")}),
         };
@@ -448,9 +502,42 @@ fn parse_op(o: &Value) -> Result<DrawOp, String> {
                 values: heapless::Vec::from_slice(&values).map_err(|_| format!("at most {} values", proto::MAX_BARS))?,
             }
         }
+        "bitmap" => {
+            // rows: equal-length strings, `#` (or 1, X, *) set and `.` (or 0, space) clear; top row first.
+            let rows: Vec<&str> = o
+                .get("rows")
+                .and_then(Value::as_array)
+                .ok_or("rows (strings of # and .) are required")?
+                .iter()
+                .map(|r| r.as_str().ok_or("rows must be strings"))
+                .collect::<Result<_, _>>()?;
+            let w = rows.first().map_or(0, |r| r.chars().count());
+            if w == 0 || w > 255 || rows.len() > 255 || rows.iter().any(|r| r.chars().count() != w) {
+                return Err("rows must be 1-255 strings of the same length (1-255)".into());
+            }
+            let stride = w.div_ceil(8);
+            let mut bits = vec![0u8; stride * rows.len()];
+            for (y, row) in rows.iter().enumerate() {
+                for (x, c) in row.chars().enumerate() {
+                    if matches!(c, '#' | '1' | 'X' | 'x' | '*') {
+                        bits[y * stride + x / 8] |= 0x80 >> (x % 8);
+                    }
+                }
+            }
+            DrawOp::Bitmap {
+                x: i16_("x")?,
+                y: i16_("y")?,
+                w: w as u8,
+                h: rows.len() as u8,
+                scale: u8_("scale", Some(1))?,
+                fg: color("fg")?,
+                bg: bg()?,
+                bits: heapless::Vec::from_slice(&bits).map_err(|_| format!("at most {} bitmap bytes", proto::MAX_BITMAP))?,
+            }
+        }
         "present" => DrawOp::Present,
         "backlight" => DrawOp::Backlight { on: o.get("on").and_then(Value::as_bool).unwrap_or(true) },
-        other => return Err(format!("unknown op {other:?}: clear, rect, line, text, bars, present, backlight")),
+        other => return Err(format!("unknown op {other:?}: clear, rect, line, text, bars, bitmap, present, backlight")),
     })
 }
 
@@ -493,6 +580,106 @@ fn expect_ok(r: Result<Response, CallError>) -> Result<Value, String> {
     }
 }
 
+/// A seven-segment glyph (bit 0 = a, top, .. bit 6 = g, middle): digits, letters in whichever case reads better,
+/// a few signs; anything else shows as three bars.
+fn seg7(c: char) -> u8 {
+    match c {
+        ' ' => 0x00,
+        '0' | 'O' => 0x3F,
+        '1' => 0x06,
+        '2' | 'Z' | 'z' => 0x5B,
+        '3' => 0x4F,
+        '4' => 0x66,
+        '5' | 'S' | 's' => 0x6D,
+        '6' => 0x7D,
+        '7' => 0x07,
+        '8' => 0x7F,
+        '9' | 'g' => 0x6F,
+        'A' | 'a' => 0x77,
+        'B' | 'b' => 0x7C,
+        'C' | '[' | '(' | '{' => 0x39,
+        'c' => 0x58,
+        'D' | 'd' => 0x5E,
+        'E' => 0x79,
+        'e' => 0x7B,
+        'F' | 'f' => 0x71,
+        'G' => 0x3D,
+        'H' | 'X' | 'x' => 0x76,
+        'h' => 0x74,
+        'I' | 'l' | '|' => 0x30,
+        'i' => 0x10,
+        'J' | 'j' => 0x1E,
+        'K' | 'k' => 0x75,
+        'L' => 0x38,
+        'M' | 'm' => 0x37,
+        'N' | 'n' => 0x54,
+        'o' => 0x5C,
+        'P' | 'p' => 0x73,
+        'Q' | 'q' => 0x67,
+        'R' | 'r' => 0x50,
+        'T' | 't' => 0x78,
+        'U' | 'V' => 0x3E,
+        'u' | 'v' => 0x1C,
+        'W' | 'w' => 0x2A,
+        'Y' | 'y' => 0x6E,
+        ']' | ')' | '}' => 0x0F,
+        '-' | '~' => 0x40,
+        '_' => 0x08,
+        '=' => 0x48,
+        '"' => 0x22,
+        '\'' | '`' => 0x20,
+        '?' => 0x53,
+        '°' | '^' => 0x63,
+        '/' => 0x52,
+        '\\' => 0x64,
+        _ => 0x49,
+    }
+}
+
+/// Text to the LED&KEY's 8 digits, left aligned: a `.` (or `,` `:`) lights the decimal point of the digit before it.
+fn panel_text(text: &str) -> [u8; PANEL_DIGITS] {
+    let mut digits = [0u8; PANEL_DIGITS];
+    let mut n = 0;
+    for c in text.chars() {
+        if matches!(c, '.' | ',' | ':') && n > 0 && digits[n - 1] & 0x80 == 0 {
+            digits[n - 1] |= 0x80;
+            continue;
+        }
+        if n == PANEL_DIGITS {
+            break;
+        }
+        digits[n] = if matches!(c, '.' | ',' | ':') { 0x80 } else { seg7(c) };
+        n += 1;
+    }
+    digits
+}
+
+/// `panel` params: `text` (or `digits`, 8 raw segment bytes), `leds` (a bitmask, bit 0 = LED 1, or 8 booleans) and
+/// `level` (0 off, 1-8; default 4).
+fn parse_panel(p: &Value) -> Result<([u8; PANEL_DIGITS], u8, u8), String> {
+    let digits = match (p.get("digits"), p.get("text")) {
+        (Some(d), _) => {
+            let v = d.as_array().filter(|a| a.len() == PANEL_DIGITS).ok_or("params.digits must be 8 numbers")?;
+            let mut out = [0u8; PANEL_DIGITS];
+            for (o, x) in out.iter_mut().zip(v) {
+                *o = x.as_u64().filter(|b| *b <= 0xFF).ok_or("params.digits entries are 0-255")? as u8;
+            }
+            out
+        }
+        (None, Some(t)) => panel_text(t.as_str().ok_or("params.text must be a string")?),
+        (None, None) => [0; PANEL_DIGITS],
+    };
+    let leds = match p.get("leds") {
+        None => 0,
+        Some(Value::Array(a)) => a.iter().take(8).enumerate().fold(0u8, |m, (i, v)| {
+            if v.as_bool().unwrap_or(false) || v.as_u64().unwrap_or(0) != 0 { m | 1 << i } else { m }
+        }),
+        Some(v) => v.as_u64().filter(|m| *m <= 0xFF).ok_or("params.leds is a bitmask 0-255 or 8 booleans")? as u8,
+    };
+    let level = p.get("level").map_or(Some(4), Value::as_u64).filter(|l| *l <= 8).ok_or("params.level is 0 (off) to 8")? as u8;
+    Ok((digits, leds, level))
+}
+
 fn dispatch(link: &Link, req: &Value) -> Value {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
@@ -503,7 +690,12 @@ fn dispatch(link: &Link, req: &Value) -> Value {
         "ping" => {
             let nonce = (link.started.elapsed().as_nanos() as u32) | 1;
             let t0 = Instant::now();
-            match link.call(&Request::Ping { nonce }) {
+            // params.timeout_ms: one try with a longer wait, to measure a slow MCU.
+            let answer = match params.get("timeout_ms").and_then(Value::as_u64) {
+                Some(ms) => link.call_once(&Request::Ping { nonce }, Duration::from_millis(ms.clamp(1, 10_000))),
+                None => link.call(&Request::Ping { nonce }),
+            };
+            match answer {
                 Ok(Response::Pong { nonce: n, uptime_ms }) if n == nonce => {
                     Ok(json!({"rtt_us": t0.elapsed().as_micros() as u64, "mcu_uptime_ms": uptime_ms}))
                 }
@@ -527,11 +719,43 @@ fn dispatch(link: &Link, req: &Value) -> Value {
         "led" => expect_ok(link.call(&Request::SetLed { led: 0, r: flag("r"), g: flag("g"), b: flag("b") })),
         "clear_failsafe" => expect_ok(link.call(&Request::ClearFailsafe)),
         "draw" => match params.get("ops").and_then(Value::as_array) {
-            Some(ops) => draw(link, ops).map(|frames| json!({"ops": ops.len(), "frames": frames})),
+            Some(ops) => draw(link, ops).map(|frames| {
+                if ops.last().is_some_and(|o| o["op"] == "present") {
+                    link.shown.lock().unwrap().draw = json!(ops);
+                }
+                json!({"ops": ops.len(), "frames": frames})
+            }),
             None => Err("params.ops must be an array of draw ops".into()),
         },
+        "panel_status" => match link.call(&Request::PanelStatus) {
+            Ok(Response::Panel { present }) => {
+                *link.panel.lock().unwrap() = Some(present);
+                Ok(json!({"present": present}))
+            }
+            Ok(other) => Err(format!("unexpected answer: {other:?}")),
+            Err(e) => Err(e.to_string()),
+        },
+        "panel" => parse_panel(&params).and_then(|(digits, leds, level)| {
+            let r = expect_ok(link.call(&Request::Panel { digits, leds, level }));
+            if r.is_ok() {
+                link.shown.lock().unwrap().panel = params.clone();
+            }
+            r
+        }),
+        "screen" => {
+            let sh = link.shown.lock().unwrap().clone();
+            let texts: Vec<Value> = sh.draw.as_array().into_iter().flatten().filter(|o| o["op"] == "text").map(|o| o["text"].clone()).collect();
+            let matrix: Vec<String> = sh.matrix.as_array().into_iter().flatten()
+                .map(|r| (0..MATRIX_WIDTH).map(|x| if r.as_u64().unwrap_or(0) >> x & 1 != 0 { '#' } else { '.' }).collect())
+                .collect();
+            Ok(json!({"texts": texts, "ops": sh.draw, "panel": sh.panel, "matrix": matrix, "matrix_writes": sh.matrix_writes}))
+        }
         "matrix" => match params.get("rows").map(parse_matrix) {
-            Some(Ok(rows)) => expect_ok(link.call(&Request::Matrix { rows })),
+            Some(Ok(rows)) => expect_ok(link.call(&Request::Matrix { rows })).inspect(|_| {
+                let mut sh = link.shown.lock().unwrap();
+                sh.matrix = json!(rows);
+                sh.matrix_writes += 1;
+            }),
             Some(Err(e)) => Err(e),
             None => Err("params.rows is required".into()),
         },
@@ -612,6 +836,9 @@ fn daemon(args: &[String]) -> io::Result<()> {
         device: device.clone(),
         baud,
         latch,
+        subscribers: Mutex::new(Vec::new()),
+        panel: Mutex::new(None),
+        shown: Mutex::new(Shown::default()),
     });
     eprintln!(
         "qonu-link {} on {device} at {baud} baud{}{}",
@@ -637,6 +864,10 @@ fn daemon(args: &[String]) -> io::Result<()> {
                 eprintln!("warning: MCU speaks protocol {}, we speak {}", i.proto, proto::PROTO_VERSION);
             }
             *link.failsafe.lock().unwrap() = Some(i.failsafe);
+            if let Ok(Response::Panel { present }) = link.call(&Request::PanelStatus) {
+                eprintln!("mcu: LED&KEY module {}", if present { "present" } else { "not found" });
+                *link.panel.lock().unwrap() = Some(present);
+            }
         }
         Ok(other) => eprintln!("mcu: unexpected answer to GetInfo: {other:?}"),
         Err(e) => eprintln!("mcu: no answer yet ({e}); will keep trying"),
@@ -675,9 +906,28 @@ fn usage() -> ! {
        qonu-link clear              leave a latched failsafe
        qonu-link bench [N]          N back-to-back pings, latency percentiles
        qonu-link fault hang|panic   break the firmware on purpose to test recovery
+       qonu-link panel TEXT [LEDS] [LEVEL]  the LED&KEY module: 8 characters, LEDs as 8 0/1 digits
+                                    (LED 1 first), brightness 1-8; qonu-link panel off
+       qonu-link screen             what the panels show: the display's texts, the LED&KEY, the matrix
+       qonu-link events             print MCU events (button, panel, boot, failsafe) as JSON lines
+       qonu-link press confirm|up|down|s1..s8   act as a button or LED&KEY key press (tests, agents)
        qonu-link call METHOD [JSON] raw socket request"
     );
     process::exit(2)
+}
+
+/// `qonu-link events`: subscribes and prints every MCU event line until interrupted.
+fn events() -> Result<(), String> {
+    let socket = env::var("QONU_LINK_SOCKET").unwrap_or_else(|_| DEFAULT_SOCKET.into());
+    let mut s = UnixStream::connect(&socket).map_err(|e| format!("{socket}: {e} (is qonu-link daemon running?)"))?;
+    writeln!(s, "{}", json!({"id": 1, "method": "subscribe", "params": {}})).map_err(|e| e.to_string())?;
+    for line in BufReader::new(s).lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.contains("\"event\"") {
+            println!("{line}");
+        }
+    }
+    Ok(())
 }
 
 fn main() {
@@ -704,6 +954,8 @@ fn main() {
             res
         }
         Some(m @ ("info" | "stats")) => request(m, json!({})).map(pretty),
+        Some("screen") => request("screen", json!({}))
+            .map(|v| pretty(json!({"texts": v["texts"], "panel": v["panel"], "matrix": v["matrix"], "matrix_writes": v["matrix_writes"]}))),
         Some("clear") => request("clear_failsafe", json!({})).map(pretty),
         Some("matrix") => {
             let rows: Vec<Value> = if arg(1) == Some("clear") {
@@ -718,6 +970,31 @@ fn main() {
             request("led", json!({"r": on(1), "g": on(2), "b": on(3)})).map(pretty)
         }
         Some("fault") => request("fault", json!({"kind": arg(1).unwrap_or("")})).map(pretty),
+        Some("events") => events(),
+        Some("panel") => {
+            let params = if arg(1) == Some("off") {
+                json!({"level": 0})
+            } else {
+                let leds: Vec<bool> = arg(2).unwrap_or("").chars().map(|c| c == '1').collect();
+                let level = arg(3).and_then(|l| l.parse::<u64>().ok()).unwrap_or(4);
+                json!({"text": arg(1).unwrap_or(""), "leds": leds, "level": level})
+            };
+            request("panel", params).map(pretty)
+        }
+        Some("press") => {
+            let id = match arg(1) {
+                Some("confirm" | "0") => 0,
+                Some("up" | "1") => 1,
+                Some("down" | "2") => 2,
+                Some(k) if k.len() == 2 && k.starts_with('s') && (b'1'..=b'8').contains(&k.as_bytes()[1]) => {
+                    PANEL_KEY_FIRST + (k.as_bytes()[1] - b'1')
+                }
+                _ => usage(),
+            };
+            request("press", json!({"id": id, "pressed": true}))
+                .and_then(|_| request("press", json!({"id": id, "pressed": false})))
+                .map(|_| ())
+        }
         Some("bench") => {
             let n: u64 = arg(1).and_then(|c| c.parse().ok()).unwrap_or(1000);
             request("bench", json!({"n": n})).map(pretty)

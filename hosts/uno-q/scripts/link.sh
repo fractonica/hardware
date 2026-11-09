@@ -5,6 +5,7 @@
 #   link.sh daemon     qonu-link for the board -> /work/link-target/daemon/.../qonu-link
 #   link.sh mcp        qonu-mcp for the board  -> /work/link-target/mcp/.../qonu-mcp
 #   link.sh dash       qonu-dash for the board -> /work/link-target/dash/.../qonu-dash
+#   link.sh web        qonu-web for the board  -> /work/link-target/web/.../qonu-web
 set -euo pipefail
 export CARGO_HOME=/work/cargo
 case "${1:-}" in
@@ -26,5 +27,9 @@ dash)
 	[ -x /work/output/host/bin/aarch64-buildroot-linux-gnu-gcc ] \
 		|| { echo "needs Buildroot's toolchain: run make build first" >&2; exit 1; }
 	cd /src/link/dash && CARGO_TARGET_DIR=/work/link-target/dash cargo build --release --locked ;;
-*) echo "usage: $0 test|firmware|daemon|mcp|dash" >&2; exit 2 ;;
+web)
+	[ -x /work/output/host/bin/aarch64-buildroot-linux-gnu-gcc ] \
+		|| { echo "needs Buildroot's toolchain: run make build first" >&2; exit 1; }
+	cd /src/link/web && CARGO_TARGET_DIR=/work/link-target/web cargo build --release --locked ;;
+*) echo "usage: $0 test|firmware|daemon|mcp|dash|web" >&2; exit 2 ;;
 esac

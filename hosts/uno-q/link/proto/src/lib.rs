@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// Bumped on incompatible changes. New enum variants appended at the end are
 /// compatible: an older peer answers them with `ErrorCode::BadRequest`.
-pub const PROTO_VERSION: u16 = 2;
+pub const PROTO_VERSION: u16 = 4;
 
 /// Largest `seq ‖ body ‖ crc` before COBS.
 pub const MAX_RAW: usize = 250;
@@ -54,7 +54,18 @@ pub enum Request {
     /// Drawing on the SPI display. Ops paint an off-screen buffer in order;
     /// `DrawOp::Present` shows it. Hosts split long op lists across frames.
     Draw { ops: heapless::Vec<DrawOp, MAX_DRAW_OPS> },
+    /// The LED&KEY module (protocol v4): a TM1638 driving 8 seven-segment digits and 8 LEDs, on header D12 (STB),
+    /// D7 (CLK) and D5 (DIO). `digits` are segment bits, left digit first: bit 0 = a (top) .. bit 6 = g (middle),
+    /// bit 7 = the decimal point. `leds` bit `i` lights LED `i + 1`. `level` 0 turns the module off, 1-8 is the
+    /// brightness. The MCU keeps it and repaints it every second, so a module plugged in later shows it too.
+    Panel { digits: [u8; PANEL_DIGITS], leds: u8, level: u8 },
+    /// Whether the LED&KEY module answers (protocol v4): `Response::Panel`.
+    PanelStatus,
 }
+
+pub const PANEL_DIGITS: usize = 8;
+/// `Event::Button` ids of the LED&KEY module's keys: S1 is `PANEL_KEY_FIRST`, S8 is `PANEL_KEY_FIRST + 7`.
+pub const PANEL_KEY_FIRST: u8 = 8;
 
 /// Display geometry, landscape, origin top left.
 pub const DISPLAY_WIDTH: u16 = 320;
@@ -62,6 +73,8 @@ pub const DISPLAY_HEIGHT: u16 = 172;
 pub const MAX_DRAW_OPS: usize = 24;
 pub const MAX_TEXT: usize = 64;
 pub const MAX_BARS: usize = 96;
+/// Bitmap bytes in one op: up to 40 x 40 pixels (a version 5 QR code, 37 x 37, takes 185).
+pub const MAX_BITMAP: usize = 200;
 
 /// One drawing operation. Colors are RGB565. Coordinates may run off-screen;
 /// drawing is clipped.
@@ -97,6 +110,19 @@ pub enum DrawOp {
     /// Show what has been drawn so far.
     Present,
     Backlight { on: bool },
+    /// A 1-bit image (protocol v3), `w` x `h` pixels, each drawn as a `scale` x `scale` square: set bits in `fg`,
+    /// clear ones in `bg` (left out: transparent). Rows are packed MSB first, each row starting on a byte. A QR code
+    /// (version 4, 33 x 33) is 165 bytes: one op.
+    Bitmap {
+        x: i16,
+        y: i16,
+        w: u8,
+        h: u8,
+        scale: u8,
+        fg: u16,
+        bg: Option<u16>,
+        bits: heapless::Vec<u8, MAX_BITMAP>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +167,8 @@ pub enum Response {
     Info(Info),
     Ok,
     Error(ErrorCode),
+    /// The answer to `Request::PanelStatus` (protocol v4).
+    Panel { present: bool },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -235,6 +263,12 @@ pub enum Event {
     /// First frame after every MCU reset.
     Boot { reset_cause: ResetCause },
     Failsafe { state: FailsafeState },
+    /// A front-panel button changed (protocol v3), debounced on the MCU. Buttons go to GND with the internal pull-up:
+    /// `id` 0 confirm on header D2 (PB3), 1 up on D3 (PB0), 2 down on D4 (PA12). `t_ms` is the MCU's uptime at the
+    /// edge, so Linux can tell press lengths apart whatever the link adds.
+    Button { id: u8, pressed: bool, t_ms: u32 },
+    /// The LED&KEY module answered, or stopped answering (protocol v4). Its keys S1..S8 are `Button` ids 8..15.
+    Panel { present: bool },
 }
 
 /// Body of every MCU -> Linux frame.
@@ -457,6 +491,23 @@ mod tests {
         assert!(n <= MAX_FRAME);
         let mut wire = out[..n - 1].to_vec();
         assert_eq!(unframe(&mut wire).unwrap().parse::<Up>().unwrap(), up);
+
+        // v3: the front-panel button event.
+        let ev = Up::Event(Event::Button { id: 0, pressed: true, t_ms: 4_000_000_000 });
+        let n = encode(9, &ev, &mut out).unwrap();
+        let mut wire = out[..n - 1].to_vec();
+        assert_eq!(unframe(&mut wire).unwrap().parse::<Up>().unwrap(), ev);
+
+        // v4: the LED&KEY module.
+        for up in [Up::Event(Event::Panel { present: true }), Up::Event(Event::Button { id: PANEL_KEY_FIRST + 7, pressed: false, t_ms: 1 })] {
+            let n = encode(10, &up, &mut out).unwrap();
+            let mut wire = out[..n - 1].to_vec();
+            assert_eq!(unframe(&mut wire).unwrap().parse::<Up>().unwrap(), up);
+        }
+        let req = Request::Panel { digits: [0xFF; PANEL_DIGITS], leds: 0xA5, level: 8 };
+        let n = encode(11, &req, &mut out).unwrap();
+        let mut wire = out[..n - 1].to_vec();
+        assert_eq!(unframe(&mut wire).unwrap().parse::<Request>().unwrap(), req);
     }
 
     #[test]

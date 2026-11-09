@@ -158,6 +158,31 @@ fn draw(fb: &mut Fb, op: &DrawOp) {
                 }
             }
         }
+        DrawOp::Bitmap { x, y, w, h, scale, fg, bg, bits } => {
+            let (w, h, k) = (*w as i32, *h as i32, (*scale).max(1) as i32);
+            let stride = (w + 7) / 8;
+            if let Some(b) = bg {
+                let size = Size::new((w * k) as u32, (h * k) as u32);
+                let _ = fb.fill_solid(&Rectangle::new(pt(*x, *y), size), color(*b));
+            }
+            for row in 0..h {
+                // Runs of set bits as one rectangle each: a QR row is a few fills, not one per module.
+                let mut col = 0;
+                while col < w {
+                    let set = |c: i32| bits.get((row * stride + c / 8) as usize).is_some_and(|byte| byte >> (7 - c % 8) & 1 == 1);
+                    if !set(col) {
+                        col += 1;
+                        continue;
+                    }
+                    let start = col;
+                    while col < w && set(col) {
+                        col += 1;
+                    }
+                    let top_left = Point::new(*x as i32 + start * k, *y as i32 + row * k);
+                    let _ = fb.fill_solid(&Rectangle::new(top_left, Size::new(((col - start) * k) as u32, k as u32)), color(*fg));
+                }
+            }
+        }
         DrawOp::Present | DrawOp::Backlight { .. } => {}
     }
 }

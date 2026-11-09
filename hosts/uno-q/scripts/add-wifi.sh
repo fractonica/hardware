@@ -20,7 +20,11 @@ if [ -z "$pass" ]; then
 else
 	[ ${#pass} -ge 8 ] && [ ${#pass} -le 63 ] || { echo "WPA passphrases are 8-63 characters" >&2; exit 1; }
 	file="local/wifi/$name.psk"
-	printf '[Security]\nPassphrase=%s\n' "$pass" > "$file"
+	# iwd's settings syntax: a backslash and spaces are escaped.
+	esc=${pass//\\/\\\\}
+	esc=${esc// /\\s}
+	printf '[Security]\nPassphrase=%s\n' "$esc" > "$file"
+	unset esc
 fi
 unset pass
 echo "saved $file (included in the next make build)"

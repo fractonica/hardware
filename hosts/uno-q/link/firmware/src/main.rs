@@ -1,13 +1,15 @@
 //! qonu-fw: STM32U585 side of the qonu link on the Arduino UNO Q.
 //!
 //! - LPUART1 (PG7 TX, PG8 RX, PG6 RTS, PG5 CTS) at 4 Mbaud to Linux `/dev/ttyHS1`, framed with
-//!   `qonu-link-proto` (COBS + CRC-32), DMA ring-buffered receive.
+//!   `qonu-link-proto` (COBS + CRC-32). Receive is a DMA ring that never stops (see `link_rx`).
 //! - Heartbeat failsafe: once the host arms it, a missed heartbeat latches the
 //!   safe state (host-owned outputs off) until the host clears it.
 //! - Independent watchdog (1 s), fed only while both link tasks make progress.
 //! - LED4 shows state: green blink = disarmed, green = armed, red blink = tripped.
-//!   LED3 and the 13x8 LED matrix belong to the host (`SetLed`, `Matrix`) and
+//!   LED3, the 13x8 LED matrix and the LED&KEY module belong to the host (`SetLed`, `Matrix`, `Panel`) and
 //!   go dark when the failsafe trips.
+//! - The matrix scan runs on an interrupt-priority executor, so drawing on the SPI display (thread mode) never holds
+//!   a matrix row lit longer than the others: that showed as random flicker.
 #![no_std]
 #![no_main]
 
@@ -16,14 +18,16 @@ mod display;
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use embassy_executor::Spawner;
-use embassy_stm32::gpio::{Flex, Level, Output, Speed};
+use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_stm32::gpio::{Flex, Input, Level, Output, OutputOpenDrain, Pull, Speed};
 use embassy_stm32::mode::Async;
 use embassy_stm32::spi::{self, Spi};
 use embassy_stm32::time::Hertz;
-use embassy_stm32::usart::{self, RingBufferedUartRx, Uart, UartTx};
+use embassy_stm32::usart::{self, Uart, UartTx};
 use embassy_stm32::wdg::IndependentWatchdog;
-use embassy_stm32::{bind_interrupts, dma, pac, peripherals};
+use embassy_stm32::interrupt::{InterruptExt, Priority};
+use embassy_stm32::{bind_interrupts, dma, interrupt, pac, peripherals};
+use static_cell::StaticCell;
 use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
@@ -32,7 +36,6 @@ use qonu_link_proto::{
     self as proto, Accumulator, ErrorCode, Event, FailsafeState, Fault, FrameError, Info, LinkCounters,
     MAX_FRAME, PanicSite, Request, ResetCause, Response, Up,
 };
-use static_cell::StaticCell;
 
 /// Link speed. 4 Mbaud with RTS/CTS measured 0 errors over 2000-call sweeps
 /// (p50 0.35 ms per round trip). Override at build time with QONU_BAUD; the
@@ -66,7 +69,17 @@ bind_interrupts!(struct Irqs {
     GPDMA1_CHANNEL0 => dma::InterruptHandler<peripherals::GPDMA1_CH0>;
     GPDMA1_CHANNEL1 => dma::InterruptHandler<peripherals::GPDMA1_CH1>;
     GPDMA1_CHANNEL2 => dma::InterruptHandler<peripherals::GPDMA1_CH2>;
+    GPDMA1_CHANNEL3 => dma::InterruptHandler<peripherals::GPDMA1_CH3>;
 });
+
+/// Runs the LED matrix scan above thread mode (where the link and the display draw). UART4 is unused: its interrupt
+/// only serves as this executor's software interrupt.
+static EXECUTOR_HIGH: InterruptExecutor = InterruptExecutor::new();
+
+#[interrupt]
+unsafe fn UART4() {
+    unsafe { EXECUTOR_HIGH.on_interrupt() }
+}
 
 // ------------------------------------------------------------ shared state
 
@@ -176,6 +189,7 @@ mod failsafe {
     /// Drives every host-owned output to its safe level.
     fn safe_outputs() {
         matrix::set([0; proto::MATRIX_HEIGHT]);
+        ledkey::repaint(); // its task sees the trip and turns the module off
         display::failsafe_banner();
         LED3.lock(|l| {
             if let Some(leds) = l.borrow_mut().as_mut() {
@@ -250,6 +264,17 @@ fn handle(req: Request) -> Response {
             matrix::set(rows);
             Response::Ok
         }
+        Request::Panel { digits, leds, level } => {
+            if failsafe::state() == FailsafeState::Tripped {
+                return Response::Error(ErrorCode::FailsafeTripped);
+            }
+            if level > 8 {
+                return Response::Error(ErrorCode::InvalidArgument);
+            }
+            ledkey::set(ledkey::Shown { digits, leds, level });
+            Response::Ok
+        }
+        Request::PanelStatus => Response::Panel { present: ledkey::present() },
     }
 }
 
@@ -326,6 +351,217 @@ mod matrix {
     }
 }
 
+// ------------------------------------------------------------- LED&KEY
+
+/// The LED&KEY module: a TM1638 with 8 seven-segment digits, 8 LEDs and 8 keys, on STB D12 (PB14), CLK D7 (PB2)
+/// and DIO D5 (PA11). Bit-banged, LSB first, all three lines open drain with pull-ups (the module may run at 5 V; its
+/// own pull-ups then lift the lines to its level). Every 10 ms the task reads the keys, debounced over two reads, and
+/// reports S1..S8 as `Event::Button` ids 8..15; it writes the display when the host changes it and once a second
+/// (a module plugged in later shows the picture too). Bytes go one at a time with a yield between them, so the link
+/// tasks never wait more than ~60 us.
+mod ledkey {
+    use super::*;
+    use core::cell::Cell;
+    use core::future::poll_fn;
+    use core::sync::atomic::AtomicBool;
+    use core::task::Poll;
+    use embassy_stm32::gpio::OutputOpenDrain;
+    use proto::{PANEL_DIGITS, PANEL_KEY_FIRST};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub struct Shown {
+        pub digits: [u8; PANEL_DIGITS],
+        pub leds: u8,
+        /// 0 off, 1-8 brightness
+        pub level: u8,
+    }
+
+    static WANT: BlockingMutex<CriticalSectionRawMutex, Cell<Shown>> =
+        BlockingMutex::new(Cell::new(Shown { digits: [0; PANEL_DIGITS], leds: 0, level: 0 }));
+    static DIRTY: AtomicBool = AtomicBool::new(true);
+
+    pub fn set(s: Shown) {
+        WANT.lock(|w| w.set(s));
+        DIRTY.store(true, Relaxed);
+    }
+
+    pub fn repaint() {
+        DIRTY.store(true, Relaxed);
+    }
+
+    static PRESENT: AtomicBool = AtomicBool::new(false);
+
+    pub fn present() -> bool {
+        PRESENT.load(Relaxed)
+    }
+
+    /// Half a clock period: 3 us (a 166 kHz clock; the TM1638 takes up to 1 MHz, but open-drain edges are slow).
+    const HALF_CYCLES: u32 = 3 * 160;
+
+    async fn yield_now() {
+        let mut yielded = false;
+        poll_fn(|cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await
+    }
+
+    struct Tm1638 {
+        stb: OutputOpenDrain<'static>,
+        clk: OutputOpenDrain<'static>,
+        dio: OutputOpenDrain<'static>,
+    }
+
+    impl Tm1638 {
+        fn half(&self) {
+            cortex_m::asm::delay(HALF_CYCLES);
+        }
+
+        /// One byte, LSB first; the TM1638 latches DIO on CLK's rising edge.
+        fn byte(&mut self, mut b: u8) {
+            for _ in 0..8 {
+                self.clk.set_low();
+                if b & 1 != 0 {
+                    self.dio.set_high();
+                } else {
+                    self.dio.set_low();
+                }
+                self.half();
+                self.clk.set_high();
+                self.half();
+                b >>= 1;
+            }
+            self.dio.set_high(); // released
+        }
+
+        fn read_byte(&mut self) -> u8 {
+            let mut v = 0;
+            for i in 0..8 {
+                self.clk.set_low(); // the TM1638 shifts the next bit out on the falling edge
+                self.half();
+                if self.dio.is_high() {
+                    v |= 1 << i;
+                }
+                self.clk.set_high();
+                self.half();
+            }
+            v
+        }
+
+        fn start(&mut self) {
+            self.stb.set_low();
+            self.half();
+        }
+
+        fn end(&mut self) {
+            self.stb.set_high();
+            self.half();
+        }
+
+        async fn command(&mut self, c: u8) {
+            self.start();
+            self.byte(c);
+            self.end();
+            yield_now().await;
+        }
+
+        async fn show(&mut self, s: &Shown) {
+            self.command(0x40).await; // write data, auto-increment address
+            self.start();
+            self.byte(0xC0); // from address 0: digit 1, LED 1, digit 2, LED 2, ...
+            for i in 0..PANEL_DIGITS {
+                yield_now().await;
+                self.byte(s.digits[i]);
+                self.byte((s.leds >> i) & 1);
+            }
+            self.end();
+            yield_now().await;
+            self.command(if s.level == 0 { 0x80 } else { 0x88 | (s.level.min(8) - 1) }).await;
+        }
+
+        /// The keys as a bitmask (bit i = S(i+1)), or None when no TM1638 answers: the unused bits 3 and 7 of each
+        /// scan byte read 0 on a real chip and 1 on a line that only the pull-up holds.
+        async fn keys(&mut self) -> Option<u8> {
+            self.start();
+            self.byte(0x42);
+            self.half(); // Twait before the first clock
+            let mut scan = [0u8; 4];
+            for b in scan.iter_mut() {
+                *b = self.read_byte();
+            }
+            self.end();
+            yield_now().await;
+            if scan.iter().any(|b| b & 0x88 != 0) {
+                return None;
+            }
+            // S1..S4 are bit 0 of bytes 0..3, S5..S8 bit 4 (the LED&KEY wires its keys to K3).
+            let mut keys = 0u8;
+            for (i, b) in scan.iter().enumerate() {
+                keys |= (b & 1) << i;
+                keys |= ((b >> 4) & 1) << (i + 4);
+            }
+            Some(keys)
+        }
+    }
+
+    #[embassy_executor::task]
+    pub async fn run(stb: OutputOpenDrain<'static>, clk: OutputOpenDrain<'static>, dio: OutputOpenDrain<'static>) {
+        let mut tm = Tm1638 { stb, clk, dio };
+        let mut ticker = Ticker::every(Duration::from_millis(10));
+        let mut present = false;
+        let (mut stable, mut last) = (0u8, 0u8);
+        let mut tick: u32 = 0;
+        loop {
+            ticker.next().await;
+            tick = tick.wrapping_add(1);
+
+            let read = tm.keys().await;
+            if read.is_some() != present {
+                present = read.is_some();
+                PRESENT.store(present, Relaxed);
+                emit(Event::Panel { present });
+                DIRTY.store(true, Relaxed);
+                if !present {
+                    // Keys held when the module went away are released.
+                    for i in 0..8 {
+                        if stable >> i & 1 != 0 {
+                            emit(Event::Button { id: PANEL_KEY_FIRST + i, pressed: false, t_ms: uptime_ms() });
+                        }
+                    }
+                    (stable, last) = (0, 0);
+                }
+            }
+            if let Some(keys) = read {
+                // A change counts once two reads 10 ms apart agree.
+                if keys == last && keys != stable {
+                    let t_ms = uptime_ms().saturating_sub(10);
+                    for i in 0..8 {
+                        if (keys ^ stable) >> i & 1 != 0 {
+                            emit(Event::Button { id: PANEL_KEY_FIRST + i, pressed: keys >> i & 1 != 0, t_ms });
+                        }
+                    }
+                    stable = keys;
+                }
+                last = keys;
+            }
+
+            if present && (DIRTY.swap(false, Relaxed) || tick % 100 == 0) {
+                let mut s = WANT.lock(|w| w.get());
+                if failsafe::state() == FailsafeState::Tripped {
+                    s.level = 0;
+                }
+                tm.show(&s).await;
+            }
+        }
+    }
+}
+
 fn on_frame(cobs: &mut [u8]) {
     match proto::unframe(cobs) {
         Err(FrameError::BadCrc) => {
@@ -348,24 +584,49 @@ fn on_frame(cobs: &mut [u8]) {
 
 // ------------------------------------------------------------------ tasks
 
+/// The link's receiver: a DMA ring on LPUART1 that runs from boot on and is polled every 250 us. Not embassy's
+/// `RingBufferedUartRx`: on a receive error (a framing error from a glitch while the MCU resets, say) that one stops
+/// the DMA, and its restart keeps a stale read position: from then on every request waited for the DMA's next
+/// half-buffer mark, 0.6-1.6 s, until the next reset. Nor `read_until_idle`, which reads the data register itself
+/// and so takes a byte off the FIFO when frames arrive back to back. Here nothing stops the ring: the UART's error
+/// and idle interrupts stay off, an errored byte is simply not transferred (DDRE is clear), and the CRC drops the
+/// damaged frame.
 #[embassy_executor::task]
-async fn link_rx(mut rx: RingBufferedUartRx<'static>) {
+async fn link_rx(mut ring: dma::ReadableRingBuffer<'static, u8>) {
     let mut acc = Accumulator::new();
-    let mut chunk = [0u8; 64];
+    let mut chunk = [0u8; 256];
+    let mut ticker = Ticker::every(Duration::from_micros(250));
     loop {
         RX_ALIVE.fetch_add(1, Relaxed);
-        match with_timeout(Duration::from_millis(100), rx.read(&mut chunk)).await {
-            Err(_) => {} // idle; the timeout only keeps RX_ALIVE moving
-            Ok(Err(_)) => {
-                // Overrun/framing/noise: the ring buffer restarts on the next
-                // read, and the accumulator drops the damaged frame.
-                RX_UART_ERRORS.fetch_add(1, Relaxed);
-            }
-            Ok(Ok(n)) => {
-                let dropped = acc.feed(&chunk[..n], on_frame);
-                RX_BAD_FRAME.fetch_add(dropped, Relaxed);
+        // PE, FE, NE, ORE: bits 0-3 of ISR, cleared by the same bits of ICR.
+        let errors = pac::LPUART1.isr().read().0 & 0x0F;
+        if errors != 0 {
+            pac::LPUART1.icr().write_value(pac::usart::regs::Icr(errors));
+            RX_UART_ERRORS.fetch_add(1, Relaxed);
+        }
+        loop {
+            // The DMA counts a byte as moved once it leaves the UART, a moment before it lands in RAM (the channel
+            // has a FIFO, and the display's DMA shares the bus): read only what was there 2 us ago.
+            let ready = match ring.len() {
+                Ok(0) => break,
+                Ok(n) => n.min(chunk.len()),
+                Err(_) => chunk.len(), // lapped: the read below reports it and resets the ring
+            };
+            cortex_m::asm::delay(320);
+            match ring.read(&mut chunk[..ready]) {
+                Ok((0, _)) => break,
+                Ok((n, _)) => {
+                    let dropped = acc.feed(&chunk[..n], on_frame);
+                    RX_BAD_FRAME.fetch_add(dropped, Relaxed);
+                }
+                Err(_) => {
+                    // The DMA lapped us: the ring resets itself and keeps running.
+                    RX_UART_ERRORS.fetch_add(1, Relaxed);
+                    break;
+                }
             }
         }
+        ticker.next().await;
     }
 }
 
@@ -385,6 +646,37 @@ async fn link_tx(mut tx: UartTx<'static, Async>) {
 }
 
 // ------------------------------------------------------------------- main
+
+
+/// The front-panel buttons to GND, with the internal pull-ups (protocol v3 `Event::Button`): id 0 confirm on D2 (PB3),
+/// 1 up on D3 (PB0), 2 down on D4 (PA12). Polled every 5 ms rather than on EXTI interrupts (with an EXTI line on PA12,
+/// the USB D+ pin, the MCU answered every request late): a level counts once it holds for 4 samples (20 ms), so contact
+/// bounce never reaches Linux.
+#[embassy_executor::task]
+async fn buttons(pins: [Input<'static>; 3]) {
+    let mut pressed = [false; 3];
+    let mut differs = [0u8; 3];
+    for (i, pin) in pins.iter().enumerate() {
+        pressed[i] = pin.is_low();
+    }
+    let mut ticker = Ticker::every(Duration::from_millis(5));
+    loop {
+        ticker.next().await;
+        for (i, pin) in pins.iter().enumerate() {
+            if pin.is_low() == pressed[i] {
+                differs[i] = 0;
+                continue;
+            }
+            differs[i] += 1;
+            if differs[i] >= 4 {
+                differs[i] = 0;
+                pressed[i] = !pressed[i];
+                let t_ms = Instant::now().as_millis().saturating_sub(15) as u32; // when the new level began
+                emit(Event::Button { id: i as u8, pressed: pressed[i], t_ms });
+            }
+        }
+    }
+}
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -438,20 +730,56 @@ async fn main(spawner: Spawner) {
 
     let mut uart_config = usart::Config::default();
     uart_config.baudrate = BAUD;
+    // embassy sets the UART up and transmits; its receiver gets an idle DMA channel (CH3) and is never used: the
+    // link's receiver is the ring below, on CH1.
     let uart = if RTSCTS {
-        Uart::new_with_rtscts(p.LPUART1, p.PG8, p.PG7, p.PG6, p.PG5, p.GPDMA1_CH0, p.GPDMA1_CH1, Irqs, uart_config)
+        Uart::new_with_rtscts(p.LPUART1, p.PG8, p.PG7, p.PG6, p.PG5, p.GPDMA1_CH0, p.GPDMA1_CH3, Irqs, uart_config)
     } else {
-        Uart::new(p.LPUART1, p.PG8, p.PG7, p.GPDMA1_CH0, p.GPDMA1_CH1, Irqs, uart_config)
+        Uart::new(p.LPUART1, p.PG8, p.PG7, p.GPDMA1_CH0, p.GPDMA1_CH3, Irqs, uart_config)
     }
     .unwrap();
     let (tx, rx) = uart.split();
-    static RX_DMA_BUF: StaticCell<[u8; 1024]> = StaticCell::new();
-    let rx = rx.into_ring_buffered(RX_DMA_BUF.init([0; 1024]));
+    core::mem::forget(rx); // dropping it would stop reception
+    let request = <peripherals::GPDMA1_CH1 as usart::RxDma<peripherals::LPUART1>>::request(&p.GPDMA1_CH1);
+    static RX_RING: StaticCell<[u8; 1024]> = StaticCell::new();
+    // SAFETY: CH1 is ours alone, and RDR is LPUART1's receive data register.
+    let mut ring = unsafe {
+        dma::ReadableRingBuffer::new(
+            dma::Channel::new(p.GPDMA1_CH1, Irqs),
+            request,
+            pac::LPUART1.rdr().as_ptr() as *mut u8,
+            RX_RING.init([0; 1024]),
+            dma::TransferOptions::default(),
+        )
+    };
+    ring.start();
+    pac::LPUART1.cr3().modify(|w| w.set_dmar(true)); // and nothing else: no error or idle interrupts
 
     emit(Event::Boot { reset_cause });
-    spawner.spawn(link_rx(rx).unwrap());
+    spawner.spawn(link_rx(ring).unwrap());
     spawner.spawn(link_tx(tx).unwrap());
-    spawner.spawn(matrix::scan(matrix_pins).unwrap());
+    // Above thread mode (see EXECUTOR_HIGH), below the UART and DMA interrupts.
+    interrupt::UART4.set_priority(Priority::P7);
+    let high = EXECUTOR_HIGH.start(interrupt::UART4);
+    high.spawn(matrix::scan(matrix_pins).unwrap());
+    // LED&KEY module: STB D12 (PB14), CLK D7 (PB2), DIO D5 (PA11).
+    spawner.spawn(
+        ledkey::run(
+            OutputOpenDrain::new_pull(p.PB14, Level::High, Speed::Low, Pull::Up),
+            OutputOpenDrain::new_pull(p.PB2, Level::High, Speed::Low, Pull::Up),
+            OutputOpenDrain::new_pull(p.PA11, Level::High, Speed::Low, Pull::Up),
+        )
+        .unwrap(),
+    );
+    // Front panel: confirm D2, up D3, down D4 (each to GND).
+    spawner.spawn(
+        buttons([
+            Input::new(p.PB3, Pull::Up),
+            Input::new(p.PB0, Pull::Up),
+            Input::new(p.PA12, Pull::Up),
+        ])
+        .unwrap(),
+    );
 
     // SPI display on the UNO header: D13 SCK, D11 MOSI, D10 CS, D9 DC, D8 RES, D6 BL.
     let mut spi_config = spi::Config::default();

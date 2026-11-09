@@ -1,0 +1,19 @@
+[Unit]
+Description=Fractonica hub (the board's home hub)
+Documentation=file:///data/fractonica/hub/docs/spec/08-hub.md
+After=network-online.target systemd-resolved.service
+Wants=network-online.target
+# Installed with `make hub-push` into /data (it survives image reflashes); skipped until then.
+ConditionPathExists=/data/fractonica/hub/packages/hub/src/main.ts
+
+[Service]
+Environment=FR_HOME=/data/fractonica/home
+WorkingDirectory=/data/fractonica/hub
+# API on 7520, not 7420: forwarded to the Mac (make hub-tunnel) beside its lab hub, the Host the hub checks still
+# matches. No USB serial on the board yet and no dns-sd (the advert is macOS's): both off.
+ExecStart=/usr/bin/node --conditions=@fractonica/source /data/fractonica/hub/packages/hub/src/main.ts --foreground --port 7520 --no-serial --no-advert
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
