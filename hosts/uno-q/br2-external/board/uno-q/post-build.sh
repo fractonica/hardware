@@ -34,8 +34,8 @@ if [ -s "$LOCAL/firmware/board-2.bin" ]; then
 fi
 
 "${SYSTEMCTL[@]}" enable \
-	rmtfs.service tqftpserv.service qbootctl-mark.service \
-	qonu-usb-gadget.service serial-getty@ttyGS0.service \
+	rmtfs.service tqftpserv.service qbootctl-mark.service qonu-mcu-boot0.service \
+	qonu-usb-gadget.service serial-getty@ttyGS0.service qonu-link.service \
 	iwd.service sshd.service \
 	systemd-networkd.service systemd-resolved.service systemd-timesyncd.service
 

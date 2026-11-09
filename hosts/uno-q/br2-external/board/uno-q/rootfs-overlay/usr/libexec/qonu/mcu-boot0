@@ -1,0 +1,13 @@
+#!/bin/sh
+# Drives the STM32's BOOT0 strap (TLMM GPIO 37) low so the MCU boots its own
+# flash on every reset. Left floating it reads high, and a reset then lands in
+# ST's ROM bootloader. The TLMM keeps the level after gpioset exits.
+set -eu
+for _ in $(seq 50); do
+	chip=$(gpiodetect | awk '/\[500000\.pinctrl\]/ {print $1; exit}')
+	[ -n "$chip" ] && break
+	sleep 0.2
+done
+[ -n "${chip:-}" ] || { echo "TLMM gpiochip (500000.pinctrl) not found" >&2; exit 1; }
+gpioset -c "$chip" -t0 37=0
+echo "BOOT0 held low on $chip line 37"

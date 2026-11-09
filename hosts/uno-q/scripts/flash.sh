@@ -13,7 +13,7 @@ BOOTZIP_SHA256=c606e95d0107f8c58d0dd9494e00624d1db7c4361cca20513bc78ef02ca28dd1
 command -v qdl >/dev/null || { echo "qdl not found (macOS: brew install qdl)" >&2; exit 1; }
 [ -f "$FLASH/rawprogram-qonu.xml" ] || { echo "no image in out/flash: run make build" >&2; exit 1; }
 (cd "$FLASH" && shasum -a 256 -c --quiet SHA256SUMS)
-ls local/wifi/*.psk local/wifi/*.open >/dev/null 2>&1 \
+compgen -G 'local/wifi/*.psk' >/dev/null || compgen -G 'local/wifi/*.open' >/dev/null \
 	|| echo "note: no Wi-Fi network in local/wifi; the board will be reachable over USB only (make wifi)"
 
 # Firehose programmer, from Arduino's boot-firmware bundle (Qualcomm license, kept out of git).

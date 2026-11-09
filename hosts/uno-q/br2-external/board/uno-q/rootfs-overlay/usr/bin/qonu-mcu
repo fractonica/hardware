@@ -1,0 +1,61 @@
+#!/bin/sh
+# qonu-mcu: inspect, back up, flash and reset the UNO Q's STM32U585 over SWD.
+# OpenOCD holds gpiochip1 lines 25/26/38 only while a command runs.
+set -eu
+CFG=/etc/openocd/uno-q.cfg
+FLASH_BASE=0x08000000
+FLASH_SIZE=0x200000   # 2 MiB, both banks
+BUNDLED=/usr/share/qonu/mcu/qonu-fw.elf
+
+# uno-q.cfg names gpiochip1; refuse to bit-bang some other controller's lines.
+gpiodetect | grep -q '^gpiochip1 \[500000\.pinctrl\]' || {
+	echo "gpiochip1 is not the TLMM (500000.pinctrl); fix /etc/openocd/uno-q.cfg" >&2; exit 1; }
+
+ocd() { openocd -f "$CFG" "$@"; }
+
+usage() {
+	cat <<USAGE
+usage: qonu-mcu info            boot address, flash size, option bytes (FLASH_OPTR)
+       qonu-mcu backup FILE     dump all 2 MiB of flash to FILE
+       qonu-mcu flash [FILE]    write an .elf/.hex (or .bin at $FLASH_BASE), verify, run;
+                                default: the firmware shipped in this image ($BUNDLED)
+       qonu-mcu verify [FILE]   compare flash with an .elf (default: the image's); resets the MCU
+       qonu-mcu reset           reset and run
+       qonu-mcu halt            halt the core (MCU stops until reset)
+USAGE
+	exit 2
+}
+
+case "${1:-}" in
+info)
+	# After "reset halt", pc shows where the MCU boots: 0x08xxxxxx is user
+	# flash, 0x0bf9xxxx is ST's ROM bootloader (BOOT0 pin high).
+	ocd -c "init" -c "reset halt" -c "reg pc" -c "flash probe 0" \
+		-c "stm32l4x option_read 0 0x40" -c "reset run" -c "shutdown" ;;
+backup)
+	[ $# -eq 2 ] || usage
+	ocd -c "init" -c "reset halt" -c "dump_image $2 $FLASH_BASE $FLASH_SIZE" \
+		-c "reset run" -c "shutdown"
+	sha256sum "$2" ;;
+flash)
+	f=${2:-$BUNDLED}
+	[ -f "$f" ] || usage
+	case "$f" in
+	*.bin) ocd -c "program $f $FLASH_BASE verify reset exit" ;;
+	*)     ocd -c "program $f verify reset exit" ;;
+	esac ;;
+verify)
+	# OpenOCD's checksum helper runs from MCU RAM, so verifying a running MCU
+	# would corrupt it: halt in reset, verify, then start fresh.
+	f=${2:-$BUNDLED}
+	[ -f "$f" ] || usage
+	# OpenOCD stops at the first failing command, so catch the verify result to
+	# make sure "reset run" always happens.
+	ocd -c "init" -c "reset halt" -c 'set rc [catch {verify_image '"$f"'} msg]' \
+		-c "reset run" \
+		-c 'if {$rc} {echo "MISMATCH: flash differs from '"$f"'"; shutdown error} else {echo "OK: flash matches '"$f"'"; shutdown}' \
+		2>&1 | grep -E '^(OK|MISMATCH|Error)' ;;
+reset) ocd -c "init" -c "reset run" -c "shutdown" ;;
+halt)  ocd -c "init" -c "halt" -c "reg pc" -c "shutdown" ;;
+*) usage ;;
+esac
