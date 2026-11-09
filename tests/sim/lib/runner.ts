@@ -166,6 +166,8 @@ export function fleetBinOf(sourceDir: string, env: NodeJS.ProcessEnv = process.e
 
 /** The sources fr_fleet is built from (firmware/test/host/CMakeLists.txt): a newer file means a stale binary. */
 const FLEET_SOURCES = ['firmware/components', 'firmware/test/host/sim', 'firmware/test/host/shim', 'hardware/drivers'];
+/** Components under FLEET_SOURCES that fr_fleet does not build: fr_posix (Linux nodes, design uno-q-host) is its own library. */
+const NOT_FLEET = new Set(['fr_posix']);
 
 /**
  * Why the checkout's own build/host-fleet/fr_fleet is older than its sources, else null (M2-C3: the first T2-ANALOG-30
@@ -189,7 +191,7 @@ export function fleetStaleness(sourceDir: string, bin: string, env: NodeJS.Proce
       const p = join(dir, n);
       const st = statSync(p);
       if (st.isDirectory()) {
-        if (n !== 'build' && !n.startsWith('.')) {
+        if (n !== 'build' && !n.startsWith('.') && !NOT_FLEET.has(n)) {
           walk(p);
         }
       } else if (/\.(c|cc|cpp|h|hpp|inc)$|^CMakeLists\.txt$/.test(n) && st.mtimeMs > newest.ms) {
