@@ -2,6 +2,8 @@
 
 A minimal, headless Linux for the **Arduino UNO Q** (Qualcomm QRB2210 + STM32U585), built with Buildroot. It's the base for an MCU control pipeline driven by agents over MCP.
 
+qonu is part of Fractonica and lives in `hosts/uno-q/`. It is self-contained: run every command below from this folder (`cd hosts/uno-q`). It doesn't use the pnpm workspace or ESP-IDF, and nothing outside this folder depends on it yet.
+
 Goals for this first layer:
 - a stable kernel
 - two independent ways in (Wi-Fi and USB-C), plus serial consoles
@@ -182,7 +184,7 @@ All tools return structured output with output schemas. A newer matrix command i
 
 ### Use it from Claude Code
 
-`.mcp.json` registers the server as `uno-q` for this project. Open the project in Claude Code and approve the server when asked, then ask for something like "draw a heart on the LED matrix". To try it without an interactive session:
+`.mcp.json` registers the server as `uno-q`. There are two copies: one at the Fractonica repo root and one in this folder, so it works wherever Claude Code is started. Approve the server when asked, then ask for something like "draw a heart on the LED matrix". To try it without an interactive session, from this folder:
 
 ```bash
 claude -p "draw a smiley on the uno-q LED matrix" --mcp-config .mcp.json --strict-mcp-config --allowedTools mcp__uno-q
@@ -257,7 +259,8 @@ link/                         the STM32 link, in Rust
   daemon/                     qonu-link: Linux daemon + CLI
   mcp/                        qonu-mcp: MCP server (tools over stdio)
   dash/                       qonu-dash: vitals dashboard for the SPI display
-.mcp.json                     registers qonu-mcp with Claude Code (via ssh uriel-mcp)
+.mcp.json                     registers qonu-mcp with Claude Code (via ssh uriel-mcp);
+                              the repo root has a copy with this folder's path
 br2-external/                 Buildroot external tree (BR2_EXTERNAL_QONU)
   configs/qonu_uno_q_defconfig
   board/uno-q/

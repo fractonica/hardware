@@ -26,4 +26,7 @@ packages/    TypeScript: protocol, codegen, hub, dashboard, sdk, cli
 tools/       pytools (esptool sidecar)
 plugin/      Claude Code plugin
 tests/       e2e and HIL scenarios
+hosts/uno-q/ qonu: Linux image, STM32 link, MCP server and vitals display for the Arduino UNO Q
 ```
+
+`hosts/uno-q/` is self-contained (Buildroot in Docker, Rust). Its [README](hosts/uno-q/README.md) covers building, flashing and the board. It isn't connected to the hub yet.
