@@ -16,7 +16,7 @@ Goals for this first layer:
 | Kernel | Linux **7.3.3** (mainline stable) with the upstream `qrb2210-arduino-imola` device tree. Plan: move to 7.4 LTS once released. |
 | Kernel config | Arduino's stock config, trimmed with `localmodconfig` to the 85 modules the board actually uses. Audio, video codec, Docker and adb are dropped, and every non-Qualcomm ARM platform is disabled. |
 | Init | systemd 258 with networkd, resolved (mDNS), timesyncd and a hardware watchdog (`qcom_wdt`, 20 s) |
-| Wi-Fi | iwd 3.12. The modem DSP runs the WCN3990 firmware and is started by `rmtfs` + `tqftpserv`. |
+| Wi-Fi | iwd 3.12, with power save off (it added 15-80 ms to every packet). The modem DSP runs the WCN3990 firmware and is started by `rmtfs` + `tqftpserv`. Measured over SSH with the Mac on Wi-Fi too: about 2 MB/s on 2.4 GHz; on 5 GHz (802.11ac, 80 MHz, 433 Mbit/s link) 6.5-8 MB/s from the board and 3-4.4 MB/s to it. |
 | Access | OpenSSH (key-only), USB NCM network, USB serial console, debug UART |
 | MCU link | `qonu-link` daemon and the qonu-fw Rust/Embassy firmware for the STM32U585, over the UART at 4 Mbaud with RTS/CTS (see [STM32 link](#stm32-link)) |
 | MCU flashing | OpenOCD (pinned upstream commit, libgpiod v2) bit-banging SWD on the QRB2210's GPIOs; `qonu-mcu` wraps it |

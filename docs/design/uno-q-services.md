@@ -43,13 +43,14 @@
 
 ## 4. Found while building
 
-**The Mac and the board can't reach each other over Wi-Fi.**
-- Neither can ping or open TCP to the other, although both are on TENRETNI (192.168.0.29 and .24) and ARP resolves on both sides.
-- The board reaches the router and the internet.
-- `cam-esp32` reaches the Mac's hub over Wi-Fi.
-- Over the USB link (10.55.0.x) everything works.
+**The Mac and the board couldn't reach each other over Wi-Fi** (found during step 1; gone by the evening).
+- Then: neither could ping or open TCP to the other, although both were on TENRETNI and ARP resolved on both sides; the board reached the router, and `cam-esp32` reached the Mac.
+- Later the same day both directions worked, by IP and by name, with nothing changed on the board. The likeliest cause is the Mac's VPN (SusiConnect, `utun4`, which holds the first default route): it now leaves `192.168.0.0/16` on `en0`. If it breaks again, `route -n get 192.168.0.24` must name `en0`.
+- `uriel.local` answers with two addresses: the Wi-Fi one and the USB link's IPv6 link-local, and macOS prefers the USB one while the cable is in. Without it, the name leads to Wi-Fi.
 
-**Likely cause:** the router isolates this client (AP or client isolation, or a guest class), or the Mac's tunnel (`utun4`) filters LAN traffic. If the router isolates it, a phone can't reach the terminal either, so it is to check in the router's settings.
+**Wi-Fi was slow because of power save.** With the WCN3990's power save on, the board took 23 ms to answer the router and 82 ms to answer the Mac. iwd's `[DriverQuirks] PowerSaveDisable=ath10k_snoc` brought that to 2.5 and 6 ms. Throughput did not change: 1.5-2.8 MB/s over SSH, the limit of a 2.4 GHz channel that the Mac and the board share at 20 MHz. A 5 GHz network is the way to more (for the SSD, step 7).
+
+**On 5 GHz** (5TENRETNI5, channel 52, 80 MHz; the board links at 433 Mbit/s): 6.5-8 MB/s from the board to the Mac and 3-4.4 MB/s the other way, against 1.5-2.8 MB/s on 2.4 GHz. The Mac's own link (130 Mbit/s) and the shared channel set the limit, not the board: its CPU stays 95 % idle during a transfer. Pings to the router average 10-15 ms with peaks of 35 on this router's 5 GHz radio, for the Mac as much as for the board.
 
 **One UART receive error wedged the link until the next MCU reset.** embassy's `RingBufferedUartRx` stops its DMA on a framing, noise or overrun error, and its restart (`start_uart`) restarts the DMA without resetting the ring's read position. From then on every answer waited for the next half-buffer mark: 0.6-1.6 s, so every call timed out. Flashing the MCU while the daemon kept sending was enough to cause one error; 300 bytes at the wrong baud reproduced it every time. `read_until_idle` was no way out either: it reads the data register itself and takes a byte off the FIFO when frames arrive back to back. The firmware now runs its own DMA ring on LPUART1 from boot, polled every 250 µs and never stopped (no error or idle interrupts; it reads only bytes that were there 2 µs earlier, since the DMA counts a byte before it lands in RAM). Cost: a round trip went from 0.34 to about 1 ms.
 
@@ -65,3 +66,4 @@
 4. Websites: **done** (own ports, linked from `qonu-web`). Next: the timelapse example with a camera device moved to the home hub.
 5. Moving devices between the lab and home hubs (`fr device move`, *proposed*), and a wiring guide in the hub for the panel and the buttons.
 6. The LED&KEY module, Wi-Fi from the panel, Remove on SERVICES, the board's time zone, the link receiver fix. **Done 2026-11-09.**
+7. *Proposed:* an SSD on the USB-C port (USB host mode). Wi-Fi becomes the only way in, so it comes first: power save off (**done**), then a 5 GHz network for speed (**done**). **The board cannot power anything on its USB-C port.** In the schematic (ABX00162 sheets 26 and 28) the USB-C VBUS pins, the 5V pin of the power header (JANALOG pin 5), JSPI pin 2 and JMISC pins 56/58 are one net, `5V_USB_VBUS`, which feeds the board through Schottky D2801. VIN goes through its own buck (U2803, LMR51440, 4 A) and D2803, so nothing drives that net from VIN. Q2801 feeds the PM4125's charger input, and the ANX7625 senses that rail (`VBUS_DIV8`), not the connector, so it always reports VBUS present. Tried 2026-11-09: on VIN, and then with 5 V wired to the 5V pin, the port came up in host mode and the ANX7625 presented Rp and saw the SSD's Rd on CC1, but both xHCI ports stayed in RxDetect and the SSD's power LED stayed dark (it lights on the Mac). So the real board does not connect the 5V pin to the connector the way the schematic shows; a forum user measured a diode there. An SSD needs power from outside the board: a USB-C hub with a PD input (Arduino's supported way; it also powers the board), a Y-cable or power injector that feeds the SSD's VBUS, or a self-powered enclosure. The board runs fine from 5 V on the 5V pin (better than 5 V on VIN, which wants 6-24 V).
