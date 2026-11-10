@@ -1,0 +1,12 @@
+# raphael: key-only SSH. Root logs in with the keys in /root/.ssh/authorized_keys.
+HostKey /etc/ssh/ssh_host_ed25519_key
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+X11Forwarding no
+ClientAliveInterval 30
+ClientAliveCountMax 4
+Subsystem sftp internal-sftp

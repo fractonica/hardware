@@ -1,0 +1,15 @@
+[Unit]
+Description=Grow the root partition to fill the SD card
+DefaultDependencies=no
+ConditionPathExists=!/var/lib/raphael/root-grown
+After=systemd-remount-fs.service
+Before=local-fs.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/raphael/grow-root
+
+[Install]
+WantedBy=local-fs.target

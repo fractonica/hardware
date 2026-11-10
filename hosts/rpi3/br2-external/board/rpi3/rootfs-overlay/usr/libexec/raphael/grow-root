@@ -1,0 +1,11 @@
+#!/bin/sh
+# Grows the root partition (2) and its ext4 filesystem to the end of the SD card. Runs once, on the first boot.
+set -eu
+disk=/dev/mmcblk0
+# sfdisk edits a disk in use only when told not to re-read it; partx then hands the new size to the kernel,
+# and resize2fs grows the mounted filesystem online.
+echo ", +" | sfdisk --quiet --no-reread --no-tell-kernel -N 2 "$disk"
+partx -u -n 2 "$disk"
+resize2fs "${disk}p2"
+mkdir -p /var/lib/raphael
+touch /var/lib/raphael/root-grown

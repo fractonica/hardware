@@ -1,0 +1,17 @@
+#!/bin/sh
+# Writes this boot's state to the SD card's FAT boot partition, so a Pi that never reaches the network can still
+# be diagnosed: put the card in any computer and open raphael-boot.txt.
+out=/boot/raphael-boot.txt
+{
+	echo "== $(date '+%Y-%m-%d %H:%M:%S %Z')  kernel $(uname -r)  up $(cut -d' ' -f1 /proc/uptime) s"
+	echo "== failed units"
+	systemctl --failed --no-legend --no-pager
+	echo "== addresses"
+	ip addr
+	echo "== Wi-Fi"
+	iwctl station wlan0 show 2>&1 | tr -d '\033'
+	echo "== warnings and errors this boot"
+	journalctl -b -p warning --no-pager -o short-monotonic | tail -n 200
+} > "$out.tmp" 2>&1
+mv "$out.tmp" "$out"
+sync

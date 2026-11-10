@@ -1,0 +1,23 @@
+# raphael: Raspberry Pi 3 Model B, 64-bit, headless. Read by the GPU firmware before Linux starts.
+arm_64bit=1
+kernel=kernel8.img
+# Show the GPU firmware's rainbow test screen at power-on (proof the firmware ran), and drive HDMI even when no
+# screen was detected, so one plugged in later still shows the console.
+hdmi_force_hotplug=1
+
+# Cut-down GPU firmware: 16 MB for the GPU, the rest (956 MB) for Linux. No camera or video codecs; HDMI still
+# shows the console.
+start_file=start_cd.elf
+fixup_file=fixup_cd.dat
+gpu_mem=16
+disable_overscan=1
+
+# Serial console on GPIO 14/15 (header pins 8 and 10) through the full PL011 UART; Bluetooth,
+# which would otherwise own that UART, is off.
+enable_uart=1
+dtoverlay=disable-bt
+
+# I2C1 (pins 3/5) and SPI0 (pins 19/21/23/24/26) for peripherals; no analog audio
+dtparam=i2c_arm=on
+dtparam=spi=on
+dtparam=audio=off

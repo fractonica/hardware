@@ -1,0 +1,12 @@
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+MulticastDNS=yes
+IPv6PrivacyExtensions=no
+
+[DHCPv4]
+# Stable lease across reflashes; Ethernet wins over Wi-Fi when both are up.
+ClientIdentifier=mac
+RouteMetric=100

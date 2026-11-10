@@ -1,0 +1,7 @@
+config BR2_PACKAGE_RPI_KERNEL_BIN
+	bool "rpi-kernel-bin"
+	depends on BR2_PACKAGE_RPI_FIRMWARE
+	help
+	  Raspberry Pi's own 64-bit kernel (kernel8.img), the Pi 3 Model B and B+ device trees and the
+	  matching modules, taken from the firmware repository that rpi-firmware already downloads, instead
+	  of building a kernel. The kernel version follows the firmware version Buildroot pins.

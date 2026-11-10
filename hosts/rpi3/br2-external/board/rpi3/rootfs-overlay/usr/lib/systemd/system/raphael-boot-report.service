@@ -1,0 +1,12 @@
+[Unit]
+Description=Write boot diagnostics to the SD card's boot partition
+# After the network has come up or given up (systemd-networkd-wait-online times out after 2 minutes)
+Wants=network-online.target
+After=network-online.target iwd.service systemd-networkd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/raphael/boot-report
+
+[Install]
+WantedBy=multi-user.target
