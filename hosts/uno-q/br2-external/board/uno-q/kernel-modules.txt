@@ -27,5 +27,9 @@ drm_client_lib gpu_sched dispcc_qcm2290 gpucc_qcm2290 backlight cec
 lmh llcc_qcom icc_bwmon ocmem qcom_stats qcom_pon rtc_pm8xxx qcom_rng
 qcrypto socinfo pwrseq_core qcom_wdt
 
+# USB Ethernet behind a USB-C hub (the board cannot power devices itself; a
+# powered hub is the way to an SSD, and most hubs carry RTL8153 or AX88179 Ethernet)
+usbnet r8152 r8153_ecm ax88179_178a cdc_ether cdc_ncm
+
 # Crypto helpers, networking, misc
 af_alg authenc libdes sha256 libsha256_generic ipv6 fuse
